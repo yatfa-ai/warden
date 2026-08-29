@@ -1,12 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { RotateCw } from 'lucide-react';
-import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
 import { displayName } from '@/lib/chatDisplay';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import {
   fleetCommitSearchEligible,
   mergeFleetCommitsByEpoch,
@@ -15,8 +14,10 @@ import {
   type FleetRecentCommitsResult,
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
+import { readListBody, readListResponse } from '@/lib/api';
+import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import type { Chat } from '@/lib/types';
-import type { GitFile } from './sidebar/types';
+import type { GitCommit, GitFile } from './sidebar/types';
 
 /**
  * FleetRecentCommits — a no-query, time-sorted "what the fleet just shipped" feed
@@ -51,8 +52,8 @@ import type { GitFile } from './sidebar/types';
  * silently poll at 60s across N agents (a steady N requests every minute). The
  * human pulls a fresh "what just shipped" on demand. ↑unpushed join (WARDEN-723):
  * each agent fires its recent + outgoing (range=outgoing, @{u}..HEAD) fetches
- * concurrently (2N) so each row can carry the precise per-hash ↑ mark — ported from
- * FleetCommitSearch. Decision #1 still bounds the 2N: it fires only on mount /
+ * concurrently (2N) so each row can carry the precise per-hash ↑ mark.
+ * Decision #1 still bounds the 2N: it fires only on mount /
  * membership change / manual ↻, never on a steady auto-poll cadence.
  */
 
@@ -156,31 +157,38 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     let cancelled = false;
     (async () => {
       // Promise.allSettled (the fleet convention, ChatSidebar.tsx handleBroadcast /
-      // handleKillSelected + FleetCommitSearch): one unreachable / non-git agent never
+      // handleKillSelected + useFleetGitStatus): one unreachable / non-git agent never
       // rejects the whole; a per-agent failure is counted and surfaced as an honest
       // "(N unreachable)" note (WARDEN-89 — never let a failure masquerade as a barren
       // history). Each agent fires TWO concurrent fetches — recent + outgoing
       // (range=outgoing, @{u}..HEAD) — so each row can carry the precise per-hash
-      // ↑unpushed mark (WARDEN-723, ported from FleetCommitSearch). 2N, but decision
+      // ↑unpushed mark (WARDEN-723). 2N, but decision
       // #1 bounds it to mount / membership change / manual ↻ (no auto-poll).
       const settled = await Promise.allSettled(
         cur.map(async ({ key, project }) => {
           // buildFleetRecentCommitsUrl stays range-free; &range=outgoing is appended
-          // HERE (mirroring how FleetCommitSearch appends it to the range-free
-          // buildFleetSearchBaseUrl) so the pure URL builder stays single-purpose.
+          // HERE, not inside buildFleetRecentCommitsUrl, so the pure URL builder
+          // stays single-purpose.
           const base = buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT);
           const [recentR, outgoingR] = await Promise.all([fetch(base), fetch(`${base}&range=outgoing`)]);
-          // WARDEN-89: fetch() resolves (does NOT reject) on a 4xx/5xx — gate on
-          // recentR.ok so an unreachable agent (404) throws and is counted as that
-          // agent's error instead of reading undefined `commits` as an empty list
-          // (false-empty disease). The recent fetch is the reachability probe.
-          if (!recentR.ok) throw new Error(`git-log HTTP ${recentR.status}`);
-          const j = await recentR.json();
-          const commits = Array.isArray(j.commits) ? j.commits : [];
+          // WARDEN-1216: the recent fetch is the reachability probe, and its read now
+          // goes through the shared readListBody + readListResponse pair so BOTH
+          // halves of git-log's failure convention throw and are counted as that
+          // agent's error in the "(N unreachable)" tally (WARDEN-89 false-empty
+          // guard). Half one: a 4xx/5xx (the old explicit !recentR.ok gate — the
+          // reader reports `Failed to load commits (<status>)` for it). Half two —
+          // the one this fix adds: git-log answers SOME failures at HTTP 200 with
+          // { commits: [], error: 'git log failed' } (withGitRepo's no-cwd guard and
+          // catch-all, src/gitRoutes.js:490/:494), which a plain r.ok gate read as a
+          // confident "no commits". A deleted working directory or a dropped SSH
+          // transport now surfaces as an error instead.
+          const j = await readListBody(recentR);
+          const { items: commits, error } = readListResponse<GitCommit>(recentR, j, 'commits', 'commits');
+          if (error) throw new Error(error);
           // The outgoing fetch may 404 / non-ok too, but if `recent` resolved the agent
           // is reachable; a failed outgoing fetch just yields no unpushed marks — a
           // commit is never WRONGLY marked unpushed by a missing outgoing set (the
-          // graceful-degradation contract, ported verbatim from FleetCommitSearch).
+          // graceful-degradation contract).
           const outgoingHashes = new Set<string>();
           if (outgoingR.ok) {
             const oj = await outgoingR.json();
@@ -246,16 +254,6 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     setRefreshTick((t) => t + 1);
   };
 
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern WorkspaceSearchDialog / GlobalSearchDialog Copy items use. Never bare
-  // navigator.clipboard, which fails silently in Electron (WARDEN-68 Rule 3); the
-  // caller owns the toast per the copyText contract (lib/clipboard.ts).
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   // The glance: slice the merged, epoch-sorted rows to the bound (top FLEET_RECENT_LIMIT
   // across the fleet). Slice AFTER the sort so the newest N survive regardless of how
   // many each agent contributed.
@@ -281,32 +279,31 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     >
       {/* Collapsible header — the ▾/▸ affordance mirrors FleetActivityHeatmap so the
           collapse reads the same everywhere in Fleet Health. The manual refresh (↻)
-          is the only way to pull a fresh view past mount (no auto-poll). */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent rounded-md transition-colors"
-      >
-        <span className="text-[10px] text-muted-foreground/60 w-2 shrink-0">{open ? '▾' : '▸'}</span>
-        <span>Recent commits</span>
-        <span className="ml-auto normal-case tracking-normal text-[10px] text-muted-foreground/70">
-          {hasEligible ? `${fleetN} agent${fleetN === 1 ? '' : 's'}` : ''}
-        </span>
-        {/* stopPropagation so the ↻ refreshes without also toggling the collapse. */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          onClick={(e) => { e.stopPropagation(); refresh(); }}
-          disabled={loading || !hasEligible}
-          aria-label="refresh recent commits across the fleet"
-          title="refresh — pull the fleet's newest commits on demand (no auto-poll)"
-          className="text-muted-foreground hover:text-foreground"
-        >
-          <RotateCw className={cn('size-3', loading && 'animate-spin')} />
-        </Button>
-      </button>
+          is the only way to pull a fresh view past mount (no auto-poll). It is a
+          SIBLING of the toggle, not a child of it (WARDEN-1050): the ↻ used to sit
+          inside the toggle <button>, which is invalid HTML and folded the ↻'s label
+          into the toggle's accessible name. Sibling placement is what let the
+          stopPropagation workaround go away. */}
+      <CollapsibleSectionHeader
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        label="Recent commits"
+        meta={hasEligible ? `${fleetN} agent${fleetN === 1 ? '' : 's'}` : ''}
+        actions={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={() => refresh()}
+            disabled={loading || !hasEligible}
+            aria-label="refresh recent commits across the fleet"
+            title="refresh — pull the fleet's newest commits on demand (no auto-poll)"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <RotateCw className={cn('size-3', loading && 'animate-spin')} />
+          </Button>
+        }
+      />
 
       {open && (
         <div className="px-2 pb-2 pt-0.5">
@@ -347,7 +344,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                   // cross-fleet differentiator is the AGENT name (the per-agent lists
                   // each carry only their own), so it leads. role="button" div (not a
                   // nested <button>) so it is keyboard-operable and can host the
-                  // expanded file list as a sibling — the FleetCommitSearch / GitBadges
+                  // expanded file list as a sibling — the sidebar git section's
                   // pattern. Click → expand to that commit's /api/git-show diff.
                   <li key={cacheKey} className="rounded">
                     <ContextMenu>
@@ -372,8 +369,8 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                             </span>
                             {/* hash (cyan mono, mirrors GitBadges) · amber ↑ when the commit is
                                 still unpushed (local-only — HEAD has it, @{u} doesn't; the
-                                outgoing (@{u}..HEAD) hash-join WARDEN-723 ported from
-                                FleetCommitSearch) · subject (truncated). */}
+                                outgoing (@{u}..HEAD) hash-join from WARDEN-723) ·
+                                subject (truncated). */}
                             <span className="flex items-center gap-1">
                               <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{row.commit.hash}</span>
                               {row.unpushed && <span className="shrink-0 text-[10px] text-amber-400" title="unpushed (local, not yet pushed)">↑</span>}
@@ -391,9 +388,9 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                           sibling Copy slice. asChild only adds onContextMenu — left-click
                           still toggles, Enter·Space still expand. */}
                       <ContextMenuContent>
-                        <ContextMenuItem onSelect={() => handleCopy(row.commit.hash)}>Copy commit hash</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => handleCopy(row.commit.subject)}>Copy commit subject</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => handleCopy(name)}>Copy agent name</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(row.commit.hash)}>Copy commit hash</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(row.commit.subject)}>Copy commit subject</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(name)}>Copy agent name</ContextMenuItem>
                       </ContextMenuContent>
                     </ContextMenu>
                     {isExpanded && (

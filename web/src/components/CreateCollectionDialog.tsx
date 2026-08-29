@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { parseCustomCriteria } from '@/lib/collections';
 import type { Collection } from '@/lib/types';
+import { readErrorBody } from '@/lib/api';
 
 interface Props {
   open: boolean;
@@ -129,7 +130,12 @@ export function CreateCollectionDialog({
           });
 
       if (!r.ok) {
-        const j = await r.json();
+        // Leg gating lives in `readErrorBody` — inside this !ok branch it is the
+        // failure leg, so a body that never parses (express.json's own 400/413
+        // fires in middleware and Express emits an HTML page) degrades to {}
+        // rather than throwing into the outer catch and misreporting a server
+        // rejection as 'Network error — please try again'.
+        const j = await readErrorBody(r);
         setError(j.error || (isEditing ? 'Failed to save collection' : 'Failed to create collection'));
         setLoading(false);
         return;

@@ -162,15 +162,39 @@ describe('readJsonDefensiveSync (boot-only)', () => {
 });
 
 describe('corruptBackupPath', () => {
-  it('produces a <base>.corrupt-<ts><ext> path with a filesystem-safe timestamp', () => {
-    const p = corruptBackupPath('/home/u/.yatfa-warden/config.json');
-    assert.match(p, /\/home\/u\/\.yatfa-warden\/config\.corrupt-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d\d\dZ\.json$/);
+  // Both properties asserted here are load-bearing (WARDEN-1040): the artifact
+  // must leave the `.json` namespace its scanner globs, and the name must be
+  // stable for stable content so re-reading an unchanged corrupt file cannot
+  // keep minting new artifacts on a request path.
+  it('produces a <base>.corrupt-<digest><ext>.bak path with no forbidden characters', () => {
+    const p = corruptBackupPath('/home/u/.yatfa-warden/config.json', '<<<not json>>>');
+    assert.match(p, /^\/home\/u\/\.yatfa-warden\/config\.corrupt-[0-9a-f]{12}\.json\.bak$/);
     // No characters Windows forbids in paths.
     assert.ok(!p.includes(':'), `backup path contains a colon: ${p}`);
   });
 
-  it('uses .json when the source has no extension', () => {
-    const p = corruptBackupPath('/tmp/activity');
-    assert.match(p, /\/tmp\/activity\.corrupt-.*\.json$/);
+  it('leaves the scanned .json namespace so the backup is never re-read', () => {
+    for (const src of ['/home/u/.yatfa-warden/config.json', '/tmp/activity', '/tmp/sessions/bad.json']) {
+      const p = corruptBackupPath(src, 'broken');
+      assert.ok(!p.endsWith('.json'), `quarantine artifact must not end in .json: ${p}`);
+    }
+  });
+
+  it('still produces a usable name when the source has no extension', () => {
+    const p = corruptBackupPath('/tmp/activity', 'broken');
+    assert.match(p, /^\/tmp\/activity\.corrupt-[0-9a-f]{12}\.bak$/);
+    assert.ok(!p.includes(':'), `backup path contains a colon: ${p}`);
+  });
+
+  it('is stable for identical content and distinct for different content', () => {
+    const f = '/tmp/sessions/bad.json';
+    assert.strictEqual(
+      corruptBackupPath(f, '{"a":'), corruptBackupPath(f, '{"a":'),
+      'the same corrupt bytes must resolve to the same artifact — otherwise every re-read mints a new file',
+    );
+    assert.notStrictEqual(
+      corruptBackupPath(f, '{"a":'), corruptBackupPath(f, '{"b":'),
+      'genuinely different corruption deserves its own artifact',
+    );
   });
 });

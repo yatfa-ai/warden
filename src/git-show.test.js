@@ -392,6 +392,50 @@ describe('/api/git-show HTTP endpoint (real Express app from server.js)', () => 
     assert.strictEqual(body.error, null);
   });
 
+  // ---- per-file leg: a FAILING git command must say so (WARDEN-1192) ----------
+  // The leg above (no path=) is a LIST and says "empty" precisely by being empty, so it
+  // stays error:null. The per-file leg is a DIFF and has no such vocabulary — `diff: null`
+  // cannot mean "empty" — so it must word a failure as an error string (the rule stated
+  // in the /api/git-log carve-out comment). Before this, both legs discarded the exit
+  // status and stamped error:null, making a broken repo byte-identical on the wire to a
+  // clean empty diff: the UI listed a file as changed and then confidently reported "no
+  // diff" as a fact about the user's data (WARDEN-89's false-empty disease).
+  it('per-file leg surfaces a git failure as an error for a non-git cwd (200, not a false empty diff)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-show?id=warden-nongit&hash=${addHash}&path=${encodeURIComponent('a.txt')}`);
+    assert.strictEqual(res.status, 200); // still never a 500
+    const body = await res.json();
+    assert.strictEqual(body.diff, null, 'a failed diff must be null, not an empty string');
+    assert.strictEqual(body.error, 'git show failed');
+    // Fixed literal, never r.stderr: both remote branches pipe 2>/dev/null, so a stderr
+    // passthrough would be an EMPTY string here — which the client reader treats as
+    // "no error", silently restoring the very bug this test pins.
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'error must be a non-empty string');
+  });
+
+  it('per-file leg surfaces an error for a valid-format but unknown hash (deliberately diverges from the files leg)', async () => {
+    // The same input the files-leg test above asserts answers error:null. The two legs
+    // ANSWER DIFFERENTLY on purpose: a list truthfully says "empty"; a diff cannot, so
+    // it says "failed" rather than assert a clean empty diff for a commit that does not
+    // exist. If this ever goes back to error:null, the false-empty bug is back.
+    const res = await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=deadbeef&path=${encodeURIComponent('a.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, null);
+    assert.strictEqual(body.error, 'git show failed');
+  });
+
+  it('preserves the BENIGN empty: a valid hash whose commit did not touch the path stays { diff: "", error: null }', async () => {
+    // addHash ("add a") predates c.txt entirely, so `git show --format= <addHash> -- c.txt`
+    // exits ZERO with empty stdout. That is a genuinely unchanged file, NOT a failure —
+    // the r.ok gate must let it through untouched, or the fix would over-correct and
+    // start reporting healthy repos as broken.
+    const res = await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=${addHash}&path=${encodeURIComponent('c.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, '', 'a successful-but-empty diff stays an empty STRING');
+    assert.strictEqual(body.error, null, 'a benign empty must not be converted into an error');
+  });
+
   it('rejects a malformed (non-hex) hash with 200 + invalid hash', async () => {
     // 'g1234' starts with a non-hex char; also guards against option injection like '--version'.
     const res = await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=g1234`);

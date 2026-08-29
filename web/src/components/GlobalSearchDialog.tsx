@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -19,7 +18,9 @@ import {
 } from '@/components/ui/context-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
+import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
+import { readErrorBody } from '@/lib/api';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
@@ -79,14 +80,6 @@ interface Props {
 // WorkspaceSearchDialog's SearchResultRow is — the kit has no Command/cmdk list
 // primitive to reach for instead.
 function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; onOpen: (r: PaneSearchResult) => void }) {
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern WorkspaceSearchDialog's SearchResultRow uses for its copy items.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -108,9 +101,9 @@ function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; o
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onOpen(result)}>Open</ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(result.text)}>Copy matched line</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.name)}>Copy pane name</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.host)}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.text)}>Copy matched line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.name)}>Copy pane name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.host)}>Copy host</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -125,11 +118,6 @@ function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; o
 // dropped. Its own component (not inlined) for the same single-child/asChild
 // reason the pane row is.
 function GlobalSearchSessionRow({ result, onOpen, timestampFormat }: { result: SessionSearchResult; onOpen: (r: SessionSearchResult) => void; timestampFormat: TimestampFormat }) {
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
   // Mirror OpenChatBrowserPage's history-row label fallback: summary, else
   // "cwd · host", else a generic "session" so a row is never blank.
   const label = result.summary || result.cwd || 'session';
@@ -155,8 +143,8 @@ function GlobalSearchSessionRow({ result, onOpen, timestampFormat }: { result: S
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onOpen(result)}>Open transcript</ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(result.snippet)}>Copy snippet</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.host)}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.snippet)}>Copy snippet</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.host)}>Copy host</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -185,6 +173,11 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   const [sessionResults, setSessionResults] = useState<SessionSearchResult[]>([]);
   const [sessionSearching, setSessionSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // WARDEN-1049: generation counter for doSearch (the PANE leg). The session leg
+  // below is a debounced effect and keeps its own `cancelled` flag — an effect has
+  // a cleanup to hang one on; this event handler does not, so its sequencing lives
+  // in a ref that survives across invocations instead.
+  const searchGen = useRef(0);
 
   // Reset everything when the dialog closes — including `error`, so a stale
   // failure message from a previous open doesn't linger (mirrors the sibling).
@@ -193,12 +186,20 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   // clean slate identical to the toggle-OFF baseline.
   useEffect(() => {
     if (!open) {
+      // WARDEN-1049: supersede the in-flight pane search FIRST — otherwise it
+      // resolves after these clears and repopulates `results`, so the next open
+      // renders the previous session's hits under an empty query box.
+      supersedeInFlight(searchGen);
       setQuery('');
       setResults([]);
       setError(null);
       setIncludeSessions(false);
       setSessionResults([]);
       setSessionSearching(false);
+      // A superseded pane response no longer runs doSearch's `finally`, so the
+      // pane spinner is cleared here (the session leg already resets its own
+      // above) — otherwise closing mid-search leaves the dialog stuck "searching".
+      setSearching(false);
     }
   }, [open]);
 
@@ -212,16 +213,22 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   const doSearch = async () => {
     const q = query.trim();
     if (!q) return;
+    // WARDEN-1049: claim the newest generation; every write below is gated on
+    // still holding it. A response that has been overtaken by a newer search, or
+    // that lands after the dialog closed, writes NOTHING.
+    const isLatest = claimLatest(searchGen);
     setSearching(true);
     setError(null);
     try {
       const res = await fetch(`/api/search-pane?query=${encodeURIComponent(q)}&panes=${openPanes.join(',')}`);
-      const data = await res.json();
-      // /api/search-pane returns 500 { error: e.message } when capturePanes
-      // fails (e.g. a pane's host is unreachable). fetch resolves on HTTP
-      // errors, so check res.ok AND data.error — otherwise a real failure
-      // collapses into a fake "No results found" (the WARDEN-89 silent-error
-      // trap). Mirrors WorkspaceSearchDialog's doSearch exactly.
+      // Parsed BEFORE the ok-gate BY DESIGN: /api/search-pane returns some
+      // failures at HTTP 200 with an `error` field, so the gate below reads
+      // `data.error` alongside `res.ok`. Leg gating lives in `readErrorBody`.
+      const data = await readErrorBody(res);
+      if (!isLatest()) return;
+      // fetch resolves on HTTP errors, so check res.ok AND data.error —
+      // otherwise a real failure collapses into a fake "No results found" (the
+      // WARDEN-89 silent-error trap). Mirrors WorkspaceSearchDialog's doSearch.
       if (!res.ok || data.error) {
         setError(data.error || 'Search failed');
         setResults([]);
@@ -229,10 +236,13 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
         setResults(Array.isArray(data.results) ? data.results : []);
       }
     } catch (e) {
+      if (!isLatest()) return;
       setError(e instanceof Error ? e.message : 'Search failed');
       setResults([]);
     } finally {
-      setSearching(false);
+      // Guarded like every other write: a superseded response that clears the
+      // spinner turns off the indicator for the search still running behind it.
+      if (isLatest()) setSearching(false);
     }
   };
 
@@ -264,7 +274,8 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
       setError(null); // fresh attempt — clear any prior banner (mirrors doSearch)
       try {
         const res = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
-        const data = await res.json();
+        // Parsed before the ok-gate, same soft-error-at-200 rationale as doSearch.
+        const data = await readErrorBody(res);
         if (!res.ok || data.error) {
           if (!cancelled) { setError(data.error || 'Session search failed'); setSessionResults([]); }
         } else {
@@ -324,12 +335,16 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
           </DialogDescription>
         </DialogHeader>
 
+        {/* WARDEN-1049: Enter is gated on `searching` exactly like the Button's
+            `disabled` below — the input is auto-focused on open, so Enter is the
+            primary way this dialog is fired and an ungated one walked around the
+            one-search-at-a-time rule the Button already implements. */}
         <div className="flex items-center gap-2">
           <Input
             ref={inputRef}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setError(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') doSearch(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
             placeholder="Search across all panes..."
           />
           <Button onClick={doSearch} disabled={searching || !query.trim()}>

@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, presetNameErrorMessage, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, snippetNameErrorMessage, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, patternNameErrorMessage, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -317,6 +317,59 @@ test('a missing field loads as []', () => {
   mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.deepEqual(loadUi().paneColRatios, []);
   assert.deepEqual(loadUi().paneRowRatios, []);
+});
+test('a present-but-wrong-type ratio value WARNS, while an absent one is silent (WARDEN-1097)', () => {
+  // The operator-facing corruption signal (WARDEN-89), which parseRatioArray was
+  // the last shape guard in storage.ts to lack. Absence is the COMMON case here
+  // (both fields are unset until the user drags a gutter) and must stay quiet.
+  const realWarn = console.warn;
+  const warnsFor = (payload, needle) => {
+    const seen = [];
+    console.warn = (...args) => { seen.push(String(args[0])); };
+    try {
+      reset();
+      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
+      loadUi();
+    } finally {
+      console.warn = realWarn;
+    }
+    return seen.filter((m) => m.includes(needle));
+  };
+  const notArray = (f) => `${f} is not an array; ignoring`;
+  assert.equal(warnsFor({ paneColRatios: 'wide' }, notArray('paneColRatios')).length, 1, 'a string payload warns');
+  assert.equal(warnsFor({ paneRowRatios: 3 }, notArray('paneRowRatios')).length, 1, 'a number payload warns');
+  assert.equal(warnsFor({ paneColRatios: { a: 1 } }, notArray('paneColRatios')).length, 1, 'an object payload warns');
+  assert.equal(warnsFor({ paneColRatios: null }, notArray('paneColRatios')).length, 0, 'null is absent, not corrupt — silent');
+  assert.equal(warnsFor({}, notArray('paneColRatios')).length, 0, 'a missing field is absent, not corrupt — silent');
+  assert.equal(warnsFor({}, notArray('paneRowRatios')).length, 0, 'the sibling field is silent too — a normal load warns ZERO times');
+  assert.equal(warnsFor({ paneColRatios: [1, 3] }, notArray('paneColRatios')).length, 0, 'a valid array never warns');
+});
+test('a rejected ENTRY warns and names the whole-array degrade (WARDEN-1097)', () => {
+  // The all-or-nothing entry rejection is exactly the Stage-1 producer fallout an
+  // operator needs to see: their whole pane layout silently reset to equal split.
+  const realWarn = console.warn;
+  const warnsFor = (payload, needle) => {
+    const seen = [];
+    console.warn = (...args) => { seen.push(String(args[0])); };
+    try {
+      reset();
+      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
+      loadUi();
+    } finally {
+      console.warn = realWarn;
+    }
+    return seen.filter((m) => m.includes(needle));
+  };
+  const badEntry = (f) => `${f} has a non-positive/non-finite entry`;
+  // A zero entry is what a cramped-pair drag used to persist (see paneGrid.test.mjs).
+  assert.equal(warnsFor({ paneColRatios: [2, 0] }, badEntry('paneColRatios')).length, 1, 'a zero entry warns');
+  assert.equal(warnsFor({ paneColRatios: [2.4, -0.4] }, badEntry('paneColRatios')).length, 1, 'a negative entry warns');
+  assert.equal(warnsFor({ paneRowRatios: [1, null, 2] }, badEntry('paneRowRatios')).length, 1, 'a non-number entry warns');
+  // Infinity does not survive JSON, so drive the non-finite case through the raw value.
+  assert.equal(warnsFor({ paneRowRatios: [1, 'Infinity', 2] }, badEntry('paneRowRatios')).length, 1, 'a string entry warns');
+  assert.equal(warnsFor({ paneColRatios: [1, 3] }, badEntry('paneColRatios')).length, 0, 'a valid array never warns');
+  assert.equal(warnsFor({ paneColRatios: [] }, badEntry('paneColRatios')).length, 0, 'an empty array never warns');
+  assert.equal(warnsFor({}, badEntry('paneColRatios')).length, 0, 'a missing field never warns');
 });
 test('persistUiState carries the ratios from the live object (not workspace-frozen)', () => {
   // Like paneLayout, the ratios are a pref — NOT a workspace-restoration field —
@@ -1050,6 +1103,59 @@ test('the full observer payload — sessions + viewMode + both filter shapes —
   assert.deepEqual(obs.directiveFilters, { agent: 'reviewer-1', host: 'ci-host' });
 });
 
+console.log('\nobserver Attention tab filters round-trip through loadObs/saveObs — WARDEN-971');
+// WARDEN-971: the Attention tab (WARDEN-880) is the third filterable observer view;
+// `attentionFilters` brings it to persistence parity with its Activity/Directives
+// siblings. These pin the storage half: the shape survives the round-trip, is absent
+// (consumer `?? 'all'` governs) when never saved, a LEGACY payload written before the
+// field existed still loads with no error, and the three tabs never collide.
+test('attentionFilters is absent when nothing is stored (consumer ?? \'all\' governs)', () => {
+  reset();
+  const obs = loadObs();
+  assert.equal(obs.attentionFilters, undefined);
+  assert.equal(obs.attentionFilters?.agent ?? 'all', 'all');
+  assert.equal(obs.attentionFilters?.host ?? 'all', 'all');
+});
+test('a pre-WARDEN-971 payload (openIds + the two sibling filter shapes, no attentionFilters) loads without throwing and defaults to all/all', () => {
+  reset();
+  mem.set('warden:observer:v1', JSON.stringify({
+    openIds: ['s1'], activeId: 's1', viewMode: 'attention',
+    activityFilters: { type: 'error', agent: 'worker-1', host: 'prod-box' },
+    directiveFilters: { agent: 'reviewer-1', host: 'ci-host' },
+  }));
+  const obs = loadObs();
+  assert.equal(obs.viewMode, 'attention');
+  assert.deepEqual(obs.directiveFilters, { agent: 'reviewer-1', host: 'ci-host' });
+  assert.equal(obs.attentionFilters, undefined);
+  assert.equal(obs.attentionFilters?.host ?? 'all', 'all');
+});
+test('Attention tab filters (agent/host) round-trip — the headline fix', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'attention', attentionFilters: { agent: 'worker-3', host: 'gpu-box' } });
+  assert.deepEqual(loadObs().attentionFilters, { agent: 'worker-3', host: 'gpu-box' });
+});
+test('clearing the Attention filters back to \'all\' persists (a cleared filter survives reload too)', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'attention', attentionFilters: { agent: 'worker-3', host: 'gpu-box' } });
+  assert.equal(loadObs().attentionFilters.host, 'gpu-box');
+  saveObs({ openIds: [], activeId: null, viewMode: 'attention', attentionFilters: { agent: 'all', host: 'all' } });
+  assert.deepEqual(loadObs().attentionFilters, { agent: 'all', host: 'all' });
+});
+test('all three tabs\' filters are independent (same-named agent/host across tabs do not collide)', () => {
+  reset();
+  saveObs({
+    openIds: ['s1'], activeId: 's1', viewMode: 'attention',
+    activityFilters: { type: 'all', agent: 'planner-1', host: 'host-a' },
+    directiveFilters: { agent: 'worker-1', host: 'host-b' },
+    attentionFilters: { agent: 'worker-3', host: 'host-c' },
+  });
+  const obs = loadObs();
+  assert.equal(obs.activityFilters.agent, 'planner-1');
+  assert.equal(obs.directiveFilters.agent, 'worker-1');
+  assert.equal(obs.attentionFilters.agent, 'worker-3');
+  assert.equal(obs.attentionFilters.host, 'host-c');
+});
+
 console.log('\ndefaultShell (the unified shell for new-chat shell preset + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');
 test('defaults to "" (auto-detect host login shell) when nothing is stored', () => {
   reset();
@@ -1729,6 +1835,89 @@ test('false for an empty expression', () => {
   assert.equal(isValidRegex(''), false);
 });
 
+console.log('\nvalidateEntryName — the shared skeleton\'s per-caller parameterization (WARDEN-1111)');
+// The skeleton itself is module-private; these pin the deltas each of the three
+// public validators supplies to it, so a future edit cannot quietly unify a
+// per-caller knob (cap / reserved guard / `except` identity) across all three.
+test('each validator keeps its OWN cap — the cap is a parameter, never a shared constant', () => {
+  // Patterns allow 64, presets/snippets 32. A name in between must therefore be
+  // rejected by two of the three and accepted by the third.
+  assert.notEqual(WATCH_PATTERN_NAME_MAX, PRESET_NAME_MAX);
+  const between = 'x'.repeat(PRESET_NAME_MAX + 1);
+  assert.ok(between.length <= WATCH_PATTERN_NAME_MAX);
+  assert.equal(validatePresetName(between, []), 'too-long');
+  assert.equal(validateSnippetName(between, []), 'too-long');
+  assert.equal(validatePatternName(between, []), null);
+});
+test('the reserved guard is preset-only — snippets and patterns may be named "claude"', () => {
+  // Only validatePresetName passes a `reserved` predicate to the skeleton, which
+  // is what keeps 'reserved' out of the snippet/pattern issue unions.
+  assert.equal(validatePresetName('claude', []), 'reserved');
+  assert.equal(validateSnippetName('claude', []), null);
+  assert.equal(validatePatternName('SHELL', []), null);
+});
+test('reserved is checked BEFORE duplicate when a name is both', () => {
+  // Order is load-bearing: a preset list already holding 'claude' must still
+  // report the more specific 'reserved', not 'duplicate'.
+  assert.equal(validatePresetName('claude', [{ name: 'claude', cmd: 'c' }]), 'reserved');
+});
+test('`except` identity is per-caller: presets/snippets exclude by NAME, patterns by ID', () => {
+  // The complement of the "excludes `except`" tests above: passing the WRONG
+  // kind of key must NOT exclude anything. This is the assertion that fails if
+  // the skeleton's identityOf is ever flattened to one shared key.
+  const pattern = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
+  // Patterns key on id, so the entry's NAME is not an identity → no exclusion.
+  assert.equal(validatePatternName('Deploy failed', pattern, 'Deploy failed'), 'duplicate');
+  assert.equal(validatePatternName('Deploy failed', pattern, 'p1'), null);
+  // Presets/snippets key on name, so an id-shaped `except` excludes nothing.
+  assert.equal(validatePresetName('codex', [{ name: 'codex', cmd: 'c' }], 'p1'), 'duplicate');
+  assert.equal(validateSnippetName('Ship', [{ name: 'Ship', text: 's' }], 'p1'), 'duplicate');
+});
+
+console.log('\npresetNameErrorMessage / snippetNameErrorMessage / patternNameErrorMessage — the toast text (WARDEN-1111)');
+// Relocated out of NewChatsSection/SnippetsSection/PatternsSection so they are
+// testable at all — this repo has no React test runner, so a pure function
+// trapped in a component is a pure function nothing can cover.
+test('presetNameErrorMessage renders every arm of PresetNameIssue', () => {
+  assert.equal(presetNameErrorMessage('codex', 'empty'), 'Preset needs a name.');
+  assert.equal(presetNameErrorMessage('codex', 'duplicate'), 'A preset named "codex" already exists.');
+  assert.equal(
+    presetNameErrorMessage('claude', 'reserved'),
+    '"claude" is a reserved preset name (use the built-in claude/shell instead).',
+  );
+});
+test('snippetNameErrorMessage renders every arm of SnippetNameIssue', () => {
+  assert.equal(snippetNameErrorMessage('Run tests', 'empty'), 'Snippet needs a name.');
+  assert.equal(snippetNameErrorMessage('Run tests', 'duplicate'), 'A snippet named "Run tests" already exists.');
+});
+test('patternNameErrorMessage renders every arm of PatternNameIssue', () => {
+  assert.equal(patternNameErrorMessage('Deploy failed', 'empty'), 'Pattern needs a name.');
+  assert.equal(patternNameErrorMessage('Deploy failed', 'duplicate'), 'A pattern named "Deploy failed" already exists.');
+});
+test('each too-long message quotes its OWN cap (32 preset/snippet vs 64 pattern)', () => {
+  // Literal caps, not the constants, so this fails loudly if a formatter is ever
+  // rewired to a shared cap — the exact mistake the shared skeleton invites.
+  assert.equal(PRESET_NAME_MAX, 32);
+  assert.equal(SNIPPET_NAME_MAX, 32);
+  assert.equal(WATCH_PATTERN_NAME_MAX, 64);
+  assert.equal(presetNameErrorMessage('x', 'too-long'), 'Preset name must be 32 characters or fewer.');
+  assert.equal(snippetNameErrorMessage('x', 'too-long'), 'Snippet name must be 32 characters or fewer.');
+  assert.equal(patternNameErrorMessage('x', 'too-long'), 'Pattern name must be 64 characters or fewer.');
+});
+test('validator issue → formatter is the exact toast the Settings write sites show', () => {
+  // The end-to-end shape each section runs: validate, then render the issue.
+  const presets = [{ name: 'codex', cmd: 'c' }];
+  assert.equal(
+    presetNameErrorMessage('codex', validatePresetName('codex', presets)),
+    'A preset named "codex" already exists.',
+  );
+  const patterns = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
+  assert.equal(
+    patternNameErrorMessage('Deploy failed', validatePatternName('Deploy failed', patterns)),
+    'A pattern named "Deploy failed" already exists.',
+  );
+});
+
 console.log('\ndefaultNewChatPresetByHost (per-host preset overrides) round-trips through loadUi/saveUi — WARDEN-352');
 test('defaults to {} when nothing is stored', () => {
   reset();
@@ -2044,6 +2233,301 @@ test('PERSISTED_PREF_KEYS is exactly the persisted UiState pref set (exhaustiven
     'PERSISTED_PREF_KEYS has no duplicate keys');
   assert.equal(PERSISTED_PREF_KEYS.length, defaultKeys.length - 1,
     'PERSISTED_PREF_KEYS length == Object.keys(DEFAULT_UI).length - 1');
+});
+
+// WARDEN-934: the sibling guard for the "Reset appearance & UI preferences"
+// button. Every pref is EITHER preserved (workspace + panel layout, WARDEN-346)
+// OR reset — nothing may fall between the two. fileViewerViewMode (WARDEN-480)
+// fell between them for months: the button hand-enumerated ~35 setter calls,
+// forgot it, and still toasted "Preferences reset to defaults" while the File
+// Viewer stayed stuck in Source across every reload.
+//
+// App.tsx type-locks BOTH its default-value map and its setter map to
+// ResettableKey = (PERSISTED_PREF_KEYS ∪ restoreOnStartup) − RESET_PRESERVED_KEYS,
+// so an unclassified pref is a compile error. This test is the runtime half:
+// it proves the two key sets PARTITION the pref set, so a pref added to
+// DEFAULT_UI and to PERSISTED_PREF_KEYS but classified in neither fails here.
+test('reset classification partitions every pref: RESET_PRESERVED_KEYS ⊎ resetUiPrefDefaults() == PERSISTED_PREF_KEYS + restoreOnStartup (WARDEN-934)', () => {
+  const preserved = [...RESET_PRESERVED_KEYS];
+  const resetKeys = Object.keys(resetUiPrefDefaults());
+  const sortedUnique = (arr) => JSON.stringify([...new Set(arr)].sort());
+
+  // Neither list may repeat a key, and the two must not overlap: a pref cannot
+  // be preserved AND reset.
+  assert.equal(preserved.length, new Set(preserved).size, 'RESET_PRESERVED_KEYS has no duplicates');
+  assert.deepEqual(preserved.filter((k) => resetKeys.includes(k)), [],
+    'no key is both preserved and reset');
+
+  // Union == every persisted pref plus restoreOnStartup (the one UiState pref
+  // App persists as a separate arg, absent from PERSISTED_PREF_KEYS but reset).
+  assert.equal(sortedUnique([...preserved, ...resetKeys]),
+    sortedUnique([...PERSISTED_PREF_KEYS, 'restoreOnStartup']),
+    'preserved ∪ reset == PERSISTED_PREF_KEYS + restoreOnStartup');
+
+  // Every preserved key is a real persisted pref (guards a typo'd entry from
+  // silently excusing a pref from the reset).
+  for (const k of preserved) {
+    assert.ok(PERSISTED_PREF_KEYS.includes(k), `preserved key ${k} is in PERSISTED_PREF_KEYS`);
+  }
+
+  // The regression anchor: the defect key is classified as RESET, not preserved.
+  assert.ok(resetKeys.includes('fileViewerViewMode'),
+    'fileViewerViewMode is reset by "Reset appearance & UI preferences"');
+  assert.equal(resetUiPrefDefaults().fileViewerViewMode, 'rendered',
+    'fileViewerViewMode resets to the DEFAULT_UI value');
+
+  // WARDEN-957: the copy anchor. ResetSection's blurb + confirm dialog promise,
+  // by name, that this reset "deletes your custom spawn presets", "reverts your
+  // instruction snippets to the four starters", and "clears your per-host
+  // display labels". All three are USER-AUTHORED content with no undo, so that
+  // enumeration is the safety mechanism (WARDEN-68 Rule 8) — not a wording nit.
+  // Pin each key to RESET (not preserved) and to its DEFAULT_UI value, so moving
+  // one to preserved fails loudly here instead of silently making the copy lie.
+  for (const k of ['customPresets', 'snippets', 'hostLabels']) {
+    assert.ok(resetKeys.includes(k),
+      `${k} is reset by "Reset appearance & UI preferences" — ResetSection copy names it as destroyed`);
+    assert.ok(!preserved.includes(k), `${k} is NOT preserved by the reset`);
+  }
+  assert.deepEqual(resetUiPrefDefaults().customPresets, [],
+    'customPresets resets to [] — every custom spawn preset is deleted');
+  assert.deepEqual(resetUiPrefDefaults().hostLabels, {},
+    'hostLabels resets to {} — every per-host display label is cleared');
+  // Snippets revert to the 4 seeded starters: authored snippets are lost, and
+  // deliberately-deleted starters come back (the one-time seed at STARTER_SNIPPETS
+  // never re-fires on its own, so only this reset can resurrect them).
+  assert.deepEqual(resetUiPrefDefaults().snippets, STARTER_SNIPPETS,
+    'snippets reverts to the STARTER_SNIPPETS set — authored snippets are lost');
+  assert.equal(resetUiPrefDefaults().snippets.length, 4,
+    'the confirm copy says "the four starters" — keep the count and the copy in sync');
+  // The revert must be a deep COPY, never an alias: a reset that handed out the
+  // module-level STARTER_SNIPPETS objects would let a later snippet edit mutate
+  // the seed for every subsequent reset.
+  assert.ok(resetUiPrefDefaults().snippets.every((s, i) => s !== STARTER_SNIPPETS[i]),
+    'reset snippets are fresh copies, not aliases of the STARTER_SNIPPETS objects');
+
+  // Panel layout stays preserved — ResetSection promises "your open tabs, panes,
+  // focus, and panel layout are preserved". (resetUiPrefsPreservingWorkspace
+  // snaps the ratios to [], but it has no production call sites; the shipped
+  // button keeps them. Do not "unify" these two without changing that copy.)
+  for (const k of ['workspaces', 'activeWorkspaceId', 'paneHost', 'paneColRatios', 'paneRowRatios']) {
+    assert.ok(preserved.includes(k), `${k} is preserved by the reset`);
+  }
+});
+
+// Every reset default must be the DEFAULT_UI value, so live React state, the
+// next saveUi persist, and a fresh reload all agree — with ONE documented
+// deviation: terminalFontFamily uses the curated DEFAULT_TERMINAL_FONT_FAMILY
+// stack rather than DEFAULT_UI's '' sentinel, because the Settings font-select
+// has no '' option and would read "Custom…" until reload.
+test('reset defaults match DEFAULT_UI (terminalFontFamily is the one documented live-state deviation)', () => {
+  const defaults = resetUiPrefDefaults();
+  for (const [k, v] of Object.entries(defaults)) {
+    if (k === 'terminalFontFamily') continue;
+    assert.deepEqual(v, DEFAULT_UI[k], `reset default for ${k} == DEFAULT_UI.${k}`);
+  }
+  assert.equal(DEFAULT_UI.terminalFontFamily, '', 'DEFAULT_UI keeps the blank sentinel');
+  assert.ok(defaults.terminalFontFamily.length > 0 && defaults.terminalFontFamily !== '',
+    'the reset pushes the curated font stack into live state, not the blank sentinel');
+});
+
+// WARDEN-896: live React state must never alias a module-level default, or an
+// in-place edit (e.g. a user adding a snippet) would corrupt the constant for
+// every later reset. The factory hands out fresh containers every call.
+test('resetUiPrefDefaults() returns fresh containers (no aliasing of DEFAULT_UI/STARTER_SNIPPETS)', () => {
+  const a = resetUiPrefDefaults();
+  const b = resetUiPrefDefaults();
+  assert.notEqual(a.snippets, b.snippets, 'snippets array is fresh per call');
+  assert.notEqual(a.snippets, STARTER_SNIPPETS, 'snippets do not alias STARTER_SNIPPETS');
+  assert.notEqual(a.snippets[0], STARTER_SNIPPETS[0], 'snippet entries are copies, not shared objects');
+  assert.deepEqual(a.snippets, STARTER_SNIPPETS, 'but the seeded content is identical');
+  assert.notEqual(a.attentionStates, b.attentionStates, 'attentionStates object is fresh per call');
+  assert.notEqual(a.attentionStates, DEFAULT_UI.attentionStates, 'attentionStates does not alias DEFAULT_UI');
+  assert.notEqual(a.mutedAlertKeys, b.mutedAlertKeys, 'mutedAlertKeys array is fresh per call');
+
+  // Mutating one call's containers cannot affect the next call's.
+  a.snippets.push({ name: 'x', text: 'y' });
+  a.attentionStates.stuck = false;
+  const c = resetUiPrefDefaults();
+  assert.deepEqual(c.snippets, STARTER_SNIPPETS, 'a mutated result does not leak into later calls');
+  assert.equal(c.attentionStates.stuck, true, 'a mutated result does not leak into later calls');
+});
+
+console.log('\nsnoozedAlertKeys (chat key → expiry ms) is sanitized on load — WARDEN-551 / characterization for WARDEN-1027');
+// WARDEN-1027: parseSnoozedKeys was the ONLY one of the six object-map
+// sanitizers in storage.ts with no behavior-locking spec block, and it carries
+// the most divergent value predicate (finite, strictly-positive number) of the
+// six. These tests pin its CURRENT behavior against the pre-refactor code so
+// the extraction of the shared parseObjectMap skeleton cannot silently relax or
+// tighten it. They are characterization tests: they passed before the refactor
+// and must keep passing after, unchanged.
+test('defaults to {} when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+});
+test('a missing field loads as {}', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+});
+test('a valid key→expiry map round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), snoozedAlertKeys: { 'host/chat-a': 1893456000000, 'host/chat-b': 1 } });
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'host/chat-a': 1893456000000, 'host/chat-b': 1 });
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  // A string is not a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: 'bogus' }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+  // An array is an object but NOT a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: [['chat-a', 123]] }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+  // A number → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: 42 }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+  // null → {} (and, per the shared skeleton, silently — null/undefined are the
+  // "absent" case, not corruption worth warning about).
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: null }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+});
+test('entries with empty/whitespace keys are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { '': 123, '   ': 123, 'chat-a': 123 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 123 });
+});
+test('keys are trimmed (a padded key survives under its trimmed form)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { '  chat-a  ': 123 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 123 });
+});
+test('entries with non-number values are dropped (one corrupt entry never blanks the snooze set)', () => {
+  reset();
+  // A numeric STRING is NOT coerced — the predicate is strictly typeof 'number'.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': '123', 'chat-b': 123, 'chat-c': true, 'chat-d': { x: 1 }, 'chat-e': [123] } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-b': 123 });
+});
+test('non-finite values (NaN, Infinity) are dropped', () => {
+  reset();
+  // NaN/Infinity have no JSON literal, but an overflowing exponent parses to
+  // ±Infinity — exactly the hand-edited / legacy-corruption class this guard
+  // exists for. (JSON.parse('1e999999') === Infinity.)
+  mem.set('warden:ui:v3', '{"activeTabs":["x"],"snoozedAlertKeys":{"chat-a":1e999999,"chat-b":-1e999999,"chat-c":123}}');
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-c': 123 });
+});
+test('zero and negative expiries are dropped (the value must be strictly positive)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': 0, 'chat-b': -1, 'chat-c': -1893456000000, 'chat-d': 1 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-d': 1 });
+});
+test('a positive PAST-expiry value is KEPT (the sanitizer deliberately does not read the clock)', () => {
+  // THE load-bearing non-behavior (see parseSnoozedKeys in storage.ts). An already-expired snooze
+  // is harmless — activeSnoozedKeys excludes it and App's mount prune clears it —
+  // and dropping it here would require a clock read inside this pure loader.
+  // A refactor that "helpfully" filtered past expiries would break the documented
+  // contract and silently change what App's prune effect observes on mount.
+  reset();
+  const longPast = 1; // 1ms after the epoch — positive, finite, and very much in the past.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': longPast, 'chat-b': 946684800000 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 1, 'chat-b': 946684800000 });
+});
+
+console.log('\nmutedAlertKeys (muted chat keys) is sanitized on load — WARDEN-364 / characterization for WARDEN-1091');
+// WARDEN-1091: parseMutedKeys is the ONLY one of the five array sanitizers in
+// storage.ts with no behavior-locking spec block, and it carries the most
+// divergent ENTRY rule of the five (a bare `typeof k !== 'string'` guard where
+// its four siblings guard `!entry || typeof entry !== 'object'`). These tests
+// pin its CURRENT behavior against the pre-refactor code so the extraction of
+// the shared parseEntryArray skeleton cannot silently relax or tighten it. They
+// are characterization tests: they passed before the refactor and must keep
+// passing after, unchanged. (Same discipline as the WARDEN-1027 block above.)
+test('defaults to [] when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+});
+test('a missing field loads as []', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+});
+test('a valid key list round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), mutedAlertKeys: ['host/chat-a', 'host/chat-b'] });
+  assert.deepEqual(loadUi().mutedAlertKeys, ['host/chat-a', 'host/chat-b']);
+});
+test('a non-array coerces to [] (defensive, no throw)', () => {
+  reset();
+  // A string is not an array → [].
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: 'bogus' }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+  // A plain object → [].
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: { 'chat-a': true } }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+  // A number → [].
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: 42 }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+  // null → [] (the "absent" case, not corruption).
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: null }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+});
+test('a present-but-wrong-type value WARNS, while an absent one is silent', () => {
+  // The operator-facing corruption signal (WARDEN-89). Absence is normal and
+  // must stay quiet; a present-but-wrong-type payload is genuine corruption and
+  // must surface. This asymmetry is the whole point of the shared preamble.
+  const realWarn = console.warn;
+  const warnsFor = (payload) => {
+    const seen = [];
+    console.warn = (...args) => { seen.push(String(args[0])); };
+    try {
+      reset();
+      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
+      loadUi();
+    } finally {
+      console.warn = realWarn;
+    }
+    return seen.filter((m) => m.includes('mutedAlertKeys is not an array; ignoring'));
+  };
+  assert.equal(warnsFor({ mutedAlertKeys: 'bogus' }).length, 1, 'a string payload warns');
+  assert.equal(warnsFor({ mutedAlertKeys: 42 }).length, 1, 'a number payload warns');
+  assert.equal(warnsFor({ mutedAlertKeys: null }).length, 0, 'null is absent, not corrupt — silent');
+  assert.equal(warnsFor({}).length, 0, 'a missing field is absent, not corrupt — silent');
+  assert.equal(warnsFor({ mutedAlertKeys: ['host/chat-a'] }).length, 0, 'a valid array never warns');
+});
+test('non-string entries are dropped (one corrupt entry never blanks the mute set)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    mutedAlertKeys: [1, true, null, { name: 'chat-a' }, ['chat-b'], 'chat-c'],
+  }));
+  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-c']);
+});
+test('entries are trimmed (a padded key survives under its trimmed form)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: ['  host/chat-a  '] }));
+  assert.deepEqual(loadUi().mutedAlertKeys, ['host/chat-a']);
+});
+test('blank and whitespace-only entries are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: ['', '   ', '\t\n', 'chat-a'] }));
+  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-a']);
+});
+test('duplicates are dropped on the TRIMMED value, first occurrence wins, order preserved', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    mutedAlertKeys: ['chat-b', 'chat-a', '  chat-b  ', 'chat-c', 'chat-a'],
+  }));
+  // 'chat-b' and 'chat-a' keep their FIRST position; the padded repeat of
+  // 'chat-b' collides under its trimmed form and is dropped, not re-appended.
+  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-b', 'chat-a', 'chat-c']);
+});
+test('the mute set is NOT capped (every valid key survives)', () => {
+  // Unlike recentlyClosed/snippets, parseMutedKeys has no cap constant — a long
+  // mute list must round-trip whole. Pinned so the shared skeleton's optional
+  // cap is never wired up here by accident.
+  reset();
+  const many = Array.from({ length: 120 }, (_, i) => `host/chat-${i}`);
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: many }));
+  assert.deepEqual(loadUi().mutedAlertKeys, many);
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

@@ -15,8 +15,9 @@
 // The headline guard is getHealthIcon's WCAG 1.4.1 pairwise-distinctness contract
 // (WARDEN-245): the 6 glyphs must stay mutually distinct so health state survives
 // grayscale / color-vision deficiency. No type check enforces distinctness — this
-// test does. getHealthIcon does not exist in the backend src/health.js dup, so the
-// backend src/health.test.js does not cover it either; this is its only coverage.
+// test does. The backend src/health.js no longer carries ANY display helper —
+// WARDEN-995 deleted its consumerless getHealthColor/getHealthBgColor/
+// formatHealthState copies — so this file is the sole coverage repo-wide.
 //
 // No front-end test runner in this repo, so (exactly like hostHealth.test.mjs) this
 // loads the REAL src/lib/healthUtils.ts (transpiled TS -> ESM via Vite's OXC
@@ -189,12 +190,14 @@ test('CHARACTERIZATION: constructor / __proto__ currently LEAK inherited members
   assert.notEqual(normalizeHealthState('__proto__'), HealthState.UNKNOWN);
 });
 
-// ---- getHealthColor / getHealthBgColor / formatHealthState: web-side parity ----
-// These are simple switches whose identical LOGIC is covered in the backend
-// src/health.js dup (via src/health.test.js), but the WEB copies had no direct
-// web-side coverage. Pinning them here brings the web module to parity and —
-// importantly — pins the documented CLOSED-vs-IDLE distinction (CLOSED reads
-// "more final" than IDLE; healthUtils.ts:30-33).
+// ---- getHealthColor / getHealthBgColor / formatHealthState: sole coverage ----
+// This file is the ONLY coverage for these three functions anywhere in the repo.
+// A backend src/health.js dup once held logic-identical copies and attracted the
+// coverage while the copies that actually render shipped untested (WARDEN-885);
+// WARDEN-995 deleted that consumerless dup, leaving src/lib/healthUtils.ts as the
+// single implementation and these assertions as its only guard. They also pin the
+// documented CLOSED-vs-IDLE distinction (CLOSED reads "more final" than IDLE;
+// healthUtils.ts:30-33).
 
 console.log('\ngetHealthColor: one class per state + the CLOSED≠IDLE distinction');
 test('each state maps to its documented text-color class', () => {

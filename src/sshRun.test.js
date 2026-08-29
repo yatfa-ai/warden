@@ -47,14 +47,17 @@ import { run } from './ssh.js';
  */
 
 // A minimal ChildProcess stand-in: stdout/stderr are EventEmitters the production code
-// reads via .on('data') (run() does NOT call setEncoding — it accumulates with +=, so
-// the fake emits pre-decoded strings and needs no setEncoding stub); the child itself
-// is an EventEmitter for 'error'/'close'. .kill is a no-op (run() always arms a timer;
-// no test here lets it fire). Quacks just enough for run().
+// reads via .setEncoding + .on('data'); the child itself is an EventEmitter for
+// 'error'/'close'. .setEncoding is a no-op (the fake emits pre-decoded strings, so there
+// is no decoder state to carry) — but it MUST exist, because run() calls it (WARDEN-1045:
+// without setEncoding, `stdout += d` decoded each Buffer chunk in isolation and destroyed
+// multibyte characters straddling a read boundary). Mirrors src/runLocalCapture.test.js.
+// .kill is a no-op (run() always arms a timer; no test here lets it fire). Quacks just
+// enough for run().
 function fakeChild() {
   const c = new EventEmitter();
-  c.stdout = new EventEmitter();
-  c.stderr = new EventEmitter();
+  c.stdout = Object.assign(new EventEmitter(), { setEncoding() {} });
+  c.stderr = Object.assign(new EventEmitter(), { setEncoding() {} });
   c.kill = () => {};
   return c;
 }
@@ -142,5 +145,70 @@ describe('run() — close, not exit (WARDEN-464 / WARDEN-766 remote transport)',
     assert.equal(r.ok, false);
     assert.equal(r.code, -1);
     assert.ok(String(r.stderr).includes('spawn ssh ENOENT'), 'spawn error folded into stderr');
+  });
+});
+
+describe("run() — '--' terminates ssh options before the host positional (WARDEN-969)", () => {
+  /**
+   * Option injection, NOT shell injection. Every spawn here is argv-safe
+   * (`spawn(SSH_BIN, args)`, no `shell: true`), which stops the SHELL — it does
+   * nothing about ssh's OWN option parser. A `host` beginning with '-' lands in a
+   * bare positional slot and ssh reads it as an option; `-oProxyCommand=<cmd>`
+   * then makes ssh execute <cmd> on the LOCAL machine.
+   *
+   * WARDEN-940's `validateNewHost` (web/src/lib/hostInput.ts) rejects a leading
+   * '-' at the Settings typed-add and stays as first line of defense — but it
+   * guards ONE entry point. `/api/discover?host=`, `/api/claude-sessions?host=`,
+   * the session-read route, `warden scan|attach --host`, and a hand-edited
+   * config.json all reach run() without passing through it. The separator lives
+   * in the BUILDER so every caller — current and future — is covered without
+   * having to remember to validate (WARDEN-140 Trap 5; the same rule the git,
+   * grep and tmux builders in this repo already follow).
+   *
+   * These use a RECORDING fake spawn (the drain tests above discard argv) so a
+   * future edit cannot silently drop the separator.
+   */
+  const recordingSpawn = () => {
+    const calls = [];
+    let child;
+    const spawnFn = (bin, args, opts) => { calls.push({ bin, args, opts }); child = fakeChild(); return child; };
+    return { calls, spawnFn, settle: () => child.emit('close', 0) };
+  };
+
+  it("passes '--' immediately before the host positional", async () => {
+    const rec = recordingSpawn();
+    const p = run('example.com', 'true', { spawn: rec.spawnFn, timeout: 60000 });
+    rec.settle();
+    await p;
+    const { args } = rec.calls[0];
+    assert.ok(args.includes('--'), "ssh argv must carry an end-of-options '--'");
+    assert.ok(args.indexOf('--') < args.indexOf('example.com'), "'--' must precede the host positional");
+    // Immediately before: nothing may sneak between the separator and the host.
+    assert.equal(args[args.indexOf('--') + 1], 'example.com');
+  });
+
+  it("keeps '--' before the host when a pooled ControlPath is appended", async () => {
+    // The socketPath branch pushes '-o ControlPath=…' AFTER the base opts, so the
+    // separator must still be the last thing before the host.
+    const rec = recordingSpawn();
+    const p = run('example.com', 'true', { spawn: rec.spawnFn, timeout: 60000, socketPath: '/tmp/cm-sock' });
+    rec.settle();
+    await p;
+    const { args } = rec.calls[0];
+    assert.equal(args[args.indexOf('--') + 1], 'example.com');
+  });
+
+  it("a '-'-leading host is passed as a POSITIONAL, not parsed as an ssh option", async () => {
+    // The attack shape: without '--', ssh reads this as -o ProxyCommand and runs
+    // the command locally. With '--' it is argv[n] after the separator — ssh
+    // treats it as a (bogus) hostname and fails to resolve it.
+    const evil = '-oProxyCommand=touch /tmp/pwned';
+    const rec = recordingSpawn();
+    const p = run(evil, 'true', { spawn: rec.spawnFn, timeout: 60000 });
+    rec.settle();
+    await p;
+    const { args } = rec.calls[0];
+    assert.equal(args[args.indexOf('--') + 1], evil, 'the hostile host must sit after the separator');
+    assert.ok(args.indexOf(evil) > args.indexOf('--'), 'no option-parsed slot for a hostile host');
   });
 });

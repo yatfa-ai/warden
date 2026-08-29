@@ -10,7 +10,11 @@ export const THIS_MACHINE = '(local)';
 export function basename(p: string) { return (p || '').replace(/[\\/]+/g, '/').replace(/\/$/, '').split('/').pop() || p; }
 
 // Short process/type label for a chat (yatfa | claude | resume | shell | <bin> | manual).
-export function chatType(c?: Chat): string {
+// Takes the minimal structural slice it actually reads (kind + cmd) rather than the
+// full Chat, so the import-light lib/agentFilter.ts can call this canonical copy with
+// its own local AgentFilterChat slice (WARDEN-936) instead of duplicating the body.
+// Chat is structurally assignable, so every existing call site is unchanged.
+export function chatType(c?: { kind?: string; cmd?: string }): string {
   if (!c) return '?';
   if (c.kind === 'yatfa') return 'yatfa';
   const bin = (c.cmd || '').split(/\s+/)[0].replace(/^.*[/\\]/, '');

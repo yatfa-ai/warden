@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
+import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -45,6 +46,8 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
+import { swapPanes } from '@/lib/paneGrid';
+import { reconcileMainOwnedPref } from '@/lib/mainOwnedPref';
 import { toast } from 'sonner';
 
 // WARDEN-436: the return banner may FIRST appear only within this window after the
@@ -663,7 +666,12 @@ function App() {
   // dots back to "unknown". Live data itself is advanced by refreshDiscoveredHosts().
   const applyCatalog = useCallback(async (silent: boolean) => {
     if (!silent) setLoading(true);
-    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch((error) => console.error('[ssh-hosts] Failed:', error));
+    // WARDEN-1202: /api/ssh-hosts returns BOTH ~/.ssh/config aliases (`hosts`) and
+    // the real configured fleet (`configured` = cfg.hosts). Reading only `hosts`
+    // dropped every host added by typing its name in Settings (WARDEN-940), so it
+    // got no sidebar row and no Open Chat scope chip. mergeHostList unions them,
+    // de-duplicated and with '(local)' filtered (consumers prepend THIS_MACHINE).
+    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(mergeHostList(j))).catch((error) => console.error('[ssh-hosts] Failed:', error));
     try {
       const cr = await fetch('/api/chats');
       const diskChats: Chat[] = (await cr.json()).chats || [];
@@ -746,121 +754,132 @@ function App() {
     refreshConfigPrefs,
   });
 
-  // Write-through setter for the main-owned "remember window bounds" flag: update
-  // the display mirror AND persist to main via IPC. A stable callback so the
-  // SettingsPage prop identity doesn't churn on every poll tick (matching the
-  // other stable setters passed down). No-op in a browser (persist call resolves
-  // without the bridge). WARDEN-263.
+  // Write-through setters for the three main-owned prefs: update the display
+  // mirror optimistically, persist to main via IPC, then RECONCILE the mirror
+  // with what main actually did. Main's set handlers return what happened, not
+  // what was asked (it refuses close-to-tray with no working tray, and re-reads
+  // the OS for launch-at-login), so a discarded return left the switch reading
+  // ON while the feature was OFF — see lib/mainOwnedPref.ts and WARDEN-973.
+  // In a browser the bridge is absent and lib/electron.ts echoes the passed
+  // value, so the refusal branch is unreachable there (no spurious toast); the
+  // switches are `disabled={!hasWindowBridge()}` besides. All three keep empty
+  // deps so the SettingsPage prop identity doesn't churn on every poll tick
+  // (matching the other stable setters passed down). WARDEN-263/278/330.
   const setRememberWindowBounds = useCallback((v: boolean) => {
-    setRememberWindowBoundsState(v);
-    void persistRememberWindowBounds(v);
+    void reconcileMainOwnedPref(v, persistRememberWindowBounds, setRememberWindowBoundsState, () => {
+      toast.error("Couldn't save that preference.");
+    });
   }, []);
 
-  // Mirror setter for launch-at-login: update the display state and write the OS
-  // login item through the IPC bridge. Stable identity for the same reason as
-  // setRememberWindowBounds. No-op in a browser (persist call resolves without
-  // the bridge). WARDEN-278.
   const setLaunchAtLogin = useCallback((v: boolean) => {
-    setLaunchAtLoginState(v);
-    void persistLaunchAtLogin(v);
+    void reconcileMainOwnedPref(v, persistLaunchAtLogin, setLaunchAtLoginState, () => {
+      toast.error("Couldn't set Launch at login — your OS didn't accept the change. On Linux this depends on your desktop environment.");
+    });
   }, []);
 
-  // Mirror setter for close-to-tray: update the display state and write the
-  // persisted flag (plus attach/detach the tray) through the IPC bridge. Stable
-  // identity for the same reason as setLaunchAtLogin. No-op in a browser.
-  // WARDEN-330.
   const setCloseToTray = useCallback((v: boolean) => {
-    setCloseToTrayState(v);
-    void persistCloseToTray(v);
+    void reconcileMainOwnedPref(v, persistCloseToTray, setCloseToTrayState, () => {
+      toast.error("Couldn't enable Close to tray — this desktop has no working system tray, so closing the window would leave Warden with no way to reopen it.");
+    });
   }, []);
 
   // Reset every UI PREF to its effective default value (the value loadUi()
   // yields post-coercion, so live React state / persisted state / a fresh
   // reload all agree) while leaving the WORKSPACE + panel layout untouched.
-  // The setters fire the existing saveUi effect, which persists defaults-for-
-  // prefs + preserved-workspace via persistUiState. Pure client-side: never
-  // touches the backend / config.json (display/terminal/new-chat prefs are
-  // client-side only by design). Stable identity — it only calls useState
-  // setters (all stable) — so the SettingsPage prop identity never churns,
-  // matching the other stable setters passed down.
+  // What survives is exactly RESET_PRESERVED_KEYS (storage.ts) — the single
+  // source of truth for the preserved set; see WARDEN-346. The setters fire
+  // the existing saveUi effect, which persists defaults-for-prefs + preserved-
+  // workspace via persistUiState. Pure client-side: never touches the backend
+  // / config.json (display/terminal/new-chat prefs are client-side only by
+  // design).
   //
-  // terminalFontFamily nuance: resets to DEFAULT_TERMINAL_FONT_FAMILY (the
-  // curated "System default" value), NOT DEFAULT_UI.terminalFontFamily ('').
-  // The persisted shape uses '' (blank = default stack), but the LIVE React
-  // initializer coerces '' → DEFAULT_TERMINAL_FONT_FAMILY via || (App.tsx:158)
-  // so a pane can never blank. Setting live state to '' here would leave the
-  // Settings font-select showing "Custom…" (no '' option in the curated list)
-  // until reload; DEFAULT_TERMINAL_FONT_FAMILY keeps live/persisted/reload in
-  // sync (the saveUi effect persists the curated value, loadUi returns it as-
-  // is, and it is NOT the DEFAULT_UI '' sentinel — but it renders identically).
-  // defaultNewChatCwd is reset too: it is a pref (in the saveUi spread), part
-  // of the defaultNewChat* family, and omitting it would leave the stale value
-  // in live state for the next persist — violating the "all agree" invariant.
-  // Does NOT touch workspace/layout setters (workspaces/activeWorkspaceId/
-  // paneHost/sidebarCollapsed/observerCollapsed/healthCollapsed/sidebarWidth/
-  // observerWidth) — those are preserved. See WARDEN-346.
+  // WARDEN-934: this used to be a hand-enumerated list of ~35 setter calls
+  // guarded only by a comment asserting it was complete — and it had already
+  // drifted. fileViewerViewMode (WARDEN-480) was never reset, so "Reset UI
+  // preferences" toasted success and left the File Viewer stuck in Source
+  // forever. The classification is now DERIVED from one compile-enforced key
+  // source, exactly like the persist path (PERSISTED_PREF_KEYS →
+  // PersistedPrefSnapshot, which closed the identical WARDEN-442/468/500
+  // drift):
   //
-  // Every OTHER pref in App's persist spread is reset here so live state, the
-  // next saveUi persist, and a fresh reload all agree (acceptance criterion #2).
-  // This includes prefs added by tickets that landed after WARDEN-346 branched
-  // (per-state attentionStates, per-severity alert routing, mutedAlertKeys,
-  // watchedChats, timestampFormat, per-host
-  // preset/cwd overrides, instruction snippets). Omitting any would leave it
-  // stale in live React state and silently survive the "reset everything"
-  // action — the next persist would then write the stale value right back.
-  // User-curated lists (customPresets/snippets/watchedChats/mutedAlertKeys)
-  // reset too: this is a destructive, confirm-gated "back to factory defaults",
-  // consistent with customPresets → [] (customPresets is user-authored as well).
+  //   ResettableKey = (PERSISTED_PREF_KEYS ∪ restoreOnStartup) − RESET_PRESERVED_KEYS
+  //
+  // and BOTH maps are keyed by it — resetUiPrefDefaults() (storage.ts) for the
+  // values, resetSetters below for the state setters. A pref that is neither
+  // listed in RESET_PRESERVED_KEYS nor given a default + setter is a TypeScript
+  // error; the storage.test.mjs exhaustiveness test covers the runtime half.
+  //
+  // The two things the types can NOT say:
+  //   - terminalFontFamily resets to DEFAULT_TERMINAL_FONT_FAMILY (the curated
+  //     "System default" value), NOT DEFAULT_UI.terminalFontFamily (''). The
+  //     persisted shape uses '' (blank = default stack), but the live React
+  //     initializer coerces '' → DEFAULT_TERMINAL_FONT_FAMILY via || (the
+  //     useState at terminalFontFamily) so a pane can never blank. Setting live
+  //     state to '' here would leave the Settings font-select showing "Custom…"
+  //     (no '' option in the curated list) until reload.
+  //   - User-curated lists (customPresets/snippets/watchedChats/mutedAlertKeys)
+  //     reset too: this is a destructive, confirm-gated "back to factory
+  //     defaults", consistent with customPresets → [].
+  //
+  // Identity is stable because every value it closes over is: the useState
+  // setters are stable by React contract, and clearWatchedChats is a
+  // useCallback(..., []) (useWatchState.ts).
   const resetUiPrefsToDefaults = useCallback(() => {
-    // Appearance
-    setTheme('system');
-    setDensity('comfortable');
-    setPaneLayout('auto');
-    // Behavior
-    setOnExitBehavior('keep');
-    setAutoFocusNewPane(true);
-    setRestoreOnStartup('previous');
-    setCopyOnSelect(false);
-    setTimestampFormat('relative');
-    // Sidebar fleet filter/sort (WARDEN-442): reset to the DEFAULT_UI values.
-    setAgentFilter('all');
-    setAgentSort('manual');
-    // Health group-by (WARDEN-468): reset to the DEFAULT_UI value ('health').
-    setHealthGroupBy('health');
-    // Health per-host collapse state (WARDEN-500): reset to the DEFAULT_UI value
-    // ({} = every host expanded), clearing any collapsed hosts.
-    setHealthCollapsedHosts({});
-    // Per-host display labels (WARDEN-490): reset to the empty map (no labels =
-    // raw hosts everywhere, today's behavior).
-    setHostLabels({});
-    // Terminal
-    setTerminalFontSize(14);
-    setTerminalScrollback(10000);
-    setTerminalFontFamily(DEFAULT_TERMINAL_FONT_FAMILY);
-    setTerminalColorScheme('auto');
-    setTerminalCursorStyle('blink-block');
-    // New chats
-    setDefaultNewChatPreset('claude');
-    setDefaultNewChatPresetByHost({});
-    setDefaultNewChatHost(THIS_MACHINE);
-    setDefaultNewChatCwd('');
-    setDefaultNewChatCwdByHost({});
-    setCustomPresets([]);
-    setSnippets(STARTER_SNIPPETS);
-    setDefaultShell('');
-    setDefaultShellByHost({});
-    // Attention / desktop alerts
-    setAttentionDesktopAlerts(false);
-    setAttentionStates({ stuck: true, erroring: true, waiting: true, blocked: true });
-    setAlertCritical(true);
-    setAlertWarning(true);
-    setAlertDirective(true);
-    setAlertError(true);
-    setMutedAlertKeys([]);
-    // WARDEN-551: clear any active snoozes too, so a reset leaves no stale
-    // temporary suppression behind (mirrors clearing the permanent mute set).
-    setSnoozedAlertKeys({});
-    clearWatchedChats();
+    const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
+      // Appearance
+      theme: setTheme,
+      density: setDensity,
+      paneLayout: setPaneLayout,
+      // Behavior
+      onExitBehavior: setOnExitBehavior,
+      autoFocusNewPane: setAutoFocusNewPane,
+      restoreOnStartup: setRestoreOnStartup,
+      copyOnSelect: setCopyOnSelect,
+      timestampFormat: setTimestampFormat,
+      // File Viewer markdown view mode (WARDEN-480) — the WARDEN-934 omission.
+      fileViewerViewMode: setFileViewerViewMode,
+      // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
+      // per-host collapse (WARDEN-500), per-host display labels (WARDEN-490).
+      agentFilter: setAgentFilter,
+      agentSort: setAgentSort,
+      healthGroupBy: setHealthGroupBy,
+      healthCollapsedHosts: setHealthCollapsedHosts,
+      hostLabels: setHostLabels,
+      // Terminal
+      terminalFontSize: setTerminalFontSize,
+      terminalScrollback: setTerminalScrollback,
+      terminalFontFamily: setTerminalFontFamily,
+      terminalColorScheme: setTerminalColorScheme,
+      terminalCursorStyle: setTerminalCursorStyle,
+      // New chats
+      defaultNewChatPreset: setDefaultNewChatPreset,
+      defaultNewChatPresetByHost: setDefaultNewChatPresetByHost,
+      defaultNewChatHost: setDefaultNewChatHost,
+      defaultNewChatCwd: setDefaultNewChatCwd,
+      defaultNewChatCwdByHost: setDefaultNewChatCwdByHost,
+      customPresets: setCustomPresets,
+      snippets: setSnippets,
+      defaultShell: setDefaultShell,
+      defaultShellByHost: setDefaultShellByHost,
+      // Attention / desktop alerts
+      attentionDesktopAlerts: setAttentionDesktopAlerts,
+      attentionStates: setAttentionStates,
+      alertCritical: setAlertCritical,
+      alertWarning: setAlertWarning,
+      alertDirective: setAlertDirective,
+      alertError: setAlertError,
+      mutedAlertKeys: setMutedAlertKeys,
+      snoozedAlertKeys: setSnoozedAlertKeys,
+      // watchedChats lives in useWatchState, which exposes a clear() rather than a
+      // raw setter — the reset value is always [] (see resetUiPrefDefaults).
+      watchedChats: () => clearWatchedChats(),
+    };
+    const defaults = resetUiPrefDefaults();
+    // The per-key types are locked by the two maps above; TS cannot correlate
+    // them across a dynamic index, so the call site casts once.
+    for (const key of Object.keys(defaults) as ResettableKey[]) {
+      (resetSetters[key] as (value: unknown) => void)(defaults[key]);
+    }
   }, [clearWatchedChats]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
@@ -1200,6 +1219,22 @@ function App() {
     // pane must restore the grid, not blank it.
     setMaximized((m) => (m === id ? null : m));
   }, [setOpenPanes, setFocused]);
+  // WARDEN-909: drag a pane onto another pane tile → swap their positions in the
+  // active workspace's openPanes. Routed through the setOpenPanes shim with a
+  // functional update, so it always targets the CURRENTLY active workspace and
+  // `workspaces` (already in PERSISTED_PREF_KEYS) persists the new order with no
+  // extra wiring — a reordered grid survives a reload under restoreOnStartup
+  // 'previous'. Nothing else needs touching: `focused` and `maximized` hold pane
+  // IDS and paneHost is keyed by pane id, so focus, maximize and each pane's host
+  // follow the pane into its new slot rather than staying with the slot. The
+  // column/row resize ratios are per-TRACK weights whose count is unchanged by a
+  // swap, so the grid's track sizes stay exactly as the user dragged them and
+  // nothing jumps — the two panes simply exchange slots inside that layout.
+  // swapPanes returns the SAME array on any no-op (self-drop, unknown id), which
+  // the shim's `next === w.openPanes` check turns into no state change at all.
+  const reorderPanes = useCallback((dragId: string, targetId: string) => {
+    setOpenPanes((p) => swapPanes(p, dragId, targetId));
+  }, [setOpenPanes]);
   // reopen a recently-closed pane: drop it from the recovery list (it is no longer
   // closed), then open it. openChat re-primes paneHost from the live catalog entry,
   // so a remote pane re-discovers its host on reopen.
@@ -1999,6 +2034,7 @@ function App() {
             fileViewerViewMode={fileViewerViewMode}
             onFileViewerViewModeChange={setFileViewerViewMode}
             pollIntervalMs={pollIntervalMs}
+            onReorderPanes={reorderPanes}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"

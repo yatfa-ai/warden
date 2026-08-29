@@ -14,10 +14,10 @@
 
 /** The verdict shape returned by POST /api/telemetry-test. Mirrors the backend's
  *  mapCapabilitiesVerdict result (src/telemetry-capabilities.js). `kind`
- *  discriminates the four states; `ok` is the binary reachability+schema-match
+ *  discriminates the states; `ok` is the binary reachability+schema-match
  *  signal; `message` is the honest, user-facing copy. */
 export type TelemetryTestVerdict = {
-  kind: 'connected' | 'schema-drift' | 'auth-required' | 'no-receiver';
+  kind: 'connected' | 'schema-drift' | 'auth-required' | 'no-receiver' | 'scheme-missing';
   ok: boolean;
   message: string;
 };
@@ -31,6 +31,7 @@ const VERDICT_LABELS: Record<TelemetryTestVerdict['kind'], string> = {
   connected: 'Connected',
   'schema-drift': 'Schema mismatch',
   'auth-required': 'Auth required',
+  'scheme-missing': 'Add scheme',
   'no-receiver': 'No receiver',
 };
 

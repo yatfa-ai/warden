@@ -33,7 +33,7 @@ import {
   type AttentionItem,
   type AttentionSeverity,
 } from '@/lib/attentionRollup';
-import { activeSnoozedKeys, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
+import { activeSnoozedKeys, alertMuteState, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
 import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
 import type { Snippet } from '@/lib/storage';
@@ -143,6 +143,20 @@ export function AttentionList({
   // instant a snooze expires (App's prune effect also clears the stale entry from
   // state on cadence, so this never lingers past expiry).
   const snoozedSet = activeSnoozedKeys(snoozedAlertKeys, Date.now());
+  // WARDEN-1043: the per-row mute/snooze prop quad, derived in ONE place. Every
+  // per-agent problem section below spreads this instead of hand-copying the four
+  // props — the shape that produced WARDEN-953's silent no-op (a new section that
+  // simply forgot them) and that invites the subtler bug of reaching for
+  // `snoozedAlertKeys[key] ?? null` directly, which renders an EXPIRED snooze as
+  // active. The derivation itself lives in snooze.ts (unit-tested there, since
+  // web/ has no React test harness); this closure only binds the render-scoped
+  // values. `snoozedSet` is computed once above and reused, so this stays
+  // once-per-render work, not once-per-row.
+  const muteProps = (key: string) => ({
+    ...alertMuteState(key, muteEnabled, mutedSet, snoozedSet, snoozedAlertKeys),
+    muteEnabled,
+    onSetAlertMute,
+  });
 
   // The directed answer (WARDEN-384): the ONE pane a human should go to first,
   // "you're needed HERE, because X" — promoted above the flat rundown so the human
@@ -198,10 +212,7 @@ export function AttentionList({
                     agent={a}
                     dot="bg-red-500"
                     onClick={() => onOpenChat(key)}
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -209,16 +220,44 @@ export function AttentionList({
           )}
           {stuck.length > 0 && (
             <Section title="Stuck" count={stuck.length} tone="text-red-500">
-              {sortOldestEnteredAtFirst(stuck).map((a) => (
-                <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="stuck" onClick={() => onOpenChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)} />
-              ))}
+              {sortOldestEnteredAtFirst(stuck).map((a) => {
+                const key = a.key || a.id;
+                return (
+                  <AgentRow
+                    key={key}
+                    agent={a}
+                    dot="bg-red-500"
+                    detail={a.signal}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="stuck"
+                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
+                    // WARDEN-953: the pane-state sections carry the same per-agent
+                    // mute/snooze bell the health sections do — applySeverityPrefs now
+                    // suppresses these buckets too, so the affordance must be reachable
+                    // (and the snooze state visible) where the agent actually appears.
+                    {...muteProps(key)}
+                  />
+                );
+              })}
             </Section>
           )}
           {erroring.length > 0 && (
             <Section title="Erroring" count={erroring.length} tone="text-red-500">
-              {sortOldestEnteredAtFirst(erroring).map((a) => (
-                <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="erroring" onClick={() => onOpenChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)} />
-              ))}
+              {sortOldestEnteredAtFirst(erroring).map((a) => {
+                const key = a.key || a.id;
+                return (
+                  <AgentRow
+                    key={key}
+                    agent={a}
+                    dot="bg-red-500"
+                    detail={a.signal}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="erroring"
+                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
+                    {...muteProps(key)}
+                  />
+                );
+              })}
             </Section>
           )}
           {warning.length > 0 && (
@@ -231,10 +270,7 @@ export function AttentionList({
                     agent={a}
                     dot="bg-yellow-500"
                     onClick={() => onOpenChat(key)}
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -242,60 +278,75 @@ export function AttentionList({
           )}
           {waiting.length > 0 && (
             <Section title="Waiting on you" count={waiting.length} tone="text-yellow-500">
-              {sortOldestEnteredAtFirst(waiting).map((a) => (
-                <AgentRow
-                  key={a.key || a.id}
-                  agent={a}
-                  dot="bg-yellow-500"
-                  detail={a.signal}
-                  enteredAt={a.enteredAt}
-                  durationStateLabel="waiting"
-                  onClick={() => onOpenChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
-                  // WARDEN-770: the two states that resolve with a one-line human
-                  // input earn the inline reply affordance. waiting (parked at a
-                  // "press enter"/"needs input" prompt) is the headline case.
-                  replyable
-                  snippets={snippets}
-                  onReplyResult={onReplyResult}
-                />
-              ))}
+              {sortOldestEnteredAtFirst(waiting).map((a) => {
+                const key = a.key || a.id;
+                return (
+                  <AgentRow
+                    key={key}
+                    agent={a}
+                    dot="bg-yellow-500"
+                    detail={a.signal}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="waiting"
+                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
+                    // WARDEN-770: the two states that resolve with a one-line human
+                    // input earn the inline reply affordance. waiting (parked at a
+                    // "press enter"/"needs input" prompt) is the headline case.
+                    replyable
+                    snippets={snippets}
+                    onReplyResult={onReplyResult}
+                    // WARDEN-953: mute/snooze bell — see the Stuck section above.
+                    {...muteProps(key)}
+                  />
+                );
+              })}
             </Section>
           )}
           {blocked.length > 0 && (
             <Section title="Blocked" count={blocked.length} tone="text-yellow-500">
-              {sortOldestEnteredAtFirst(blocked).map((a) => (
-                <AgentRow
-                  key={a.key || a.id}
-                  agent={a}
-                  dot="bg-yellow-500"
-                  detail={a.signal}
-                  enteredAt={a.enteredAt}
-                  durationStateLabel="blocked"
-                  onClick={() => onOpenChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
-                  // WARDEN-770: blocked (waiting on approval/dependency) is the
-                  // second replyable state — the human can unblock inline.
-                  replyable
-                  snippets={snippets}
-                  onReplyResult={onReplyResult}
-                />
-              ))}
+              {sortOldestEnteredAtFirst(blocked).map((a) => {
+                const key = a.key || a.id;
+                return (
+                  <AgentRow
+                    key={key}
+                    agent={a}
+                    dot="bg-yellow-500"
+                    detail={a.signal}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="blocked"
+                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
+                    // WARDEN-770: blocked (waiting on approval/dependency) is the
+                    // second replyable state — the human can unblock inline.
+                    replyable
+                    snippets={snippets}
+                    onReplyResult={onReplyResult}
+                    // WARDEN-953: mute/snooze bell — see the Stuck section above.
+                    {...muteProps(key)}
+                  />
+                );
+              })}
             </Section>
           )}
           {custom.length > 0 && (
             <Section title="Watch patterns" count={custom.length} tone="text-yellow-500">
-              {sortOldestEnteredAtFirst(custom).map((a) => (
-                <AgentRow
-                  key={a.key || a.id}
-                  agent={a}
-                  dot="bg-yellow-500"
-                  // detail = the matching line + the pattern name that matched it, so
-                  // the human sees both WHAT printed and WHICH of their rules tripped.
-                  detail={a.customMatch ? `'${a.customMatch.line}' (${a.customMatch.pattern})` : undefined}
-                  enteredAt={a.enteredAt}
-                  durationStateLabel="matching a watch pattern"
-                  onClick={() => onOpenChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
-                />
-              ))}
+              {sortOldestEnteredAtFirst(custom).map((a) => {
+                const key = a.key || a.id;
+                return (
+                  <AgentRow
+                    key={key}
+                    agent={a}
+                    dot="bg-yellow-500"
+                    // detail = the matching line + the pattern name that matched it, so
+                    // the human sees both WHAT printed and WHICH of their rules tripped.
+                    detail={a.customMatch ? `'${a.customMatch.line}' (${a.customMatch.pattern})` : undefined}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="matching a watch pattern"
+                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
+                    // WARDEN-953: mute/snooze bell — see the Stuck section above.
+                    {...muteProps(key)}
+                  />
+                );
+              })}
             </Section>
           )}
           {/*
@@ -384,7 +435,9 @@ function AgentRow({
   muted?: boolean;
   /** WARDEN-551 — snooze expiry (ms) for this row, or null. A future timestamp
    * means the row is snoozed (Clock icon + countdown + "End snooze now"); null
-   * means not snoozed. Only the health-bucket rows pass this (mirrors `muted`). */
+   * means not snoozed. WARDEN-953: passed by every per-agent section (health AND
+   * pane states), mirroring `muted` — the suppressed set applySeverityPrefs
+   * consults now covers all seven per-agent buckets. */
   snoozedUntil?: number | null;
   muteEnabled?: boolean;
   onSetAlertMute?: (key: string, mode: AlertMuteMode) => void;
@@ -504,7 +557,8 @@ function AgentRow({
       )}
       {/*
         WARDEN-364 + WARDEN-551 — per-agent mute/snooze on the desktop-alert
-        channel (health buckets only). The bell now opens a small menu of
+        channel (WARDEN-953: every per-agent section, health AND pane states).
+        The bell now opens a small menu of
         durations (permanent / 1 hour / until tomorrow) instead of toggling
         permanent mute in one click, so the human can pick a time-boxed snooze
         that auto-rearms. While suppressed it shows the state + a one-click resume.

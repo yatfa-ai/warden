@@ -22,9 +22,6 @@ import assert from 'node:assert';
 import {
   HealthState,
   getHealthState,
-  getHealthColor,
-  getHealthBgColor,
-  formatHealthState,
   groupByHealth,
   getHealthSummary,
 } from './health.js';
@@ -165,22 +162,6 @@ describe('getHealthState — manual (tmux, non-agent) sessions are IDLE when sta
   });
 });
 
-describe('formatHealthState / colors — CLOSED helper mappings', () => {
-  it('formats CLOSED as "Closed"', () => {
-    assert.strictEqual(formatHealthState(HealthState.CLOSED), 'Closed');
-  });
-
-  it('maps CLOSED to a gray text color (distinct from critical red)', () => {
-    const closedColor = getHealthColor(HealthState.CLOSED);
-    assert.match(closedColor, /^text-gray-/);
-    assert.notStrictEqual(closedColor, getHealthColor(HealthState.CRITICAL));
-  });
-
-  it('maps CLOSED to a gray background color', () => {
-    assert.match(getHealthBgColor(HealthState.CLOSED), /^bg-gray-/);
-  });
-});
-
 describe('groupByHealth — CLOSED has its own bucket', () => {
   it('places a closed agent in groups.closed, separate from critical', () => {
     const agents = [
@@ -201,18 +182,32 @@ describe('groupByHealth — CLOSED has its own bucket', () => {
   });
 });
 
-describe('getHealthSummary — closed is counted and labelled', () => {
+describe('getHealthSummary — closed and unknown are counted and labelled', () => {
   it('counts closed chats in the summary and includes them in the total', () => {
     const groups = groupByHealth([
       { id: 'a', healthState: HealthState.HEALTHY },
       { id: 'b', healthState: HealthState.CLOSED },
       { id: 'c', healthState: HealthState.CLOSED },
-      { id: 'd', healthState: HealthState.UNKNOWN }, // excluded from total
+      { id: 'd', healthState: HealthState.UNKNOWN },
     ]);
     const summary = getHealthSummary(groups);
     assert.strictEqual(summary.closed, 2);
     assert.strictEqual(summary.healthy, 1);
-    assert.strictEqual(summary.total, 3); // healthy(1) + closed(2); unknown excluded
+    assert.strictEqual(summary.unknown, 1);
+    assert.strictEqual(summary.total, 4); // healthy(1) + closed(2) + unknown(1)
+    assert.match(summary.label, /1 unknown/);
+  });
+
+  it('counts a catalog-only (all-unknown) fleet in the total — WARDEN-1068', () => {
+    const groups = groupByHealth([
+      { id: 'a', healthState: HealthState.UNKNOWN },
+      { id: 'b', healthState: HealthState.UNKNOWN },
+      { id: 'c', healthState: HealthState.UNKNOWN },
+    ]);
+    const summary = getHealthSummary(groups);
+    assert.strictEqual(summary.unknown, 3);
+    assert.strictEqual(summary.total, 3);
+    assert.match(summary.label, /3 unknown/);
   });
 
   it('includes "N closed" in the label', () => {

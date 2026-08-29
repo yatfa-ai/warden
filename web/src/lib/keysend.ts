@@ -16,8 +16,9 @@
 // and batch-kill via summarizeFanout (the allSettled→summary reducer); only the
 // keysend-specific copy + the "key send failed" fallback live here.
 //
-// The IMPURE seam (runKeySendFanout) is the shared fan-out itself: Promise.allSettled
-// over /api/key per selected agent. It lives here (mirroring runKillFanout in
+// The IMPURE seam (runKeySendFanout) is the shared fan-out itself: one POST to
+// /api/key per selected agent, via the shared runFanout request loop (./fanout,
+// WARDEN-974). It lives here (mirroring runKillFanout in
 // kill.ts) because interrupt — like kill — is a TWO-surface operation (sidebar
 // WARDEN-492, Fleet Health WARDEN-492), so the fetch-and-reduce shape lives once
 // instead of being duplicated inline in each component. Unlike kill, interrupt is
@@ -26,11 +27,11 @@
 // `classifyPane` / health poll tick, not via an eager reconcile — hence no
 // `onSettled` hook.
 //
-// `import type` only below (besides summarizeFanout) — erased by OXC, so this
-// module loads under the same transpile-to-temp-`.mjs` + dynamic-`import()`
-// harness as broadcast.ts / kill.ts (see keysend.test.mjs).
+// `import type` only below (besides runFanout + summarizeFanout) — erased by
+// OXC, so this module loads under the same transpile-to-temp-`.mjs` +
+// dynamic-`import()` harness as broadcast.ts / kill.ts (see keysend.test.mjs).
 
-import { summarizeFanout } from './fanout';
+import { formatFanoutToast, runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/key: either ok, or not-ok with a reason. */
 export interface KeySendOutcome { ok: boolean; error?: string }
@@ -61,14 +62,14 @@ export function summarizeKeySend(
   return { total, sent: succeeded, failed };
 }
 
-/** Toast variant for a key-send summary — success only when every agent got it. */
-export type KeySendToastVariant = 'success' | 'error';
+/**
+ * Toast variant / shape for a key-send summary. Both alias the shared fan-out
+ * types (./fanout) — see kill.ts for the rationale. The names are kept as
+ * exported aliases so existing importers are unaffected.
+ */
+export type KeySendToastVariant = FanoutToastVariant;
 
-export interface KeySendToast {
-  title: string;
-  description?: string;
-  variant: KeySendToastVariant;
-}
+export type KeySendToast = FanoutToast;
 
 // The human-facing verb depends on what the key DOES, not the raw tmux token:
 // C-c interrupts the foreground process (SIGINT); Escape dismisses a prompt /
@@ -95,29 +96,24 @@ const COPY: Record<string, { verb: string; verbInf: string; obj: string }> = {
  * - Some/total failure → an error whose title carries the N/M tally and whose
  *   description lists each agent the key didn't reach with its reason (so the
  *   human can see WHICH sessions didn't respond and why — host unreachable,
- *   session dead, etc.). The description is the full failure list (not
- *   truncated): the selection caps it at a human-scale N, and sonner wraps a long
- *   description in a scrollable toast body. Rendered with `whitespace-pre-line`
- *   by the caller so each failure lands on its own line.
+ *   session dead, etc.).
+ *
+ * The three-branch shape itself is the shared formatFanoutToast (./fanout,
+ * WARDEN-1034); only the key-aware COPY lives here. This is the call site that
+ * fixes the two-phrase model's boundary: the COPY table's verb/verbInf/obj is
+ * collapsed to the two complete phrases (`${verb}${obj}` and
+ * `Failed to ${verbInf}${obj}`) HERE, so the shared helper never conjugates
+ * anything. The unknown-key fallback keeps the copy honest if the vocabulary
+ * grows: an unlisted key renders "Sent {key} to N agents" / "Failed to send
+ * {key} to N of M agents". `sent` is mapped onto the shared `succeeded` field;
+ * the public KeySendSummary shape is unchanged.
  */
 export function formatKeySendToast(s: KeySendSummary, key: string): KeySendToast {
   const { verb = 'Sent', verbInf = 'send', obj = ` ${key} to` } = COPY[key] ?? {};
-  if (s.failed.length === 0) {
-    return { title: `${verb}${obj} ${s.sent} agent${s.sent === 1 ? '' : 's'}`, variant: 'success' };
-  }
-  const list = s.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
-  if (s.sent === 0) {
-    return {
-      title: `Failed to ${verbInf}${obj} ${s.failed.length} of ${s.total} agent${s.total === 1 ? '' : 's'}`,
-      description: list,
-      variant: 'error',
-    };
-  }
-  return {
-    title: `${verb}${obj} ${s.sent} of ${s.total} agents — ${s.failed.length} failed`,
-    description: list,
-    variant: 'error',
-  };
+  return formatFanoutToast(
+    { total: s.total, succeeded: s.sent, failed: s.failed },
+    { success: `${verb}${obj}`, failure: `Failed to ${verbInf}${obj}` },
+  );
 }
 
 /**
@@ -151,18 +147,6 @@ export async function runKeySendFanout(
   key: string,
   nameOf: (id: string) => string,
 ): Promise<KeySendSummary> {
-  const results = await Promise.allSettled(
-    ids.map((id) =>
-      fetch('/api/key', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, key }),
-      }).then(async (r) =>
-        r.ok
-          ? { ok: true }
-          : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-      ),
-    ),
-  );
+  const results = await runFanout('/api/key', ids, (id) => ({ id, key }));
   return summarizeKeySend(results, ids, nameOf);
 }

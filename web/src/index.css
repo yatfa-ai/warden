@@ -612,9 +612,9 @@
  * CAVEAT — this is a width cap, not a content-fit guarantee: giving the row a
  * definite width stops the hostname from inflating the viewport, but content
  * WITHIN a row can still exceed the panel width. A very wide per-host
- * distribution (all 5 states, 3-digit counts) is the one case that does — that
+ * distribution (all 6 states, 3-digit counts) is the one case that does — that
  * line is `flex-wrap` (HealthDashboard.tsx) so its segments wrap to a new line
- * instead of clipping. Do NOT re-introduce an "all 5 states always fits on one
+ * instead of clipping. Do NOT re-introduce an "all 6 states always fits on one
  * line" belief here; only DOM geometry can establish non-overflow.
  */
 .health-fleet-scroll [data-slot="scroll-area-viewport"] > div {

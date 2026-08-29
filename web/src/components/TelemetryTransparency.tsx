@@ -1,16 +1,19 @@
-// Telemetry transparency panel — WARDEN-526. A READ-ONLY, in-product view of the
-// telemetry verifiability engine shipped in WARDEN-508. It renders
-// `describeCollection` (exactly what each consent tier collects) and
-// `previewPayload` (the exact redacted + validated payload a sample event would
-// transmit), so an opt-in — or considering-opt-in — user can confirm that what
-// is sent matches what consent promised. This is the roadmap's "trust made
-// verifiable" success measure, finally surfaced in the product.
+// Telemetry transparency panel — WARDEN-526, reworked onto PER-CATEGORY consent
+// by WARDEN-1116. A READ-ONLY, in-product view of the telemetry verifiability
+// engine. It renders `describeCollection` (exactly what each consent CATEGORY
+// collects, and whether the user has it on) and `previewPayload` (the exact
+// redacted + validated payload a sample event would transmit under the user's
+// actual combination), so an opt-in — or considering-opt-in — user can confirm
+// that what is sent matches what consent promised.
+//
+// It tells the truth for ANY combination, including ones the old three-value tier
+// could not express: a decorating category on with nothing collecting is shown as
+// enabled-but-sending-nothing rather than quietly implying names are transmitted.
 //
 // Boundaries (the clean part): the panel runs a HARDCODED SAMPLE event through
-// two PURE renderer-side functions. No transport, no IPC, no /api/config
-// preference, no receiver/endpoint, no new consent flag, no change to any
-// consent invariant. It only DISPLAYS what the engine computes. Wired into the
-// Telemetry section of SettingsPage (WARDEN-457) below the two consent toggles.
+// PURE renderer-side functions. No transport, no IPC, no /api/config write, no
+// receiver/endpoint, no new consent flag, no change to any consent invariant. It
+// only DISPLAYS what the engine computes.
 import { type ReactNode, useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,9 +23,14 @@ import {
   SCHEMA_VERSION,
   describeCollection,
   previewPayload,
+  type CategoryCollection,
   type PreviewChange,
 } from '@/lib/telemetry/transparency';
-import type { ConsentTier } from '@/lib/telemetry/redact';
+import {
+  TELEMETRY_CATEGORIES,
+  withCategory,
+  type TelemetryConsent,
+} from '@/lib/telemetry/consent';
 import { TelemetryTransmissionLog } from '@/components/TelemetryTransmissionLog';
 
 /**
@@ -55,21 +63,22 @@ const SAMPLE_ERROR_EVENT = {
   chatName: 'planner-main',
 };
 
-/** The two tiers a user can actively compare; `'off'` is not a preview choice. */
-type PreviewTier = Exclude<ConsentTier, 'off'>;
-
 interface Props {
-  /** Whether the base consent toggle is on (drives the effective tier). */
-  telemetryBaseEnabled: boolean;
-  /** Whether the extended consent toggle is on (drives the effective tier). */
-  telemetryExtendedEnabled: boolean;
+  /** The user's live per-category consent (already resolved by the caller through
+   *  the single consent authority — this panel never re-derives it). */
+  consent: TelemetryConsent;
 }
 
-/** Resolve the user's current effective tier from the persisted consent flags,
- *  mirroring the consent model in redact.ts / schema.ts. */
-function effectiveTier(base: boolean, extended: boolean): ConsentTier {
-  return base && extended ? 'extended' : base ? 'base' : 'off';
-}
+/**
+ * Every event type ANY category can produce, with its anonymous structural
+ * fields. Derived from an all-categories-on catalog so the structural disclosure
+ * is COMPLETE regardless of what the user currently has enabled — the per-category
+ * cards above say which of them actually apply to them. Computed once at module
+ * load (the registry is static).
+ */
+const ALL_EVENT_TYPES = describeCollection(
+  Object.fromEntries(TELEMETRY_CATEGORIES.map((c) => [c.id, true])),
+).eventTypes;
 
 /** A small monospace field-name chip (used for event fields, identifiers, and
  *  hard-excluded content field lists). */
@@ -114,24 +123,25 @@ function changeBadge(change: PreviewChange): { label: string; variant: 'destruct
   }
 }
 
-export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedEnabled }: Props) {
-  // The preview tier tracks the user's current effective tier until they pick
-  // one manually (so an opt-in user sees their tier by default), then sticks —
-  // letting them compare the SAME sample event across base vs extended. A user
-  // who has telemetry off still sees a useful preview, defaulting to `base`.
-  const current = effectiveTier(telemetryBaseEnabled, telemetryExtendedEnabled);
-  const [override, setOverride] = useState<PreviewTier | null>(null);
-  const previewTier: PreviewTier = override ?? (current === 'extended' ? 'extended' : 'base');
+export function TelemetryTransparency({ consent }: Props) {
+  // The preview consent tracks the user's ACTUAL consent until they explore a
+  // different combination, then sticks — letting them compare the SAME sample
+  // event across combinations without touching their real settings. A user with
+  // telemetry off still sees a useful preview; `null` means "follow my consent".
+  const [override, setOverride] = useState<TelemetryConsent | null>(null);
+  const previewConsent = override ?? consent;
 
   const [showPayload, setShowPayload] = useState(true);
   const [showSample, setShowSample] = useState(false);
 
-  // The catalog is deterministic per tier; compute once. Both tiers share the
-  // same base-event types and hard-excluded content list — the ONLY difference
-  // is whether chat/session-name identifiers are collected (extended only).
-  const baseCatalog = useMemo(() => describeCollection('base'), []);
-  const extendedCatalog = useMemo(() => describeCollection('extended'), []);
-  const preview = useMemo(() => previewPayload(SAMPLE_ERROR_EVENT, previewTier), [previewTier]);
+  // The catalog of what the user's ACTUAL consent collects (drives the category
+  // cards), and the catalog for whatever combination is being previewed.
+  const catalog = useMemo(() => describeCollection(consent), [consent]);
+  const preview = useMemo(() => previewPayload(SAMPLE_ERROR_EVENT, previewConsent), [previewConsent]);
+  // Human labels for whatever combination is being previewed.
+  const enabledPreviewLabels = TELEMETRY_CATEGORIES
+    .filter((c) => previewConsent[c.id] === true)
+    .map((c) => c.label);
 
   // Group the redaction substitutions by category for the one-line summary
   // (e.g. "1 path, 1 host, 1 secret redacted · 1 name dropped").
@@ -149,13 +159,11 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
   for (const [cat, n] of redactedByCat) summaryParts.push(`${n} ${cat}`);
   const redactedSummary = summaryParts.length ? `${summaryParts.join(', ')} redacted` : 'nothing redacted';
   const nameSummary =
-    previewTier === 'extended'
-      ? retainedNames > 0
-        ? `${retainedNames} name retained`
-        : 'no names retained'
+    retainedNames > 0
+      ? `${retainedNames} name retained`
       : droppedNames > 0
         ? `${droppedNames} name dropped`
-        : 'no names dropped';
+        : 'no names in this event';
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/30 p-3">
@@ -164,36 +172,61 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
         <h3 className="text-sm font-medium text-foreground">What telemetry sends</h3>
       </div>
       <p className="text-xs text-muted-foreground">
-        A live, local preview of exactly what each consent tier collects and the precise
+        A live, local preview of exactly what each consent category collects and the precise
         redacted payload a sample event would transmit — generated by the same redaction engine
         your telemetry uses. Nothing here is sent; this is a read-only inspection.
       </p>
 
-      {/* 1 — Per-tier collection catalog (describeCollection). */}
+      {/* 1 — Per-CATEGORY collection catalog (describeCollection). Rendered from
+          the catalog, so a new category appears here with no edit. */}
       <div className="flex flex-col gap-2">
-        <h4 className="text-xs font-semibold text-foreground">What each tier collects</h4>
+        <h4 className="text-xs font-semibold text-foreground">What each category collects</h4>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <TierSummaryCard
-            title="Base tier"
-            isCurrent={current === 'base'}
-            collectsBase={baseCatalog.collectsBaseEvents}
-            collectsNames={baseCatalog.collectsIdentifiers}
-          />
-          <TierSummaryCard
-            title="Extended tier"
-            subtitle="requires base"
-            isCurrent={current === 'extended'}
-            collectsBase={extendedCatalog.collectsBaseEvents}
-            collectsNames={extendedCatalog.collectsIdentifiers}
-          />
+          {catalog.categories.map((cat) => (
+            <CategorySummaryCard key={cat.id} category={cat} />
+          ))}
         </div>
+
+        {/* The honest bottom line for the user's ACTUAL combination. */}
+        <p
+          className="text-[11px] text-muted-foreground"
+          data-telemetry-collects={catalog.collectsAnything ? 'yes' : 'no'}
+          role="status"
+        >
+          {catalog.collectsAnything ? (
+            <>
+              With your current selection, warden collects{' '}
+              <span className="font-medium text-foreground">
+                {catalog.eventTypes.map((e) => e.type).join(', ')}
+              </span>
+              {catalog.retainedFields.length ? (
+                <>
+                  , and retains{' '}
+                  <span className="font-medium text-foreground">
+                    {catalog.retainedFields.join(', ')}
+                  </span>
+                </>
+              ) : (
+                ', with no identifiers'
+              )}
+              .
+            </>
+          ) : (
+            <>
+              With your current selection, <span className="font-medium text-foreground">nothing is collected and nothing is sent</span>
+              {catalog.categories.some((c) => c.inert)
+                ? ' — the categories you have on only add fields to events other categories produce, and none of those is on.'
+                : '.'}
+            </>
+          )}
+        </p>
 
         <div className="flex flex-col gap-1.5">
           <span className="text-[11px] font-medium text-muted-foreground">
-            Anonymous event types &amp; structural fields (base &amp; extended):
+            Anonymous event types &amp; structural fields:
           </span>
           <div className="flex flex-col gap-1">
-            {baseCatalog.eventTypes.map((et) => (
+            {ALL_EVENT_TYPES.map((et) => (
               <div key={et.type} className="flex flex-wrap items-center gap-1.5">
                 <code className="rounded bg-background px-1.5 py-0.5 font-mono text-[11px] font-semibold text-foreground ring-1 ring-border">
                   {et.type}
@@ -216,26 +249,29 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
           </p>
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium text-muted-foreground">
-            Chat &amp; session-name identifiers — retained <em className="not-italic font-semibold">only</em> at
-            extended; dropped at base:
-          </span>
-          <div className="flex flex-wrap gap-1.5">
-            {extendedCatalog.identifierFields.length ? (
-              extendedCatalog.identifierFields.map((f) => <FieldChip key={f}>{f}</FieldChip>)
-            ) : (
-              <span className="text-[11px] text-muted-foreground/60">none</span>
-            )}
-          </div>
-        </div>
+        {catalog.categories
+          .filter((cat) => cat.fields.length > 0)
+          .map((cat) => (
+            <div key={cat.id} className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                Fields gated by <span className="font-semibold text-foreground">{cat.label}</span> —
+                retained <em className="not-italic font-semibold">only</em> while that category is on;
+                dropped otherwise:
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {cat.fields.map((f) => (
+                  <FieldChip key={f}>{f}</FieldChip>
+                ))}
+              </div>
+            </div>
+          ))}
 
         <div className="flex flex-col gap-1.5">
           <span className="text-[11px] font-medium text-muted-foreground">
-            Never collected — content / prompt fields hard-excluded at every tier:
+            Never collected — content / prompt fields hard-excluded under every combination:
           </span>
           <div className="flex flex-wrap gap-1.5">
-            {baseCatalog.hardExcludedContent.map((f) => (
+            {catalog.hardExcludedContent.map((f) => (
               <FieldChip key={f}>{f}</FieldChip>
             ))}
           </div>
@@ -248,36 +284,50 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-xs font-semibold text-foreground">Sample event preview</h4>
-          {/* Segmented base/extended toggle — compare the same event across tiers. */}
+          {/* Per-CATEGORY preview switches — explore ANY combination against the
+              same sample event, including combinations the old tier could not
+              express. These change only the preview; the user's real consent is
+              untouched. */}
           <div
             className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5"
             role="group"
-            aria-label="Preview consent tier"
+            aria-label="Preview consent categories"
           >
-            {(['base', 'extended'] as const).map((t) => (
-              <Button
-                key={t}
-                size="xs"
-                variant={previewTier === t ? 'secondary' : 'ghost'}
-                aria-pressed={previewTier === t}
-                onClick={() => setOverride(t)}
-                className="gap-1"
-              >
-                {t === 'base' ? 'Base' : 'Extended'}
-                {current === t && (
-                  <Badge variant="outline" className="h-3.5 px-1 text-[9px] uppercase tracking-wide">
-                    current
-                  </Badge>
-                )}
-              </Button>
-            ))}
+            {catalog.categories.map((cat) => {
+              const on = previewConsent[cat.id] === true;
+              return (
+                <Button
+                  key={cat.id}
+                  size="xs"
+                  variant={on ? 'secondary' : 'ghost'}
+                  aria-pressed={on}
+                  onClick={() => setOverride(withCategory(previewConsent, cat.id, !on))}
+                  className="gap-1"
+                >
+                  {cat.label}
+                </Button>
+              );
+            })}
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => setOverride(null)}
+              disabled={override === null}
+              className="gap-1"
+            >
+              Reset to mine
+            </Button>
           </div>
         </div>
 
         <p className="text-[11px] text-muted-foreground">
-          Previewing the sample event as the <span className="font-medium text-foreground">{previewTier}</span> tier
-          would transmit it. Toggle tiers to see <code className="font-mono">chatName</code> drop at base and
-          survive (scrubbed) at extended.
+          Previewing the sample event under{' '}
+          <span className="font-medium text-foreground">
+            {enabledPreviewLabels.length ? enabledPreviewLabels.join(' + ') : 'no categories'}
+          </span>
+          . Toggle categories to see <code className="font-mono">chatName</code> drop when the name
+          category is off and survive (scrubbed) when it is on — and to see that with nothing
+          collecting, nothing is transmitted at all.
         </p>
 
         {/* Validity + redaction summary, always visible. */}
@@ -291,7 +341,15 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
           )}
           <Badge variant="secondary">{redactedSummary}</Badge>
           {droppedContent > 0 && <Badge variant="outline">{droppedContent} content field dropped</Badge>}
-          <Badge variant={previewTier === 'extended' ? 'secondary' : 'outline'}>{nameSummary}</Badge>
+          <Badge variant={retainedNames > 0 ? 'secondary' : 'outline'}>{nameSummary}</Badge>
+          {/* The gate the schema check does NOT cover: a valid payload is still
+              only sent when a collecting category is on. */}
+          <Badge
+            variant={preview.transmitted ? 'secondary' : 'outline'}
+            data-telemetry-preview-transmitted={preview.transmitted ? 'yes' : 'no'}
+          >
+            {preview.transmitted ? 'would be sent' : 'not sent — nothing is being collected'}
+          </Badge>
         </div>
 
         {/* Enumerated redaction diff — scannable, always visible. */}
@@ -367,33 +425,37 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
   );
 }
 
-/** A compact tier-summary card: which categories a tier collects. */
-function TierSummaryCard({
-  title,
-  subtitle,
-  isCurrent,
-  collectsBase,
-  collectsNames,
-}: {
-  title: string;
-  subtitle?: string;
-  isCurrent: boolean;
-  collectsBase: boolean;
-  collectsNames: boolean;
-}) {
+/** A compact per-CATEGORY card: what this category collects and whether it is on. */
+function CategorySummaryCard({ category }: { category: CategoryCollection }) {
   return (
-    <div className="flex flex-col gap-1.5 rounded-md border border-border bg-background p-2.5">
+    <div
+      className="flex flex-col gap-1.5 rounded-md border border-border bg-background p-2.5"
+      data-telemetry-category={category.id}
+      data-telemetry-category-enabled={category.enabled ? 'yes' : 'no'}
+    >
       <div className="flex items-center gap-1.5">
-        <span className="text-xs font-semibold text-foreground">{title}</span>
-        {subtitle && <span className="text-[10px] text-muted-foreground/70">({subtitle})</span>}
-        {isCurrent && (
-          <Badge variant="secondary" className="ml-auto h-4 px-1.5 text-[10px]">
-            your tier
-          </Badge>
-        )}
+        <span className="text-xs font-semibold text-foreground">{category.label}</span>
+        <Badge variant={category.enabled ? 'secondary' : 'outline'} className="ml-auto h-4 px-1.5 text-[10px]">
+          {category.enabled ? 'on' : 'off'}
+        </Badge>
       </div>
-      <CollectsRow ok={collectsBase}>Anonymous error, crash &amp; freeze events</CollectsRow>
-      <CollectsRow ok={collectsNames}>Chat &amp; session names</CollectsRow>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{category.summary}</p>
+      {category.eventTypes.map((et) => (
+        <CollectsRow key={et.type} ok={category.enabled}>
+          <code className="font-mono">{et.type}</code> events
+        </CollectsRow>
+      ))}
+      {category.fields.map((f) => (
+        <CollectsRow key={f} ok={category.enabled && !category.inert}>
+          <code className="font-mono">{f}</code>
+        </CollectsRow>
+      ))}
+      {category.inert && (
+        <p className="text-[11px] text-amber-700 dark:text-amber-400">
+          On, but inert: it only decorates events other categories produce, and none of those is on
+          — so nothing is sent.
+        </p>
+      )}
     </div>
   );
 }

@@ -4,7 +4,7 @@
 // (GET /api/git-diff?id=&path= — no staged/range, so the default worktree-vs-HEAD
 // diff) and renders it via DiffBlock. Two pure seams live here so the load-bearing
 // decisions have real unit coverage — there is no front-end DOM test runner in
-// this repo (see breadcrumbs.test.mjs / collisionCompare.test.mjs), so the
+// this repo (see breadcrumbs.test.mjs), so the
 // behavior that a render-only check can't catch is pinned at the pure layer:
 //
 //   1. classifyChangesView — turns a /api/git-diff response into the render
@@ -37,7 +37,8 @@
 
 // Response shape of GET /api/git-diff?id=&path= (working-tree-vs-HEAD, no
 // staged/range). Mirrors the route contract at src/gitRoutes.js (/api/git-diff)
-// and the `gitDiff` fixture in collisionCompare.test.mjs: { diff, untracked, error }.
+// and this module's own `gitDiff` fixtures in fileViewerChanges.test.mjs:
+// { diff, untracked, error }.
 export interface ChangesDiffResponse {
   diff: string | null;
   untracked: boolean;

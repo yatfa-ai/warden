@@ -8,18 +8,40 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
+// NOTE: `saveCatalog` is deliberately NOT imported here. Every catalog write in
+// this file goes through `mutateCatalog`, which owns the read-modify-write critical
+// section (WARDEN-991); the two remaining `loadCatalog` calls are read-only. Keeping
+// saveCatalog out of scope makes that invariant structural rather than a convention.
+import { load, save, loadCatalog, mutateCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import { buildGetResponse, applyConfigPut, afterSave, resetConfig } from './config-schema.js';
+// WARDEN-1116 — THE telemetry consent authority (pure, dependency-free CJS shared
+// by the server and the Electron main process; see src/telemetry-consent.cjs).
+import { resolveConsent } from './telemetry-consent.cjs';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
-import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
+// NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
+// Every in-memory catalogue read/write in this file goes through `chatCatalog`,
+// which owns the per-host slots, the freshness stamps, the in-flight dedup and
+// the lastActivity carry-forward (WARDEN-1206). Those two functions are the
+// owner's injected dependencies (src/chatCatalog.js). Keeping them out of scope
+// makes that single-owner invariant structural rather than a convention — the
+// same trick the `saveCatalog` note above plays for the disk catalogue.
+import { capturePanes, resolveChatWithRefresh, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
 import { run, runLocalTmux, shellQuote, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import {
   parseJsonlHead, snippetFromLine,
-  localClaudeSessions, remoteClaudeSessions,
+  // `remoteClaudeSessions` (the frozen bare-array variant) is deliberately NOT
+  // imported here any more: since WARDEN-1208 both fleet readers go through
+  // `sessionCache`, which fetches the richer detail variant and projects down.
+  // Its contract stays frozen and un-widened — it simply has no caller in this
+  // file. `remoteClaudeSessionsDetail` is still used directly by the SINGLE-host
+  // /api/claude-sessions route, which is a different read (one named host, no
+  // fan-out) and explicitly out of this slice's scope.
+  localClaudeSessions, remoteClaudeSessionsDetail,
   mergeAndPaginateSessions,
   readLocalSessionTranscript, buildSessionReadScript, parseSessionReadOutput,
 } from './claudeSessions.js';
@@ -34,11 +56,16 @@ import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi, matchWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { createHostStatusCache } from './hostStatus.js';
+import { createChatCatalogCache } from './chatCatalog.js';
+import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion } from './companion.js';
+import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
+import { loopMonitor, instrumentSyncIo, formatStallLine } from './loop-monitor.js';
+import { appendStall, readStalls, pruneStallLog, stallLogFile } from './stall-log.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -55,7 +82,34 @@ const companionEnvOverridden = process.env.WARDEN_COMPANION_TRANSPORT !== undefi
 applyCompanionToggle(cfg.companionTransportEnabled, { override: companionEnvOverridden });
 
 const app = express();
+
+// WARDEN-977 — label every request for the event-loop stall monitor. This is the
+// ATTRIBUTION half of the server's stall instrumentation: when the heartbeat in
+// src/loop-monitor.js sees the loop blocked for seconds, the spans open across
+// that window name the work that held it. Deliberately the FIRST middleware, so
+// static assets and unmatched paths are labeled too.
+//
+// Cost per request: one small object, one monotonic clock read, one 'close'
+// listener. No I/O and nothing synchronous is added to the request path — the
+// monitor exists precisely because synchronous work on this path is the suspect.
+// (`end` is idempotent, and node emits 'close' on a finished response AND on an
+// aborted one, so a span always closes.)
+app.use((req, res, next) => {
+  const span = loopMonitor.begin(`${req.method} ${requestLabelPath(req.path)}`);
+  res.on('close', () => loopMonitor.end(span));
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
+
+// Curated label for a request path: warden's routes are static, but a label must
+// never become a channel for arbitrary text (it is written to the stall log and
+// printed to stderr), so anything outside a conservative charset is collapsed and
+// the whole thing is length-bounded.
+function requestLabelPath(p) {
+  const raw = typeof p === 'string' && p ? p : '/';
+  const safe = raw.replace(/[^A-Za-z0-9/._-]+/g, '*');
+  return safe.length > 48 ? safe.slice(0, 48) + '…' : safe;
+}
 
 const DIST = path.join(__dirname, '..', 'web', 'dist');
 if (fs.existsSync(DIST)) {
@@ -72,57 +126,66 @@ if (fs.existsSync(DIST)) {
   ));
 }
 
-// chat cache + resolver
-let cache = [];
+// The in-memory chat catalogue. ONE owner (WARDEN-1206): per-host slots carrying
+// freshness, per-host in-flight refresh dedup, and the lastActivity carry-forward
+// applied STRUCTURALLY on every refresh. This replaced a bare `let cache = []`
+// rewritten wholesale at six sites, each of which had to remember to call a
+// `retainLastActivity` helper by hand. `snapshot()` is a flat chat array — the
+// same shape the old array had — and never awaits the network. See
+// src/chatCatalog.js; it is modelled on createHostStatusCache below.
+const chatCatalog = createChatCatalogCache();
+
+// The cross-host Claude SESSION list. ONE owner (WARDEN-1208): per-host slots
+// carrying `{sessions, at, limit, unreachable}`, plus a per-host in-flight
+// promise so concurrent readers JOIN one enumeration instead of stacking two.
+//
+// This replaced TWO independent full-fleet fan-outs over the SAME rows: the
+// `/api/claude-sessions-all` route ran one ON THE REQUEST PATH (so the slowest
+// host set the pace for every host), and `tickBudget` ran an identical one every
+// 120s — its own comment already noted it reuses "the SAME functions
+// /api/claude-sessions-all uses". A user opening the session browser mid-sweep
+// paid a second full-fleet SSH sweep for rows the server was already fetching.
+//
+// Fetches go through `remoteClaudeSessionsDetail` (the `{sessions, unreachable}`
+// discriminator) rather than the bare `remoteClaudeSessions`, whose contract is
+// FROZEN (WARDEN-1196) — the sweep-facing read projects down to the array, so
+// that signature is not widened and the sweep does not start consuming
+// `unreachable`. See src/sessionCache.js; it is modelled on createHostStatusCache
+// below, exactly as chatCatalog is.
+const sessionCache = createSessionCache({
+  fetchLocal: (limit) => localClaudeSessions(limit),
+  fetchRemote: (host, limit) => remoteClaudeSessionsDetail(host, limit),
+  local: LOCAL,
+});
 
 // Per-host connectivity cache behind GET /api/hosts/status (WARDEN-915), so that
 // request never waits on live SSH. See createHostStatusCache in src/hostStatus.js
 // for the model, and the route below for what it replaced.
 const hostStatusCache = createHostStatusCache();
 
-// Carry a chat's last-known lastActivity forward across a cache refresh
-// (WARDEN-245). Activity is captured for LIVE sessions only; when a session goes
-// inactive the fresh discover yields lastActivity === null, and a cache replace
-// would wipe the value the closed chat needs for Fleet Health recency ordering.
-// This fills any nextChat.lastActivity that is null/undefined with the prior
-// cached value for the same id (catalog chats additionally hydrate from the
-// persisted entry in chats.js; this covers yatfa chats, which have no catalog,
-// and is belt-and-suspenders for catalog chats too). Pure / no ssh.
-function retainLastActivity(prevCache, nextChats) {
-  if (!prevCache.length) return nextChats;
-  const prev = new Map();
-  for (const c of prevCache) {
-    if (c.lastActivity != null) prev.set(c.id, c.lastActivity);
-  }
-  if (!prev.size) return nextChats;
-  return nextChats.map((c) =>
-    (c.lastActivity == null && prev.has(c.id)) ? { ...c, lastActivity: prev.get(c.id) } : c
-  );
-}
-
 async function resolve(id) {
-  const result = await resolveChatWithRefresh(id, cache, async () => {
-    // Lazy mode: never do a full fleet discoverAll. Seed cache from disk (instant, zero
-    // ssh), then — only if the id carries a known "<host>:..." prefix — discover that one
-    // host. Bare container names (restored yatfa tabs) stay unresolved until the user
-    // clicks the host. resolveChatWithRefresh re-matches against the refreshed cache.
-    if (!cache.length) cache = (await catalogChats(cfg)).chats;
+  const result = await resolveChatWithRefresh(id, chatCatalog.snapshot(), async () => {
+    // Lazy mode: never do a full fleet discoverAll. Seed the catalogue from disk
+    // (instant, zero ssh), then — only if the id carries a known "<host>:..." prefix
+    // — discover that one host. Bare container names (restored yatfa tabs) stay
+    // unresolved until the user clicks the host. resolveChatWithRefresh re-matches
+    // against the refreshed snapshot.
+    await chatCatalog.seedIfEmpty(cfg);
     const colon = id.lastIndexOf(':');
     if (colon > 0) {
       const hostHint = id.slice(0, colon);
       if (hostHint === LOCAL || cfg.hosts.includes(hostHint)) {
-        const { chats } = await discoverHost(hostHint, cfg);
-        cache = [...cache.filter((c) => c.host !== hostHint), ...retainLastActivity(cache, chats)];
+        await chatCatalog.refreshHost(hostHint, cfg);
       }
     } else if (cfg.hosts.length) {
       // Bare name (e.g. a restored yatfa tab like "yatfa-worker") with no host hint.
       // Locate it across configured hosts so already-open remote panes resolve on app
       // start. Demand-driven + cached: runs at most once per unresolved bare name.
-      const settled = await Promise.allSettled(cfg.hosts.map((h) => discoverHost(h, cfg)));
-      const found = settled.filter((r) => r.status === 'fulfilled').flatMap((r) => r.value.chats);
-      cache = [...cache.filter((c) => !cfg.hosts.includes(c.host)), ...retainLastActivity(cache, found)];
+      // The owner dedups per host, so two panes resolving bare names concurrently
+      // share ONE fleet sweep instead of each starting their own (WARDEN-1206).
+      await chatCatalog.refreshHosts(cfg.hosts, cfg);
     }
-    return { chats: cache, errors: [] };
+    return { chats: chatCatalog.snapshot(), errors: [] };
   });
 
   if (result.chat) return { chat: result.chat };
@@ -156,22 +219,22 @@ const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 // Disk-only catalog list — instant, zero ssh (lazy mode). Live active/status are
 // resolved per host on demand via /api/discover.
 app.get('/api/chats', async (_req, res) => {
-  const { chats, errors } = await catalogChats(cfg);
-  // Refresh catalog (disk) chats in the cache but KEEP any lazily-discovered yatfa chats,
-  // so already-open remote panes keep streaming across list refreshes.
-  const yatfa = cache.filter((c) => c.kind === 'yatfa');
-  cache = [...yatfa, ...retainLastActivity(cache, chats)];
+  // Refreshes the catalog (disk) chats in the catalogue but KEEPS any lazily-discovered
+  // yatfa chats, so already-open remote panes keep streaming across list refreshes.
+  // That preservation is the owner's rule now, not this handler's (WARDEN-1206).
+  const { chats, errors } = await chatCatalog.refreshCatalog(cfg);
   res.json({ chats, errors });
 });
 
 // Discover ONE host on demand (user clicked it). Returns that host's chats with live
-// active/lastActivity and merges them into the cache.
+// active/lastActivity and merges them into the catalogue.
 app.get('/api/discover', async (req, res) => {
   const host = String(req.query.host || '');
   if (!host) return res.status(400).json({ error: 'missing ?host=' });
   try {
-    const { chats } = await discoverHost(host, cfg);
-    cache = [...cache.filter((c) => c.host !== host), ...retainLastActivity(cache, chats)];
+    // Concurrent clicks on the same host share ONE discover (the owner's per-host
+    // in-flight dedup); each still gets that host's chats back.
+    const chats = await chatCatalog.refreshHost(host, cfg);
     res.json({ host, chats });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -192,9 +255,10 @@ function cwdHostKey(cwd, host) { return `${cwd}\0${host}`; }
 // Health endpoint for fleet health monitoring
 app.get('/api/health', (_req, res) => {
   try {
-    // Cache-derived (zero ssh). Under lazy mode only discovered/catalog chats are present;
-    // catalog chats report UNKNOWN until their host is clicked.
-    const chats = cache;
+    // Catalogue-derived (zero ssh — snapshot() never awaits the network). Under lazy
+    // mode only discovered/catalog chats are present; catalog chats report UNKNOWN
+    // until their host is clicked.
+    const chats = chatCatalog.snapshot();
 
     // Per-agent token spend (WARDEN-466): join each live agent to its budget
     // session's lifetime token total so the cost dimension sits beside CPU/mem
@@ -256,6 +320,72 @@ app.get('/api/health', (_req, res) => {
   }
 });
 
+// ---- Server event-loop stall instrumentation (WARDEN-977) ------------------
+//
+// The backend is a FORKED CHILD of the Electron main process, and the freeze
+// heartbeat that already existed (electron/telemetry-source.cjs) only ever
+// watched the main process — so a multi-second block of THIS process emitted
+// nothing anywhere, which is why the ~10s Settings hang survived three passes
+// (WARDEN-828 / WARDEN-831 / WARDEN-915). This wires the server-side heartbeat
+// to its three read channels, all of which are on by default and none of which
+// require a rebuild, a debugger or any unrelated opt-in:
+//
+//   1. ~/.yatfa-warden/stalls.jsonl — the durable record the owner reads.
+//   2. one `[warden:stall] …` line on stderr, which the Electron main process
+//      already relays to its console as `[server] …`.
+//   3. GET /api/diagnostics/stalls — the same file, in a browser.
+//
+// Telemetry is deliberately NOT the channel: it is opt-in and off by default, so
+// it cannot deliver a signal the owner needs to read on demand.
+function startLoopMonitor() {
+  loopMonitor.setOnStall((record) => {
+    // stderr first (synchronous, always available, survives a failed write), then
+    // the durable append. Both are on the stall path only — never on a request.
+    console.error(`${formatStallLine(record)} | recorded in ${stallLogFile()}`);
+    appendStall(record).catch((e) => {
+      console.warn(`[warden:stall] could not append to ${stallLogFile()}: ${e.message}`);
+    });
+  });
+  loopMonitor.start();
+  // Time the synchronous fs / child_process members so a stall can be attributed
+  // to the actual blocking call, not just to the request or sweep it happened
+  // inside. One patch covers every runtime sync site in src/ that calls through
+  // the module object (`import fs from 'node:fs'` → `fs.statSync(…)`), which is
+  // all of them — session, collection, companion, LLM, git and claude-session
+  // reads, including the hand-rolled fd-level windowed reads
+  // (openSync/readSync/closeSync) that carry the largest synchronous payloads.
+  // This MEASURES the sites WARDEN-831 deliberately left synchronous; it does
+  // not convert them (out of scope, and the point is to stop guessing).
+  // Calls at/above the monitor's floor (100ms) take a ring slot; ALL calls are
+  // aggregated per label, so a stall made of many cheap calls is still visible.
+  const requireCjs = createRequire(import.meta.url);
+  instrumentSyncIo(loopMonitor, { fs, childProcess: requireCjs('node:child_process') });
+  // Age out records older than 7 days, once, off the request path.
+  pruneStallLog().catch((e) => console.warn(`[warden:stall] prune failed: ${e.message}`));
+}
+
+// Recorded server stalls — the owner-facing read surface for the durable log.
+// Reads the FILE (not just the in-process ring) so the evidence survives a
+// restart; `session` additionally exposes this process's ring, which is the
+// fallback when the home dir is unwritable. Zero SSH, one async file read.
+app.get('/api/diagnostics/stalls', async (req, res) => {
+  try {
+    const limitRaw = parseInt(String(req.query.limit ?? ''), 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 50;
+    const stalls = await readStalls({ limit });
+    res.json({
+      logFile: stallLogFile(),
+      config: loopMonitor.config,
+      stats: loopMonitor.stats(),
+      stalls,
+      session: loopMonitor.stalls().slice(-limit).reverse(),
+      timestamp: Date.now(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Pane-state classification for the proactive attention surfaces (WARDEN-344).
 //
 // `/api/health` above is purely inactivity-based (HEALTHY/WARNING/CRITICAL by
@@ -278,13 +408,21 @@ app.get('/api/agent-states', async (req, res) => {
       .filter(Boolean);
     if (keys.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
 
-    // Resolve pane keys → chats from the cache (zero ssh). Match on key OR id so a
-    // bare restored tab id resolves the same as a host-qualified key.
+    // Resolve pane keys → chats from the catalogue (zero ssh). Match on key OR id
+    // so a bare restored tab id resolves the same as a host-qualified key. One
+    // snapshot for the whole loop — it is a fresh array each call.
+    // WARDEN-1223: a bare key can name a session on MORE THAN ONE host — collect
+    // EVERY match (deduped by the host-qualified id) so each host's agent is
+    // captured and classified from its own terminal instead of only the first
+    // catalogue entry winning.
+    const known = chatCatalog.snapshot();
     const seen = new Set();
     const chats = [];
     for (const k of keys) {
-      const c = cache.find((x) => x.key === k || x.id === k);
-      if (c && !seen.has(c.key)) { seen.add(c.key); chats.push(c); }
+      for (const c of known) {
+        if (c.key !== k && c.id !== k) continue;
+        if (!seen.has(c.id)) { seen.add(c.id); chats.push(c); }
+      }
     }
     if (chats.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
 
@@ -322,7 +460,7 @@ app.get('/api/agent-states/fleet', async (req, res) => {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
-    const agents = await pollFleetStates(cache, cfg, {}, { excludeKeys });
+    const agents = await pollFleetStates(chatCatalog.snapshot(), cfg, {}, { excludeKeys });
     res.json({ agents, total: agents.length, timestamp: Date.now() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -347,10 +485,24 @@ app.get('/api/agent-states/fleet', async (req, res) => {
 let lastLoggedState = new Map(); // key → state (the transition-diff baseline)
 
 // A failed state-changed write must NEVER break the poll (a disk hiccough shouldn't
-// 500 /api/agent-states or sink the attention rollup). Mirrors appendLifecycleEvent's
-// try/catch discipline. Exported so a test can drive the real appendEvent write path.
-export function appendStateEvent(event) {
-  try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+// 500 /api/agent-states or sink the attention rollup). Genuinely mirrors
+// appendLifecycleEvent's discipline (server.js:~2418): `appendEvent` is ASYNC, so the
+// guard must be `await` + `catch` — a SYNCHRONOUS try/catch around an async call
+// catches NOTHING (it only sees a throw before the first await inside the callee), the
+// returned promise is dropped, and a rejection escapes as an `unhandledRejection`
+// which terminates the process on Node >= 15 — the exact crash this guard exists to
+// prevent (WARDEN-947; the sync shape shipped with WARDEN-788 before WARDEN-831 made
+// the append async).
+//
+// AWAITING (not fire-and-forget `.catch()`) also preserves the ordering guarantee
+// appendLifecycleEvent spells out: the event is on disk before the tick continues, so a
+// concurrent /api/activity reader (or a test) never observes the tick's state change
+// before the event lands. This is async I/O — it orders the tick behind its own append,
+// it does not block the event loop.
+//
+// Exported so a test can drive the real appendEvent write path.
+export async function appendStateEvent(event) {
+  try { await appendEvent(event); } catch { /* ignore single-event write failures */ }
 }
 
 /**
@@ -367,18 +519,25 @@ export function appendStateEvent(event) {
  * unit-testable WITHOUT SSH / capture / the activity store: a test passes its own
  * Map + recording appendFn and asserts exactly which transitions survive.
  *
+ * ASYNC (WARDEN-947): the production `appendFn` (appendStateEvent) is async, so the
+ * append is AWAITED here and the awaited chain is threaded all the way out to
+ * pollAgentStates / tickAttention. Dropping the promise here would re-open the
+ * escaping-rejection crash and the write-after-teardown race. A synchronous test
+ * appendFn still works unchanged (`await` on a non-promise is a no-op) — callers just
+ * have to await the returned boolean.
+ *
  * @param {Map<string, string>} map   The diff-baseline map (module-level lastLoggedState in prod).
  * @param {string} key               The agent key (stable across pollers).
  * @param {string} state             The newly-classified state.
  * @param {object} meta              Identity carried onto the event (id/host/container/role/…).
- * @param {(e: object) => void} appendFn  The store writer (appendStateEvent in prod).
- * @returns {boolean}
+ * @param {(e: object) => void|Promise<void>} appendFn  The store writer (appendStateEvent in prod).
+ * @returns {Promise<boolean>}
  */
-export function logStateTransition(map, key, state, meta, appendFn) {
+export async function logStateTransition(map, key, state, meta, appendFn) {
   const prev = map.get(key);
   if (prev === state) return false; // unchanged tick → NO event (the dedup)
   map.set(key, state);
-  appendFn({
+  await appendFn({
     type: 'state_changed',
     from: prev ?? null, // null marks the first-observation baseline segment start
     to: state,
@@ -390,10 +549,17 @@ export function logStateTransition(map, key, state, meta, appendFn) {
 // Thin wrapper pollAgentStates calls per classified chat: skips manual/tmux chats
 // (no container — their high-churn flapping would write events the container-keyed
 // reader drops, mirroring the heatmap's case-1 scope) and threads the module map +
-// the try/catch-guarded writer onto logStateTransition. Exported for the test reset.
-function logAgentState(c, state) {
+// the guarded writer onto logStateTransition. Exported for the test reset.
+//
+// ASYNC (WARDEN-947): returns the awaited append so every call site can order the tick
+// behind its own write. appendStateEvent swallows write failures, so this never
+// rejects — but it MUST still be awaited, or the promise is dropped again.
+async function logAgentState(c, state) {
   if (!c.container) return; // manual/tmux chats carry no timeline row (heatmap case 1)
-  logStateTransition(lastLoggedState, c.key, state, {
+  // WARDEN-1223: the transition-diff baseline is keyed by the HOST-QUALIFIED id —
+  // the bare key names two different agents when two hosts run a same-named
+  // session, and a per-name baseline attributes one agent's transition to the other.
+  return logStateTransition(lastLoggedState, c.id, state, {
     id: c.container || c.session,
     host: c.host,
     container: c.container ?? null,
@@ -408,6 +574,74 @@ function logAgentState(c, state) {
 // so this never leaks across files; within a file it isolates each case.
 export function __resetLastLoggedStateForTest() {
   lastLoggedState = new Map();
+}
+
+// The 6 identity keys every classified agent row carries, regardless of which
+// classifier produced it (pollAgentStates, tickAttention's sweep, or the
+// sweep_skipped rows pollFleetStates synthesizes without ever probing). Pure
+// projection of a chat — no I/O, no state.
+function agentRowBase(c) {
+  return {
+    // WARDEN-1223: `id` is the HOST-QUALIFIED chat id, NOT the bare
+    // container/session name — rebinding it to the bare name collapses two
+    // same-named sessions on different hosts into one agent row.
+    id: c.id,
+    key: c.key,
+    host: c.host,
+    project: c.project,
+    role: c.role,
+    name: c.name || c.key || (c.container || c.session),
+  };
+}
+
+// The shared classify→log loop (WARDEN-1010). Takes chats plus their ALREADY-captured
+// panes and returns the classified rows; it deliberately does NOT capture, because the
+// two callers' capture calls genuinely diverge (pollAgentStates reconciles first and
+// passes `deps`; tickAttention's 60s sweep skips the reconcile so it can't fight the
+// dashboard's subscription). Each caller keeps its own capture; only the loop body —
+// which drifted for a month and cost a fail_audit — is shared.
+//
+// WARDEN-947: a sequential for-of (not `chats.map`) because logAgentState is AWAITED —
+// the state_changed write must land before the caller returns, so a concurrent
+// /api/activity reader (or a test) never sees the returned state before its event.
+// Sequential rather than Promise.all keeps the per-tick event order deterministic. The
+// cost is ~0 in steady state: the dedup means an unchanged tick writes NOTHING, so only
+// genuine transitions pay an append.
+async function classifyCapturedPanes(chats, panes, cfg = {}) {
+  const out = [];
+  for (const c of chats) {
+    const base = agentRowBase(c);
+    // A MISSING key means capturePanes silently dropped this chat (host SSH
+    // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
+    // the badge can still name the agent instead of omitting it (WARDEN-89).
+    if (!Object.prototype.hasOwnProperty.call(panes, c.id)) {
+      // WARDEN-788: capture_failed is a genuine state change (reachable →
+      // unreachable) with historical value ("when was this host down?"), logged
+      // for container-bearing yatfa agents so the timeline can render an
+      // "unreachable" segment. The dedup map prevents flapping from spamming.
+      await logAgentState(c, 'capture_failed');
+      out.push({ ...base, state: 'capture_failed', captureError: true, signal: null });
+      continue;
+    }
+    const clean = stripAnsi(panes[c.id] || '');
+    const { state, signal } = classifyPane(clean, c);
+    // WARDEN-540: user-authored output-pattern alerts. Run the matcher over the SAME
+    // already-cleaned text classifyPane read (a sibling pure function — zero new SSH
+    // capture; rides the caller's existing capturePanes). When a watched chat's output
+    // matches an enabled pattern, attach customMatch { pattern, line } — an ADDITIVE
+    // signal independent of `state` (an agent can be both erroring AND match a custom
+    // pattern). The frontend's watch diff fires a 'custom' ping on the new-match
+    // transition; the attention rollup surfaces it as its own row. Null/absent when no
+    // pattern matches → identical to today.
+    const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
+    // WARDEN-788: persist the transition (no-op on an unchanged tick). capture_failed
+    // above and the classifyPane states here are the only states this loop produces —
+    // sweep_skipped lives in pollFleetStates (never reaches here), so it correctly
+    // produces no state_changed event, consistent with the heatmap/attention.
+    await logAgentState(c, state);
+    out.push({ ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) });
+  }
+  return out;
 }
 
 // pollAgentStates is the /api/agent-states poll core: it reconciles the companion
@@ -445,44 +679,9 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
   // earns its zero-RPC steady state because the real fn is what the gate tests).
   const capture = deps.capturePanes ?? capturePanes;
   const panes = await capture(chats, cfg, deps);
-  return chats.map((c) => {
-    const base = {
-      id: c.container || c.session,
-      key: c.key,
-      host: c.host,
-      project: c.project,
-      role: c.role,
-      name: c.name || c.key || (c.container || c.session),
-    };
-    // A MISSING key means capturePanes silently dropped this chat (host SSH
-    // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
-    // the badge can still name the agent instead of omitting it (WARDEN-89).
-    if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-      // WARDEN-788: capture_failed is a genuine state change (reachable →
-      // unreachable) with historical value ("when was this host down?"), logged
-      // for container-bearing yatfa agents so the timeline can render an
-      // "unreachable" segment. The dedup map prevents flapping from spamming.
-      logAgentState(c, 'capture_failed');
-      return { ...base, state: 'capture_failed', captureError: true, signal: null };
-    }
-    const clean = stripAnsi(panes[c.key] || '');
-    const { state, signal } = classifyPane(clean, c);
-    // WARDEN-540: user-authored output-pattern alerts. Run the matcher over the SAME
-    // already-cleaned text classifyPane read (a sibling pure function — zero new SSH
-    // capture; rides this poll's existing capturePanes). When a watched chat's output
-    // matches an enabled pattern, attach customMatch { pattern, line } — an ADDITIVE
-    // signal independent of `state` (an agent can be both erroring AND match a custom
-    // pattern). The frontend's watch diff fires a 'custom' ping on the new-match
-    // transition; the attention rollup surfaces it as its own row. Null/absent when no
-    // pattern matches → identical to today.
-    const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
-    // WARDEN-788: persist the transition (no-op on an unchanged tick). capture_failed
-    // above and the classifyPane states here are the only states this site produces —
-    // sweep_skipped lives in pollFleetStates (never reaches here), so it correctly
-    // produces no state_changed event, consistent with the heatmap/attention.
-    logAgentState(c, state);
-    return { ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) };
-  });
+  // WARDEN-1010: the classify→log loop lives in classifyCapturedPanes above, shared
+  // with tickAttention's 60s sweep. The row shape produced here is unchanged.
+  return classifyCapturedPanes(chats, panes, cfg);
 }
 
 // pollFleetStates is the slow "fleet sweep" classification mode (WARDEN-571). The 30s
@@ -523,8 +722,12 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
 // stripAnsi path so classification semantics are identical to the open-pane poll — no
 // divergent heuristics. Exported (and deps-injected) for the cost-gate test. (WARDEN-571)
 export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
+  // The caller's open ∪ watched pane keys may be BARE keys or host-qualified ids
+  // (the client sends what it stored; WARDEN-1223: a bare key can name a session
+  // on more than one host, so exclude on EITHER identity to avoid re-classifying
+  // a pane the 30s poll already owns).
   const exclude = new Set((opts.excludeKeys || []));
-  const fleet = (Array.isArray(chats) ? chats : []).filter((c) => c && c.key && !exclude.has(c.key));
+  const fleet = (Array.isArray(chats) ? chats : []).filter((c) => c && c.key && !exclude.has(c.key) && !exclude.has(c.id));
   // Partition the fleet: companion-eligible (REMOTE + companion transport on) vs the
   // rest. The companion path is the ONLY capture path the sweep is allowed to use, so
   // anything that would require a raw SSH capture (LOCAL tmux, or the companion flag
@@ -550,12 +753,7 @@ export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
   // dropped" spirit: it is the explicit "didn't look here" state, kept distinct from
   // capture_failed (tried + failed via the companion path).
   const skippedRows = skipped.map((c) => ({
-    id: c.container || c.session,
-    key: c.key,
-    host: c.host,
-    project: c.project,
-    role: c.role,
-    name: c.name || c.key || (c.container || c.session),
+    ...agentRowBase(c),
     state: 'sweep_skipped',
     sweepSkipped: true,
     signal: null,
@@ -627,8 +825,22 @@ app.get('/api/activity', async (req, res) => {
   // case in ActivityTimeline.tsx), and the from:null baseline fires for every
   // agent on every warden restart — fleet-wide noise. The transition still flows
   // to /api/activity/series's stateSeries (its dedicated surface).
-  const events = (await readEvents({ after, before, limit }))
+  //
+  // WARDEN-1101: the limit MUST be applied AFTER the exclusion, so it is read
+  // here rather than passed into readEvents. readEvents sorts newest-first and
+  // slices internally, so `readEvents({ limit })` then `.filter()` subtracts every
+  // state_changed in the newest N from the user's requested N instead of skipping
+  // over it — and that restart baseline arrives as one newest-first burst of N
+  // agents. On a fleet ≥50, "Last 50" rendered "Showing 0 of 0 events" with a full
+  // store on disk. Filtering first and slicing after makes N mean "N activity
+  // events", which is what the caller asked for.
+  const activity = (await readEvents({ after, before }))
     .filter((e) => !NON_ACTIVITY_TYPES.has(e.type));
+  // Guard the slice explicitly: `?limit=abc` → parseInt → NaN, and a bare
+  // `.slice(0, NaN)` returns [] — trading one blanking bug for another. readEvents'
+  // own `if (limit && …)` guard treats NaN/0 as "no limit" and returns the full
+  // feed; this preserves that behaviour for every non-positive-integer value.
+  const events = Number.isInteger(limit) && limit > 0 ? activity.slice(0, limit) : activity;
   res.json({ events });
 });
 
@@ -798,7 +1010,7 @@ app.get('/api/collections/:id/agents', async (req, res) => {
     if (!collection) {
       return res.status(404).json({ error: 'Collection not found' });
     }
-    const chats = cache;
+    const chats = chatCatalog.snapshot();
     const agents = collections.getAgentsInCollection(collection, chats);
     res.json({ agents, count: agents.length });
   } catch (e) {
@@ -879,19 +1091,24 @@ app.post('/api/config/reset', async (_req, res) => {
   res.json({ ok: true });
 });
 
-// Forward the (now-clamped) telemetry prefs to the Electron main process over
+// Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
 // signal without an app restart — the source + pipeline live in MAIN, but the
 // PUT is serviced here in the server child. Guarded: process.send exists only
 // when the server is forked by electron/main.cjs (standalone `node src/server`
 // has no parent). WARDEN-524. Pulled out of the PUT handler so afterSave can
 // name it as an injected dep, keeping config-schema.js dependency-free.
+//
+// WARDEN-1116 — consent travels as a per-CATEGORY map, resolved through the ONE
+// consent authority rather than assembled here from named booleans. A new
+// category rides this channel with no change to this function, and main maps it
+// straight back onto the same registry. Turning a category off therefore halts
+// its traffic on the next signal, with no restart.
 function forwardTelemetryConfig(cfg) {
   if (typeof process.send !== 'function') return;
   process.send({
     type: 'telemetry-config',
-    base: cfg.telemetryBaseEnabled === true,
-    extended: cfg.telemetryExtendedEnabled === true,
+    categories: resolveConsent(cfg),
     endpoint: typeof cfg.telemetryEndpoint === 'string' ? cfg.telemetryEndpoint : '',
     // Forward the cleartext auth token. This is the parent↔child IPC channel
     // (main process ↔ server child, both in-app on the same host) — NOT the
@@ -1065,18 +1282,31 @@ app.get('/api/search-pane', async (req, res) => {
   if (!query) return res.status(400).json({ error: 'query required' });
 
   const paneKeys = String(req.query.panes || '').split(',').filter(Boolean);
-  const chats = paneKeys.map((key) => cache.find((c) => c.key === key)).filter(Boolean);
-
+  const known = chatCatalog.snapshot();
+  // WARDEN-1223: a bare key can name a session on more than one host — collect
+  // EVERY catalogue match (deduped by the host-qualified id), so search results
+  // are attributed to the chat whose terminal actually matched, per host.
+  const chats = [];
+  const seenIds = new Set();
+  for (const key of paneKeys) {
+    for (const c of known) {
+      if (c.key !== key && c.id !== key) continue;
+      if (!seenIds.has(c.id)) { seenIds.add(c.id); chats.push(c); }
+    }
+  }
   if (chats.length === 0) return res.json({ results: [], query });
 
   try {
     const captures = await capturePanes(chats, cfg);
     const results = [];
 
-    for (const [key, content] of Object.entries(captures)) {
+    // capturePanes is keyed by the host-qualified id (WARDEN-1223); attribute each
+    // captured pane to ITS chat (host + name), not the first same-named one.
+    for (const [id, content] of Object.entries(captures)) {
       const lines = content.split('\n');
-      const chat = chats.find((c) => c.key === key);
+      const chat = chats.find((c) => c.id === id);
       if (!chat) continue;
+      const key = chat.key;
 
       const lowerQuery = query.toLowerCase();
       lines.forEach((line, idx) => {
@@ -1233,11 +1463,49 @@ async function remoteSearchClaudeSessions(host, q) {
   return out.slice(0, SESSION_SEARCH_PER_HOST);
 }
 
+// An unreachable REMOTE host answers `{ host, sessions: [], error: 'host
+// unreachable' }` — and, critically, WITHOUT a `claudeAvailable` key (WARDEN-1196).
+//
+// THE BUG THIS CLOSES. Both helpers destroyed the failure server-side:
+// `remoteClaudeSessions` returned `[]` for a dead host, and `detectClaude`
+// returned `null` because its probes could not reach the machine. That produced a
+// clean `200 {sessions: [], claudeAvailable: false}`, and the sidebar's warning is
+// gated on `claudeAvailable === false` — so a dropped tunnel / wedged control
+// socket / powered-off box was reported in the product's own voice as
+// "⚠ claude not found on <host> — install it", a confident, WRONG, and ACTIONABLE
+// claim about the user's machine. `detectClaude` cannot tell "claude is absent"
+// from "I could not reach the host", so the answer is not to make it try: it is to
+// not ask a question whose answer we already know is unknowable.
+//
+// WHY THE KEY IS OMITTED RATHER THAN SENT AS `false`. Sending `claudeAvailable:
+// false` alongside the error would leave the bug LIVE — the gate is a strict
+// `=== false`. Omitting it arrives as `undefined`, which that gate does not
+// satisfy, so the wrong instruction cannot render. The client state shape already
+// types the field optional, so this needs no change to the gate's operator (which
+// would risk over-correcting the two states that MUST keep their existing render:
+// a reachable host with zero sessions, and a reachable host genuinely missing
+// claude).
+//
+// Skipping `detectClaude` on this path also drops three SSH probes to a machine we
+// have just proven unreachable — each on an 8s timeout.
+//
+// Scope: the REMOTE leg only. `(local)` does no SSH (`localClaudeSessions` reads
+// the filesystem), so transport failure is impossible there and that path is
+// unchanged. A host that answers with a non-zero exit and real stdout is a COMMAND
+// failure, not transport — `isTransportFailure` returns false when stdout is
+// non-empty — and still degrades to the pre-existing empty list.
 app.get('/api/claude-sessions', async (req, res) => {
   const host = String(req.query.host || LOCAL);
-  const sessions = host === LOCAL ? await localClaudeSessions() : await remoteClaudeSessions(host);
+  if (host !== LOCAL) {
+    const { sessions, unreachable } = await remoteClaudeSessionsDetail(host);
+    // `claudeAvailable` is deliberately absent from this body — see above.
+    if (unreachable) return res.json({ host, sessions: [], error: 'host unreachable' });
+    const claudeAvailable = !!(await detectClaude(host));
+    return res.json({ host, sessions, claudeAvailable });
+  }
+  const sessions = await localClaudeSessions();
   const claudeAvailable = !!(await detectClaude(host));
-  res.json({ sessions, claudeAvailable });
+  res.json({ host, sessions, claudeAvailable });
 });
 
 // Page-size guardrails for the unified "All Sessions" endpoint. Default 40 matches
@@ -1259,15 +1527,80 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   // and `hasMore` is computed honestly (clamped to bound remote SSH cost).
   const perHost = Math.min(ALL_SESSIONS_MAX_PER_HOST, offset + limit + 1);
   const hosts = [LOCAL, ...cfg.hosts];
-  const results = await Promise.allSettled(hosts.map(async (host) => {
-    const sessions = host === LOCAL ? await localClaudeSessions(perHost) : await remoteClaudeSessions(host, perHost);
-    return { host, sessions };
-  }));
-  const buckets = results
-    .filter((r) => r.status === 'fulfilled')
-    .map((r) => ({ host: r.value.host, sessions: r.value.sessions }));
+  // ONE OWNER (WARDEN-1208). This used to be a `Promise.allSettled` fan-out right
+  // here, which meant the route could not answer until the LAST host settled: one
+  // unreachable machine withheld every healthy host's rows for the duration of its
+  // 15s SSH timeout, and a page load landing near the 120s budget sweep re-fetched
+  // rows that sweep was already fetching. Both are now the cache's business — it
+  // serves each host from its own slot, joins an in-flight fetch rather than
+  // stacking a second one, and bounds how long a cold host may hold the response.
+  //
+  // WHAT DID NOT CHANGE, deliberately: the cache fetches the REMOTE leg through
+  // `remoteClaudeSessionsDetail`, so a transport failure stays DISTINGUISHABLE from
+  // "this host has no sessions" (WARDEN-1200) and `unreachableHosts` below is
+  // derived exactly as before. The bare `remoteClaudeSessions` contract is still
+  // FROZEN (WARDEN-1196) and still un-widened; the budget sweep now shares this
+  // cache but still consumes a plain array.
+  //
+  // Scope, unchanged: REMOTE only. `localClaudeSessions` is a filesystem read, not
+  // a transport, so `isTransportFailure` has no meaning for it and `(local)` can
+  // never be reported unreachable (the cache hard-codes `unreachable: false` on
+  // that leg). A remote host answering with a non-zero exit and real stdout is a
+  // COMMAND failure — `isTransportFailure` returns false on non-empty stdout — so
+  // it still degrades to the pre-existing empty list and is NOT named unreachable.
+  const settled = await sessionCache.snapshot(hosts, perHost);
+  // Every host contributes its bucket, INCLUDING the ones we could not fully
+  // answer for. A cold host (`known: false`) contributes zero rows here — but it
+  // is contributing zero rows WHILE BEING DISCLOSED as `pendingHosts` below, which
+  // is what keeps that different from the false-empty defect. An under-filled host
+  // (joined a smaller in-flight fetch) contributes its REAL but possibly truncated
+  // rows, and is disclosed the same way: dropping them would blank a host that did
+  // answer, for a list the user can see. This is the OPPOSITE choice from the
+  // budget sweep, which drops pending hosts' rows entirely (`completeSessionRows`)
+  // — deliberately, because it computes a NUMBER that gets cached, and a truncated
+  // list would make it silently wrong rather than visibly partial.
+  const buckets = settled.map(({ host, sessions }) => ({ host, sessions }));
+  const unreachableHosts = settled.filter((b) => b.unreachable).map((b) => b.host);
+  // Hosts we have NOT SUCCESSFULLY READ YET — cold on this request, or still
+  // filling from a fetch another reader launched. Disclosed for the same reason
+  // `unreachableHosts` is: an empty session list renders as the confident sentence
+  // "Nothing runnable on the selected hosts yet", so a host we simply have not
+  // looked at must never be merged away as zero rows (the WARDEN-89 / WARDEN-1200
+  // false-empty defect). "We have not looked yet" and "we looked and it is empty"
+  // are different answers, and the wire now carries the difference.
+  const pendingHosts = settled.filter((b) => b.pending).map((b) => b.host);
   const { sessions, hasMore, totals } = mergeAndPaginateSessions(buckets, offset, limit);
-  res.json({ sessions, hasMore, totals });
+  // `unreachableHosts` is ADDITIVE and OMITTED when the fleet is fully reachable, so
+  // a healthy response is byte-identical to before this change.
+  //
+  // Deliberately NOT a top-level `error` key, even though the sibling single-host
+  // route uses one. The client seam throws on a 2xx carrying `error`
+  // (web/src/lib/allSessionsApi.ts) and OpenChatBrowserPage's catch never seats a
+  // list — so on a first load with one host down, an `error` here would render
+  // "Could not load sessions" INSTEAD of the rows the reachable hosts did return.
+  // That is the WARDEN-1196 criterion-4 over-correction: replacing a false-empty
+  // with a false-total-failure. `error` is a whole-read-failed channel; a partial
+  // fleet is a partial SUCCESS and needs its own, non-throwing channel.
+  //
+  // It is also what makes `totals`/`hasMore` honest. Both are computed over the
+  // SURVIVING buckets only (mergeAndPaginateSessions) — unavoidable, since the
+  // missing rows are on the machine we could not read — so the client can now know
+  // the rollup and the pagination are partial instead of trusting them blindly.
+  //
+  // `pendingHosts` rides the SAME additive, non-throwing channel and for the same
+  // reason — both are partial-SUCCESS disclosures, never a whole-read failure. It
+  // is likewise OMITTED when every host answered, so a warm response is
+  // byte-identical to before this change. The two are deliberately separate keys:
+  // "I could not reach this machine" and "I have not looked at it yet" call for
+  // different words to a user and different behaviour from a client (the second
+  // resolves on its own, and is worth re-reading for).
+  res.json({
+    sessions,
+    hasMore,
+    totals,
+    ...(unreachableHosts.length ? { unreachableHosts } : {}),
+    ...(pendingHosts.length ? { pendingHosts } : {}),
+  });
 });
 
 // GET /api/budget — the cached token-spend budget snapshot (WARDEN-415). Cheap
@@ -1413,13 +1746,17 @@ app.post('/api/rename', async (req, res) => {
   const host = String(req.body?.host || LOCAL).trim() || LOCAL;
   const name = String(req.body?.name || '').trim().slice(0, 60);
   if (!session || !name) return res.status(400).json({ error: 'session and name required' });
-  const catalog = await loadCatalog();
-  // Composite identity: a session name can repeat across hosts, so scope the find
-  // to host+session (host defaults to local for callers that don't send it).
-  const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
-  if (!entry) return res.status(404).json({ error: 'not a renameable chat' });
-  entry.name = name;
-  await saveCatalog(catalog);
+  // Serialized read-modify-write (WARDEN-991). Composite identity: a session name
+  // can repeat across hosts, so scope the find to host+session (host defaults to
+  // local for callers that don't send it). Returning undefined when the entry is
+  // absent skips the write and preserves the 404.
+  const updated = await mutateCatalog((catalog) => {
+    const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
+    if (!entry) return undefined;
+    entry.name = name;
+    return catalog;
+  });
+  if (!updated) return res.status(404).json({ error: 'not a renameable chat' });
   res.json({ ok: true });
 });
 
@@ -1455,13 +1792,23 @@ app.post('/api/spawn', async (req, res) => {
   const cmd = (cmdRaw === undefined ? 'claude --dangerously-skip-permissions' : String(cmdRaw)).trim();
   if (!session) return res.status(400).json({ error: 'session name is required' });
   if (!NAME_RE.test(session)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
-  const catalog = await loadCatalog();
-  // Composite identity: the same session name may exist on a DIFFERENT host (each
-  // host's tmux server is independent), so only a same-host collision blocks spawn.
-  if (catalog.some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
+  // Pre-flight duplicate check: fail fast with a 409 BEFORE paying for a real
+  // tmux/ssh spawn. Composite identity: the same session name may exist on a
+  // DIFFERENT host (each host's tmux server is independent), so only a same-host
+  // collision blocks spawn. This snapshot is deliberately NOT reused for the append
+  // below — buildAndSpawn awaits a full spawn, and appending against a stale
+  // snapshot across that window is exactly the lost-update bug (WARDEN-991).
+  if ((await loadCatalog()).some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
   const r = await buildAndSpawn({ host, session, name: req.body?.name || session, cwd, cmd });
   if (r.error) return res.status(r.status).json({ error: r.error });
-  await saveCatalog([...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }]);
+  // Append under serialization with a FRESH read, and re-check the collision here:
+  // a concurrent spawn of the same host+session may have landed between the
+  // pre-check and now. Same 409 body/status as the pre-flight rejection.
+  const appended = await mutateCatalog((catalog) => {
+    if (catalog.some((c) => sameCatalogEntry(c, host, session))) return undefined;
+    return [...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }];
+  });
+  if (!appended) return res.status(409).json({ error: `"${session}" already exists` });
   // Record the human's own spawn action so a returning human can see the agents
   // they brought up (WARDEN-484). Mirrors the existing attached/ended row shape.
   await appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
@@ -1494,10 +1841,14 @@ app.post('/api/resume', async (req, res) => {
       return res.status(500).json({ error: `\`claude\` failed to start on ${host} — tmux session died immediately. Is \`claude\` installed and on PATH there?` });
     }
   }
-  // Composite identity: only replace THIS host's same-named resume entry; a
-  // different host may legitimately carry the same resume-<sid> session name.
-  const catalog = (await loadCatalog()).filter((c) => !sameCatalogEntry(c, host, session));
-  await saveCatalog([...catalog, { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd }]);
+  // Serialized filter-then-append in ONE mutation (WARDEN-991) — split across two
+  // catalog writes it would race a concurrent kill/spawn. Composite identity: only
+  // replace THIS host's same-named resume entry; a different host may legitimately
+  // carry the same resume-<sid> session name.
+  await mutateCatalog((catalog) => [
+    ...catalog.filter((c) => !sameCatalogEntry(c, host, session)),
+    { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd },
+  ]);
   // Record the human's own resume action (WARDEN-484). container is always null
   // here (resume spawns a bare-tmux session), matching the existing row shape.
   await appendEvent({ type: 'resumed', id: out.id, host, container: null, role: out.role, name });
@@ -1512,9 +1863,12 @@ app.post('/api/kill', async (req, res) => {
   // kills the agent's tmux session inside the container (container keeps running).
   try { await killTmux(chat, cfg); } catch { /* noop */ }
   // Remove from catalog (spawned chats only; yatfa are auto-discovered).
+  // Serialized (WARDEN-991): a fleet batch-kill fires N concurrent POSTs, and
+  // unserialized only ONE removal survived — every tmux session died but the
+  // catalog kept ghosts that re-rendered in the sidebar until killed one at a time.
   // Composite identity: only drop the killed chat's own host+session entry — a
   // different host may carry the same session name and must be left intact.
-  if (chat.kind === 'tmux') await saveCatalog((await loadCatalog()).filter((c) => !sameCatalogEntry(c, chat.host, chat.session)));
+  if (chat.kind === 'tmux') await mutateCatalog((c) => c.filter((x) => !sameCatalogEntry(x, chat.host, chat.session)));
   // Record the human's deliberate kill — the authoritative signal that lets a
   // returning human tell an agent THEY stopped apart from one that crashed. Emitted
   // here rather than via the attach-PTY onExit handler, which stays silent for
@@ -1875,10 +2229,23 @@ const SEARCH_TRANSFER_LINE_LEN = 1000;
 // Parse one `<path>:<line>:<text>` line as emitted by `git grep -n` / `rg -n` /
 // `grep -rn`. The line number is the FIRST ':digits:' after the path (non-greedy
 // match), so a text body containing its own ':123:' isn't misread as the line.
+//
+// The path is C-unescaped: `git grep` (both producers — buildSearchScript's
+// remote script and searchLocalRaw's local stream) quotes any path holding a
+// non-ASCII byte, backslash or double-quote under the default core.quotePath=true,
+// exactly like `git ls-files`/`git show --name-status`. Without this the octal
+// form ("s\303\274b/caf\303\251.js") is what the dialog renders, copies, and
+// hands to the FileViewer — where it string-equals no real path, so the file
+// silently fails to open. unescapeGitPath is a no-op on paths that don't start
+// with `"`, so the rg/grep fallbacks (raw UTF-8) pass through unchanged.
+// See WARDEN-962; sibling fixes WARDEN-650/675/676.
+//
+// `text` (group 3) is raw matched line CONTENT, not a path — deliberately not
+// unescaped, or a literal `\n` in source code would be mangled into a newline.
 export function parseSearchLine(raw) {
   const m = raw.match(/^(.*?):(\d+):(.*)$/);
   if (!m) return null;
-  return { file: m[1], line: parseInt(m[2], 10), text: m[3] };
+  return { file: unescapeGitPath(m[1]), line: parseInt(m[2], 10), text: m[3] };
 }
 
 // Parse raw search stdout into capped, truncated { file, line, text } rows.
@@ -2078,6 +2445,62 @@ app.post('/api/search-files', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// JSON error handler — WARDEN-1105.
+//
+// MUST be registered after every route/`app.use` above, and MUST declare four
+// arguments, or Express treats it as ordinary middleware and it catches nothing.
+//
+// Without it, Express hands every error to `finalhandler`, which answers with a
+// `text/html` body. The browser client parses every response with `res.json()`
+// and falls back to `undefined` when that throws (`web/src/lib/api.ts`), so an
+// HTML body erases the server's real diagnostic — an ENOSPC from a config
+// write, or body-parser's own 400/413 — and each caller shows its generic
+// default toast instead. Most routes here have no top-level try/catch, and
+// Express 5 auto-forwards a rejected `async` handler to this handler, so this is
+// the single place that guarantees a parseable `{ error }` for all of them. It
+// generalizes what `/api/send` and `/api/key` already do by hand.
+//
+// Scope: an error handler only runs for errors routed through `next(err)`. An
+// unmatched path never produces an error, so 404s still come from
+// `express.static`/`finalhandler` — deliberately unchanged here, since a
+// catch-all would shadow the static serving of the built frontend.
+app.use((err, req, res, next) => {
+  // A route that already began responding owns the socket; sending again would
+  // corrupt the response. Delegate to Express's default handler, which closes
+  // the connection instead.
+  if (res.headersSent) return next(err);
+
+  // body-parser sets 400 (malformed JSON) and 413 (over the 1mb limit set at the
+  // top of this file). Preserving those is the difference between "your payload
+  // is too big" and a blanket, misleading 500. Anything that is not a plausible
+  // HTTP error status (absent, non-integer, out of range) becomes a 500 rather
+  // than being passed to res.status(), which would throw on a bogus code.
+  const declared = Number(err?.status ?? err?.statusCode);
+  const status = Number.isInteger(declared) && declared >= 400 && declared <= 599 ? declared : 500;
+
+  // 4xx messages are authored by express/body-parser about the client's own
+  // request ("request entity too large") — safe and actionable, so they pass
+  // through. 5xx messages are unbounded server internals: a HostConnectionError
+  // embeds the remote hostname, an fs error embeds an absolute path. Those are
+  // replaced wholesale, mirroring the `/api/search-pane` handler just above.
+  // Never `err.stack`, at any status.
+  //
+  // The 4xx message can embed a fragment of the client's own body (V8 renders
+  // one into a JSON parse error), so it is length-capped for the same reason
+  // requestLabelPath caps its label: a diagnostic must not become a channel for
+  // arbitrary text. 200 chars mirrors the caps the rest of this file uses.
+  const message = typeof err?.message === 'string' ? err.message.trim().slice(0, 200) : '';
+  const safe = status < 500 ? (message || 'bad request') : 'internal server error';
+
+  // The browser losing the detail is the bug being fixed — not the logging. Keep
+  // the full error server-side, under the same curated path label the loop
+  // monitor uses so an arbitrary URL can't inject text into the log.
+  if (status >= 500) console.error(`[error] ${req.method} ${requestLabelPath(req.path)}:`, err);
+
+  res.status(status).json({ error: safe });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
@@ -2181,17 +2604,44 @@ streamWss.on('connection', (ws) => {
 
   const tickMonitor = async () => {
     if (!monitors.size) return;
-    const chats = [...monitors].map((k) => cache.find((c) => c.key === k)).filter(Boolean);
+    const known = chatCatalog.snapshot();
+    // WARDEN-1223: a bare monitor id can name a session on more than one host —
+    // resolve EVERY catalogue match (key or id), deduped by the host-qualified
+    // id, so each host's pane is captured from its own terminal instead of the
+    // first same-named catalogue entry winning.
+    const chats = [];
+    const seenIds = new Set();
+    for (const k of monitors) {
+      for (const c of known) {
+        if (c.key !== k && c.id !== k) continue;
+        if (!seenIds.has(c.id)) { seenIds.add(c.id); chats.push(c); }
+      }
+    }
     if (!chats.length) return;
     let out;
     try { out = await capturePanes(chats, cfg); } catch { return; }
-    for (const [k, pane] of Object.entries(out)) {
-      send({ type: 'snapshot', id: k, pane });
+    // capturePanes is keyed by the host-qualified id. The CLIENT registered its
+    // snapshot handler under the id IT sent (bare key or qualified id), so each
+    // capture is echoed back under every monitor id that names that chat — the
+    // wire contract is unchanged, while the CONTENT now comes from the right
+    // host's terminal (WARDEN-1223).
+    for (const [capId, pane] of Object.entries(out)) {
+      const chat = chats.find((c) => c.id === capId);
+      if (!chat) continue;
+      for (const m of monitors) {
+        if (m === chat.key || m === chat.id) {
+          send({ type: 'snapshot', id: m, pane, host: chat.host, name: chat.name });
+        }
+      }
       // Snapshot logging disabled due to performance: 2s intervals create 300K+ events/pane/7 days
       // appendEvent({ type: 'snapshot', id: k, host: chats.find(c => c.key === k)?.host, container: chats.find(c => c.key === k)?.container });
     }
   };
-  const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tickMonitor, 2000); tickMonitor(); } };
+  // Traced for the stall monitor (WARDEN-977): the 2s pane-capture beat is the
+  // busiest always-on timer in the process, so a stall that lands inside it must
+  // say so rather than being attributed to whichever request it froze.
+  const tracedTickMonitor = () => loopMonitor.trace('ws:pane-monitor', tickMonitor);
+  const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tracedTickMonitor, 2000); tracedTickMonitor(); } };
   const stopMonitorIfEmpty = () => { if (monitorTimer && !monitors.size) { clearInterval(monitorTimer); monitorTimer = null; } };
 
   // WARDEN-413: keep companion pane-push subscriptions in sync with the monitored
@@ -2225,9 +2675,9 @@ streamWss.on('connection', (ws) => {
       startMonitor();
       if (isNew) {
         // Subscribe this pane's host to pushed deltas (skip-on-tick gate). resolve()
-        // seeded the cache, so the chat is findable by key here. Fire-and-forget:
+        // seeded the catalogue, so the chat is findable by key here. Fire-and-forget:
         // until the delta arrives, capturePanes keeps polling (graceful bootstrap).
-        const chat = cache.find((c) => c.key === id || c.id === id);
+        const chat = chatCatalog.snapshot().find((c) => c.key === id || c.id === id);
         syncMonitorSubscription(chat, true);
       }
     }
@@ -2237,18 +2687,18 @@ streamWss.on('connection', (ws) => {
       monitors.delete(id);
       stopMonitorIfEmpty();
       if (wasPresent) {
-        const chat = cache.find((c) => c.key === id || c.id === id);
+        const chat = chatCatalog.snapshot().find((c) => c.key === id || c.id === id);
         syncMonitorSubscription(chat, false);
       }
     }
     else if (m.type === 'attach') {
       if (attaches.has(m.id)) return;
       // Lazy restore: if the client knows the host (stored when the pane was first
-      // opened), discover just that one host so resolve() hits cache — no all-hosts scan.
-      if (m.host && !cache.some((c) => c.key === m.id || c.id === m.id)) {
+      // opened), discover just that one host so resolve() hits the catalogue — no
+      // all-hosts scan.
+      if (m.host && !chatCatalog.has(m.id)) {
         try {
-          const { chats } = await discoverHost(String(m.host), cfg);
-          cache = [...cache.filter((c) => c.host !== m.host), ...retainLastActivity(cache, chats)];
+          await chatCatalog.refreshHost(String(m.host), cfg);
         } catch { /* fall through; resolve() still has a locate fallback */ }
       }
       const r = await resolve(String(m.id));
@@ -2341,13 +2791,14 @@ streamWss.on('connection', (ws) => {
     // companion.js). Best-effort + fire-and-forget: a transport hiccup here must
     // not block teardown, and capturePanes falls back to polling either way.
     if (isCompanionTransportEnabled()) {
+      const known = chatCatalog.snapshot();
       const byHost = {};
       for (const k of monitors) {
         // Match the monitor handler's key||id lookup so a host-prefixed monitor id
         // (chat.id) still resolves, and drop the ref by chat.KEY — subscribePanes
         // keys refs by chat.key (describePanes), so the add/drop stay balanced
         // whatever id form the client sent. (WARDEN-413 reviewer minor finding.)
-        const chat = cache.find((c) => c.key === k || c.id === k);
+        const chat = known.find((c) => c.key === k || c.id === k);
         if (chat && chat.host !== LOCAL) (byHost[chat.host] ||= []).push(chat.key);
       }
       for (const [host, keys] of Object.entries(byHost)) {
@@ -2486,8 +2937,13 @@ async function tickLifecycleBody(deps = {}) {
 
 function startLifecyclePoll() {
   if (lifecycleTimer) return;
-  lifecycleTimer = setInterval(tickLifecycle, LIFECYCLE_INTERVAL_MS);
-  tickLifecycle(); // seed the baseline immediately (fires once, emits nothing)
+  // Traced (WARDEN-977): an always-on sweep is the most plausible window for one
+  // of the remaining synchronous sites to land on a user-visible request, so the
+  // stall monitor must be able to name it. `trace` returns the tick's own promise
+  // (rejection identity preserved), so the sweep behaves exactly as untraced.
+  const kick = () => loopMonitor.trace('sweep:lifecycle', tickLifecycle);
+  lifecycleTimer = setInterval(kick, LIFECYCLE_INTERVAL_MS);
+  kick(); // seed the baseline immediately (fires once, emits nothing)
 }
 
 // ---- Token-spend budget slow-cadence accumulator (WARDEN-415) ---------------
@@ -2495,13 +2951,16 @@ function startLifecyclePoll() {
 // The backend owns the budget check on its OWN slow beat (BUDGET_INTERVAL_MS,
 // ~120s) — deliberately decoupled from the 2s monitor tick so it never joins the
 // per-tick capture cost. Each tick REUSES the existing per-session token totals
-// (localClaudeSessions / remoteClaudeSessions — the SAME functions
-// /api/claude-sessions-all uses; do NOT re-read transcripts with new logic),
+// (through `sessionCache`, the ONE owner of the cross-host session list since
+// WARDEN-1208 — the SAME rows /api/claude-sessions-all serves; do NOT re-read
+// transcripts with new logic, and do NOT add a second fan-out here: that
+// duplication is exactly what the cache was introduced to remove),
 // filters to sessions active in the configured window, sums their lifetime
 // totals (semantics documented in budget.js), and caches the pure
 // computeBudgetState result. /api/budget returns the cache — instant, no SSH —
 // so the frontend's progress surface + debounce check stay cheap. One
-// unreachable host degrades to "no spend from it" via Promise.allSettled; it
+// unreachable host degrades to "no spend from it" (the cache never rejects and
+// leaves a failed fetch's slot untouched); it
 // never fails the whole sweep.
 let budgetState = null;
 // Previous-sweep snapshot for the budget-breach webhook debounce (WARDEN-555).
@@ -2513,6 +2972,9 @@ let budgetTimer = null;
 // Re-entrancy guard, same rationale as lifecycleRunning: a sweep over slow hosts
 // can exceed the 120s beat, so an in-flight tick makes the next a no-op.
 let budgetRunning = false;
+// WARDEN-947: handle on the seed sweep kicked FIRE-AND-FORGET by startBudgetPoll /
+// restartBudgetPoll. Production never reads it; see __budgetSweepSettledForTest.
+let budgetInFlight = null;
 // Per-host fetch ceiling. Sessions are mtime-sorted descending and the window is
 // recent, so window-active sessions sit at the front; this caps transcript reads
 // (local) + the grep+awk SSH pass (remote) on a very active host. 100 is far
@@ -2543,15 +3005,53 @@ async function tickBudget(deps = {}) {
     // returning the enriched header (cwd/summary + four token ints), identical
     // to /api/claude-sessions-all. We only need mtime + tokenUsage.total +
     // identity, so the same rows feed computeBudgetState directly.
-    const results = await Promise.allSettled(hosts.map(async (host) => {
-      const sessions = host === LOCAL
-        ? await localClaudeSessions(BUDGET_PER_HOST_LIMIT)
-        : await remoteClaudeSessions(host, BUDGET_PER_HOST_LIMIT);
-      return sessions.map((s) => ({ ...s, host }));
-    }));
-    const sessions = results
-      .filter((r) => r.status === 'fulfilled')
-      .flatMap((r) => r.value);
+    //
+    // ONE OWNER (WARDEN-1208). This used to be its OWN `Promise.allSettled`
+    // fan-out, duplicating the route's over the same rows on an unrelated beat —
+    // the duplication this comment block has always described ("the SAME
+    // functions /api/claude-sessions-all uses") but did not prevent. Both readers
+    // now share `sessionCache`, so a sweep landing near a page load costs ONE
+    // enumeration per host instead of two, and each warms the slots the other
+    // reads.
+    //
+    // `wait: true` is the slow-cadence mode: unlike the request path there is no
+    // user waiting, so this awaits every fetch it launches with NO settle bound
+    // and keeps the complete-rows behaviour the budget math has always had. A
+    // host that fails still degrades to "no spend from it" — the cache leaves a
+    // failed fetch's slot untouched and never rejects — exactly as the previous
+    // `allSettled` + fulfilled-filter did.
+    //
+    // PROJECTED DOWN TO A BARE ARRAY, deliberately. The cache fetches through the
+    // richer `remoteClaudeSessionsDetail` (that is how the route keeps its
+    // `unreachable` discriminator), but this sweep consumes only the rows, so the
+    // frozen `remoteClaudeSessions` contract (WARDEN-1196) is neither widened nor
+    // relied on here, and the sweep does NOT start consuming `unreachable` — that
+    // would be a behaviour change outside this slice.
+    const settled = await sessionCache.snapshot(hosts, BUDGET_PER_HOST_LIMIT, { wait: true });
+    // PENDING HOSTS CONTRIBUTE NOTHING TO THE BUDGET MATH, and this projection is
+    // load-bearing rather than defensive.
+    //
+    // `wait: true` awaits every fetch this sweep LAUNCHES, but it cannot wait on
+    // one it merely JOINED at a smaller limit (launcher-only settle discipline,
+    // and a joined fetch fills the slot at ITS launcher's window). So when a
+    // page-1 route fetch — `perHost = offset + limit + 1`, typically 41 — is in
+    // flight as the 120s tick fires, this sweep can arrive holding a REAL but
+    // TRUNCATED 41-row slot for a host it asked 100 rows of. The cache tells us
+    // exactly that via `pending`.
+    //
+    // Those rows are mtime-DESCENDING, so on a host with more than 41 sessions
+    // active in the window the truncation silently DROPS spend, and the result is
+    // cached for the next 120s. That is a wrong NUMBER, not a slow response —
+    // strictly worse than the honest degradation, and worse than the pre-cache
+    // behaviour (which always fanned out at the full 100).
+    //
+    // `completeSessionRows` excludes those hosts, degrading each to "no spend from
+    // it this tick" — the SAME pre-existing semantics an unreachable or failed
+    // host already gets here, self-correcting on the next tick. The ROUTE
+    // deliberately does the OPPOSITE with the same flag (it keeps the rows and
+    // discloses `pendingHosts`), because it renders a list rather than computing a
+    // number; that divergence is documented on the helper.
+    const sessions = completeSessionRows(settled);
     budgetState = computeBudgetState(sessions, {
       now: Date.now(),
       windowMs,
@@ -2594,8 +3094,34 @@ function startBudgetPoll() {
   // Always (re)seed the interval; tickBudget self-clears when disabled, so an
   // idle parked timer is harmless and lets a later enable (PUT /api/config) wake
   // it without a second start call.
-  if (!budgetTimer) budgetTimer = setInterval(tickBudget, BUDGET_INTERVAL_MS);
-  tickBudget(); // seed the cache immediately on enable
+  if (!budgetTimer) budgetTimer = setInterval(kickBudgetSweep, BUDGET_INTERVAL_MS);
+  kickBudgetSweep(); // seed the cache immediately on enable
+}
+
+// Kick a seed sweep without awaiting it (both callers are synchronous), keeping a
+// handle so __budgetSweepSettledForTest can await it. WARDEN-947 — the exact
+// counterpart of kickAttentionSweep below, for the exact same reason.
+function kickBudgetSweep() {
+  // The `.catch` is the same lesson as appendStateEvent above: a fire-and-forget async
+  // call needs a REAL rejection handler, or a future throw outside tickBudget's own
+  // try/catch escapes as an unhandledRejection and kills the process on Node >= 15.
+  // Traced for the stall monitor (WARDEN-977) — see startLifecyclePoll.
+  const p = loopMonitor.trace('sweep:budget', tickBudget)
+    .catch(() => { /* a seed sweep must never take the server down */ })
+    .finally(() => { if (budgetInFlight === p) budgetInFlight = null; });
+  budgetInFlight = p;
+}
+
+// Test seam: resolves once no budget sweep is in flight — the seed one kicked by
+// startBudgetPoll/restartBudgetPoll included. A test that enables the budget via PUT
+// /api/config and then drives its own tickBudget() sweeps MUST await this first: the
+// seed sweep advances prevBudgetState when it lands, and while it runs the
+// budgetRunning guard makes the test's own sweep a silent no-op — which turns the
+// test's priming sweep into a nothing and its breach sweep into the prime, so the
+// expected POST never fires.
+export async function __budgetSweepSettledForTest() {
+  await budgetInFlight;
+  while (budgetRunning) await new Promise((r) => setImmediate(r));
 }
 
 // React to a config change: enable → ensure the timer runs + recompute now;
@@ -2603,8 +3129,8 @@ function startBudgetPoll() {
 // threshold/window tweak → recompute now so the next read is fresh.
 function restartBudgetPoll() {
   if (cfg.tokenBudgetEnabled) {
-    if (!budgetTimer) budgetTimer = setInterval(tickBudget, BUDGET_INTERVAL_MS);
-    tickBudget();
+    if (!budgetTimer) budgetTimer = setInterval(kickBudgetSweep, BUDGET_INTERVAL_MS);
+    kickBudgetSweep();
   } else if (budgetTimer) {
     clearInterval(budgetTimer);
     budgetTimer = null;
@@ -2634,6 +3160,16 @@ let prevAttentionStates = new Map(); // key → state (the diff baseline)
 let attentionTimer = null;
 // Re-entrancy guard, same rationale as lifecycleRunning/budgetRunning.
 let attentionRunning = false;
+// WARDEN-947: a handle on the sweep kicked FIRE-AND-FORGET by startAttentionPoll /
+// restartAttentionPoll. Production never reads it — it exists so a test that drives
+// its OWN sweeps can await the kicked one instead of racing it. That race is real and
+// was flaking server-attention-webhook.test.js on main: PUT /api/config →
+// restartAttentionPoll() → bare tickAttention(); when that sweep lands it STOMPS
+// prevAttentionStates with its own (real-fleet, usually empty) map, so the test's
+// primed baseline vanishes and its next sweep re-primes instead of firing — and while
+// it is still running, the attentionRunning guard turns the test's sweep into a silent
+// no-op. Both manifest as "0 POSTs, expected 1".
+let attentionInFlight = null;
 
 // tickAttention — one server-side attention sweep. Exported so a test can drive
 // a single sweep deterministically (the running server drives it off a 60s
@@ -2709,23 +3245,13 @@ async function tickAttention(deps = {}) {
       // called bare with no deps.pollAgentStates) with canned panes + ZERO SSH.
       const capture = deps.capturePanes ?? capturePanes;
       const panes = await capture(chatList, cfg);
-      return chatList.map((c) => {
-        const base = {
-          id: c.container || c.session,
-          key: c.key,
-          host: c.host,
-          project: c.project,
-          role: c.role,
-          name: c.name || c.key || (c.container || c.session),
-        };
-        if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-          logAgentState(c, 'capture_failed');
-          return { ...base, state: 'capture_failed', signal: null };
-        }
-        const { state, signal } = classifyPane(stripAnsi(panes[c.key] || ''), c);
-        logAgentState(c, state);
-        return { ...base, state, signal };
-      });
+      // WARDEN-1010: the classify→log loop is classifyCapturedPanes, shared with
+      // pollAgentStates — the drift that made this copy miss captureError and
+      // customMatch is structurally impossible now. `classify` is already awaited at
+      // the call site, so returning this promise is unchanged for callers. The two
+      // added keys are inert on the webhook path (notify.js's two diffs read only
+      // key/state/signal/name/host, and the baseline advance builds a key→state Map).
+      return classifyCapturedPanes(chatList, panes, cfg);
     });
     const agents = await classify(chats);
     // WARDEN-575: the done diff shares the SAME classified `agents` + the SAME
@@ -2772,7 +3298,10 @@ async function tickAttention(deps = {}) {
     // ones) so recovery re-arms the one-shot and capture_failed rows don't get
     // stuck firing on every sweep once capture recovers.
     prevAttentionStates = new Map(
-      agents.filter((a) => a && typeof a.state === 'string').map((a) => [a.key, a.state]),
+      // WARDEN-1223: baseline keyed by the HOST-QUALIFIED identity
+      // (notify.attentionRowKey) — per agent, not per bare name, so a one-shot
+      // notification is never attributed to a same-named agent on another host.
+      agents.filter((a) => a && typeof a.state === 'string').map((a) => [notify.attentionRowKey(a), a.state]),
     );
   } catch {
     // A transient capture failure leaves the previous baseline in place (no
@@ -2786,8 +3315,31 @@ function startAttentionPoll() {
   // Self-gates via tickAttention's first line, so a parked idle timer is harmless
   // and a later enable (PUT /api/config → restartAttentionPoll) wakes it without a
   // second start call.
-  if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
-  tickAttention();
+  if (!attentionTimer) attentionTimer = setInterval(kickAttentionSweep, ATTENTION_SWEEP_MS);
+  kickAttentionSweep();
+}
+
+// Kick a sweep without awaiting it (both callers are synchronous), keeping a handle
+// so __attentionSweepSettledForTest can await it. WARDEN-947.
+function kickAttentionSweep() {
+  // `.catch` for the same reason as kickBudgetSweep / appendStateEvent: fire-and-forget
+  // async must not be able to escape as an unhandledRejection.
+  // Traced for the stall monitor (WARDEN-977) — see startLifecyclePoll.
+  const p = loopMonitor.trace('sweep:attention', tickAttention)
+    .catch(() => { /* a kicked sweep must never take the server down */ })
+    .finally(() => { if (attentionInFlight === p) attentionInFlight = null; });
+  attentionInFlight = p;
+}
+
+// Test seam: resolves once no attention sweep is in flight — the kicked one from
+// startAttentionPoll/restartAttentionPoll included. A test that enables the channel
+// (PUT /api/config) and then drives its own tickAttention() sweeps MUST await this
+// first, or the kicked sweep lands mid-test and stomps the baseline. The
+// attentionRunning spin covers the re-entrant case (a kick that no-op'd because an
+// earlier sweep was still running), so this is deterministic — not a timed sleep.
+export async function __attentionSweepSettledForTest() {
+  await attentionInFlight;
+  while (attentionRunning) await new Promise((r) => setImmediate(r));
 }
 
 // React to a config change: enable → ensure the timer runs + sweep now; disable
@@ -2798,9 +3350,9 @@ function restartAttentionPoll() {
   // done) is enabled — mirrors tickAttention's gate so a Settings flip of either
   // routing takes effect on the next sweep.
   if (cfg.webhookEnabled && cfg.webhookUrl && (cfg.webhookAlertAttention || cfg.webhookAlertDone)) {
-    if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
+    if (!attentionTimer) attentionTimer = setInterval(kickAttentionSweep, ATTENTION_SWEEP_MS);
     prevAttentionStates = new Map(); // clean baseline prime on (re)enable
-    tickAttention();
+    kickAttentionSweep();
   } else if (attentionTimer) {
     clearInterval(attentionTimer);
     attentionTimer = null;
@@ -2837,6 +3389,11 @@ export function startServer(port = 7421, host = '127.0.0.1') {
   server.listen(port, host, async () => {
     console.log(`warden ui → http://${host}:${port}`);
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
+    // Watch THIS process's event loop for multi-second blocks and record them
+    // durably with attribution (WARDEN-977). Started here — not at module import
+    // — so importing `app` (tests, tools, the CLI) runs no timer and patches no
+    // builtin; the server child is the only process that instruments itself.
+    startLoopMonitor();
     // Start connection pool cleanup task
     startConnectionPoolCleanup();
     // Start cross-host lifecycle polling (captures agent start/stop/error on

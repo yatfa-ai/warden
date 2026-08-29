@@ -29,6 +29,26 @@ export const HealthState = {
 };
 
 /**
+ * The canonical, ORDERED health-state vocabulary — the ONE hand-written list on
+ * the backend. Every other backend site that needs "all six states" derives from
+ * this instead of re-typing the members (WARDEN-1104).
+ *
+ * The order is `HealthState`'s declaration order (healthy → unknown, closed
+ * between idle and unknown per WARDEN-245) and is LOAD-BEARING: it fixes the
+ * bucket order of `groupByHealth` and, more visibly, the segment order of
+ * `getHealthSummary`'s human-readable `label`.
+ *
+ * Adding a state = add it to `HealthState` (in its display position) and every
+ * derived site below picks it up. Two shipped bugs came from missing a site on
+ * exactly such an addition: WARDEN-245 (`closed` missed the buckets) and
+ * WARDEN-1064/1068 (`unknown` missed the summary, so a populated fleet's bar
+ * read "0 agents").
+ *
+ * @type {string[]}
+ */
+export const HEALTH_STATES = Object.values(HealthState);
+
+/**
  * Get health state for an agent based on activity and status
  * @param {Object} agent - Agent object from discoverAll
  * @param {number} lastActivity - Timestamp of last activity (ms since epoch)
@@ -95,88 +115,21 @@ export function getHealthState(agent, lastActivity, thresholds = {}) {
 }
 
 /**
- * Get color class for a health state
- * @param {string} state - Health state
- * @returns {string} CSS color class
- */
-export function getHealthColor(state) {
-  switch (state) {
-    case HealthState.HEALTHY:
-      return 'text-green-400';
-    case HealthState.WARNING:
-      return 'text-yellow-400';
-    case HealthState.CRITICAL:
-      return 'text-red-400';
-    case HealthState.IDLE:
-      return 'text-gray-400';
-    case HealthState.CLOSED:
-      // Gray, one shade darker than IDLE (gray-400) so a closed (dead) session
-      // reads as "more final" than an idle (waiting) one, while staying in the
-      // neutral gray family. The distinct glyph (■ vs ○) is the WCAG lever.
-      return 'text-gray-500';
-    default:
-      return 'text-muted-foreground';
-  }
-}
-
-/**
- * Get background color class for a health state
- * @param {string} state - Health state
- * @returns {string} CSS background color class
- */
-export function getHealthBgColor(state) {
-  switch (state) {
-    case HealthState.HEALTHY:
-      return 'bg-green-500';
-    case HealthState.WARNING:
-      return 'bg-yellow-500';
-    case HealthState.CRITICAL:
-      return 'bg-red-500';
-    case HealthState.IDLE:
-      return 'bg-gray-500';
-    case HealthState.CLOSED:
-      return 'bg-gray-600';
-    default:
-      return 'bg-muted-foreground';
-  }
-}
-
-/**
- * Format health state for display
- * @param {string} state - Health state
- * @returns {string} Display label
- */
-export function formatHealthState(state) {
-  switch (state) {
-    case HealthState.HEALTHY:
-      return 'Healthy';
-    case HealthState.WARNING:
-      return 'Warning';
-    case HealthState.CRITICAL:
-      return 'Critical';
-    case HealthState.IDLE:
-      return 'Idle';
-    case HealthState.CLOSED:
-      return 'Closed';
-    default:
-      return 'Unknown';
-  }
-}
-
-/**
  * Group agents by health state
+ *
+ * One empty bucket per canonical state, derived from HEALTH_STATES so a new
+ * member can never silently lose its bucket (WARDEN-245 shipped exactly that).
+ * `Object.fromEntries` deliberately yields a NORMAL, prototype-inheriting object
+ * — the same kind the hand-written literal produced — so the `if (groups[state])`
+ * guard below keeps its existing (quirky) behavior for inherited keys such as
+ * `'constructor'`. Hardening that is a real behavior change and is out of scope
+ * here (see WARDEN-885).
+ *
  * @param {Array} agents - Array of agent objects with health state
  * @returns {Object} Agents grouped by health state
  */
 export function groupByHealth(agents) {
-  const groups = {
-    healthy: [],
-    warning: [],
-    critical: [],
-    idle: [],
-    closed: [],
-    unknown: []
-  };
+  const groups = Object.fromEntries(HEALTH_STATES.map((state) => [state, []]));
 
   for (const agent of agents) {
     const state = agent.healthState || HealthState.UNKNOWN;
@@ -190,25 +143,26 @@ export function groupByHealth(agents) {
 
 /**
  * Calculate health summary for display
+ *
+ * Counts, `total` and `label` are all derived from HEALTH_STATES, so the three
+ * can no longer disagree about which states exist — the exact defect shipped in
+ * WARDEN-1064/1068, where the counts covered five of the six buckets
+ * `groupByHealth` produced and the fleet bar read "0 agents" for a populated
+ * fleet. The label format is asserted by callers/tests: `${n} ${state}` per
+ * segment in canonical order, joined by ` · `.
+ *
  * @param {Object} groups - Grouped agents by health state
  * @returns {Object} Summary with counts and label
  */
 export function getHealthSummary(groups) {
-  const healthy = groups.healthy?.length || 0;
-  const warning = groups.warning?.length || 0;
-  const critical = groups.critical?.length || 0;
-  const idle = groups.idle?.length || 0;
-  const closed = groups.closed?.length || 0;
-  const total = healthy + warning + critical + idle + closed;
-
-  const label = `${healthy} healthy · ${warning} warning · ${critical} critical · ${idle} idle · ${closed} closed`;
+  const counts = Object.fromEntries(
+    HEALTH_STATES.map((state) => [state, groups[state]?.length || 0])
+  );
+  const total = HEALTH_STATES.reduce((sum, state) => sum + counts[state], 0);
+  const label = HEALTH_STATES.map((state) => `${counts[state]} ${state}`).join(' · ');
 
   return {
-    healthy,
-    warning,
-    critical,
-    idle,
-    closed,
+    ...counts,
     total,
     label
   };

@@ -1,6 +1,6 @@
 {
   "name": "warden",
-  "version": "0.1.30",
+  "version": "0.1.48",
   "description": "Yatfa Warden — dashboard for AI agent chats",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "scan": "node src/cli.js scan",
     "electron": "electron .",
     "electron:dev": "npm run build && electron .",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run build && electron-builder --publish never",
     "postinstall": "",
     "test": "node --test src",
     "dev:server": "node scripts/dev.mjs server",
@@ -36,7 +36,8 @@
   "devDependencies": {
     "@electron/rebuild": "^4.1.0",
     "electron": "^43.0.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "specguard-ts": "github:yatfa-ai/specguard-ts"
   },
   "build": {
     "appId": "io.yatfa.warden",
@@ -57,16 +58,22 @@
       "output": "release"
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.png",
       "artifactName": "yatfa-warden-setup-${version}.${ext}"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "artifactName": "yatfa-warden-${version}.${ext}"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "artifactName": "yatfa-warden-${version}.${ext}"
     }
   }

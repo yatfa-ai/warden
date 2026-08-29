@@ -8,3 +8,6 @@ release/
 electron-download/
 apikey.txt
 .mcp.json
+
+# The SpecGuard reporter local sink (no key configured).
+/log/

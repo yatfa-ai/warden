@@ -8,33 +8,38 @@ import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
 
 /**
  * WARDEN-557 — the honest "is signal actually flowing?" status for the
- * Telemetry section. A pure, live-derived view of the two already-bound prefs
- * `telemetryBaseEnabled` × `telemetryEndpoint` (no new consent flag, no
- * transport change, no delivery feedback). It reads the same values the
- * consent toggles and endpoint field use, so it re-renders the instant either
- * changes — there is no shadow state.
+ * Telemetry section. A pure, live-derived view of the already-bound prefs
+ * (whether a COLLECTING consent category is on) × `telemetryEndpoint` (no new
+ * consent flag, no transport change, no delivery feedback). It reads the same
+ * values the consent switches and endpoint field mutate, so it re-renders the
+ * instant either changes — there is no shadow state.
  *
- * Three states (see deriveTelemetrySendingStatus):
- *  - base OFF → renders nothing (off is off).
- *  - base ON + blank endpoint → amber notice: enabled but no receiver is
+ * Four states (see deriveTelemetrySendingStatus):
+ *  - nothing collecting → renders nothing (off is off). WARDEN-1116: a
+ *    decorating-only consent (names on, nothing collecting) lands here, because
+ *    no event is produced for a name to ride on.
+ *  - collecting + blank endpoint → amber notice: enabled but no receiver is
  *    configured, so nothing is being sent (the silently-inert opt-in).
- *  - base ON + endpoint set → positive destination confirmation (host only,
+ *  - collecting + endpoint set but no usable web scheme (WARDEN-1238) → amber
+ *    notice: the address parses but the transport cannot use it, so nothing is
+ *    being sent and the label reflects the address as typed.
+ *  - collecting + usable endpoint → positive destination confirmation (host only,
  *    derived from the configured URL; NOT a reachability claim).
  */
 export function TelemetrySendingStatus({
-  baseEnabled,
+  collecting,
   endpoint,
 }: {
-  baseEnabled: boolean;
+  collecting: boolean;
   endpoint: string;
 }) {
-  const status = deriveTelemetrySendingStatus({ baseEnabled, endpoint });
+  const status = deriveTelemetrySendingStatus({ collecting, endpoint });
   if (status.kind === 'off') return null;
   if (status.kind === 'unconfigured') {
     return (
       // role="status" (an aria-live=polite region): the whole point of this
-      // slice is that the status updates live as the user toggles base consent
-      // or edits the endpoint. The unconfigured notice is the state change most
+      // slice is that the status updates live as the user toggles a consent
+      // category or edits the endpoint. The unconfigured notice is the state change most
       // worth announcing — "you opted in, but nothing is being sent yet."
       <div
         role="status"
@@ -45,6 +50,29 @@ export function TelemetrySendingStatus({
           <span className="font-medium">Enabled, but nothing is being sent.</span>{' '}
           No receiver endpoint is configured, so events buffer in memory and are
           dropped. Add a receiver URL below for signal to flow.
+        </p>
+      </div>
+    );
+  }
+  if (status.kind === 'needs-scheme') {
+    // WARDEN-1238 — a non-blank endpoint with no scheme is just as inert as a
+    // blank one (the transport sends to the endpoint EXACTLY as configured and
+    // never rewrites it), but the cause — and the fix — is different, so it gets
+    // its own amber banner: not "no endpoint" but "add the scheme".
+    return (
+      <div
+        role="status"
+        className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+      >
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <p className="text-amber-800 dark:text-amber-200">
+          <span className="font-medium">
+            Enabled, but nothing is being sent — the endpoint is missing its scheme.
+          </span>{' '}
+          Warden sends to the endpoint exactly as configured, so{' '}
+          <span className="font-medium">{status.destination}</span> cannot receive
+          events without it. Add <span className="font-medium">https://</span> to the
+          endpoint below for signal to flow.
         </p>
       </div>
     );

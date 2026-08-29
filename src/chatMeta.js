@@ -95,3 +95,23 @@ export function sortChats(chats) {
 export function agentTarget(chat) {
   return `${chat.container || chat.key || chat.session || 'local'}@${chat.host}`;
 }
+
+// The tmux TARGET for a chat: an explicit session wins; a yatfa chat with no
+// session targets its container; nothing set means the default 'agent' session.
+// ONE definition shared by the default SSH path (chats.js buildCaptureScript)
+// and the companion transport (companion.js), so the two produce byte-equal
+// targets — the invariant this module exists to hold.
+//
+// NOT to be confused with agentTarget() above, which builds the DISPLAY identity
+// (container -> key -> session -> 'local', plus @host) for the CLI and directives
+// log. Different chain, different purpose; keep them separate.
+//
+// `||` (not `??`) is load-bearing: an EMPTY session string must fall through to
+// the container, exactly as every hand-written copy did.
+//
+// Deliberately NOT the home for the `cfg.tmuxSession || 'agent'` ladder
+// (companion.js discover, chats.js discover, tmux.js sess()) — that chain has no
+// container leg and resolves a config-level session.
+export function paneTarget(session, container) {
+  return session || container || 'agent';
+}

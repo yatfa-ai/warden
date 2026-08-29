@@ -1,0 +1,166 @@
+// The per-file git-diff READ seam (WARDEN-1187) — the response-reading step of
+// `DiffInspectRow`'s lazy diff fetch, extracted so it is unit-testable without a
+// React runner (mirroring web/src/lib/collectionsApi.ts, WARDEN-1181, which
+// extracted the Collections read for exactly this reason).
+//
+// It lives in its OWN module rather than beside the component because it imports
+// the shared reader from ./api, and because a pure `(Response) => Promise<string>`
+// is the largest testable piece of that fetch — see web/gitDiffRead.test.mjs.
+//
+// WHY THIS EXISTS AT ALL: the pre-WARDEN-1187 read path in DiffInspectRow was
+//
+//     const r = await fetch(buildUrl());
+//     const j = await r.json();                          // no r.ok gate, no j.error
+//     setDiff(typeof j.diff === 'string' ? j.diff : null);
+//     } catch { setDiff(null); }                          // every failure → null
+//
+// Both legs converged on `setDiff(null)`, which renders the row's definitive
+// empty state: "no diff". That assertion is SELF-CONTRADICTORY — the row only
+// exists for a file the UI has already listed as changed, so the product says
+// "this file changed" and then, in its own confident voice and as a fact about
+// the user's data, "no diff". The WARDEN-89 false-empty disease.
+//
+// It was also the last raw-read holdout in GitBadges.tsx: `useGitListFetcher`
+// (:642), the git-log grep (:854), `fetchShow` (:911) and `fetchStashShow`
+// (:1037) all honour the error contract. The holdout was the CHILD of the very
+// rows whose parent (`fetchShow`) already captures `j.error`.
+
+import { readListBody, readResponse } from './api';
+
+/**
+ * Read a per-file git diff response (`GET /api/git-show` and
+ * `GET /api/git-stash-show`, both with a `path`) the way warden's backend
+ * actually answers, and FAIL LOUDLY when it did not answer with data.
+ *
+ * Delegates to the house reader pair (`readListBody` + `readResponse`) for the two
+ * parts that genuinely transfer — the leg-gated body parse and the status-over-body
+ * error precedence — so this path inherits the legs those encode, and inherits any
+ * future fix to them.
+ *
+ * This payload key is a STRING, so it reads through `readResponse` (WARDEN-1191),
+ * the scalar/mixed sibling of `readListResponse`. Until that sibling existed this
+ * seam called the LIST reader and threw its `items` away — `Array.isArray('diff
+ * text')` is false, so `items` was `[]` unconditionally — while passing
+ * `field: 'diff'` purely to honour a signature it did not want. The precedence is
+ * unchanged; only the reader that expresses it fits the payload now.
+ *
+ * The failure shapes this reaches, traced against src/gitRoutes.js — both routes
+ * go through `withGitRepo` (:516-540) and NEITHER sets `notFoundEmpty`:
+ *
+ *  1. **unknown chat id** — 404 with a bare `{error}` and no `diff` key at all.
+ *     Reported by STATUS.
+ *  2. **`no cwd`** — 200 `{files: [], diff: null, error: 'no cwd'}` (:539). The
+ *     200-with-`{error}` half of warden's convention, which an `r.ok` gate alone
+ *     misses entirely.
+ *  3. **malformed hash / ref / path**, and any **route-level throw** — 200
+ *     `{...defaults, error: msg}` (:538). Same half.
+ *  4. **a proxy/tunnel non-2xx carrying an HTML body** — `.json()` REJECTS on
+ *     HTML. `readListBody` makes the body optional on the `!ok` leg precisely for
+ *     this, so it degrades to `Failed to load diff (502)` instead of the silent
+ *     `TypeError` the old bare `catch` swallowed.
+ *  5. **a truncated 2xx body** — `fetch` resolves `ok: true` as soon as the
+ *     HEADERS arrive, so a body cut mid-stream rejects at `.json()`. On the `ok`
+ *     leg `readListBody` deliberately lets that rejection through, so it lands in
+ *     the caller's `catch` rather than becoming a confident "no diff".
+ *
+ *  6. **a genuine git failure** — 200 `{files: [], diff: null, error: 'git show
+ *     failed'}` / `'git stash diff failed'` (`gitRoutes.js:1167` / `:1590`). The
+ *     200-with-`{error}` half again, so it throws here and the caller renders it
+ *     through the row's ERROR channel — distinct from the empty state.
+ *
+ * ✅ That sixth shape is NEW (WARDEN-1192), and this block used to say the opposite.
+ * It previously recorded that a genuine git failure never arrives as an error,
+ * because both legs did `diff = capDiff(r.ok ? r.stdout : '')` and then answered
+ * `error: null` at HTTP 200 — a broken repo was byte-identical on the wire to a
+ * clean empty diff, which this client could only read as a genuine emptiness. That
+ * was called out here as a SERVER-side masking defect and its own ticket;
+ * WARDEN-1192 WAS that ticket, and it landed the exit-status gate on both per-file
+ * legs. The failure now arrives as an error string and is rendered as one.
+ *
+ * Two scoping facts worth keeping, because they make the shapes above look
+ * inconsistent unless you know them:
+ *   • Only the **per-file** (`path`-bearing) legs were hardened. The sibling
+ *     **files** legs still answer `{files: [], error: null}` on a failing git
+ *     command, deliberately: a LIST says "empty" precisely by being empty, while a
+ *     DIFF has no such vocabulary (`diff: null` cannot mean "empty"), so only the
+ *     diff must word it as an error. See the carve-out comment at
+ *     `gitRoutes.js:857-858`, which states that rule.
+ *   • Consequently a **valid-format but unknown** hash/ref on a healthy repo now
+ *     answers DIFFERENTLY on the two legs — `error: null` from the files leg, an
+ *     error string from this one. That divergence is the rule above working as
+ *     intended, not a bug.
+ *
+ * `readFileDiff`'s own behavior did NOT change for this: the reader already threw
+ * on any 200 carrying a non-empty `{error}`, so the new shape needed no code here.
+ *
+ * @param res the Response (only `ok` / `status` / `json` are read, so a plain
+ *            object stands in for one under test)
+ * @returns the diff text on success — `''` for a genuinely empty diff, which the
+ *          caller must keep rendering as "no diff" rather than as a failure.
+ *          A non-string / absent `diff` on an otherwise-clean 200 also degrades
+ *          to `''`, preserving the pre-fix reading of that shape.
+ * @throws  Error whenever the response failed, by EITHER half of warden's error
+ *          convention (non-2xx, or a 200 carrying a non-empty `{error}`); also
+ *          propagates the `.json()` rejection of a truncated 2xx body
+ */
+export async function readFileDiff(
+  res: Pick<Response, 'ok' | 'status'> & { json: () => Promise<unknown> },
+): Promise<string> {
+  // Rests on the detail reader below so there is ONE expression of the error
+  // precedence for this payload. `readFileDiff`'s own contract is unchanged — it
+  // still resolves to the diff string alone and throws on exactly the same shapes
+  // — because the only difference between the two is which fields are KEPT off an
+  // already-validated record (WARDEN-1194).
+  const { diff } = await readFileDiffDetail(res);
+  return diff;
+}
+
+/**
+ * The same read as {@link readFileDiff}, keeping the SECOND field the per-file
+ * `/api/git-show` response carries: `message`, the commit's body (WARDEN-388).
+ *
+ * WHY A SIBLING RATHER THAN A WIDER `readFileDiff` (WARDEN-1194). `FileViewer`'s
+ * `BlameHash` popover — the diff behind every hash in both the Blame and the
+ * History view — was the LAST raw path-bearing read of these routes: an `r.ok`
+ * gate and then `j.diff` / `j.message` straight off an unchecked body, so the
+ * 200-with-`{error}` half of warden's convention (a `no cwd`, a route throw, and
+ * since WARDEN-1192 a genuine `git show failed`) rendered as the popover's
+ * definitive "no diff for this file at this commit" — a confident factual claim
+ * about the user's data made when the truth is "we could not read the
+ * repository". Routing it through `readFileDiff` as-is would have closed that
+ * hole and silently DROPPED the commit body, regressing WARDEN-388. Hence the
+ * pair: `readFileDiff` keeps its narrow string contract (and its pinned tests)
+ * for `DiffInspectRow`, which has no commit body to render, and this reader
+ * serves the site that does.
+ *
+ * Every failure shape, and every non-failure, is the SAME as `readFileDiff`'s —
+ * see its doc block above; this function adds no leg of its own, it only keeps a
+ * second field off the record the shared reader already validated.
+ *
+ * @returns `{ diff, message }` on success. `diff` is `''` for a genuinely empty
+ *          diff (the caller must keep rendering that as "no diff", NOT as a
+ *          failure). `message` is `''` for a subject-only commit and for any
+ *          response that omits/mistypes the key — the caller renders an empty
+ *          body as nothing, exactly as the pre-fix `typeof j.message === 'string'
+ *          && j.message` guard did.
+ * @throws  the same Error as {@link readFileDiff}, on either half of warden's
+ *          error convention.
+ */
+export async function readFileDiffDetail(
+  res: Pick<Response, 'ok' | 'status'> & { json: () => Promise<unknown> },
+): Promise<{ diff: string; message: string }> {
+  // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx body
+  // that fails to parse is a real failure and must reach the caller's catch
+  // rather than becoming a confident "no diff" (WARDEN-1014 review).
+  const body = await readListBody(res);
+  // The scalar sibling: same precedence as the list reader, and it hands back the
+  // narrowed body so the diff is read off it without a second cast.
+  const { record, error } = readResponse(res, body, 'diff');
+  if (error) throw new Error(error);
+  return {
+    // A genuine emptiness stays empty. This is NOT an over-correction point: the
+    // caller renders `''` as "no diff", exactly as before the fix.
+    diff: typeof record.diff === 'string' ? record.diff : '',
+    message: typeof record.message === 'string' ? record.message : '',
+  };
+}

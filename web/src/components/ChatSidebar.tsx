@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -24,19 +24,17 @@ import { SnoozeDialog } from './SnoozeDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
-import { copyText } from '@/lib/clipboard';
+import { showFanoutToast } from '@/lib/fanoutToast';
+import { copyWithToast } from '@/lib/clipboardToast';
+import { runFanout } from '@/lib/fanout';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
-// The cross-agent file-edit compare dialog (WARDEN-321): mounted as a sibling of
-// FileViewer so a coordinator reading a file can diff a co-editor's version A↔B
-// without leaving the FileViewer (WARDEN-868). Self-contained — fans /api/git-diff
-// + /api/cross-agent-diff per agent itself; the parent only supplies path + agents.
-import { CollisionCompareDialog } from './CollisionCompareDialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
+import { parseLoadedPins, nextPins } from '@/lib/pinSync';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import {
@@ -44,32 +42,20 @@ import {
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { chatMatchesCriteria } from '@/lib/collections';
-import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
+import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { SnoozeDuration } from '@/lib/snooze';
 import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
-import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
+import type { GitCommit, ClaudeSession } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
-import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
-// WARDEN-565: re-homes the orphaned WARDEN-288 cross-agent file-collision ⚠ badge
-// into the fleet view headers (the surfaces that replaced the abolished project-
-// chip row, WARDEN-372). The badge is fully built; it was simply never rendered.
-// WARDEN-635: GitStateBadges (the ±N/↑N/↓N fleet WIP badges, orphaned by the same
-// WARDEN-372 abolition) is re-homed alongside it here, now extended with a 4th ⚑N
-// at-risk-repo-state axis — mounting it lights up all four axes at once.
-// WARDEN-639: detectProjectOutgoingCollisions feeds a 3rd cross-agent collision
-// sibling (committed×committed, both unpushed) alongside the live ⚠ and impending ⏱.
-import { GitCollisionBadge, GitStateBadges, GitTriageCallout } from './sidebar/GitBadges';
-import { detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
-// Pure finder for the FileViewer co-editors chip (WARDEN-810): same-project sibling
-// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed). Reuses the
-// cached gitStatus map the fleet collision memos below read — no new fetch.
-import { findFileCoEditors } from '@/lib/fileCoEditors';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
+import type { SourceControlGitInfo } from './sidebar/SourceControlPanel';
+import { useGitStatus, useInvalidateGitStatus } from '@/lib/gitStatusHooks';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
+import { readListBody, readListResponse, readResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -188,30 +174,51 @@ const buildOutgoingParams = () => `limit=50&range=outgoing`;
 
 // Shared skeleton for fetchGitLog / fetchGitLogIncoming / fetchGitLogOutgoing: GET
 // /api/git-log?id=…&<buildParams(limit)>, cache commits per chatId (re-expand is
-// instant), toggle a per-chatId loading flag, and cache [] on transient failure so
-// a re-expand won't loop. Zero behavior change vs. the inline copies (WARDEN-620).
+// instant), toggle a per-chatId loading flag, and cache [] on failure so a re-expand
+// won't loop (WARDEN-620).
+//
+// WARDEN-1014: the response-READING step is the shared `readListResponse` from
+// lib/api.ts, so BOTH halves of the backend's error convention are honoured — a
+// non-2xx AND a 200 whose body carries `{error}` beside the `gitDefaults` empty array
+// (src/gitRoutes.js:490 no-cwd, :494 catch-all). Previously `j.error` was dropped and
+// `Array.isArray(j.commits)` accepted the server's placeholder as data, so a cwd-less
+// chat or an unreachable SSH host rendered "no commits" — indistinguishable from a
+// fresh repo (the WARDEN-89 false-empty). `setError` is the channel added alongside
+// `setCommits`; the caching-[]-on-failure policy is deliberately UNCHANGED, so the
+// re-expand guard still can't loop — the error simply now rides with it.
+//
 // Deps are all stable (useState setters, a string literal, module consts) so the
 // callback keeps a stable identity, matching the original useCallback(fn, []).
-function useGitLogFetcher({ setCommits, setLoading, errorLabel, buildParams }: {
+function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label, buildParams }: {
   setCommits: (updater: (prev: Record<string, GitCommit[]>) => Record<string, GitCommit[]>) => void;
+  setError: (updater: (prev: Record<string, string | null>) => Record<string, string | null>) => void;
   setLoading: (updater: (prev: Record<string, boolean>) => Record<string, boolean>) => void;
   errorLabel: string;
+  /** Human-readable noun for the failure copy ('commits', 'incoming commits', …). */
+  label: string;
   buildParams: (limit: number) => string;
 }) {
   return useCallback(async (chatId: string, limit: number = WHATS_NEW_FETCH_LIMIT) => {
     setLoading((p) => ({ ...p, [chatId]: true }));
+    setError((p) => ({ ...p, [chatId]: null }));
     try {
       const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
-      const j = await r.json();
-      setCommits((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
+      // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
+      // catch instead of becoming an empty list with no error (WARDEN-1014 review).
+      const j = await readListBody(r);
+      const { items, error } = readListResponse<GitCommit>(r, j, 'commits', label);
+      setCommits((p) => ({ ...p, [chatId]: items }));
+      setError((p) => ({ ...p, [chatId]: error }));
     } catch (error) {
-      // Non-critical: cache an empty list so a transient failure doesn't loop on re-expand.
+      // Cache an empty list so a transient failure doesn't loop on re-expand — but
+      // record WHY, so the section renders a failure rather than a false empty.
       console.error(errorLabel, error);
       setCommits((p) => ({ ...p, [chatId]: [] }));
+      setError((p) => ({ ...p, [chatId]: error instanceof Error ? error.message : `Failed to load ${label}` }));
     } finally {
       setLoading((p) => ({ ...p, [chatId]: false }));
     }
-  }, [setCommits, setLoading, errorLabel, buildParams]);
+  }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
 export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
@@ -231,6 +238,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   const [tabSearchQuery, setTabSearchQuery] = useState('');
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
+  // WARDEN-1240: pin persistence bookkeeping. The server's PUT /api/pins
+  // replaces the whole stored list wholesale, so the client must never write
+  // from an unverified snapshot. `pinsRef` mirrors the state so serialized
+  // toggles always build on the last confirmed set (rapid clicks no longer
+  // race); `pinsLoadedRef` gates writes on a verified load — a failed or
+  // error-bodied GET is "unknown", never "no pins", so it can never be written
+  // back as an empty list.
+  const pinsRef = useRef<Set<string>>(new Set());
+  const pinsLoadedRef = useRef(false);
+  const pinWriteChainRef = useRef<Promise<void>>(Promise.resolve());
   // WARDEN-305: per-agent notes — id → short human annotation (mirrors pins).
   const [agentNotes, setAgentNotes] = useState<Record<string, string>>({});
   // WARDEN-342: per-past-session tags — claude-session id → short reusable labels
@@ -238,12 +255,24 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // any of the selected tags (union semantics).
   const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
   const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
-  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
+  // WARDEN-1196: `error` is the per-host failure reason (null/absent = the last fetch
+  // succeeded). Written by fetchHostSessions from readResponse, so it is non-null for
+  // BOTH a non-2xx AND a 200 carrying {error} — the latter is how the backend reports
+  // an unreachable host, since the SSH failure is server-side and the HTTP call itself
+  // succeeds. `claudeAvailable` stays OPTIONAL and is genuinely absent on that path:
+  // an unreachable host cannot answer whether claude is installed, so the ⚠ warning's
+  // strict `=== false` gate must not be satisfied.
+  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean; error?: string | null }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null; outgoingFiles?: string[] | null }>>({});
+
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
+  // WARDEN-1014: the failure reason per chatId for each of the three git-log caches
+  // (null = the last fetch succeeded). Written by useGitLogFetcher from
+  // readListResponse, so it is non-null for BOTH a non-2xx AND a 200 carrying
+  // {error}. Forwarded to SourceControlPanel beside the cache it describes.
+  const [gitLogError, setGitLogError] = useState<Record<string, string | null>>({});
   // incoming (behind) commit history per chatId — the commits @{u} has that HEAD
   // doesn't (the "↓N behind" half of WARDEN-153's count). A separate cache from the
   // local gitLog so each half refreshes independently and the popover shows both.
@@ -252,6 +281,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // section — but the call is harmless on a non-behind repo (returns []).
   const [gitLogIncoming, setGitLogIncoming] = useState<Record<string, GitCommit[]>>({});
   const [gitLogIncomingLoading, setGitLogIncomingLoading] = useState<Record<string, boolean>>({});
+  const [gitLogIncomingError, setGitLogIncomingError] = useState<Record<string, string | null>>({});
   // outgoing (ahead/unpushed) commit history per chatId — the commits HEAD has that
   // @{u} doesn't (the "↑N unpushed" half of WARDEN-153's count, explorable per
   // WARDEN-252). A separate cache from gitLog/gitLogIncoming so each third refreshes
@@ -261,6 +291,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // harmless on a non-ahead repo (returns []).
   const [gitLogOutgoing, setGitLogOutgoing] = useState<Record<string, GitCommit[]>>({});
   const [gitLogOutgoingLoading, setGitLogOutgoingLoading] = useState<Record<string, boolean>>({});
+  const [gitLogOutgoingError, setGitLogOutgoingError] = useState<Record<string, string | null>>({});
   // Per-file diff dialog (WARDEN-151): which chatId + path is shown in the DiffViewer.
   // `staged` (WARDEN-369): when true the DiffViewer fetches `git diff --cached` (what
   // will be committed) instead of the combined worktree-vs-HEAD diff — set by clicking
@@ -280,13 +311,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // line (open at top); onNavigate resets it on a path change so a stale highlight
   // never survives a breadcrumb/dir-click navigation (mirrors PaneGrid WARDEN-334).
   const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string; line?: number } | null>(null);
-  // The co-editor Compare target (WARDEN-868): set by FileViewer's onCompare, the
-  // reader's open path + the two agents to diff — the reader (no source → treated
-  // as 'wip' by the dialog) and the picked sibling (source 'outgoing' when its
-  // change is an unpushed commit, else 'wip'). Shaped like GitBadges' compareTarget
-  // (the sidebar fleet mount) so the same CollisionCompareDialog reads either. null
-  // while closed; onOpenChange clears it so a re-open re-fetches fresh state.
-  const [compareTarget, setCompareTarget] = useState<{ path: string; agents: { key: string; source?: 'outgoing' | 'wip' }[] } | null>(null);
   const { prefs } = useNotificationPrefs();
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
@@ -306,49 +330,108 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // WARDEN-581 — bulk-snooze duration dialog (sibling of broadcast/kill/interrupt).
   const [snoozeOpen, setSnoozeOpen] = useState(false);
 
+  // WARDEN-1196: the response READ goes through the shared `readResponse`/`readListBody`
+  // pair from lib/api.ts, so BOTH halves of warden's error convention are honoured — a
+  // non-2xx AND a 200 carrying {error}. The second half is the load-bearing one here:
+  // an unreachable host is an SSH failure that happens SERVER-side, so the HTTP request
+  // itself succeeds with a 200 and a well-formed body. The old code had no `r.ok` gate
+  // and no `j.error` read (`j.sessions || []`), and its `catch` → toast leg could not
+  // fire for exactly that reason — our own server answered 200 and `r.json()` parsed —
+  // so a dead host rendered as a confident "claude not found — install it".
+  //
+  // `claudeAvailable` is read as a strict boolean rather than passed through: on the
+  // failure path the key is ABSENT, and it must stay `undefined` (never coerced to
+  // `false`) or the ⚠ warning's `=== false` gate would fire for an unreachable host —
+  // the very bug this closes.
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
     try {
       const r = await fetch(`/api/claude-sessions?host=${encodeURIComponent(host)}`);
-      const j = await r.json();
-      setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
+      // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx body
+      // that fails to parse is a real failure and must reach the catch below rather
+      // than becoming a confident empty list (WARDEN-1014).
+      const body = await readListBody(r);
+      const { record, error } = readResponse(r, body, 'sessions');
+      const sessions = Array.isArray(record.sessions) ? (record.sessions as ClaudeSession[]) : [];
+      setHostSessions((p) => ({
+        ...p,
+        [host]: {
+          // A failure keeps NO stale rows: the point is that we do not know what is on
+          // this host, so showing the last successful scan's sessions beside an error
+          // would be its own quieter version of the same lie.
+          sessions: error ? [] : sessions,
+          claudeAvailable: typeof record.claudeAvailable === 'boolean' ? record.claudeAvailable : undefined,
+          error,
+        },
+      }));
     } catch (error) {
       console.error('[fetchHostSessions] Failed:', error);
-      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      // A thrown fetch/parse is the same class of "we could not read this host" as the
+      // 200-with-{error} leg, so it lands in the SAME state field and renders the same
+      // failure row — not only a toast the human may have disabled.
+      setHostSessions((p) => ({ ...p, [host]: { sessions: [], error: message } }));
+      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${message}`);
     }
     setLoadingHost(null);
   };
 
-  const fetchGitStatus = useCallback(async (chatId: string) => {
-    try {
-      const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat, outgoingFiles: j.outgoingFiles } }));
-      }
-    } catch (error) {
-      // Git status is non-critical, so just log it without showing a toast
-      console.error('[git-status] Failed:', error);
-    }
-  }, []);
+  // WARDEN-1211: the focused pane's git status is now a READ of the SHARED
+  // per-agent cache (`['git-status', key]`, owned by lib/gitStatusQuery +
+  // lib/gitStatusHooks) — the same key Fleet Health's fan reads — so the two
+  // surfaces can no longer disagree about one agent, and an agent held by both
+  // costs ONE fetch, not two.
+  //
+  // What replaced what (behaviours preserved, mechanism changed):
+  // - The old private `fetch('/api/git-status?id=…')` and the WARDEN-975
+  //   single-entry `gitStatus` map are GONE; `gitStatusQuery.data` is the fact.
+  // - LATE-RESPONSE GUARD (the old gitReqRef): inherent now. Each key's fetch
+  //   writes only its OWN cache entry and the section always reads the FOCUSED
+  //   key's entry — a late A response can never overwrite B's, so switching
+  //   focus A → B with A resolving last still leaves B on screen.
+  // - BRANCH-LESS → "no repo": kept as a CONSUMER-side read (finding A). The
+  //   shared fetcher's strict WARDEN-89 gate (`r.ok && !j.error`) routes an
+  //   unreachable/error agent to the query's error state; a SUCCESSFUL payload
+  //   with no `branch` is still a valid empty read — `gitInfo` stays undefined
+  //   and SourceControlPanel returns null (its `!gitInfo?.branch` gate), never
+  //   an error. The previously-focused repo's status cannot linger: the read is
+  //   keyed to `focused`, not a mutable map.
+  const gitStatusQuery = useGitStatus(focused);
+  const invalidateGitStatus = useInvalidateGitStatus();
+  // Git status is non-critical: log a settled fetch failure without a toast.
+  useEffect(() => {
+    if (gitStatusQuery.error) console.error('[git-status] Failed:', gitStatusQuery.error);
+  }, [gitStatusQuery.error]);
 
   // Recent commits. `limit` defaults to WHATS_NEW_FETCH_LIMIT (50) so the per-agent
   // "What's new since your last visit" marker counts every commit since the last
   // visit (a rare visitor can have dozens); showing up to 50 (vs the old 5) is a
   // benign superset, not a regression (WARDEN-356 review: "count capped at 5").
-  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', buildParams: buildGitLogParams });
+  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setError: setGitLogError, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', label: 'commits', buildParams: buildGitLogParams });
   // Incoming (behind, HEAD..@{u}) via range=incoming (WARDEN-225); limit hardcoded at 50.
-  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', buildParams: buildIncomingParams });
+  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setError: setGitLogIncomingError, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', label: 'incoming commits', buildParams: buildIncomingParams });
   // Outgoing (ahead/unpushed, @{u}..HEAD) via range=outgoing (WARDEN-252); limit hardcoded at 50.
-  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', buildParams: buildOutgoingParams });
+  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setError: setGitLogOutgoingError, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', label: 'outgoing commits', buildParams: buildOutgoingParams });
 
-  // Load pinned chat ids + per-agent notes from the backend on mount
+  // Load pinned chat ids + per-agent notes from the backend on mount.
+  // WARDEN-1240: a pins response is only adopted when it is ok AND actually a
+  // pin list (parseLoadedPins). A failure leaves the load gate closed — the
+  // client holds "unknown" (rendered as nothing pinned) rather than believing
+  // "no pins", and the first toggle retries the load before writing so the
+  // unknown state can never be written back as an empty list.
   useEffect(() => {
     const fetchPins = async () => {
       try {
         const r = await fetch('/api/pins');
         const j = await r.json();
-        setPinnedChatIds(new Set(j.pins || []));
+        const pins = r.ok ? parseLoadedPins(j) : null;
+        if (pins) {
+          pinsLoadedRef.current = true;
+          pinsRef.current = pins;
+          setPinnedChatIds(pins);
+        } else {
+          console.error('[pins] Load failed: unverified response', { ok: r.ok, body: j });
+        }
       } catch (error) {
         console.error('[pins] Failed:', error);
       }
@@ -376,29 +459,58 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     fetchSessionTags();
   }, []);
 
-  // Toggle a chat's pinned state and persist it
-  const togglePin = async (chatId: string) => {
-    const newPins = new Set(pinnedChatIds);
-    if (newPins.has(chatId)) {
-      newPins.delete(chatId);
-    } else {
-      newPins.add(chatId);
-    }
-    try {
-      const r = await fetch('/api/pins', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pins: Array.from(newPins) }),
-      });
-      if (r.ok) {
-        setPinnedChatIds(newPins);
+  // Toggle a chat's pinned state and persist it (WARDEN-1240). Every write is
+  // serialized through `pinWriteChainRef` and builds on `pinsRef` — the last
+  // confirmed set, not the React snapshot — so rapid clicks each land their own
+  // change instead of racing near-identical arrays where only the last survives.
+  // If the mount-time load never verified, the first toggle re-attempts it and
+  // refuses to write when it still fails: an unknown pin state is never written
+  // back over the stored list. On success we adopt the server's returned list.
+  const togglePin = (chatId: string) => {
+    const attempt = async () => {
+      if (!pinsLoadedRef.current) {
+        try {
+          const r = await fetch('/api/pins');
+          const j = await r.json();
+          const pins = r.ok ? parseLoadedPins(j) : null;
+          if (!pins) {
+            console.error('[pins-save] Aborted: pin state unverified, refusing to overwrite stored list');
+            return;
+          }
+          pinsLoadedRef.current = true;
+          pinsRef.current = pins;
+          setPinnedChatIds(pins);
+        } catch (error) {
+          console.error('[pins-save] Aborted: pin load retry failed:', error);
+          return;
+        }
       }
-    } catch (error) {
-      console.error('[pins-save] Failed:', error);
-    }
+      const newPins = nextPins(pinsRef.current, chatId);
+      try {
+        const r = await fetch('/api/pins', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pins: Array.from(newPins) }),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const confirmed = parseLoadedPins(j) ?? newPins;
+          pinsRef.current = confirmed;
+          setPinnedChatIds(confirmed);
+        } else {
+          console.error('[pins-save] Failed: non-ok response', r.status);
+        }
+      } catch (error) {
+        console.error('[pins-save] Failed:', error);
+      }
+    };
+    pinWriteChainRef.current = pinWriteChainRef.current.then(attempt, attempt);
   };
 
-  // WARDEN-305: set or clear a per-agent note and persist it (mirrors togglePin).
+  // WARDEN-305: set or clear a per-agent note and persist it. Unlike pins, this
+  // sends the per-key change (id + note) and adopts the server's merged map on
+  // success, so it is immune to both the rapid-click race and the wiped-list
+  // failure mode (WARDEN-1240).
   // Empty/blank text clears the note (server deletes the key).
   const setNote = async (chatId: string, text: string) => {
     try {
@@ -518,142 +630,24 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   const sessionPreview = showAllSessions ? visibleSessions : visibleSessions.slice(0, SESSION_PREVIEW);
   const hasMoreSessions = visibleSessions.length > SESSION_PREVIEW;
 
-  // WARDEN-565: cross-agent file-edit collision ⚠ badge for the fleet view headers.
-  // Re-homes the orphaned WARDEN-288 detection (detectProjectFileCollisions) into the
-  // surfaces that replaced the abolished project-chip row (WARDEN-372). The helper
-  // reads the cached gitStatus map (no new fetch, no backend change) and keys by
-  // project internally, so a per-view computation over that view's chats emits a
-  // cross-project total.paths union that maps to a single ⚠N badge — and the badge's
-  // showProject flag disambiguates the same path colliding in two projects.
-  //
-  // This memo MUST live at the top level (hooks can't be called conditionally — the
-  // host/collection branches are early returns), so it guards on view.kind and
-  // resolves the in-view population the same way each branch does: the host view's
-  // hostChats (a single host can run several projects, so it can span them), and the
-  // whole chats fleet for the root view (mirroring FleetCommitSearch, which reads the
-  // full chats fleet from that same header). The colliding paths are empty when no two
-  // active project agents share a dirty file, in which case the badge renders nothing.
-  const fleetCollisionPaths = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return detectProjectFileCollisions(viewChats, gitStatus).total.paths;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-601: the IMPENDING counterpart to fleetCollisionPaths — cross-joins each
-  // agent's unpushed-commit file-set (outgoingFiles, now on /api/git-status) against
-  // the OTHER agents' working-tree WIP, so the rollup can surface a collision the
-  // working-tree×working-tree detector is blind to (one agent committed the file,
-  // clean tree, while another has it dirty). Same view population + cached gitStatus
-  // map as the live memo (no new fetch — outgoingFiles rides the existing per-tab
-  // /api/git-status poll). Empty when no committed-outgoing × working-tree overlap
-  // exists, in which case the ⏱ renders nothing (zero noise).
-  const fleetImpendingPaths = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return detectProjectImpendingCollisions(viewChats, gitStatus).total.paths;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-639: the OUTGOING×OUTGOING counterpart to fleetImpendingPaths — finds paths
-  // ≥2 agents EACH have in their unpushed commits (outgoingFiles) with clean working
-  // trees, the one matrix cell neither the live ⚠ nor the impending ⏱ covers (both
-  // agents committed, neither dirty → invisible to the WIP join AND the impending
-  // editor side → surfaces only at push/merge/CI). Same view population + cached
-  // gitStatus map as the other two memos (no new fetch — outgoingFiles rides the
-  // existing per-tab /api/git-status poll). Empty when no two clean committers share an
-  // outgoing path, in which case the ⇄ renders nothing (zero noise).
-  const fleetOutgoingPaths = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return detectProjectOutgoingCollisions(viewChats, gitStatus).total.paths;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state badges were
-  // orphaned dead code — GitStateBadges was never imported (WARDEN-372 abolished the
-  // project-chip row that hosted it; WARDEN-565 re-wired the sibling GitCollisionBadge
-  // and explicitly deferred this one). This memo re-homes summarizeProjectGitState
-  // (the cached-map aggregator — no new fetch, no backend change) the same way, so
-  // mounting <GitStateBadges> below lights up all four axes at once: the existing ±N
-  // (dirty) / ↑N (unpushed) / ↓N (behind) fleet WIP totals AND the new ⚑N at-risk-
-  // repo-state chip rolling up detached HEAD / no-upstream / mid-merge agents — a
-  // non-routine state that needs a human's eye but was previously invisible at the
-  // fleet level. Same view population + cached gitStatus map as the collision memos
-  // above; .total carries the four counts + the contributing agents (in chats order).
-  const fleetGitState = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return summarizeProjectGitState(viewChats, gitStatus).total;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-810: the file-level complement to the fleet collision rollups above.
-  // When a file is open in FileViewer (fileTarget set), find every OTHER same-project
-  // agent whose cached gitStatus shows that path dirty (±) / in conflict (⚑) / in an
-  // unpushed commit (↑), so the FileViewer header chip can surface cross-agent file
-  // contention at the reading moment — inside the dialog, where the sidebar's fleet ⚠
-  // badge below is out of view. Reuses the SAME cached gitStatus map the fleet memos
-  // read (no new fetch, no backend route). Narrowed to the reader's OWN project first
-  // (a same-project collision is what's actionable for THIS reader); the finder then
-  // applies the active gate + self-exclusion + status-known gate internally.
-  // labelFor joins key → displayName(findChat(chats, key)) — the same React-layer
-  // join GitBadges' popover rows perform, kept out of the pure finder so it stays
-  // import-free for its OXC test harness. undefined when no file is open or the
-  // reader has no resolvable project → FileViewer renders no chip (graceful).
-  const fileCoEditors = useMemo(() => {
-    if (!fileTarget) return undefined;
-    const selfChat = findChat(chats, fileTarget.chatId);
-    const project = selfChat?.project;
-    if (!project) return undefined;
-    const projectChats = chats.filter((c) => c.project === project);
-    return findFileCoEditors({
-      filePath: fileTarget.path,
-      selfKey: fileTarget.chatId,
-      projectChats,
-      gitStatus,
-      labelFor: (key) => displayName(findChat(chats, key)),
-    });
-  }, [fileTarget, chats, gitStatus]);
-
   // Fan the message out to every selected agent via the existing per-target
   // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
-  // Promise.allSettled (not Promise.all) so a partial failure — one host
-  // unreachable, one session dead — is reported per-agent and does NOT abort the
-  // other sends. Never throws: failure is encoded in the summary. Returns the
-  // summary so the BroadcastDialog can close on completion.
+  // The request loop itself is the shared runFanout (@/lib/fanout, WARDEN-974) —
+  // the same one batch Kill and batch Interrupt use — so the allSettled-over-fetch
+  // shape is no longer re-typed here. Promise.allSettled (not Promise.all) so a
+  // partial failure — one host unreachable, one session dead — is reported
+  // per-agent and does NOT abort the other sends. Never throws: failure is
+  // encoded in the summary. Returns the summary so the BroadcastDialog can close
+  // on completion.
   const handleBroadcastSend = async (text: string) => {
     const ids = Array.from(selectedIds);
-    const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch('/api/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, text }),
-        }).then(async (r) =>
-          r.ok
-            ? { ok: true }
-            : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-        ),
-      ),
-    );
+    const results = await runFanout('/api/send', ids, (id) => ({ id, text }));
     const nameOf = (id: string) => {
       const c = findChat(chats, id);
       return c ? displayName(c) : id;
     };
     const summary = summarizeBroadcast(results, ids, nameOf);
-    const outcome = formatBroadcastToast(summary);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatBroadcastToast) renders one failure per line instead of
-        // collapsing to a single run-on line — sonner's default description
-        // element normalizes whitespace.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatBroadcastToast(summary), prefs.notifyChatOps);
     // The broadcast's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
@@ -690,16 +684,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
       hosts.forEach((h) => onDiscoverHost(h));
     });
-    const outcome = formatKillToast(summary);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKillToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKillToast(summary), prefs.notifyChatOps);
     // The kill's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
@@ -727,16 +712,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       return c ? displayName(c) : id;
     };
     const summary = await runKeySendFanout(ids, key, nameOf);
-    const outcome = formatKeySendToast(summary, key);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKeySendToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
@@ -840,46 +816,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     fetchCollections();
   }, []);
 
-  // Fetch git status for open panes (lazy loading). WARDEN-372: this was keyed on
-  // the abolished activeTabs; it now follows the active workspace's open panes.
+  // WARDEN-975/1211: git status is fetched for the FOCUSED pane ONLY — the single
+  // repo the git section describes. On focus change the shared query mounts fresh
+  // (a new key has no cached entry → one fetch); on every catalog refresh (`chats`)
+  // this effect INVALIDATES the focused key so the section stays live while a pane
+  // stays focused — the same beat the old private fetch fired on. Read-only GET.
   useEffect(() => {
-    openPanes.forEach((id) => {
-      const c = findChat(chats, id);
-      if (c) fetchGitStatus(id);
-    });
-  }, [chats, openPanes, fetchGitStatus]);
-
-  // WARDEN-431: keep the FOCUSED pane's git status fresh so the Source Control
-  // panel (the single place working-tree changes now show) reflects the focused
-  // repo immediately on focus switch, not just on the periodic catalog refresh.
-  // The per-open-panes effect above still feeds every pane's GitBranchBadge; this
-  // is a focused-only top-up so the panel is never stale right after switching
-  // panes. Read-only GET, and setGitStatus merges by key (no flicker). fetchGitStatus
-  // is stable, so this fires only when `focused` changes.
-  useEffect(() => {
-    if (focused) fetchGitStatus(focused);
-  }, [focused, fetchGitStatus]);
-
-  // WARDEN-356: keep recent git-log fresh for chats the human has VISITED so the
-  // per-agent "What's new since your last visit" marker reflects commits landed
-  // since the last open/focus. Bounded to visited chats only (getLastSeen !==
-  // null) — the marker is irrelevant for a never-visited chat, so unvisited
-  // agents pay no extra fetch (their git-log still loads lazily when the
-  // GitBranchBadge popover opens, as before). Reuses the existing fetchGitLog +
-  // /api/git-log endpoint (read-only) — no new endpoint. The fetch uses
-  // WHATS_NEW_FETCH_LIMIT (50, fetchGitLog's default) so the marker's count is
-  // accurate up to 50 and reports "✦50+" (truncated) beyond — the WARDEN-356
-  // review's "count silently capped at 5" fix. The re-fetch cadence mirrors
-  // fetchGitStatus (every catalog refresh) so the marker stays current; the
-  // documented future optimization is a server `since` param if this client-side
-  // filtering ever proves costly for large fleets.
-  useEffect(() => {
-    openPanes.forEach((id) => {
-      if (getLastSeen(id) === null) return;
-      const c = findChat(chats, id);
-      if (c) fetchGitLog(id);
-    });
-  }, [chats, openPanes, fetchGitLog]);
+    if (focused) invalidateGitStatus(focused);
+  }, [focused, chats, invalidateGitStatus]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -902,16 +846,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // summary so the two stay identical — expanding the summary reveals the exact
   // same rows (the WARDEN-178 colorblind-safe StatusDot, incl. offline=square,
   // + retry/inspect still works via enterHost).
-  // WARDEN-419: clipboard helper for the host-row context menu. Mirrors the
-  // handleCopy pattern shipped in CollectionsSection (WARDEN-396): the
-  // Electron-safe copyText() (Clipboard API + execCommand fallback) + a toast
-  // so the user sees the copy landed.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   const renderHost = (h: string) => {
     const n = chats.filter((c) => c.host === h && c.active).length;
     const hostStatus = hostStatuses[h];
@@ -951,9 +885,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           <ContextMenuItem onSelect={() => enterHost(h)}>Open</ContextMenuItem>
           <ContextMenuItem onSelect={() => onDiscoverHost(h)}>Discover</ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => handleCopy(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
           {!isLocal && (
-            <ContextMenuItem onSelect={() => handleCopy(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
+            <ContextMenuItem onSelect={() => copyWithToast(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
           )}
         </ContextMenuContent>
       </ContextMenu>
@@ -979,19 +913,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         onKill={() => onKill(id)}
         onRename={onRename}
         dim={dim}
-        gitInfo={gitStatus[id]}
-        gitCommits={gitLog[id]}
-        gitLogLoading={gitLogLoading[id]}
-        onFetchGitLog={() => fetchGitLog(id)}
-        incomingCommits={gitLogIncoming[id]}
-        incomingLoading={gitLogIncomingLoading[id]}
-        onFetchIncoming={() => fetchGitLogIncoming(id)}
-        outgoingCommits={gitLogOutgoing[id]}
-        outgoingLoading={gitLogOutgoingLoading[id]}
-        onFetchOutgoing={() => fetchGitLogOutgoing(id)}
-        onOpenDiff={(path, staged) => setDiffTarget({ chatId: id, path, staged })}
-        onOpenConflict={(path) => setConflictTarget({ chatId: id, path })}
-        onOpenFile={(path) => setFileTarget({ chatId: id, path })}
         showHostTags={showHostTags}
         showTypeBadges={showTypeBadges}
         showStatusIndicators={showStatusIndicators}
@@ -1049,6 +970,18 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             style={{ backgroundColor: C.metadata?.color || '#6366f1' }}
           />
           <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{C.name}</span>
+          {/* WARDEN-949: the collection list APPLIES matchesAgentFilter + sortChats
+              (:1009) but offered no control, so a sticky agentFilter (WARDEN-442)
+              followed the user in here and silently narrowed the list — below the
+              card's own count, with no way to see or clear it without leaving the
+              view. No hideHostSort: a collection can span hosts, so "Host" is a
+              meaningful sort here (unlike the single-host view). */}
+          <AgentFilterSortControls
+            agentFilter={agentFilter}
+            agentSort={agentSort}
+            onFilterChange={onFilterChange}
+            onSortChange={onSortChange}
+          />
           {/* WARDEN-338: one-click broadcast to the whole collection. Resolves the
               collection's live membership (the same `agents` array the list renders,
               so the target set is byte-for-byte what the action bar's "All" button
@@ -1176,43 +1109,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onSortChange={onSortChange}
             hideHostSort
           />
-          {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the fleet
-              header that replaced the abolished project-chip row (WARDEN-372). Computed
-              over this host's chats (hostChats) — a host can run several projects, so
-              showProject tags each colliding path with its project. Renders nothing when
-              no two active project agents share a dirty file (silent-when-clean). The
-              popover's jump rows + per-path "Compare edits" (WARDEN-321) live in the badge. */}
-          <GitCollisionBadge
-            collisions={fleetCollisionPaths}
-            impending={fleetImpendingPaths}
-            outgoing={fleetOutgoingPaths}
-            chats={hostChats}
-            gitStatus={gitStatus}
-            onOpenChat={onOpenChat}
-            showProject
-          />
-          {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N/🗄N project git-state fleet
-              badges, re-homed into this host header the same way GitCollisionBadge
-              was. Computed over hostChats (== the memo's viewChats for this host — a
-              host can run several projects). The ⚑N axis rolls up detached-HEAD /
-              no-upstream / mid-merge agents — a non-routine repo state that needs a
-              human's eye but was previously invisible at the fleet level. The 🗄N
-              axis (WARDEN-667) rolls up agents with parked `git stash` WIP — the lone
-              current-state git signal that had no fleet chip. Renders nothing when
-              every axis is 0 (silent-when-clean); each popover lists the contributing
-              agents and deep-links to them. */}
-          <GitStateBadges
-            dirty={fleetGitState.dirty}
-            unpushed={fleetGitState.unpushed}
-            behind={fleetGitState.behind}
-            atRisk={fleetGitState.atRisk}
-            stashed={fleetGitState.stashed}
-            stalled={fleetGitState.stalled}
-            agents={fleetGitState.agents}
-            chats={hostChats}
-            gitStatus={gitStatus}
-            onOpenChat={onOpenChat}
-          />
+          {/* WARDEN-975: the per-host header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N) and
+              collision badges (⚠/⏱/⇄) are gone. They described git OUTSIDE the focused
+              pane — which the product decision says has no value — and every one of
+              their popover rows opened a pane. The header keeps filter/sort + rescan. */}
           <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
             {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
           </button></IconTooltip>
@@ -1236,7 +1136,35 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 {[1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)}
               </>
             )}
-            {info.claudeAvailable === false && (
+            {/* WARDEN-1196 — the host could not be READ. Distinct from both siblings
+                below/above it: this is "we do not know what is on this machine",
+                whereas the ⚠ warning is a claim ABOUT the machine ("claude is not
+                installed") and the EmptyState is a claim about its CONTENTS ("there is
+                nothing here"). Both of those are factual assertions we are not entitled
+                to make when the fetch failed, which is exactly how a dropped tunnel used
+                to render as "install claude" — a wrong instruction the user would act on.
+                Offers the only useful action (retry) instead of a false remediation. */}
+            {info.error && (
+              <div className="mx-1 my-2 px-2 py-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/30 rounded-md flex items-start gap-2">
+                <span className="min-w-0 flex-1 wrap-anywhere">
+                  ✖ could not reach {hostLabelFor(H, hostLabels) || LABEL[H] || H} — {info.error}. Sessions on this host are unknown, not absent.
+                </span>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="h-auto p-0 text-[11px] underline hover:bg-transparent hover:text-foreground shrink-0"
+                  onClick={() => fetchHostSessions(H)}
+                  disabled={loadingHost === H}
+                >
+                  retry
+                </Button>
+              </div>
+            )}
+            {/* The ⚠ install-claude instruction is suppressed on a failed fetch: with the
+                host unreachable the backend omits `claudeAvailable` entirely, so this
+                strict `=== false` gate cannot fire. The explicit `!info.error` term is
+                belt-and-suspenders for any future route that sends both. */}
+            {!info.error && info.claudeAvailable === false && (
               <div className="mx-1 my-2 px-2 py-2 text-[11px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
                 ⚠ claude not found on {hostLabelFor(H, hostLabels) || LABEL[H] || H} — install it to resume sessions here.
               </div>
@@ -1306,9 +1234,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                       Resume
                     </ContextMenuItem>
                     <ContextMenuSeparator />
-                    <ContextMenuItem onSelect={() => handleCopy(s.id)}>Copy session ID</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => handleCopy(s.cwd)}>Copy working directory</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => handleCopy(s.summary)}>Copy summary</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => copyWithToast(s.id)}>Copy session ID</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => copyWithToast(s.cwd)}>Copy working directory</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => copyWithToast(s.summary)}>Copy summary</ContextMenuItem>
                   </ContextMenuContent>
                 </ContextMenu>
               );
@@ -1323,7 +1251,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 no sessions match the selected tag{activeTagFilters.size > 1 ? 's' : ''} — <button className="underline hover:text-foreground" onClick={() => setActiveTagFilters(new Set())}>clear filter</button>
               </div>
             )}
-            {sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
+            {/* WARDEN-1196: `!info.error` — "there is nothing here" is a claim about the
+                host's CONTENTS, which we cannot make when we could not read it. The
+                failure row above renders instead, so the two are mutually exclusive. */}
+            {!info.error && sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
               <EmptyState type="nothing-here" message={hostChats.length === 0 ? undefined : 'no agents match the current filter'} />
             )}
           </div>
@@ -1410,72 +1341,25 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           agentSort={agentSort}
           onFilterChange={onFilterChange}
           onSortChange={onSortChange}
+          hideSort
         />
-        {/* WARDEN-534: fleet-wide commit search. A sidebar-level affordance that
-            fans the per-agent --grep (WARDEN-498) across EVERY active project
-            agent from one box, grouped by agent (name · project · ↑unpushed), so
-            one query finds where a change landed across the fleet. Root-header
-            placement (alongside the filter/sort controls) per the ticket's
-            placement note; the popover owns its own input + debounce + fan-out. */}
-        <FleetCommitSearch
-          chats={chats}
-          onOpenChat={onOpenChat}
-          onOpenFile={(chatId, file, line) => setFileTarget({ chatId, path: file, line })}
-        />
-        {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the root
-            fleet header alongside FleetCommitSearch (the surface that replaced the
-            abolished project-chip row, WARDEN-372). Computed over the whole chats
-            fleet — mirroring FleetCommitSearch, which also fans across the full fleet
-            from this header — so the ⚠ surfaces a fleet-wide divergence risk. The
-            fleet spans projects, so showProject tags each colliding path with its
-            project. Renders nothing when no two active project agents share a dirty
-            file (silent-when-clean). */}
-        <GitCollisionBadge
-          collisions={fleetCollisionPaths}
-          impending={fleetImpendingPaths}
-          outgoing={fleetOutgoingPaths}
-          chats={chats}
-          gitStatus={gitStatus}
-          onOpenChat={onOpenChat}
-          showProject
-        />
-        {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N/🗄N project git-state fleet
-            badges, re-homed into the root fleet header alongside GitCollisionBadge
-            and FleetCommitSearch. Computed over the whole chats fleet (== the memo's
-            viewChats), mirroring those siblings which also fan across the full fleet
-            from this header. The ⚑N axis rolls up detached-HEAD / no-upstream /
-            mid-merge agents across the fleet; the 🗄N axis (WARDEN-667) rolls up
-            agents with parked `git stash` WIP across the fleet; renders nothing when
-            every axis is 0. */}
-        <GitStateBadges
-          dirty={fleetGitState.dirty}
-          unpushed={fleetGitState.unpushed}
-          behind={fleetGitState.behind}
-          atRisk={fleetGitState.atRisk}
-          stashed={fleetGitState.stashed}
-          stalled={fleetGitState.stalled}
-          agents={fleetGitState.agents}
-          chats={chats}
-          gitStatus={gitStatus}
-          onOpenChat={onOpenChat}
-        />
-        {/* WARDEN-745: the compositional capstone of the 6 git-state chips above.
-            Where those chips are a flat count a human must rank by hand across N
-            agents, this promotes the ONE composite-worst agent as "triage THIS
-            first, because X" — a verbatim mirror of WARDEN-384's AttentionBadge
-            callout (rankGitTriage + focus-excluded pickGitTriageTop + gitTriageReason
-            in gitStateSummary.ts). Pure composition: it assigns each agent its
-            highest-precedence present signal (atRisk > stalled > unpushed > behind >
-            dirty > stash) and orders within-tier by that axis's already-shipped
-            severity. The focused pane is NEVER promoted (WARDEN-482 guard via
-            pickGitTriageTop). Renders nothing when <2 agents carry a git signal, or
-            the whole fleet is clean/pushed/in-sync. Click → onOpenChat(top.key). */}
-        <GitTriageCallout
-          agents={fleetGitState.agents}
-          chats={chats}
-          focused={focused}
-          onOpenChat={onOpenChat}
-        />
+        {/* WARDEN-975: the root fleet header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N), its
+            collision badges (⚠/⏱/⇄), its "triage first" callout and the fleet-wide
+            commit/code search (WARDEN-534/559/589) are all gone. Each described or
+            searched git OUTSIDE the focused pane, and each was a pane-opening control
+            — the callout terminally so (pickGitTriageTop deliberately EXCLUDED the
+            focused pane, so it always pointed at some other agent and its only action
+            was to open that agent's pane), and the fleet search barely less so: its
+            group headers and result rows both called onOpenChat, and its rows carried
+            per-agent ↑unpushed STATE, not just history. The ticket's binding
+            statements are absolute rather than comparative — "remove EVERY fleet-level
+            git surface", "nothing else renders git, and no git control navigates
+            anywhere", "the sidebar header and per-host headers ... keeping only
+            filter, count and refresh" — so the header now holds exactly filter, count,
+            updated-ago and refresh. Git lives only in the Source Control section
+            below, scoped to the focused pane. Fleet Health keeps its own pane-
+            independent fleet git fan-out (FleetRecentCommits / useFleetGitStatus),
+            which is explicitly out of scope. */}
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
@@ -1485,13 +1369,33 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       <NewChatForm onSpawned={handleSpawned} />
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-1.5 flex flex-col gap-0.5">
-          {/* WARDEN-431: the Source Control panel — the single place a focused
-              pane's repo working-tree changes show, grouped like VS Code. Re-points
-              to whichever pane is focused; renders nothing when the focused pane
-              has no git repo. The inline per-chat changed-file rows are gone. */}
+          {/* WARDEN-431 + WARDEN-975: the git section — the ONLY place git appears in
+              the sidebar, describing ONLY the focused pane. It re-points to whichever
+              pane is focused and renders nothing when that pane has no git repo. It now
+              carries everything the per-row branch badge used to: the branch/detached +
+              ahead/behind/freshness/stash/magnitude summary on its header line, the
+              grouped working-tree buckets, and (expanded) the recent / unpushed /
+              incoming commit lists with their lazy fetch, per-commit diffs and
+              file-opening. Every handler is bound to `focused`, so no control here can
+              act on — or navigate to — any other pane. */}
           <SourceControlPanel
-            gitInfo={focused ? gitStatus[focused] : undefined}
+            chatId={focused}
+            gitInfo={(focused ? gitStatusQuery.data : undefined) as SourceControlGitInfo | undefined}
             onOpenDiff={(path, staged) => { if (focused) setDiffTarget({ chatId: focused, path, staged }); }}
+            onOpenConflict={(path) => { if (focused) setConflictTarget({ chatId: focused, path }); }}
+            onOpenFile={(path) => { if (focused) setFileTarget({ chatId: focused, path }); }}
+            commits={focused ? gitLog[focused] : undefined}
+            commitsLoading={focused ? gitLogLoading[focused] : undefined}
+            commitsError={focused ? gitLogError[focused] : undefined}
+            onFetchCommits={() => { if (focused) fetchGitLog(focused); }}
+            incomingCommits={focused ? gitLogIncoming[focused] : undefined}
+            incomingLoading={focused ? gitLogIncomingLoading[focused] : undefined}
+            incomingError={focused ? gitLogIncomingError[focused] : undefined}
+            onFetchIncoming={() => { if (focused) fetchGitLogIncoming(focused); }}
+            outgoingCommits={focused ? gitLogOutgoing[focused] : undefined}
+            outgoingLoading={focused ? gitLogOutgoingLoading[focused] : undefined}
+            outgoingError={focused ? gitLogOutgoingError[focused] : undefined}
+            onFetchOutgoing={() => { if (focused) fetchGitLogOutgoing(focused); }}
             collapsed={!!sourceControlCollapsed}
             onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}
           />
@@ -1520,19 +1424,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 showTypeBadges={showTypeBadges}
                 showStatusIndicators={showStatusIndicators}
                 showProjectBadges={showProjectBadges}
-                gitInfo={gitStatus[id]}
-                gitCommits={gitLog[id]}
-                gitLogLoading={gitLogLoading[id]}
-                onFetchGitLog={() => fetchGitLog(id)}
-                incomingCommits={gitLogIncoming[id]}
-                incomingLoading={gitLogIncomingLoading[id]}
-                onFetchIncoming={() => fetchGitLogIncoming(id)}
-                outgoingCommits={gitLogOutgoing[id]}
-                outgoingLoading={gitLogOutgoingLoading[id]}
-                onFetchOutgoing={() => fetchGitLogOutgoing(id)}
-                onOpenDiff={(path, staged) => setDiffTarget({ chatId: id, path, staged })}
-                onOpenConflict={(path) => setConflictTarget({ chatId: id, path })}
-                onOpenFile={(path) => setFileTarget({ chatId: id, path })}
                 note={c ? agentNotes[c.id] : undefined}
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
                 timestampFormat={timestampFormat}
@@ -1638,44 +1529,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
-        coEditors={fileCoEditors}
-        onOpenCoEditor={(key) => setFileTarget((prev) => (prev ? { ...prev, chatId: key } : prev))}
-        // WARDEN-868: open CollisionCompareDialog on the reader's version vs the
-        // picked sibling's. The reader (fileTarget.chatId) contributes no source →
-        // the dialog treats it as 'wip' (working tree), which is correct: a CLEAN
-        // reader renders the dialog's 'empty' panel note rather than misreading as
-        // resolved. The sibling's `unpushed` flag (its ↑ glyph) selects the diff
-        // range — an unpushed sibling's change lives in a committed range (source
-        // 'outgoing' → &range=outgoing); a dirty-working-tree sibling is 'wip'.
-        // fileTarget is guaranteed set at call time (onCompare only fires from a row
-        // inside an OPEN FileViewer), but guard anyway for TS + safety.
-        onCompare={(siblingKey) => {
-          if (!fileTarget) return;
-          const ce = fileCoEditors?.find((c) => c.key === siblingKey);
-          setCompareTarget({
-            path: fileTarget.path,
-            agents: [
-              { key: fileTarget.chatId },
-              { key: siblingKey, source: ce?.unpushed ? 'outgoing' : 'wip' },
-            ],
-          });
-        }}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
-      />
-      {/* Scoped to the path + two agents selected by the co-editor Compare action
-          above. Rendered as a sibling of FileViewer (not inside it) so Radix's
-          Dialog portal stacks cleanly above the already-dismissed FileViewer /
-          popover — the same sibling-mount discipline GitBadges uses for its fleet
-          Compare-edits dialog. */}
-      <CollisionCompareDialog
-        open={!!compareTarget}
-        onOpenChange={(o) => { if (!o) setCompareTarget(null); }}
-        path={compareTarget?.path ?? ''}
-        agents={compareTarget?.agents ?? []}
-        chats={chats}
-        gitStatus={gitStatus}
-        onOpenChat={onOpenChat}
       />
       <BroadcastDialog
         open={broadcastOpen}

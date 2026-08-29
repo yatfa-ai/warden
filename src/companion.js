@@ -28,8 +28,10 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { run as defaultRun, SSH_BASE_OPTS, SSH_BIN, shellQuote } from './ssh.js';
-import { buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
+// SSH_BASE_OPTS is no longer imported here: buildSshArgv applies it (WARDEN-989).
+import { run as defaultRun, SSH_BIN, buildSshArgv, shellQuote } from './ssh.js';
+import { buildChat, sortChats, parseActivityTimestamp, paneTarget } from './chatMeta.js';
+import { loopMonitor } from './loop-monitor.js';
 
 const LOCAL = '(local)';
 const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
@@ -263,20 +265,29 @@ export class CompanionRpcError extends Error {
   }
 }
 
-// Format the actionable message a thrown channel error carries — the SAME text
-// the op sites (discover/capturePanes/hasSession/…) build inline: a
+// Format the actionable message a thrown channel error carries — the ONE place
+// the op sites (discover/capturePanes/hasSession/…) get their error text: a
 // CompanionTransportError's message plus its recovery hint (how to return to the
-// default SSH path), an RPC error's message, or a generic fallback. Centralised
-// so the WARDEN-878 status surface shows byte-identical text to the op contracts
-// (a failed host's tooltip and the op's thrown error read the same). (WARDEN-878)
-function formatCompanionError(host, e) {
+// default SSH path), an RPC error's message, or a generic fallback naming the op.
+// Centralised so the WARDEN-878 status surface shows byte-identical text to the
+// op contracts (a failed host's tooltip and the op's thrown error read the same).
+//
+// `op` names the operation in the generic fallback — the ONLY thing that varied
+// across the seven hand-rolled ladders this helper replaced (WARDEN-933). It
+// defaults to the literal 'op' for the callers that are not a single named
+// operation (the bootstrap status capture, and mapCmdError's best-effort
+// envelope), preserving their `companion op failed on <host>` text verbatim.
+// (WARDEN-878, WARDEN-933)
+function formatCompanionError(host, e, op = 'op') {
   if (e instanceof CompanionTransportError) {
+    // Surface the actionable recovery hint (opt-out env var) so the user knows
+    // exactly how to return to the default SSH path — no silent fallback.
     return e.message + (e.recovery ? ` ${e.recovery}` : '');
   }
   if (e instanceof CompanionRpcError) {
     return e.message;
   }
-  return `companion op failed on ${host}: ${e?.message ?? e}`;
+  return `companion ${op} failed on ${host}: ${e?.message ?? e}`;
 }
 
 // ------------------------------- RPC channel --------------------------------
@@ -385,8 +396,20 @@ export class CompanionChannel {
 
 // Spawn the persistent ssh-to-companion process and return a Transport
 // ({write,onLine,onExit,kill}). One process per host; reused for every RPC.
-function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, host, remotePath];
+// Exported (alongside streamFileToHost below) so the two `child.stdin` write
+// sites can be driven directly by a test with an injected `spawnFn` — the
+// mid-write EPIPE race in WARDEN-983 is unreachable through the fakeDeps()
+// bootstrap harness, which stubs both legs out.
+export function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
+  // argv (including the `--` separator before the host) comes from ssh.js's
+  // buildSshArgv, so this site is covered by the same invariant as every other
+  // ssh transport even though it spawns directly rather than via run()
+  // (WARDEN-969 could not reach it; WARDEN-979 patched it by hand; WARDEN-989
+  // routed it through the builder).
+  const args = buildSshArgv(host, {
+    opts: ['-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`],
+    command: remotePath,
+  });
   let child;
   try {
     child = spawnFn(SSH_BIN, args, { windowsHide: true });
@@ -400,6 +423,15 @@ function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
   const onExit = (err) => { if (exitCb) exitCb(err); };
   child.on('exit', (code) => onExit(new Error(`companion ssh exited with code ${code}`)));
   child.on('error', (e) => onExit(e));
+  // `child.stdin` is its OWN Socket emitter, and an 'error' event with no listener
+  // THROWS — killing the whole warden server, mid-request. The try/catch in write()
+  // below does NOT cover this: it catches only a *synchronous* throw (e.g.
+  // ERR_STREAM_DESTROYED). An EPIPE from ssh dying while a write is in flight
+  // surfaces ASYNCHRONOUSLY as an 'error' event here, outside that try block
+  // entirely. Route it through onExit so it tears the channel down as an ordinary
+  // transport death (CompanionTransportError, which every caller already handles).
+  // Both guards are needed — sync and async are different paths. (WARDEN-983.)
+  child.stdin.on('error', (e) => onExit(new Error(`stdin write failed: ${e.message}`)));
   return {
     write(line) {
       try { child.stdin.write(line + '\n'); }
@@ -425,12 +457,33 @@ function makeDeadTransport(err) {
   };
 }
 
+// How long streamFileToHost's 'exit' waits for 'close' before settling on its
+// own. See the hang guard in that function for why this exists and why it is
+// generous. Exported so its test asserts against the real value rather than
+// hard-coding a sleep.
+export const UPLOAD_CLOSE_GRACE_MS = 1000;
+
 // Stream the bundled binary to the host over ssh stdin (the VS Code Remote-SSH
 // model). Returns { ok, code, stderr }. The binary is only ever exec'd on the
 // REMOTE host after this upload, never locally.
-function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
+// Exported for the WARDEN-983 stdin-EPIPE guard — see spawnPersistentChannel.
+//
+// Known, deliberate exception to the WARDEN-464 'close'-not-'exit' discipline
+// this function now follows: `ensureControlMaster` (src/ssh.js:139) also
+// accumulates stderr and returns it through the same degrading
+// `${stderr || `exit ${code}`}` idiom, but it must STAY on 'exit'. It starts a
+// persistent `-N` ControlMaster with ControlPersist=10m and resolves
+// `{ ..., process: child }` on success; the backgrounded master can hold its
+// stdio open indefinitely, so 'close' may never fire and converting it would
+// risk wedging the whole connection pool — far worse than a degraded message on
+// its failure leg.
+export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
   const cmd = buildUploadScript(remotePath);
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, host, `bash -lc ${shellQuote(cmd)}`];
+  // argv from ssh.js's buildSshArgv — see spawnPersistentChannel above.
+  const args = buildSshArgv(host, {
+    opts: ['-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`],
+    command: `bash -lc ${shellQuote(cmd)}`,
+  });
   return new Promise((resolve) => {
     let child;
     try {
@@ -441,17 +494,95 @@ function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
     }
     let stderr = '';
     let resolved = false;
-    const done = (r) => { if (!resolved) { resolved = true; resolve(r); } };
+    let graceTimer = null;
+    const done = (r) => {
+      if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+      if (!resolved) { resolved = true; resolve(r); }
+    };
     const stream = fs.createReadStream(localBinaryPath);
     stream.on('error', (e) => {
       try { child.kill('SIGKILL'); } catch { /* noop */ }
       done({ ok: false, code: -1, stderr: `read binary failed: ${e.message}` });
     });
     child.on('error', (e) => done({ ok: false, code: -1, stderr: String(e) }));
+    // setEncoding('utf8') before the 'data' listener (WARDEN-1045): accumulating
+    // Buffers with `+=` decodes each chunk in isolation, so a multibyte character
+    // split across a read boundary is destroyed. Additive consistency only — this
+    // stderr carries short ssh diagnostics, well under the 64KB pipe buffer — but
+    // the idiom must not diverge between the spawn-and-collect siblings.
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('exit', (code) => {
+    // Drain stdout. 'close' waits for ALL stdio to close, and this function never
+    // reads child.stdout — an unconsumed pipe fills its buffer and stalls the
+    // child (and therefore the close we now resolve on). Same reason sshControl
+    // resumes the streams it ignores (src/ssh.js:90-91).
+    if (child.stdout) child.stdout.resume();
+    // 'close' (NOT 'exit') — this resolver ACCUMULATES stderr and RETURNS it, and
+    // that stderr is the ONLY diagnostic a user gets when a host fails to provision
+    // (bootstrapChannel's `upload failed: ${stderr || `ssh exited ${code}`}` — the
+    // `||` means a truncated stderr does not error, it silently degrades the real
+    // cause, e.g. "No space left on device", to a bare "ssh exited 1"). 'exit'
+    // fires BEFORE the stdio pipes drain, so it can capture a truncated or empty
+    // tail; 'close' fires only after they drain. The race is wide here because we
+    // pipe ~2.1MB through child.stdin, saturating the loop in exactly the window
+    // the child exits and its stderr tail must drain. Same class as WARDEN-464/766
+    // (ssh.js run(), runLocalCapture, gitRoutes) — 'close' passes the same `code`,
+    // so the {ok, code, stderr} contract is unchanged; only stderr gets completer.
+    child.on('close', (code) => {
       stream.destroy();
       done({ ok: code === 0, code: code ?? -1, stderr });
+    });
+    // Hang guard. 'close' requires every stdio stream to close; a child whose
+    // stdio is held open (inherited by a grandchild, a wedged pipe) would leave a
+    // promise that resolves TODAY pending forever. So 'exit' — which we no longer
+    // resolve on — arms a bounded grace instead: if 'close' has not landed within
+    // it, settle with whatever stderr drained. 'close' clears the timer, and both
+    // paths funnel through the idempotent done(), so whichever lands first wins
+    // and the other no-ops. The grace is ~1000x a real drain (microseconds), so in
+    // practice 'close' always wins; when it doesn't, the result is today's
+    // possibly-truncated stderr — never worse than the status quo, never a hang.
+    // NOT unref'd: this timer is the only thing keeping the promise alive on that
+    // path, and an unref'd one would let node exit with the upload unsettled.
+    child.on('exit', (code) => {
+      if (resolved) return;
+      stream.destroy();
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        done({ ok: code === 0, code: code ?? -1, stderr });
+      }, UPLOAD_CLOSE_GRACE_MS);
+    });
+    // `child.stdin` is its own Socket emitter and an unlistened 'error' THROWS —
+    // process death, taking the warden server with it. The pipe below streams
+    // ~2.1MB, so the window where ssh can die mid-write (EPIPE, delivered
+    // ASYNCHRONOUSLY as this event) is wide. `child.on('error')` above does NOT
+    // cover it: that fires for spawn failures, not for writes to the child's pipe.
+    // Route it through the idempotent done() so the upload resolves as a failed
+    // upload; whichever of stdin-error / exit lands first wins, the other no-ops.
+    // (WARDEN-983.)
+    // APPEND the accumulated remote stderr, never replace it (WARDEN-1018). When
+    // the remote dies mid-upload (disk full, mkdir/auth failure) it stops reading
+    // while ~2.1MB is still piped, so the write EPIPEs — and because child.stdin
+    // is one of the stdio streams 'close' waits on, THIS handler necessarily runs
+    // before 'close' and wins deterministically. Reporting only the local symptom
+    // ("write EPIPE") would therefore discard the remote cause on the DOMINANT
+    // failure leg, exactly the diagnostic the 'close' comment above calls "the
+    // ONLY diagnostic a user gets when a host fails to provision".
+    // Additive by construction: with an empty accumulator the message is
+    // byte-identical to the pre-WARDEN-1018 one, so no path can regress.
+    // NOT solved by arming the UPLOAD_CLOSE_GRACE_MS timer here so 'close' wins
+    // with complete stderr — that reds companion.test.js:1864, which requires the
+    // stdin path (not the exit path) to produce this result.
+    // Caveat, deliberately not oversold: stdin's 'error' precedes the stderr
+    // pipe's full drain, so this recovers what has DRAINED SO FAR, not a
+    // guaranteed-complete remote message. Strictly better than discarding it.
+    child.stdin.on('error', (e) => {
+      stream.destroy();
+      const remote = stderr.trim();
+      done({
+        ok: false,
+        code: -1,
+        stderr: `upload stdin failed: ${e.message}${remote ? ` — remote said: ${remote}` : ''}`,
+      });
     });
     stream.pipe(child.stdin);
   });
@@ -792,16 +923,7 @@ export async function discover(host, cfg = {}, opts = {}, deps = {}) {
     const chats = mapCompanionContainers(host, result?.containers || [], session);
     return { host, ok: true, chats };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      // Surface the actionable recovery hint (opt-out env var) so the user knows
-      // exactly how to return to the default SSH path — no silent fallback.
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion discover failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'discover');
     return { host, ok: false, error: msg, chats: [] };
   }
 }
@@ -829,23 +951,11 @@ export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
     const channel = await getChannel(host, cfg, deps);
     // Send the per-host pane list. `container` is null for bare-tmux / manual
     // chats so the companion selects bare `tmux` (vs `docker exec <c> tmux`).
-    // The target falls back container -> 'agent', identical to chats.js.
-    const panes = (list || []).map((c) => ({
-      key: c.key,
-      container: c.container || null,
-      session: c.session || c.container || 'agent',
-    }));
+    const panes = describePanes(list);
     const result = await channel.call('capturePanes', { panes }, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true, panes: (result && result.panes) || {} };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion capturePanes failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'capturePanes');
     return { host, ok: false, error: msg, panes: {} };
   }
 }
@@ -871,22 +981,14 @@ export async function hasSession(host, { container, session } = {}, cfg = {}, op
   }
   try {
     const channel = await getChannel(host, cfg, deps);
-    // The target falls back session -> container -> 'agent', identical to
-    // capturePanes (companion.js:512-517) and src/chats.js. `container` is null
-    // for bare-tmux / manual chats so the companion selects bare `tmux`.
-    const target = session || container || 'agent';
+    // `container` is null for bare-tmux / manual chats so the companion selects
+    // bare `tmux`.
+    const target = paneTarget(session, container);
     const result = await channel.call('hasSession', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
     return { host, ok: true, exists: !!(result && result.exists) };
   } catch (e) {
     const transport = e instanceof CompanionTransportError;
-    let msg;
-    if (transport) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion hasSession failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'hasSession');
     return { host, ok: false, transport, error: msg, exists: false };
   }
 }
@@ -919,21 +1021,14 @@ export async function spawnSession(host, params, cfg = {}, opts = {}, deps = {})
     const channel = await getChannel(host, cfg, deps);
     const payload = {
       container: params?.container || null,
-      session: params?.session || params?.container || 'agent',
+      session: paneTarget(params?.session, params?.container),
       cwd: params?.cwd || '',
       cmd: Array.isArray(params?.cmd) ? params.cmd : [],
     };
     await channel.call('spawnSession', payload, { timeout: opts.timeout ?? 30000 });
     return { host, ok: true };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion spawnSession failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'spawnSession');
     return { host, ok: false, error: msg };
   }
 }
@@ -952,19 +1047,12 @@ export async function killSession(host, params, cfg = {}, opts = {}, deps = {}) 
     const channel = await getChannel(host, cfg, deps);
     const payload = {
       container: params?.container || null,
-      session: params?.session || params?.container || 'agent',
+      session: paneTarget(params?.session, params?.container),
     };
     await channel.call('killSession', payload, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion killSession failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'killSession');
     return { host, ok: false, error: msg };
   }
 }
@@ -1007,30 +1095,24 @@ function mapCmdResult(host, result) {
 // best-effort caller (resize, wrapped in try/catch at the server.js call site)
 // needs to swallow without distinguishing.
 function mapCmdError(host, e) {
-  let msg;
-  if (e instanceof CompanionTransportError) {
-    msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-  } else if (e instanceof CompanionRpcError) {
-    msg = e.message;
-  } else {
-    msg = `companion op failed on ${host}: ${e?.message ?? e}`;
-  }
-  return { host, ok: false, code: -1, stdout: '', stderr: msg };
+  // No op name: the generic `companion op failed on <host>` default is this
+  // envelope's long-standing text (resize and friends share one best-effort
+  // mapper rather than naming a single op). (WARDEN-933)
+  return { host, ok: false, code: -1, stdout: '', stderr: formatCompanionError(host, e) };
 }
 
 // resize() over the companion channel: runs `set-option -t <target> window-size
 // latest` host-side. Returns {host, ok, code, stdout, stderr} (the raw runTmux
 // shape) or {host, ok:false, code:-1, stderr} on ANY failure — it NEVER falls back
-// to raw SSH. The target falls back session → container → "agent", identical to
-// hasSession (companion.js) and src/chats.js. `container` is null for bare-tmux /
-// manual chats so the companion selects bare `tmux`.
+// to raw SSH. `container` is null for bare-tmux / manual chats so the companion
+// selects bare `tmux`.
 export async function resize(host, { container, session } = {}, cfg = {}, opts = {}, deps = {}) {
   if (host === LOCAL) {
     return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
   }
   try {
     const channel = await getChannel(host, cfg, deps);
-    const target = session || container || 'agent';
+    const target = paneTarget(session, container);
     const result = await channel.call('resize', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
     return mapCmdResult(host, result);
   } catch (e) {
@@ -1065,8 +1147,7 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
 // send() over the companion channel: runs the WARDEN-254 write sequence
 // (single-line send-keys -l + Enter; multiline set-buffer / paste-buffer -p -d /
 // send-keys Enter) host-side. <text> is an arbitrary user directive carried as a
-// JSON param and shell-quoted HOST-SIDE (never interpolated raw). The target
-// falls back session → container → "agent", identical to resize / hasSession.
+// JSON param and shell-quoted HOST-SIDE (never interpolated raw).
 export async function send(host, { container, session, text } = {}, cfg = {}, opts = {}, deps = {}) {
   if (host === LOCAL) {
     return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
@@ -1079,7 +1160,7 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
       // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
       return { host, unsupported: true };
     }
-    const target = session || container || 'agent';
+    const target = paneTarget(session, container);
     const result = await channel.call('send', {
       container: container || null,
       session: target,
@@ -1105,7 +1186,7 @@ export async function sendKey(host, { container, session, key } = {}, cfg = {}, 
     if (!methods.includes('sendKeys')) {
       return { host, unsupported: true };
     }
-    const target = session || container || 'agent';
+    const target = paneTarget(session, container);
     const result = await channel.call('sendKeys', {
       container: container || null,
       session: target,
@@ -1247,13 +1328,12 @@ function ensurePaneDeltaHandler(channel, host) {
 }
 
 // describePanes normalizes a chat list to the {key,container,session} shape the
-// companion expects (identical to capturePanes' mapping). container null for
-// bare-tmux; target falls back session -> container -> 'agent'.
+// companion expects. container null for bare-tmux; target via paneTarget().
 function describePanes(list) {
   return (list || []).map((c) => ({
     key: c.key,
     container: c.container || null,
-    session: c.session || c.container || 'agent',
+    session: paneTarget(c.session, c.container),
   }));
 }
 
@@ -1285,14 +1365,7 @@ async function syncSubscriptionOnce(host, cfg, opts = {}, deps = {}) {
     await channel.call('subscribePanes', { panes }, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true, subscribed: true, count: panes.length };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion subscribePanes failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'subscribePanes');
     // Companion-or-fail surfaces the actionable error, but a subscription failure
     // does NOT break pane rendering: capturePanes keeps polling (freshness is
     // false until a real push arrives), so this is a recoverable degradation.
@@ -1468,7 +1541,11 @@ export function startPaneDeltaSweep(cfg = {}, opts = {}, deps = {}) {
   if (paneDeltaSweepTimer) return paneDeltaSweepTimer;
   if (!isCompanionTransportEnabled()) return null;
   const interval = opts.interval ?? AGENT_STATE_TTL_MS;
-  const tick = () => { reconcilePaneSubscriptions([], cfg, {}, deps).catch(() => {}); };
+  // Traced for the server stall monitor (WARDEN-977): an always-on background
+  // sweep that blocks the loop must be nameable in the stall record instead of
+  // being blamed on whichever request it froze. `trace` hands back the tick's own
+  // value, so the fire-and-forget shape below is unchanged.
+  const tick = () => { loopMonitor.trace('sweep:pane-delta', () => reconcilePaneSubscriptions([], cfg, {}, deps)).catch(() => {}); };
   paneDeltaSweepTimer = setInterval(tick, interval);
   if (typeof paneDeltaSweepTimer.unref === 'function') paneDeltaSweepTimer.unref();
   return paneDeltaSweepTimer;

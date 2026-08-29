@@ -8,7 +8,15 @@
 // Two DISTINCT resets, each clearly labeled as to its scope (WARDEN-889 #4):
 //   1. "Reset appearance & UI preferences" — CLIENT-side UI prefs only
 //      (appearance/terminal/new-chat/behavior). Preserves the open workspace.
-//      Never touches the backend / config.json.
+//      Never touches the backend / config.json. NOTE (WARDEN-957): this reset
+//      also destroys USER-AUTHORED content — customPresets (deleted), snippets
+//      (reverted to STARTER_SNIPPETS, so authored ones are lost AND deleted
+//      starters return, bypassing the one-time-seed contract at storage.ts's
+//      STARTER_SNIPPETS), and hostLabels (cleared). Both the blurb and the
+//      confirm dialog below MUST keep naming all three: the copy is the only
+//      safety mechanism for an action with no undo (WARDEN-68 Rule 8). If the
+//      reset set ever changes, change this copy with it — web/storage.test.mjs
+//      asserts those three keys are RESET, not preserved.
 //   2. "Reset backend configuration to defaults" — EVERY backend preference
 //      (webhook/telemetry/observer/hosts/thresholds/…) restored to its default,
 //      INCLUDING the write-only auth tokens no normal Save can clear. Instant
@@ -73,7 +81,7 @@ export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onReset
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">Reset appearance &amp; UI preferences</span>
               <span className="text-xs text-muted-foreground">
-                Resets client-side appearance, terminal, new-chat, and behavior preferences to their defaults. Your open tabs, panes, focus, and panel layout are preserved. Does not touch backend configuration.
+                Resets client-side appearance, terminal, new-chat, and behavior preferences to their defaults. This also deletes your custom spawn presets, reverts your instruction snippets to the four starters (any snippet you wrote or edited is lost), and clears your per-host display labels — this cannot be undone. Your open tabs, panes, focus, and panel layout are preserved. Does not touch backend configuration.
               </span>
             </div>
             <div>
@@ -113,7 +121,7 @@ export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onReset
         open={resetPrefsOpen}
         onOpenChange={(o) => { if (!o) setResetPrefsOpen(false); }}
         title="Reset appearance & UI preferences?"
-        description="Resets all client-side appearance, terminal, new-chat, and behavior preferences to their defaults. Your open tabs, panes, focus, and panel layout are preserved. Backend configuration is not touched."
+        description="Resets all client-side appearance, terminal, new-chat, and behavior preferences to their defaults. Your custom spawn presets are deleted, your instruction snippets revert to the four starters (any snippet you wrote or edited is lost, and any starter you deleted comes back), and your per-host display labels are cleared. This action cannot be undone. Your open tabs, panes, focus, and panel layout are preserved. Backend configuration is not touched."
         confirmLabel="Reset"
         cancelLabel="Cancel"
         destructive

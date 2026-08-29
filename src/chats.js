@@ -5,7 +5,7 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog, stampCatalogActivity } from './config.js';
-import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, agentTarget } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
 import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
@@ -298,12 +298,28 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
 }
 
 // Check which catalog sessions are alive on a host (one ssh round-trip).
-async function discoverManual(host, entries, cfg) {
+//
+// `opts.activity === false` is the lean path (the 60s lifecycle sweep): it skips
+// the second-pass capture below exactly as discover() (:272) and discoverAll()'s
+// LOCAL catalog branch (:418) already do. The lifecycle diff needs only
+// alive/dead transitions, and this block costs one NON-pooled ssh capture-pane
+// plus a chats.json read-modify-write per active session. (WARDEN-994; the
+// omission was drift — WARDEN-245 added the stamp a day after WARDEN-147 added
+// the guards, to a helper that had no `opts`.)
+//
+// `deps` is a test seam mirroring discover()'s at :197 — the ssh calls and the
+// catalog write are injectable so the lean/non-lean split is assertable without
+// real ssh or touching chats.json. Defaults are the real ones, so production
+// behavior is unchanged.
+export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
+  const runFn = deps.run ?? run;
+  const runWithPoolFn = deps.runWithPool ?? runWithPool;
+  const stampFn = deps.stampCatalogActivity ?? stampCatalogActivity;
   const sessions = entries.map((e) => e.session).filter((s) => NAME_RE.test(s));
   const activeMap = {};
   if (sessions.length) {
     const script = `for s in ${sessions.join(' ')}; do if tmux has-session -t "$s" >/dev/null 2>&1; then printf '1 %s\\n' "$s"; else printf '0 %s\\n' "$s"; fi; done`;
-    const res = await runWithPool(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 }, cfg);
+    const res = await runWithPoolFn(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 }, cfg);
     if (res.ok) for (const line of res.stdout.split('\n')) {
       const m = line.match(/^([01]) (\S+)$/);
       if (m) activeMap[m[2]] = m[1] === '1';
@@ -317,11 +333,16 @@ async function discoverManual(host, entries, cfg) {
   const result = entries.map(e => ({ ...e, active: !!activeMap[e.session], lastActivity: e.lastActivity ?? null }));
   const activeEntries = result.filter(e => e.active);
 
-  // Second pass: capture activity timestamps concurrently for all active sessions
-  if (activeEntries.length > 0) {
+  // Second pass: capture activity timestamps concurrently for all active sessions.
+  // Skipped in the lean path (opts.activity === false, the lifecycle poll): that
+  // diff needs only alive/dead transitions, and each capture here is a fresh
+  // NON-pooled ssh (plain `run`, not runWithPool) plus a chats.json write.
+  // Inactive/lean entries still carry the persisted lastActivity hydrated above,
+  // so WARDEN-245's recency ordering is preserved. (WARDEN-994)
+  if (opts.activity !== false && activeEntries.length > 0) {
     await Promise.all(
       activeEntries.map(entry =>
-        run(host, `tmux capture-pane -t ${entry.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
+        runFn(host, `tmux capture-pane -t ${entry.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
           .then(async activityRes => {
             if (activityRes.ok) {
               // Shared timestamp parse — same helper the companion + yatfa path
@@ -332,7 +353,7 @@ async function discoverManual(host, entries, cfg) {
                 // Persist while alive so the value survives the chat later going
                 // inactive AND a warden restart (WARDEN-245). Best-effort: a reject
                 // propagates to the .catch below (never blocks discovery).
-                await stampCatalogActivity(host, entry.session, entry.lastActivity);
+                await stampFn(host, entry.session, entry.lastActivity);
               }
             }
           })
@@ -346,14 +367,24 @@ async function discoverManual(host, entries, cfg) {
   return result;
 }
 
-export async function discoverAll(hosts, cfg, opts = {}) {
-  const results = await Promise.all(hosts.map((h) => discover(h, cfg, { activity: opts.activity })));
+// `deps` is a test seam mirroring discover()'s at :197 and discoverManual()'s at
+// :314. It exists so the lean flag's ARRIVAL at the remote catalog branch is
+// observable behaviorally — a guard inside discoverManual is dead code unless
+// this function forwards the flag, and that forward is otherwise unreachable
+// from a test (this function does its own loadCatalog + real ssh). Defaults are
+// the real ones and no caller passes a 4th argument, so production behavior is
+// unchanged. (WARDEN-994)
+export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
+  const discoverFn = deps.discover ?? discover;
+  const discoverManualFn = deps.discoverManual ?? discoverManual;
+  const loadCatalogFn = deps.loadCatalog ?? loadCatalog;
+  const results = await Promise.all(hosts.map((h) => discoverFn(h, cfg, { activity: opts.activity })));
   let all = [];
   const errors = results.filter((r) => !r.ok).map((r) => ({ host: r.host, error: r.error }));
   for (const r of results) if (r.ok) all = all.concat(r.chats);
 
   // catalog chats (all kind:'tmux' now): local host → local tmux; remote → ssh.
-  const catalog = await loadCatalog();
+  const catalog = await loadCatalogFn();
   if (catalog.length) {
     const byHost = {};
     for (const e of catalog) (byHost[e.host || LOCAL] ||= []).push(e);
@@ -366,7 +397,7 @@ export async function discoverAll(hosts, cfg, opts = {}) {
         const alive = await localAliveSessions();
         actives = entries.map((e) => ({ e, active: alive.has(e.session) }));
       } else {
-        actives = (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
+        actives = (await discoverManualFn(host, entries, cfg, { activity: opts.activity })).map((e) => ({ e, active: e.active }));
       }
 
       // Create result objects first. Inactive catalog chats hydrate lastActivity
@@ -487,7 +518,10 @@ export async function discoverHost(host, cfg) {
               await stampCatalogActivity(LOCAL, o.session, o.lastActivity);
             }
           }
-        }).catch(() => {})
+        })
+        .catch(err => {
+          console.warn(`Failed to capture activity for local session ${o.session}:`, err instanceof Error ? err.message : String(err));
+        })
     ));
     chats.push(...objs);
   } else {
@@ -520,7 +554,7 @@ export async function discoverHost(host, cfg) {
 export function buildCaptureScript(list) {
   return list.map((c) => {
     const t = c.container ? `docker exec ${shellQuote(c.container)} tmux` : 'tmux';
-    const s = shellQuote(c.session || c.container || 'agent');
+    const s = shellQuote(paneTarget(c.session, c.container));
     return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
   }).join('; ');
 }
@@ -545,7 +579,8 @@ export function parseCaptureSentinels(stdout) {
 }
 
 // Capture tmux pane content from multiple chats concurrently.
-// Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
+// Groups by host to minimize SSH round-trips. Returns a map of HOST-QUALIFIED
+// chat id (c.id, `${host}:${name}`) -> pane content. (WARDEN-1223)
 // `deps` is a test seam (defaults to {} in production, where capturePanesViaCompanion
 // bootstraps the real SSH channel) forwarded to the companion transport so the
 // WARDEN-413 skip path is drivable end-to-end with a fake channel. (WARDEN-413)
@@ -553,6 +588,22 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
   const byHost = {};
   for (const c of chats) (byHost[c.host] ||= []).push(c);
   const out = {};
+  // WARDEN-1223: the result map is keyed by the HOST-QUALIFIED chat id (c.id,
+  // `${host}:${name}`), never the bare `key`. Within one host the bare key is
+  // unique (it is a container or tmux session name), but two hosts may each run
+  // a same-named session — keying the flat map on the bare name collapses them
+  // into one slot, so one agent is badged from the other's terminal and the
+  // second host's capture failure is masked by the first host's entry. Each
+  // per-host capture below still runs on bare keys (the sentinel/script and
+  // companion contracts are unchanged — the bare key IS unique per host); this
+  // helper is where a host-local result is promoted to the host-qualified slot.
+  const mergeHost = (host, panes) => {
+    for (const c of byHost[host] || []) {
+      if (panes && Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        out[c.id] = panes[c.key];
+      }
+    }
+  };
   await Promise.all(Object.entries(byHost).map(async ([host, list]) => {
     if (host === LOCAL) {
       // WARDEN-440: capture each LOCAL pane via async runLocalTmux, concurrently.
@@ -564,7 +615,7 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
       // off-thread, so HTTP/WS/timers stay responsive during monitor ticks.
       await Promise.all(list.map(async (c) => {
         const r = await runLocalTmux(['capture-pane', '-t', c.session || c.container, '-p', '-e', '-S', '-60', '-E', '-']);
-        if (r.ok) out[c.key] = r.stdout;
+        if (r.ok) out[c.id] = r.stdout;
       }));
       return;
     }
@@ -583,17 +634,17 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
       // within PANE_DELTA_FRESH_MS and capturePanes resumes polling, so a frozen
       // push can never freeze the UI. The cache is in-memory only.
       if (hasFreshPaneDelta(host)) {
-        Object.assign(out, readPaneDeltas(host, list.map((c) => c.key)));
+        mergeHost(host, readPaneDeltas(host, list.map((c) => c.key)));
         return;
       }
       const r = await capturePanesViaCompanion(host, list, cfg, {}, deps);
-      if (r.ok) Object.assign(out, r.panes);
+      if (r.ok) mergeHost(host, r.panes);
       return;
     }
     const script = buildCaptureScript(list);
     const res = await runWithPool(host, script, { timeout: 15000 }, cfg);
     if (!res.ok) return;
-    Object.assign(out, parseCaptureSentinels(res.stdout));
+    mergeHost(host, parseCaptureSentinels(res.stdout));
   }));
   return out;
 }

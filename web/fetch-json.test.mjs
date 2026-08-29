@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, modPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-fetch-json-'));
 const tmpFile = join(tmpDir, 'api.mjs');
 writeFileSync(tmpFile, code);
-const { fetchJson } = await import(tmpFile);
+const { fetchJson, postJson, putJson } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 // --- Fake fetch + response builders ---------------------------------------
@@ -51,6 +51,17 @@ const jsonRes = (status, body) => ({
   json: async () => body,
 });
 const ok = (body) => jsonRes(200, body);
+
+// A response whose HEADERS arrived (so `ok`/`status` are set) but whose BODY
+// fails to parse — the truncated-mid-stream shape a dropped SSH tunnel produces.
+// `fetch` resolves on headers, so this is `res.ok === true` with a rejecting
+// `json()`; it is the WARDEN-1023 scenario at both defect sites.
+const unparseableStatus = (status) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => { throw new Error('bad json'); },
+});
+const unparseable2xx = () => unparseableStatus(200);
 
 let passed = 0;
 const test = async (name, fn) => {
@@ -150,11 +161,61 @@ await test('4xx is a hard client error — returned at once, NOT retried', async
   assert.equal(fetchImpl.calls(), 1, 'a 4xx must not be retried — retrying a client error hammers');
 });
 
-await test('a non-JSON 2xx body degrades to ok:true with undefined data (parity with requestJson)', async () => {
-  const fetchImpl = scriptableFetch([{ ok: true, status: 200, json: async () => { throw new Error('bad json'); } }]);
-  const r = await fetchJson('/api/config', { fetchImpl, sleepImpl: sleepZero });
-  assert.equal(r.ok, true);
+// A 2xx whose body fails to parse is a REAL failure (WARDEN-1023).
+//
+// This test previously asserted the OPPOSITE (`ok:true` + `data: undefined`,
+// "parity with requestJson") and so actively pinned the bug in — the right
+// scenario with the wrong expectation, exactly the shape WARDEN-89 names.
+// The convention it now matches is `readListBody` (WARDEN-1014, api.ts): the
+// `.catch(() => undefined)` tolerance belongs to the NON-2xx leg only, because
+// `fetch` resolves as soon as the HEADERS arrive — a body truncated mid-stream
+// (a dropped SSH tunnel) is `res.ok === true` with a rejecting `json()`.
+// Reported as ok:true, that rendered Settings as confident DEFAULTS with Save
+// enabled, one click from overwriting the user's real backend config.
+await test('a non-JSON 2xx body is a REAL failure → ok:false (not ok:true + undefined data)', async () => {
+  const fetchImpl = scriptableFetch([unparseable2xx(), unparseable2xx(), unparseable2xx()]);
+  const r = await fetchJson('/api/config', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.ok, false, 'a truncated 200 must NOT be reported as a success');
   assert.equal(r.data, undefined);
+  assert.ok(r.error, 'the parse failure must surface a non-empty error for the Retry state');
+  assert.match(r.error, /bad json/);
+});
+
+await test('a truncated 2xx is retryable — it joins the transient path, then goes terminal', async () => {
+  // A mid-stream truncation is the same transient class as a 5xx, so it is
+  // retried rather than failed at once...
+  const fetchImpl = scriptableFetch([unparseable2xx(), unparseable2xx(), unparseable2xx()]);
+  const r = await fetchJson('/api/config', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.ok, false);
+  assert.equal(fetchImpl.calls(), 3, '1 initial + 2 retries — a truncated 2xx is retried');
+});
+
+await test('a truncated 2xx that heals on retry → ok:true with the real data', async () => {
+  // ...and a blip that self-heals must still deliver the body, not an error.
+  const fetchImpl = scriptableFetch([unparseable2xx(), ok({ tmuxSession: 'agent' })]);
+  const r = await fetchJson('/api/config', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.data, { tmuxSession: 'agent' });
+});
+
+await test('the non-2xx tolerance is PRESERVED — an HTML 500 body still reads as ok:false', async () => {
+  // The gate must narrow the tolerance to the failure leg, not remove it: a
+  // 5xx serving an HTML error page must never surface a raw JSON parse error.
+  const fetchImpl = scriptableFetch([
+    unparseableStatus(500), unparseableStatus(500), unparseableStatus(500),
+  ]);
+  const r = await fetchJson('/api/config', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /500/, 'the STATUS carries the message when the body will not parse');
+  assert.doesNotMatch(r.error, /bad json/, 'a failure body must not leak a JSON parse error');
+});
+
+await test('an HTML 4xx body still returns at once without retrying', async () => {
+  const fetchImpl = scriptableFetch([unparseableStatus(404)]);
+  const r = await fetchJson('/api/config', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, undefined, 'no error field in an unparseable body → undefined, not a throw');
+  assert.equal(fetchImpl.calls(), 1, 'a 4xx must not be retried even when its body is junk');
 });
 
 // === Timeout — the core "never spin forever" guarantee =====================
@@ -203,6 +264,57 @@ await test('a 5xx with no error field surfaces a status-derived message', async 
   const r = await fetchJson('/api/config', { retries: 0, fetchImpl, sleepImpl: sleepZero });
   assert.equal(r.ok, false);
   assert.match(r.error, /502/, 'falls back to a status string when the body has no error');
+});
+
+// === requestJson (postJson / putJson) — the SECOND defect site =============
+//
+// `requestJson` had the identical ungated `.catch(() => undefined)` and was the
+// stated precedent the `fetchJson` bug was written for ("parity with
+// requestJson"), yet this file never exercised it. It has no `fetchImpl` seam,
+// so these tests swap `globalThis.fetch` for the duration.
+
+const withFetch = async (impl, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = impl;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+};
+
+await test('postJson: a non-JSON 2xx body is a REAL failure → ok:false + error', async () => {
+  const r = await withFetch(async () => unparseable2xx(), () => postJson('/api/send', { t: 'hi' }));
+  assert.equal(r.ok, false, 'a truncated 200 must NOT be reported as a success');
+  assert.equal(r.data, undefined);
+  assert.match(r.error, /bad json/);
+});
+
+await test('putJson: a truncated 200 on /api/config surfaces ok:false, not a silent success', async () => {
+  const r = await withFetch(async () => unparseable2xx(), () => putJson('/api/config', { hosts: [] }));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /bad json/);
+});
+
+await test('postJson: a well-formed 2xx still returns ok:true + parsed data', async () => {
+  const r = await withFetch(async () => ok({ saved: true }), () => postJson('/api/send', {}));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.data, { saved: true });
+});
+
+await test('postJson: the non-2xx tolerance is PRESERVED — an HTML 500 reads as ok:false', async () => {
+  const r = await withFetch(async () => unparseableStatus(500), () => postJson('/api/send', {}));
+  assert.equal(r.ok, false, 'the status still drives the failure');
+  assert.equal(r.error, undefined, 'an unparseable failure body degrades to undefined, never throws');
+  assert.equal(r.res.status, 500, 'the raw Response is still handed to the caller');
+});
+
+await test('postJson: a 4xx with a JSON error body still surfaces that error', async () => {
+  const r = await withFetch(async () => jsonRes(400, { error: 'bad request' }), () =>
+    postJson('/api/send', {}),
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'bad request');
 });
 
 console.log(`\n# tests ${passed}`);

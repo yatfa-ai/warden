@@ -498,29 +498,37 @@ export function parsePhaseFromTailOutput(stdout) {
 // Read the local filesystem's most-recent transcript tail and return it in the
 // ___TAIL-marked shape parsePhaseFromTailOutput expects (or '' if none). Uses
 // os.homedir(), so a test redirects HOME to a throwaway dir to isolate it.
-function readLocalTranscriptTail() {
+// Async (WARDEN-1073): this walk stat'd every transcript in the archive with
+// synchronous fs on the WS request path — 400+ blocking syscalls per call, once
+// per pane, growing monotonically with transcript history. Converted to fsp so
+// the syscalls yield the event loop, matching collectLocalSessionFiles in
+// claudeSessions.js:134 (the same walk, already async) and the WARDEN-832
+// decision of record: no synchronous fs on a runtime/request path. Structure and
+// skip/'' semantics are otherwise unchanged.
+async function readLocalTranscriptTail() {
   const dir = path.join(os.homedir(), '.claude', 'projects');
   const files = [];
   let projects;
-  try { projects = fs.readdirSync(dir); } catch { return ''; } // no ~/.claude/projects
+  try { projects = await fsp.readdir(dir); } catch { return ''; } // no ~/.claude/projects
   for (const proj of projects) {
     const pdir = path.join(dir, proj);
-    try { if (!fs.statSync(pdir).isDirectory()) continue; } catch { continue; }
-    for (const f of fs.readdirSync(pdir)) {
+    try { if (!(await fsp.stat(pdir)).isDirectory()) continue; } catch { continue; }
+    for (const f of await fsp.readdir(pdir)) {
       if (!f.endsWith('.jsonl')) continue;
       const fp = path.join(pdir, f);
-      try { files.push({ fp, mtime: fs.statSync(fp).mtimeMs }); } catch { /* skip */ }
+      try { files.push({ fp, mtime: (await fsp.stat(fp)).mtimeMs }); } catch { /* skip */ }
     }
   }
   if (!files.length) return '';
   files.sort((a, b) => b.mtime - a.mtime);
   const { fp } = files[0];
-  const size = fs.statSync(fp).size;
+  const size = (await fsp.stat(fp)).size;
   const len = Math.min(size, 8192);
-  const fd = fs.openSync(fp, 'r');
   const buf = Buffer.alloc(len);
-  fs.readSync(fd, buf, 0, len, size - len);
-  fs.closeSync(fd);
+  // try/finally: the handle closes on every path, including a throwing read — a
+  // leaked fd on this per-pane path would be worse than the stall being fixed.
+  const fh = await fsp.open(fp, 'r');
+  try { await fh.read(buf, 0, len, size - len); } finally { await fh.close(); }
   return '___TAIL\n' + buf.toString('utf8');
 }
 
@@ -541,7 +549,7 @@ export async function readTranscriptPhase(chat, cfg = {}) {
       stdout = res.stdout;
     } else if (chat.host === LOCAL) {
       // bare local tmux 'claude' session: transcript on the local filesystem.
-      stdout = readLocalTranscriptTail();
+      stdout = await readLocalTranscriptTail();
     } else {
       // bare remote tmux session: transcript on the remote host.
       const res = await run(chat.host, buildTranscriptTailScript(), { timeout: 10000 }, cfg);
@@ -611,7 +619,9 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
     for (const id of idList) {
       const r = resolveChat(id, chats, null);
       if (r.chat) {
-        if (!seen.has(r.chat.key)) { seen.add(r.chat.key); resolved.push(r.chat); }
+        // Dedupe by the HOST-QUALIFIED id (WARDEN-1223): the bare key can name
+        // two different hosts' sessions, and deduping on it would drop one.
+        if (!seen.has(r.chat.id)) { seen.add(r.chat.id); resolved.push(r.chat); }
       } else if (r.error) {
         resolutionErrors.push({ id, error: r.error });
       } else {
@@ -637,30 +647,35 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
     const panes = await capturePanes(toCapture, cfg);
 
     const base = (c) => ({
-      id: c.container || c.session, host: c.host, project: c.project, role: c.role, active: c.active,
+      // id is the HOST-QUALIFIED chat id (WARDEN-1223): the bare container/session
+      // name can name two different hosts' sessions, and the read result rows and
+      // the last-read state cache below key on it.
+      id: c.id, host: c.host, project: c.project, role: c.role, active: c.active,
     });
 
-    // Build the raw-pane entries AND the observedState side-channel (key →
+    // Build the raw-pane entries AND the observedState side-channel (qualified id →
     // {state, phase, sig}) for the last-read cache (WARDEN-166). Entries stay RAW
     // (a `pane` field, no classification) — observedState carries the state for
     // caching without polluting the raw-content result. Per-pane phase reads run
     // concurrently (WARDEN-88) and only when opted in; per-pane failures → null.
     const observedState = {};
     const read = await Promise.all(toCapture.map(async (c) => {
-      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-        observedState[c.key] = { state: 'capture_failed', phase: null, sig: null };
+      // capturePanes is keyed by the HOST-QUALIFIED id (WARDEN-1223) — a missing
+      // entry means THIS chat's capture failed, not "some host with this name".
+      if (!Object.prototype.hasOwnProperty.call(panes, c.id)) {
+        observedState[c.id] = { state: 'capture_failed', phase: null, sig: null };
         return {
           ...base(c), ok: false,
           error: `failed to capture pane on ${c.host} (host unreachable or tmux capture error)`,
         };
       }
-      const raw = panes[c.key] || '';
+      const raw = panes[c.id] || '';
       const clean = stripAnsi(raw);
       let phase = null;
       if (wantPhase) {
         try { phase = await readTranscriptPhase(c, cfg); } catch { phase = null; }
       }
-      observedState[c.key] = { state: classifyPane(clean, c).state, phase, sig: paneSignature(clean) };
+      observedState[c.id] = { state: classifyPane(clean, c).state, phase, sig: paneSignature(clean) };
       return { ...base(c), ok: true, pane: raw.split('\n').slice(-lines).join('\n') };
     }));
 
@@ -677,7 +692,7 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
     if (diffing) {
       readForResult = read.filter((e) => {
         if (!e.ok) return true;
-        const p = lastReadState[e.id]; // id === key for both chat shapes
+        const p = lastReadState[e.id]; // host-qualified id, the observedState key (WARDEN-1223)
         if (!p) return true; // newly read → changed
         return p.sig !== (observedState[e.id] && observedState[e.id].sig);
       });
@@ -858,7 +873,7 @@ export class Observer {
         try {
           const clean = stripAnsi(pane);
           this._mergeReadState({
-            [chat.key]: { state: classifyPane(clean, chat).state, phase: null, sig: paneSignature(clean) },
+            [chat.id]: { state: classifyPane(clean, chat).state, phase: null, sig: paneSignature(clean) },
           });
         } catch { /* cache update is best-effort */ }
         return { id: chat.container, host: chat.host, pane: pane.slice(-8000) };

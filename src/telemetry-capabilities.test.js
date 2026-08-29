@@ -16,6 +16,7 @@ import {
   CLIENT_SCHEMA_VERSION,
   CAPABILITIES_PATH,
   capabilitiesUrlFromEndpoint,
+  webOriginFromEndpoint,
   mapCapabilitiesVerdict,
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
@@ -91,6 +92,85 @@ test('capabilitiesUrlFromEndpoint returns null for empty/blank (no guess — cal
   assert.equal(capabilitiesUrlFromEndpoint('   '), null);
   assert.equal(capabilitiesUrlFromEndpoint(null), null);
   assert.equal(capabilitiesUrlFromEndpoint(undefined), null);
+});
+
+// ── WARDEN-1238 — parse success is not a usable-origin test ──────────────────────
+
+test('the root cause, stated empirically: a scheme-less host:port/path PARSES but yields no usable origin', () => {
+  // WHATWG reads `receiver.example:` as an opaque (non-special) SCHEME, so the
+  // strict parse succeeds — with origin "null" and an empty host. This is exactly
+  // why parse-success was the wrong test, and why the fix judges usable origins.
+  const u = new URL('receiver.example:8080/ingest');
+  assert.equal(u.origin, 'null');
+  assert.equal(u.host, '');
+});
+
+test('WARDEN-1238: a scheme-less host:port with a path derives the real origin (was "null/capabilities")', () => {
+  // Previously the strict parse "succeeded" with origin "null", the lenient retry
+  // never ran, and the probe went to the nonsense URL "null/capabilities" —
+  // declaring a healthy self-hosted receiver unreachable. It must now be
+  // recognised at its derived origin.
+  assert.equal(
+    capabilitiesUrlFromEndpoint('receiver.example:8080/ingest'),
+    'https://receiver.example:8080/capabilities'
+  );
+});
+
+test('WARDEN-1238: webOriginFromEndpoint flags the https:// prefix as a repair (schemeless), never as configuration', () => {
+  assert.deepEqual(webOriginFromEndpoint('https://r.example/ingest'), {
+    origin: 'https://r.example',
+    schemeless: false,
+  });
+  assert.deepEqual(webOriginFromEndpoint('r.example'), {
+    origin: 'https://r.example',
+    schemeless: true,
+  });
+  assert.deepEqual(webOriginFromEndpoint('r.example:8080/ingest'), {
+    origin: 'https://r.example:8080',
+    schemeless: true,
+  });
+  assert.equal(webOriginFromEndpoint(''), null);
+  assert.equal(webOriginFromEndpoint('::::'), null, 'neither form parses');
+  // A NON-web scheme parses but is not a usable web origin.
+  assert.equal(webOriginFromEndpoint('postgres://db.example/warden'), null);
+});
+
+test('WARDEN-1238: a non-web scheme (e.g. ssh://) is not blessed as a usable web address', () => {
+  assert.equal(capabilitiesUrlFromEndpoint('ssh://receiver.example'), null);
+});
+
+// ── mapCapabilitiesVerdict — the scheme-missing state (WARDEN-1238) ─────────────
+
+test('scheme-missing: schemeless + 200 + schema-match → NOT connected (the transport cannot use the address)', () => {
+  const v = mapCapabilitiesVerdict({
+    status: 200,
+    body: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false },
+    schemeless: true,
+  });
+  assert.equal(v.kind, 'scheme-missing');
+  assert.equal(v.ok, false, 'a scheme-less address must never read as a green connected');
+  assert.match(v.message, /scheme/i);
+});
+
+test('schemeless defaults to false: the same 200 + schema-match is still connected (no behavior change for usable addresses)', () => {
+  const v = mapCapabilitiesVerdict({
+    status: 200,
+    body: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false },
+  });
+  assert.equal(v.kind, 'connected');
+  assert.equal(v.ok, true);
+});
+
+test('scheme-missing beats schema-drift only in wording, not in ok: a drifted schemeless receiver is still not ok', () => {
+  // A reachable but drifted receiver on a schemeless endpoint: drift copy is kept
+  // (it is the more specific, still-honest verdict); both must be ok:false.
+  const v = mapCapabilitiesVerdict({
+    status: 200,
+    body: { schemaVersion: CLIENT_SCHEMA_VERSION + 1, authRequired: false },
+    schemeless: true,
+  });
+  assert.equal(v.kind, 'schema-drift');
+  assert.equal(v.ok, false);
 });
 
 // ── mapCapabilitiesVerdict — the four states ────────────────────────────────────
@@ -308,5 +388,35 @@ test('probe: an unparseable endpoint → no-receiver, fetchImpl is NEVER called 
   const v = await probeReceiverCapabilities({ endpoint: '   ', fetchImpl });
   assert.equal(v.kind, 'no-receiver');
   assert.equal(called, 0, 'no fetch attempted for an unparseable origin');
+});
+
+// ── WARDEN-1238 — scheme-less endpoints across the probe composition ────────────
+
+test('probe: a scheme-less endpoint with a HEALTHY receiver → scheme-missing, probed at the derived origin', async () => {
+  // The two WARDEN-1238 wrongs, fixed: the host:port+path shape is RECOGNISED
+  // (probed at https://receiver.example:8080, not "null/capabilities"), and it is
+  // NOT reported connected — the transport sends to the raw string, which cannot
+  // carry events without a scheme.
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } });
+  const v = await probeReceiverCapabilities({
+    endpoint: 'receiver.example:8080/ingest',
+    fetchImpl,
+  });
+  assert.equal(v.kind, 'scheme-missing');
+  assert.equal(v.ok, false);
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.equal(
+    fetchImpl.calls[0].url,
+    'https://receiver.example:8080/capabilities',
+    'probed at the derived origin, never the nonsense "null" one'
+  );
+});
+
+test('probe: a bare-host endpoint with a healthy receiver → scheme-missing (never a green connected)', async () => {
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } });
+  const v = await probeReceiverCapabilities({ endpoint: 'receiver.example', fetchImpl });
+  assert.equal(v.kind, 'scheme-missing');
+  assert.equal(v.ok, false);
+  assert.match(v.message, /scheme/i);
 });
 

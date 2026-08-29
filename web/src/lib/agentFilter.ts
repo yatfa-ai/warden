@@ -9,17 +9,21 @@
 // extracted into lib/chatDisplay.ts by WARDEN-216. This module keeps only the
 // FILTER/SORT cluster: the AgentFilter/AgentSort option types + metadata, the
 // matchesAgentFilter predicate, the compareChats/sortChats comparators, and the
-// findChat lookup. (chatType is duplicated locally below — see its comment.)
+// findChat lookup.
 //
-// Self-contained by design: NO imports (neither `@/`-alias nor relative). The
-// repo has no front-end test runner, so agentFilter.test.mjs loads this file by
-// transpiling the TS with Vite's OXC transform and dynamically `import()`ing the
-// result from a temp dir — a context where module resolvers are not available,
-// so any import here would break the test harness. (diff.ts and
-// gitStateSummary.ts follow the same zero-import rule.) The Chat type from the
+// Import discipline: this module must stay loadable by agentFilter.test.mjs,
+// which transpiles the TS with Vite's OXC transform and dynamically `import()`s
+// the result from a temp dir — a context with no `@/`-alias resolver and no
+// node_modules. So: a `@/`-alias import or any React/.tsx import is still
+// FORBIDDEN. A RELATIVE SIBLING import is fine, provided the sibling is itself
+// runtime-import-free and the test transpiles both files and rewrites the
+// specifier to the temp-dir `.mjs` before transform — the pattern kill.test.mjs
+// established (WARDEN-328) and this file's ./chatDisplay import uses (WARDEN-936;
+// chatDisplay's only import is an erased `import type`). The Chat type from the
 // React layer is NOT imported; instead a local minimal slice is defined below,
 // which Chat structurally satisfies — so ChatSidebar passes Chat instances
 // unchanged (zero behavior change).
+import { chatType } from './chatDisplay';
 
 // Minimal slice of Chat these helpers read. Defined locally rather than imported
 // from the React-layer types so the helpers stay decoupled and are testable with
@@ -36,24 +40,9 @@ export interface AgentFilterChat {
   lastActivity?: number;
 }
 
-// Short process/type label for a chat (yatfa | claude | resume | shell | <bin>).
-// This is a LOCAL copy of the canonical chatType in lib/chatDisplay.ts. It is
-// duplicated here (rather than imported) deliberately: matchesAgentFilter below
-// needs it, and importing from chatDisplay would break this module's
-// zero-import / testable-with-node invariant (see header). The two are kept in
-// sync; chatDisplay.ts remains the canonical home (and is exercised by
-// chatDisplay.test.mjs). Logic-identical to the original inline ChatSidebar fn.
-export function chatType(c?: AgentFilterChat): string {
-  if (!c) return '?';
-  if (c.kind === 'yatfa') return 'yatfa';
-  const bin = (c.cmd || '').split(/\s+/)[0].replace(/^.*[/\\]/, '');
-  if (bin === 'claude' || bin === 'claude.exe') return (c.cmd || '').includes('--resume') ? 'resume' : 'claude';
-  if (['bash', 'sh', 'zsh', 'fish', 'pwsh', 'powershell', 'cmd.exe'].includes(bin)) return 'shell';
-  // An empty cmd is a tmux session launched with no explicit command — i.e. the
-  // host's login shell (the ＋ split "no explicit shell" case, WARDEN-223) — so
-  // it reads as 'shell', not the generic 'manual'.
-  return bin || 'shell';
-}
+// Re-exported so the identifier stays available from this module (it is the same
+// canonical function object — chatDisplay.ts is its sole definition).
+export { chatType };
 
 // Agent-list filter/sort controls (WARDEN-91). Shared across the root, host, and
 // collection views so the option lists and matching logic can never drift.

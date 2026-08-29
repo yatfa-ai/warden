@@ -90,6 +90,80 @@ export function isReservedPresetName(name: string): boolean {
   return BUILTIN_PRESETS.some((b) => b.toLowerCase() === lower);
 }
 
+// ─── The ONE name-validation skeleton (WARDEN-1111) ───────────────────────────
+//
+// Extracted from the three hand-copied validate*Name bodies (preset WARDEN-219,
+// snippet WARDEN-323, pattern WARDEN-540) — same six steps in the same order,
+// re-copied per feature, exactly the vein parseObjectMap (WARDEN-1027) and
+// parseEntryArray (WARDEN-1091) already collapsed further down this file. Now
+// the contract is inherited by CALLING this; only the delta is supplied.
+//
+// The invariants that live here once, for every caller:
+//   - the name is TRIMMED first, matching how each load-time sanitizer
+//     normalizes, so validation and persistence agree on the same string;
+//   - check ORDER is empty → too-long → reserved → duplicate, and it is
+//     load-bearing: a reserved name that is ALSO a duplicate reports 'reserved';
+//   - duplicate detection is CASE-INSENSITIVE (a custom entry can never
+//     near-collide with a differently-cased sibling);
+//   - `except` excludes ONE entry from duplicate detection, so a case-only
+//     rename (codex -> Codex) is never flagged as its own duplicate.
+//
+// The per-caller delta:
+//   - `opts.max` — the caller's own cap. Deliberately a PARAMETER, never a
+//     shared constant: PRESET_NAME_MAX/SNIPPET_NAME_MAX/WATCH_PATTERN_NAME_MAX
+//     stay distinct and independently tunable.
+//   - `opts.identityOf` — what `except` is compared against, and the reason this
+//     parameter is REQUIRED rather than defaulted. Preset and snippet exclude by
+//     NAME; watch patterns key on a stable id and exclude by ID. That divergence
+//     was previously an accident hiding under a "Mirrors validateSnippetName"
+//     comment — every call site happens to pass the matching kind, so it is
+//     correct today, but a fourth validator could silently inherit the wrong
+//     semantics. Making it explicit means the caller must now STATE its choice.
+//   - `opts.reserved` — the built-in-name guard. Preset-only; omitting it makes
+//     'reserved' unreachable, which is what lets snippet/pattern keep their
+//     narrower issue unions.
+type NameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
+
+function validateEntryName<T extends { name: string }>(
+  name: string,
+  existing: T[],
+  opts: {
+    max: number;
+    identityOf: (entry: T) => string;
+    reserved?: (n: string) => boolean;
+  },
+  except?: string,
+): NameIssue | null {
+  const n = name.trim();
+  if (!n) return 'empty';
+  if (n.length > opts.max) return 'too-long';
+  if (opts.reserved?.(n)) return 'reserved';
+  const lower = n.toLowerCase();
+  if (existing.some((e) => opts.identityOf(e) !== except && e.name.toLowerCase() === lower)) {
+    return 'duplicate';
+  }
+  return null;
+}
+
+// The message text shared by all three name formatters below. Only the noun and
+// the cap differ; the reserved-preset arm is the one genuinely per-noun message
+// and stays with its own formatter. `noun` is passed Capitalized (it opens two
+// of the three sentences) and lower-cased for the mid-sentence duplicate arm.
+type CommonNameIssue = 'empty' | 'too-long' | 'duplicate';
+
+function nameIssueMessage(
+  noun: string,
+  max: number,
+  name: string,
+  issue: CommonNameIssue,
+): string {
+  switch (issue) {
+    case 'empty': return `${noun} needs a name.`;
+    case 'too-long': return `${noun} name must be ${max} characters or fewer.`;
+    case 'duplicate': return `A ${noun.toLowerCase()} named "${name}" already exists.`;
+  }
+}
+
 // The validation outcome for a candidate preset name. `null` means acceptable.
 export type PresetNameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
 
@@ -98,21 +172,31 @@ export type PresetNameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
 // persist a name the sanitizer would silently drop. Pure and dependency-free so
 // it is unit-tested directly (there is no React test runner in this repo).
 //   - `existing`: the current custom-preset list (for duplicate detection)
-//   - `except`:   an entry name to EXCLUDE from duplicate detection (for renames,
+//   - `except`:   an entry NAME to EXCLUDE from duplicate detection (for renames,
 //                 so a case-only rename like codex -> Codex isn't its own dupe)
-// Trims the name first, matching how parseCustomPresets normalizes on load.
 export function validatePresetName(
   name: string,
   existing: CustomPreset[],
   except?: string,
 ): PresetNameIssue | null {
-  const n = name.trim();
-  if (!n) return 'empty';
-  if (n.length > PRESET_NAME_MAX) return 'too-long';
-  if (isReservedPresetName(n)) return 'reserved';
-  const lower = n.toLowerCase();
-  if (existing.some((p) => p.name !== except && p.name.toLowerCase() === lower)) return 'duplicate';
-  return null;
+  return validateEntryName(
+    name,
+    existing,
+    { max: PRESET_NAME_MAX, identityOf: (p) => p.name, reserved: isReservedPresetName },
+    except,
+  );
+}
+
+// Human message for a non-null preset-name validation issue. Lives here beside
+// the contract it renders (rather than inside NewChatsSection) so it is covered
+// by storage.test.mjs — this repo has no React test runner, so a pure function
+// trapped in a component is a pure function nothing can test.
+export function presetNameErrorMessage(name: string, issue: PresetNameIssue): string {
+  // The one arm with no snippet/pattern counterpart; the rest are shared text.
+  if (issue === 'reserved') {
+    return `"${name}" is a reserved preset name (use the built-in claude/shell instead).`;
+  }
+  return nameIssueMessage('Preset', PRESET_NAME_MAX, name, issue);
 }
 
 // A snapshot of a pane the user closed, kept per-workspace as a click-to-reopen
@@ -205,31 +289,20 @@ export function mergeRecentlyClosed(
 // strings; closedAt coerces to a number (0 if absent/invalid). Dedups by id
 // (first occurrence wins) and caps at RECENTLY_CLOSED_CAP.
 function parseRecentlyClosed(raw: unknown): RecentlyClosedEntry[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] recentlyClosed is not an array; ignoring:', raw);
-    }
-    return [];
-  }
-  const seen = new Set<string>();
-  const out: RecentlyClosedEntry[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
+  return parseEntryArray<RecentlyClosedEntry>(raw, 'recentlyClosed', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
     const e = entry as Record<string, unknown>;
     const id = typeof e.id === 'string' ? e.id : '';
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
+    if (!id) return undefined;
     const closedAt = typeof e.closedAt === 'number' && Number.isFinite(e.closedAt) ? e.closedAt : 0;
-    out.push({
+    return {
       id,
       name: typeof e.name === 'string' ? e.name : '',
       host: typeof e.host === 'string' ? e.host : '',
       cwd: typeof e.cwd === 'string' ? e.cwd : '',
       closedAt,
-    });
-    if (out.length >= RECENTLY_CLOSED_CAP) break;
-  }
-  return out;
+    };
+  }, { cap: RECENTLY_CLOSED_CAP, key: (e) => e.id });
 }
 
 // A user-defined instruction snippet: a named, reusable instruction the human
@@ -265,21 +338,29 @@ export type SnippetNameIssue = 'empty' | 'too-long' | 'duplicate';
 // persist a name the sanitizer would silently drop. Pure and dependency-free so
 // it is unit-tested directly (there is no React test runner in this repo).
 //   - `existing`: the current snippet list (for duplicate detection)
-//   - `except`:   an entry name to EXCLUDE from duplicate detection (for renames,
+//   - `except`:   an entry NAME to EXCLUDE from duplicate detection (for renames,
 //                 so a case-only rename like "Run tests" -> "RUN TESTS" isn't its
 //                 own dupe)
-// Trims the name first, matching how parseSnippets normalizes on load.
 export function validateSnippetName(
   name: string,
   existing: Snippet[],
   except?: string,
 ): SnippetNameIssue | null {
-  const n = name.trim();
-  if (!n) return 'empty';
-  if (n.length > SNIPPET_NAME_MAX) return 'too-long';
-  const lower = n.toLowerCase();
-  if (existing.some((s) => s.name !== except && s.name.toLowerCase() === lower)) return 'duplicate';
-  return null;
+  // Passing no `reserved` guard makes 'reserved' unreachable (snippets have no
+  // built-ins), so narrowing the skeleton's union to SnippetNameIssue is sound.
+  return validateEntryName(
+    name,
+    existing,
+    { max: SNIPPET_NAME_MAX, identityOf: (s) => s.name },
+    except,
+  ) as SnippetNameIssue | null;
+}
+
+// Human message for a non-null snippet-name validation issue. Lives here beside
+// the contract it renders (rather than inside SnippetsSection) so it is covered
+// by storage.test.mjs — see presetNameErrorMessage.
+export function snippetNameErrorMessage(name: string, issue: SnippetNameIssue): string {
+  return nameIssueMessage('Snippet', SNIPPET_NAME_MAX, name, issue);
 }
 
 // The starter snippet set seeded once on a fresh install (and on a v2→v3
@@ -337,21 +418,35 @@ export type PatternNameIssue = 'empty' | 'too-long' | 'duplicate';
 
 /**
  * Validate a candidate watch-pattern name against the SAME contract the backend
- * sanitizer enforces (WARDEN-540). Mirrors validateSnippetName: trims first, then
- * rejects empty / over-cap / duplicate (case-insensitive, with an `except` for the
- * rename case). Pure + dependency-free so it is unit-tested directly.
+ * sanitizer enforces (WARDEN-540): trims first, then rejects empty / over-cap /
+ * duplicate (case-insensitive, with an `except` for the rename case).
+ *
+ * `except` is a pattern ID, NOT a name — watch patterns key on a stable id, so a
+ * rename never confuses the row. That is the one thing this validator does
+ * differently from its preset/snippet siblings, and it is now stated outright as
+ * the skeleton's `identityOf` rather than buried in a hand-copied `.some()`.
  */
 export function validatePatternName(
   name: string,
   existing: WatchPattern[],
   except?: string,
 ): PatternNameIssue | null {
-  const n = name.trim();
-  if (!n) return 'empty';
-  if (n.length > WATCH_PATTERN_NAME_MAX) return 'too-long';
-  const lower = n.toLowerCase();
-  if (existing.some((p) => p.id !== except && p.name.toLowerCase() === lower)) return 'duplicate';
-  return null;
+  // No `reserved` guard → 'reserved' is unreachable; see validateSnippetName.
+  return validateEntryName(
+    name,
+    existing,
+    { max: WATCH_PATTERN_NAME_MAX, identityOf: (p) => p.id },
+    except,
+  ) as PatternNameIssue | null;
+}
+
+/**
+ * Human message for a non-null pattern-name validation issue. Lives here beside
+ * the contract it renders (rather than inside PatternsSection) so it is covered
+ * by storage.test.mjs — see presetNameErrorMessage.
+ */
+export function patternNameErrorMessage(name: string, issue: PatternNameIssue): string {
+  return nameIssueMessage('Pattern', WATCH_PATTERN_NAME_MAX, name, issue);
 }
 
 /**
@@ -609,29 +704,16 @@ export interface UiState {
 // name or cmd, names over PRESET_NAME_MAX chars, reserved built-in names
 // (case-insensitive), and duplicates (case-insensitive; first occurrence wins).
 function parseCustomPresets(raw: unknown): CustomPreset[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] customPresets is not an array; ignoring:', raw);
-    }
-    return [];
-  }
-  const seen = new Set<string>();
-  const out: CustomPreset[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
+  return parseEntryArray<CustomPreset>(raw, 'customPresets', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
     const e = entry as Record<string, unknown>;
     const name = typeof e.name === 'string' ? e.name.trim() : '';
     const cmd = typeof e.cmd === 'string' ? e.cmd.trim() : '';
-    if (!name || !cmd) continue;
-    if (name.length > PRESET_NAME_MAX) continue;
-    if (isReservedPresetName(name)) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ name, cmd });
-  }
-  return out;
+    if (!name || !cmd) return undefined;
+    if (name.length > PRESET_NAME_MAX) return undefined;
+    if (isReservedPresetName(name)) return undefined;
+    return { name, cmd };
+  }, { key: (p) => p.name.toLowerCase() });
 }
 
 // Sanitize a raw snippets value into a valid Snippet[]. Defensive: never throws
@@ -642,182 +724,202 @@ function parseCustomPresets(raw: unknown): CustomPreset[] {
 // SNIPPET_MAX_COUNT (overflow dropped) so the payload can never bloat
 // localStorage. Mirrors parseCustomPresets's drop-bad-entries discipline.
 function parseSnippets(raw: unknown): Snippet[] {
+  return parseEntryArray<Snippet>(raw, 'snippets', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === 'string' ? e.name.trim() : '';
+    const text = typeof e.text === 'string' ? e.text.trim() : '';
+    if (!name || !text) return undefined;
+    if (name.length > SNIPPET_NAME_MAX) return undefined;
+    if (text.length > SNIPPET_TEXT_MAX) return undefined;
+    return { name, text };
+  }, { cap: SNIPPET_MAX_COUNT, key: (s) => s.name.toLowerCase() });
+}
+
+// WARDEN-1091: the ONE array sanitizer skeleton — the array complement of
+// parseObjectMap below. Five parsers (recentlyClosed, customPresets, snippets,
+// mutedAlertKeys, workspaces) each carried a byte-identical copy of the same
+// 6-line preamble, re-copied by five separate shipped features (WARDEN-219,
+// 256, 323, 364, 372) so each could inherit the WARDEN-89 guard. Now the guard
+// is inherited by CALLING this; only the delta is supplied.
+//
+// The invariants that live here once, for every caller:
+//   - a non-array `raw` degrades to [] — never throws (WARDEN-89), so one
+//     corrupt payload can never blank a whole list;
+//   - a PRESENT-but-wrong-type `raw` warns with `label` (the operator-facing
+//     corruption signal), while absent (undefined/null) is silent — absence is
+//     normal, corruption is not;
+//   - `coerce` returns the entry to keep, or `undefined` to DROP it. The drop
+//     sentinel is strictly `undefined`, not falsiness — a caller whose element
+//     type admits '' / 0 / false keeps those as real values. `coerce` also owns
+//     the per-caller ENTRY guard, which is NOT uniform across the five (four
+//     want `!entry || typeof entry !== 'object'`, mutedAlertKeys wants
+//     `typeof k !== 'string'`), so it does not belong in the skeleton.
+//
+// Two OPTIONAL deltas, because they are not universal:
+//   - `opts.cap` — stop after N kept entries (retaining the FIRST N valid ones).
+//     Only recentlyClosed and snippets cap; mutedAlertKeys deliberately has no
+//     cap. Checked at the top of the loop; the pre-refactor copies checked at
+//     the top (snippets) and after the push (recentlyClosed), which retain the
+//     same entries — the difference was never observable.
+//   - `opts.key` — DROP an entry whose key repeats (first occurrence wins,
+//     order preserved). NOT universal: parseWorkspaces REPAIRS a duplicate id
+//     with a fresh one and keeps the entry, so it passes no `key` and owns its
+//     own seen-set inside its coerce closure.
+function parseEntryArray<T>(
+  raw: unknown,
+  label: string,
+  coerce: (entry: unknown) => T | undefined,
+  opts?: { cap?: number; key?: (v: T) => string },
+): T[] {
   if (!Array.isArray(raw)) {
     if (raw !== undefined && raw !== null) {
       // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] snippets is not an array; ignoring:', raw);
+      console.warn(`[loadUi] ${label} is not an array; ignoring:`, raw);
     }
     return [];
   }
   const seen = new Set<string>();
-  const out: Snippet[] = [];
+  const out: T[] = [];
   for (const entry of raw) {
-    if (out.length >= SNIPPET_MAX_COUNT) break; // cap payload size
-    if (!entry || typeof entry !== 'object') continue;
-    const e = entry as Record<string, unknown>;
-    const name = typeof e.name === 'string' ? e.name.trim() : '';
-    const text = typeof e.text === 'string' ? e.text.trim() : '';
-    if (!name || !text) continue;
-    if (name.length > SNIPPET_NAME_MAX) continue;
-    if (text.length > SNIPPET_TEXT_MAX) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ name, text });
+    if (opts?.cap !== undefined && out.length >= opts.cap) break; // cap payload size
+    const val = coerce(entry);
+    if (val === undefined) continue; // caller's rule rejected this entry → drop
+    if (opts?.key) {
+      const k = opts.key(val);
+      if (seen.has(k)) continue; // duplicate → drop (first occurrence wins)
+      seen.add(k);
+    }
+    out.push(val);
   }
   return out;
 }
+
+// WARDEN-1027: the ONE object-map sanitizer skeleton, extracted from the six
+// hand-copied parsers below (cwd/shell/labels/collapsed/preset per-host maps and
+// the snoozed-alert map). Every copy shared the same ~16 lines and differed only
+// in its console.warn field name and its value rule, so each new per-host
+// preference re-copied the whole thing to inherit the WARDEN-89 guard. Now the
+// guard is inherited by CALLING this; only the delta is supplied.
+//
+// The invariants that live here once, for every caller:
+//   - a non-object / array / primitive `raw` degrades to {} — never throws
+//     (WARDEN-89), so one corrupt payload can never blank a whole map;
+//   - a PRESENT-but-wrong-type `raw` warns with `label` (the operator-facing
+//     corruption signal), while absent (undefined/null) is silent — absence is
+//     normal, corruption is not;
+//   - keys are trimmed and empty/whitespace keys are dropped;
+//   - `coerce` returns the value to keep, or `undefined` to DROP the entry. The
+//     drop sentinel is strictly `undefined`, not falsiness — `false` and `0` are
+//     legitimate kept values for a caller whose rule admits them.
+function parseObjectMap<T>(
+  raw: unknown,
+  label: string,
+  coerce: (v: unknown) => T | undefined,
+): Record<string, T> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn(`[loadUi] ${label} is not an object; ignoring:`, raw);
+    }
+    return {};
+  }
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    if (!key) continue; // empty/whitespace key → drop
+    const val = coerce(v);
+    if (val === undefined) continue; // caller's rule rejected this value → drop
+    out[key] = val;
+  }
+  return out;
+}
+
+// The value rule shared by the three string-valued per-host maps (cwd, shell,
+// labels): trim, and treat empty/whitespace as ABSENT rather than as a stored
+// blank. That distinction is load-bearing in all three — an empty override must
+// mean "inherit the global default" (cwd/shell) or "no label" (labels), never a
+// persisted blank that could seed a spawn field empty.
+const coerceNonEmptyString = (v: unknown): string | undefined => {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s || undefined;
+};
 
 // Sanitize a raw defaultNewChatCwdByHost value (host key → default cwd) into a
 // valid Record<string,string>. Defensive: never throws on malformed input
 // (WARDEN-89) — it drops bad entries instead, so one corrupt/blank entry can
-// never blank the spawn cwd field. Modeled on parseCustomPresets (and explicitly
-// NOT on the looser paneHost loader, which does not coerce values): each entry
-// requires a non-empty trimmed-string KEY and a trimmed-string VALUE, and
-// entries whose value is empty/whitespace are dropped — an empty override means
-// "use the global defaultNewChatCwd" and so must never persist as a blank that
-// could seed the spawn field empty. Values are trimmed, matching
-// defaultNewChatCwd's own load-time trim (line ~331).
+// never blank the spawn cwd field. Explicitly NOT modeled on the looser paneHost
+// loader, which does not coerce values: each entry requires a non-empty
+// trimmed-string KEY and a non-empty trimmed-string VALUE, and entries whose
+// value is empty/whitespace are dropped — an empty override means "use the
+// global defaultNewChatCwd" and so must never persist as a blank that could seed
+// the spawn field empty. Values are trimmed, matching defaultNewChatCwd's own
+// load-time trim (line ~331).
 function parseCwdByHost(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] defaultNewChatCwdByHost is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    if (!key || !val) continue; // empty key → drop; empty value → inherit global default
-    out[key] = val;
-  }
-  return out;
+  return parseObjectMap(raw, 'defaultNewChatCwdByHost', coerceNonEmptyString);
 }
 
 // Sanitize a raw defaultShellByHost value (host key → default shell) into a
-// valid Record<string,string> (WARDEN-429 — mirrors parseCwdByHost). Like a cwd
-// path, a shell name is an arbitrary string, so a non-empty trim is enough
-// (there is no semantic "valid preset" check as parsePresetByHost needs).
-// Defensive: never throws on malformed input (WARDEN-89) — it drops bad entries
-// instead, so one corrupt/blank entry can never seed the spawn command with a
-// dangling shell name. Each entry requires a non-empty trimmed-string KEY and a
-// trimmed-string VALUE; entries whose value is empty/whitespace are dropped — an
-// empty override means "use the global defaultShell" (then the host login shell)
-// and so must never persist as a blank that could seed the command field empty.
-// Values are trimmed, matching defaultShell's own load-time trim.
+// valid Record<string,string> (WARDEN-429). Like a cwd path, a shell name is an
+// arbitrary string, so a non-empty trim is enough (there is no semantic "valid
+// preset" check as parsePresetByHost needs). Entries whose value is
+// empty/whitespace are dropped — an empty override means "use the global
+// defaultShell" (then the host login shell) and so must never persist as a blank
+// that could seed the command field empty, or leave a dangling shell name.
 function parseShellByHost(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] defaultShellByHost is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    if (!key || !val) continue; // empty key → drop; empty value → inherit global default
-    out[key] = val;
-  }
-  return out;
+  return parseObjectMap(raw, 'defaultShellByHost', coerceNonEmptyString);
 }
 
 // Sanitize a raw hostLabels value (raw host key → friendly label) into a valid
-// HostLabels map (WARDEN-490). Mirrors parseCwdByHost/parseShellByHost's drop-
-// bad-entries discipline: each entry requires a non-empty trimmed-string KEY and
-// a trimmed-string VALUE, and entries whose value is empty/whitespace are
+// HostLabels map (WARDEN-490). Entries whose value is empty/whitespace are
 // dropped — an empty label means "no label" (today's behavior), so it must never
-// persist as a blank that could blank a host's tag. Defensive: never throws on
-// malformed input (WARDEN-89) — it drops bad entries instead, so one corrupt
-// entry can never blank the label map. NOTE: this map is display-only; it never
-// reaches the backend (see the UiState.hostLabels comment).
+// persist as a blank that could blank a host's tag. NOTE: this map is
+// display-only; it never reaches the backend (see the UiState.hostLabels
+// comment).
 function parseLabelsByHost(raw: unknown): HostLabels {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] hostLabels is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: HostLabels = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    if (!key || !val) continue; // empty key → drop; empty label → no label (today's behavior)
-    out[key] = val;
-  }
-  return out;
+  return parseObjectMap(raw, 'hostLabels', coerceNonEmptyString);
 }
 
 // Sanitize a raw healthCollapsedHosts value (host key → collapsed?) into a
-// valid Record<string,boolean> (WARDEN-500 — mirrors parseCwdByHost's
-// drop-bad-entries model). The per-host expand/collapse state inside Health's
-// Host grouping was a HealthDashboard-local useState that reset to {} on every
-// Warden restart; now App-owned + persisted so a cross-host human's collapsed
-// hosts survive reload (completing the persistence WARDEN-468 started for the
-// grouping toggle itself). Defensive: never throws on malformed input
-// (WARDEN-89) — it drops bad entries instead, so one corrupt entry can never
-// blank the whole collapse map. Each entry requires a non-empty trimmed-string
-// KEY and a strictly-boolean VALUE; anything else is dropped. A non-object
-// payload (string/array/number) degrades to {} (every host expanded — byte-for-
-// byte today's default, zero regression for fresh installs).
+// valid Record<string,boolean> (WARDEN-500). The per-host expand/collapse state
+// inside Health's Host grouping was a HealthDashboard-local useState that reset
+// to {} on every Warden restart; now App-owned + persisted so a cross-host
+// human's collapsed hosts survive reload (completing the persistence WARDEN-468
+// started for the grouping toggle itself). Each entry requires a STRICTLY
+// boolean VALUE; anything else (including the truthy string 'yes' or the numeric
+// 1) is dropped. `false` is a real, KEPT value — an explicitly-expanded host is
+// not the same as an absent one. A non-object payload (string/array/number)
+// degrades to {} (every host expanded — byte-for-byte today's default, zero
+// regression for fresh installs).
 function parseCollapsedHosts(raw: unknown): Record<string, boolean> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] healthCollapsedHosts is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, boolean> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    if (!key) continue; // empty/whitespace key → drop
-    if (typeof v !== 'boolean') continue; // non-boolean value → drop
-    out[key] = v;
-  }
-  return out;
+  return parseObjectMap(raw, 'healthCollapsedHosts', (v) => (typeof v === 'boolean' ? v : undefined));
 }
 
 // Sanitize a raw defaultNewChatPresetByHost value (host key → preset name) into a
-// valid Record<string,string> (WARDEN-352 — mirrors parseCwdByHost). CRITICAL
-// DIFFERENCE from parseCwdByHost: cwd values are arbitrary path strings (a
-// non-empty trim is enough), but preset values are SEMANTIC names — each must be
-// a VALID preset (a built-in 'claude'/'shell' OR an existing customPresets
-// entry). A host defaulting to a since-deleted custom preset is DROPPED on load,
-// which means "inherit the global defaultNewChatPreset" — exactly mirroring how
-// the global defaultNewChatPreset itself falls back to 'claude' via presetIsValid
-// when it names a deleted preset. `isValid` is that same loadUi-scoped
-// presetIsValid closure (built-in OR in the parsed customPresets), passed in at
-// the call site where customPresets is already in scope — so a per-host value
-// naming a REAL custom preset is correctly KEPT (do not call this where
-// customPresets has not yet been parsed). Defensive: never throws (WARDEN-89) —
-// drops bad entries instead, so one corrupt entry can never seed the spawn field
-// with a dangling preset name.
+// valid Record<string,string> (WARDEN-352). CRITICAL DIFFERENCE from
+// parseCwdByHost: cwd values are arbitrary path strings (a non-empty trim is
+// enough), but preset values are SEMANTIC names — each must be a VALID preset (a
+// built-in 'claude'/'shell' OR an existing customPresets entry). A host
+// defaulting to a since-deleted custom preset is DROPPED on load, which means
+// "inherit the global defaultNewChatPreset" — exactly mirroring how the global
+// defaultNewChatPreset itself falls back to 'claude' via presetIsValid when it
+// names a deleted preset. `isValid` is that same loadUi-scoped presetIsValid
+// closure (built-in OR in the parsed customPresets), passed in at the call site
+// where customPresets is already in scope — so a per-host value naming a REAL
+// custom preset is correctly KEPT. CALL-ORDERING CONTRACT (unchanged by
+// WARDEN-1027): do NOT call this where customPresets has not yet been parsed.
+// Defensive: never throws (WARDEN-89) — drops bad entries instead, so one
+// corrupt entry can never seed the spawn field with a dangling preset name.
 function parsePresetByHost(
   raw: unknown,
   isValid: (p: unknown) => boolean,
 ): Record<string, string> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] defaultNewChatPresetByHost is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    // empty key → drop; empty value → inherit global default; invalid preset
-    // (not a built-in and not in customPresets) → inherit global default.
-    if (!key || !val || !isValid(val)) continue;
-    out[key] = val;
-  }
-  return out;
+  // empty value → inherit global default; invalid preset (not a built-in and not
+  // in customPresets) → inherit global default.
+  return parseObjectMap(raw, 'defaultNewChatPresetByHost', (v) => {
+    const val = coerceNonEmptyString(v);
+    return val !== undefined && isValid(val) ? val : undefined;
+  });
 }
 
 // Sanitize a raw mutedAlertKeys value into a de-duplicated string[] of non-empty
@@ -826,22 +928,10 @@ function parsePresetByHost(
 // can never blank the mute set. Modeled on parseCustomPresets's drop-bad-entries
 // discipline; order is preserved (first occurrence wins) so the set is stable.
 function parseMutedKeys(raw: unknown): string[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] mutedAlertKeys is not an array; ignoring:', raw);
-    }
-    return [];
-  }
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const k of raw) {
-    if (typeof k !== 'string') continue;
-    const key = k.trim();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(key);
-  }
-  return out;
+  return parseEntryArray<string>(raw, 'mutedAlertKeys', (k) => {
+    if (typeof k !== 'string') return undefined;
+    return k.trim() || undefined; // blank/whitespace-only → drop
+  }, { key: (k) => k });
 }
 
 // WARDEN-660: coerce a persisted gutter-ratio array to a valid number[] (each
@@ -851,40 +941,51 @@ function parseMutedKeys(raw: unknown): string[] {
 // as corrupt rather than silently dropped (mirroring the all-or-nothing
 // discipline that keeps a hand-edited / legacy payload from distorting the
 // grid). [] is the meaningful "equal split" default the rest of the code reads.
-function parseRatioArray(raw: unknown): number[] {
-  if (!Array.isArray(raw)) return [];
+//
+// WARDEN-1097: this was the last shape guard in this file outside the WARDEN-89
+// norm — it degraded silently, so a user whose whole pane layout reset to an
+// equal split got no diagnostic at all (and Settings → Reset copy promises that
+// layout is PRESERVED). It now warns like its parseEntryArray/parseObjectMap
+// siblings, with the same asymmetry: a PRESENT-but-wrong-type value is genuine
+// corruption worth surfacing, while absent (undefined/null) is normal and stays
+// silent — getting that backwards would warn twice on every ordinary load,
+// since both ratio fields are absent until the user drags a gutter. The
+// all-or-nothing ENTRY rejection warns too: that is the case this comment
+// already calls corrupt, and it is exactly what a bad persisted ratio looks like.
+function parseRatioArray(raw: unknown, label: string): number[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn(`[loadUi] ${label} is not an array; ignoring:`, raw);
+    }
+    return [];
+  }
   const out: number[] = [];
   for (const r of raw) {
-    if (typeof r !== 'number' || !Number.isFinite(r) || r <= 0) return [];
+    if (typeof r !== 'number' || !Number.isFinite(r) || r <= 0) {
+      console.warn(`[loadUi] ${label} has a non-positive/non-finite entry; ignoring the whole array:`, raw);
+      return [];
+    }
     out.push(r);
   }
   return out;
 }
 
 // Sanitize a raw snoozedAlertKeys value (chat key → expiry ms) into a valid
-// Record<string, number> (WARDEN-551 — mirrors parseMutedKeys's drop-bad-entries
-// discipline, the WARDEN-89 defensive norm). Each entry requires a non-empty
-// trimmed-string KEY and a finite, strictly-POSITIVE number VALUE; anything else
-// is dropped, so one corrupt entry can never blank the snooze set. Entries whose
-// expiry is already in the past (a positive number < now) are NOT dropped here —
-// they are harmless (activeSnoozedKeys excludes them and App's mount prune clears
-// them on the next launch), and dropping them at load would require reading the
-// clock inside the sanitizer, which this pure loader deliberately avoids.
+// Record<string, number> (WARDEN-551 — the WARDEN-89 defensive norm). Each entry
+// requires a non-empty trimmed-string KEY and a finite, strictly-POSITIVE number
+// VALUE; anything else is dropped, so one corrupt entry can never blank the
+// snooze set. Note the value rule is STRICT: a numeric string is not coerced,
+// and 0 / negative / NaN / ±Infinity all drop. Entries whose expiry is already
+// in the past (a positive number < now) are NOT dropped here — they are harmless
+// (activeSnoozedKeys excludes them and App's mount prune clears them on the next
+// launch), and dropping them at load would require reading the clock inside this
+// pure loader, which it deliberately avoids. That non-behavior is pinned by the
+// WARDEN-1027 characterization tests in web/storage.test.mjs.
 function parseSnoozedKeys(raw: unknown): Record<string, number> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] snoozedAlertKeys is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    if (!key) continue; // empty/whitespace key → drop
-    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue; // non-number / non-finite / non-positive → drop
-    out[key] = v;
-  }
-  return out;
+  return parseObjectMap(raw, 'snoozedAlertKeys', (v) => (
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
+  ));
 }
 
 // Sanitize a raw workspaces value into a valid, id-unique WorkspacePaneSet[].
@@ -899,16 +1000,12 @@ function parseSnoozedKeys(raw: unknown): Record<string, number> {
 // Id UNIQUENESS is enforced (first occurrence wins; duplicates get fresh ids)
 // so active-workspace lookup-by-id is always unambiguous.
 function parseWorkspaces(raw: unknown): WorkspacePaneSet[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] workspaces is not an array; ignoring:', raw);
-    }
-    return [];
-  }
+  // NB: no `key` option — parseWorkspaces REPAIRS a duplicate id with a fresh
+  // one and KEEPS the entry, where the shared `key` option would DROP it. The
+  // seen-set therefore lives here, in this closure, fresh per call.
   const seenIds = new Set<string>();
-  const out: WorkspacePaneSet[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
+  return parseEntryArray<WorkspacePaneSet>(raw, 'workspaces', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
     const e = entry as Record<string, unknown>;
     let id = typeof e.id === 'string' && e.id ? e.id : genWorkspaceId();
     if (seenIds.has(id)) id = genWorkspaceId();
@@ -917,9 +1014,8 @@ function parseWorkspaces(raw: unknown): WorkspacePaneSet[] {
     const openPanes = Array.isArray(e.openPanes) ? e.openPanes.filter((p: unknown): p is string => typeof p === 'string') : [];
     const focused = typeof e.focused === 'string' ? e.focused : null;
     const recentlyClosed = parseRecentlyClosed(e.recentlyClosed);
-    out.push({ id, name, openPanes, focused, recentlyClosed });
-  }
-  return out;
+    return { id, name, openPanes, focused, recentlyClosed };
+  });
 }
 
 // Version-tolerant read: prefer the current key, but if it is absent, walk down
@@ -1022,6 +1118,116 @@ export const PERSISTED_PREF_KEYS = [
   'paneHost', 'agentFilter', 'agentSort', 'healthGroupBy', 'healthCollapsedHosts', 'hostLabels',
 ] as const satisfies readonly (keyof Omit<UiState, 'restoreOnStartup'>)[];
 
+// The WORKSPACE + LAYOUT set that Settings → Reset → "Reset appearance & UI
+// preferences" PRESERVES (WARDEN-346): the working set, where panes live, and
+// the panel geometry are not "preferences", and ResetSection's copy promises
+// "your open tabs, panes, focus, and panel layout are preserved". Everything
+// else is a pref and gets its default.
+//
+// NOTE (WARDEN-934): paneColRatios/paneRowRatios are PRESERVED here — they are
+// panel layout, which the shipped button promises to keep. This deliberately
+// differs from resetUiPrefsPreservingWorkspace() below, which snaps them to []
+// (it spreads DEFAULT_UI); that helper has no production call sites, so the
+// preserved set here is the shipped behavior.
+export const RESET_PRESERVED_KEYS = [
+  'workspaces', 'activeWorkspaceId', 'paneHost',
+  'sidebarCollapsed', 'observerCollapsed', 'healthCollapsed', 'sourceControlCollapsed',
+  'sidebarWidth', 'observerWidth', 'paneColRatios', 'paneRowRatios',
+] as const satisfies readonly (typeof PERSISTED_PREF_KEYS)[number][];
+
+/** A pref the UI-prefs reset intentionally leaves alone (workspace + layout). */
+export type ResetPreservedKey = (typeof RESET_PRESERVED_KEYS)[number];
+
+/**
+ * A pref the UI-prefs reset MUST restore: every persisted pref that is not in
+ * the preserved set, plus `restoreOnStartup` (the one UiState pref App persists
+ * as a separate arg rather than through the live object, so it is absent from
+ * PERSISTED_PREF_KEYS but is still reset).
+ *
+ * This is the compile-enforced half of the guard: App's reset callback keys BOTH
+ * its default-value map and its setter map off this type, so a pref that is
+ * neither preserved nor reset is a TypeScript error. The runtime half is the
+ * exhaustiveness test in storage.test.mjs (RESET_PRESERVED_KEYS ∪
+ * resetUiPrefDefaults() == PERSISTED_PREF_KEYS + restoreOnStartup).
+ */
+export type ResettableKey = Exclude<
+  (typeof PERSISTED_PREF_KEYS)[number] | 'restoreOnStartup',
+  ResetPreservedKey
+>;
+
+/** The default value for every resettable pref — no optional (?) fields. */
+export type ResetUiDefaults = Required<Pick<UiState, ResettableKey>>;
+
+/**
+ * The default LIVE-state value of every pref the UI-prefs reset restores.
+ *
+ * Mirrors DEFAULT_UI, with ONE deliberate deviation: `terminalFontFamily` is
+ * DEFAULT_TERMINAL_FONT_FAMILY rather than DEFAULT_UI's `''` sentinel. `''` is
+ * correct for the PERSISTED shape ("blank = default stack"), but App's live
+ * initializer coerces `'' → DEFAULT_TERMINAL_FONT_FAMILY`, and the Settings
+ * font-select has no `''` option — so pushing `''` into live state would show
+ * "Custom…" until reload. The curated value renders identically and keeps
+ * live/persisted/reload in sync. (See the note above
+ * resetUiPrefsPreservingWorkspace.)
+ *
+ * A FACTORY, not a constant: every object/array value is freshly built, so live
+ * React state can never alias a module-level default and corrupt it by in-place
+ * mutation (WARDEN-896).
+ *
+ * The return-type annotation is the compile enforcement: a missing key is a
+ * missing-property error, an unknown key an excess-property error.
+ */
+export function resetUiPrefDefaults(): ResetUiDefaults {
+  return {
+    // Appearance
+    theme: 'system',
+    density: 'comfortable',
+    paneLayout: 'auto',
+    // Behavior
+    onExitBehavior: 'keep',
+    autoFocusNewPane: true,
+    restoreOnStartup: 'previous',
+    copyOnSelect: false,
+    timestampFormat: 'relative',
+    fileViewerViewMode: 'rendered',
+    // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
+    // per-host collapse (WARDEN-500), per-host labels (WARDEN-490).
+    agentFilter: 'all',
+    agentSort: 'manual',
+    healthGroupBy: 'health',
+    healthCollapsedHosts: {},
+    hostLabels: {},
+    // Terminal
+    terminalFontSize: 14,
+    terminalScrollback: 10000,
+    terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
+    terminalColorScheme: 'auto',
+    terminalCursorStyle: 'blink-block',
+    // New chats
+    defaultNewChatPreset: 'claude',
+    defaultNewChatPresetByHost: {},
+    defaultNewChatHost: '(local)',
+    defaultNewChatCwd: '',
+    defaultNewChatCwdByHost: {},
+    customPresets: [],
+    snippets: STARTER_SNIPPETS.map((s) => ({ ...s })),
+    defaultShell: '',
+    defaultShellByHost: {},
+    // Attention / desktop alerts
+    attentionDesktopAlerts: false,
+    attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
+    alertCritical: true,
+    alertWarning: true,
+    alertDirective: true,
+    alertError: true,
+    mutedAlertKeys: [],
+    // WARDEN-551: clear active snoozes too, so a reset leaves no stale
+    // temporary suppression behind (mirrors clearing the permanent mute set).
+    snoozedAlertKeys: {},
+    watchedChats: [],
+  };
+}
+
 export function loadUi(): UiState {
   try {
     const v = JSON.parse(readVersioned(KEY_PREFIX, KEY_VERSION) ?? 'null');
@@ -1120,8 +1326,8 @@ export function loadUi(): UiState {
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
         // WARDEN-660: a corrupt/non-array value degrades to [] (equal split).
-        paneColRatios: parseRatioArray(v.paneColRatios),
-        paneRowRatios: parseRatioArray(v.paneRowRatios),
+        paneColRatios: parseRatioArray(v.paneColRatios, 'paneColRatios'),
+        paneRowRatios: parseRatioArray(v.paneRowRatios, 'paneRowRatios'),
         onExitBehavior: ['keep', 'dim', 'auto-close'].includes(v.onExitBehavior) ? v.onExitBehavior : 'keep',
         // Only an explicit false opts out; absent/unknown defaults to true so a
         // partial payload never silently disables focus-stealing.
@@ -1185,8 +1391,9 @@ export function loadUi(): UiState {
         // the Project mode surviving a Warden restart.
         healthGroupBy: ['health', 'host', 'project'].includes(v.healthGroupBy) ? v.healthGroupBy : 'health',
         // WARDEN-500: defensive drop-bad-entries parse — a corrupt map never blanks
-        // the whole collapse state. Mirrors parseCwdByHost/parseShellByHost: require
-        // string keys + boolean values, drop anything else; a non-object → {}.
+        // the whole collapse state. Shares the parseObjectMap skeleton with the
+        // per-host maps (WARDEN-1027): require string keys, and strictly boolean
+        // values here — drop anything else; a non-object → {}.
         healthCollapsedHosts: parseCollapsedHosts(v.healthCollapsedHosts),
         // WARDEN-490 — per-host display labels. Sanitized to a host→label map
         // with empty values dropped (no label = today's behavior). Display-only;
@@ -1332,12 +1539,17 @@ const OBS_VERSION = 1;
 // concrete type/container/host) round-trip verbatim — no encoding. Optional
 // with all-'all' defaults so an existing localStorage payload upgrades with no
 // migration; consumers read each field with `?? 'all'`.
+// WARDEN-971: the Attention tab (added as a peer tab in WARDEN-880) is the third
+// filterable observer view — `attentionFilters` is its host/agent pair, identical
+// in shape and lifecycle to `directiveFilters`. Same no-migration rule: a payload
+// written before this field existed simply loads it as undefined.
 export interface ObsUi {
   openIds: string[];
   activeId: string | null;
   viewMode?: 'sessions' | 'activity' | 'directives' | 'attention';
   activityFilters?: { type: string; agent: string; host: string };
   directiveFilters?: { agent: string; host: string };
+  attentionFilters?: { agent: string; host: string };
 }
 export function loadObs(): ObsUi {
   try {
@@ -1349,6 +1561,7 @@ export function loadObs(): ObsUi {
         viewMode: v.viewMode || 'sessions',
         activityFilters: v.activityFilters,
         directiveFilters: v.directiveFilters,
+        attentionFilters: v.attentionFilters,
       };
     }
   } catch (e) {

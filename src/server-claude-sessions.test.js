@@ -247,6 +247,28 @@ describe('/api/claude-sessions-all HTTP endpoint (real Express app from server.j
     assert.ok(body.totals.byHost && typeof body.totals.byHost === 'object');
   });
 
+  it('a FULLY-REACHABLE fleet answers no `unreachableHosts` and no `error` (WARDEN-1200)', async () => {
+    // The healthy-path counterpart to claude-sessions-all-unreachable.test.js, and it
+    // lives HERE because this file's fleet is the fully-reachable one: `{"hosts": []}`
+    // above means the only host is `(local)`, a filesystem read that cannot fail in
+    // transport. (`cfg` is read once at module scope in src/server.js, so a file's
+    // fleet is frozen at first import and the two cases cannot share a process.)
+    //
+    // The key must be ABSENT rather than an empty array. The client seam narrows a
+    // missing key to `[]`, so either would read correctly — but omitting it keeps a
+    // healthy response byte-identical to before WARDEN-1200, which is what guarantees
+    // the new disclosure cannot regress a fleet that has nothing to disclose.
+    const res = await fetch(`${baseUrl}/api/claude-sessions-all`);
+    const body = await res.json();
+
+    assert.strictEqual(res.status, 200);
+    assert.ok(!('unreachableHosts' in body),
+      `a healthy fleet must omit the key entirely, got ${JSON.stringify(body.unreachableHosts)}`);
+    assert.strictEqual(body.error, undefined,
+      'this route has no top-level error channel — the client seam THROWS on one');
+    assert.ok(body.sessions.length > 0, 'and the rows are unaffected');
+  });
+
   it('default page returns the newest 40 and flags more (page 1 == old global cap, now not a hard ceiling)', async () => {
     const body = await (await fetch(`${baseUrl}/api/claude-sessions-all`)).json();
     assert.strictEqual(body.sessions.length, 40, 'default page size is 40');

@@ -7,18 +7,19 @@
 // via summarizeFanout (the allSettled→summary reducer); only the kill-specific
 // copy + the "kill failed" fallback live here.
 //
-// The IMPURE seam (runKillFanout) is the shared fan-out itself: Promise.allSettled
-// over /api/kill per selected agent. It used to live inline in ChatSidebar; it now
+// The IMPURE seam (runKillFanout) is the shared fan-out itself: one POST to
+// /api/kill per selected agent, via the shared runFanout request loop
+// (./fanout, WARDEN-974). It used to live inline in ChatSidebar; it now
 // lives here so every multi-select kill surface (sidebar, Fleet Health) shares ONE
 // copy of the fiddly fetch-and-reduce shape. Each surface passes its own
 // `onSettled` reconciliation (the two surfaces reconcile differently) and keeps
 // its view concerns (toast, selection clear) in the component.
 //
-// `import type` only below (besides summarizeFanout) — erased by OXC, so this
-// module loads under the same transpile-to-temp-`.mjs` + dynamic-`import()`
-// harness as broadcast.ts (see kill.test.mjs).
+// `import type` only below (besides runFanout + summarizeFanout) — erased by
+// OXC, so this module loads under the same transpile-to-temp-`.mjs` +
+// dynamic-`import()` harness as broadcast.ts (see kill.test.mjs).
 
-import { summarizeFanout } from './fanout';
+import { formatFanoutToast, runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/kill: either ok, or not-ok with a reason. */
 export interface KillOutcome { ok: boolean; error?: string }
@@ -49,14 +50,15 @@ export function summarizeKill(
   return { total, stopped: succeeded, failed };
 }
 
-/** Toast variant for a kill summary — success only when every agent was stopped. */
-export type KillToastVariant = 'success' | 'error';
+/**
+ * Toast variant / shape for a kill summary. Both alias the shared fan-out types
+ * (./fanout) — the three formatters emit structurally identical toasts, and one
+ * renderer (showFanoutToast) consumes all three. The names are kept as exported
+ * aliases so existing importers are unaffected.
+ */
+export type KillToastVariant = FanoutToastVariant;
 
-export interface KillToast {
-  title: string;
-  description?: string;
-  variant: KillToastVariant;
-}
+export type KillToast = FanoutToast;
 
 /**
  * Shape the result toast for a kill summary.
@@ -65,28 +67,19 @@ export interface KillToast {
  * - Some/total failure → an error whose title carries the N/M tally and whose
  *   description lists each agent that wasn't stopped with its reason (so the
  *   human can see WHICH sessions are still running and why — host unreachable,
- *   session already dead, etc.). The description is the full failure list (not
- *   truncated): the sidebar's own selection caps it at a human-scale N, and
- *   sonner wraps a long description in a scrollable toast body. Rendered with
- *   `whitespace-pre-line` by the caller so each failure lands on its own line.
+ *   session already dead, etc.).
+ *
+ * The three-branch shape itself is the shared formatFanoutToast (./fanout,
+ * WARDEN-1034); only the kill COPY lives here. "Failed to stop" is passed as its
+ * own opaque phrase rather than derived from "Stopped" — see FanoutToastPhrases.
+ * `stopped` is mapped onto the shared `succeeded` field; the public KillSummary
+ * shape is unchanged.
  */
 export function formatKillToast(s: KillSummary): KillToast {
-  if (s.failed.length === 0) {
-    return { title: `Stopped ${s.stopped} agent${s.stopped === 1 ? '' : 's'}`, variant: 'success' };
-  }
-  const list = s.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
-  if (s.stopped === 0) {
-    return {
-      title: `Failed to stop ${s.failed.length} of ${s.total} agent${s.total === 1 ? '' : 's'}`,
-      description: list,
-      variant: 'error',
-    };
-  }
-  return {
-    title: `Stopped ${s.stopped} of ${s.total} agents — ${s.failed.length} failed`,
-    description: list,
-    variant: 'error',
-  };
+  return formatFanoutToast(
+    { total: s.total, succeeded: s.stopped, failed: s.failed },
+    { success: 'Stopped', failure: 'Failed to stop' },
+  );
 }
 
 /**
@@ -119,19 +112,7 @@ export async function runKillFanout(
   nameOf: (id: string) => string,
   onSettled?: () => void | Promise<void>,
 ): Promise<KillSummary> {
-  const results = await Promise.allSettled(
-    ids.map((id) =>
-      fetch('/api/kill', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-      }).then(async (r) =>
-        r.ok
-          ? { ok: true }
-          : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-      ),
-    ),
-  );
+  const results = await runFanout('/api/kill', ids, (id) => ({ id }));
   const summary = summarizeKill(results, ids, nameOf);
   if (onSettled) await onSettled();
   return summary;

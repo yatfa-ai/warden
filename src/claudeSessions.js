@@ -23,7 +23,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { run } from './ssh.js';
+import { run, isTransportFailure } from './ssh.js';
 
 // fs.promises alias — the local session enumeration/transcript reads are async
 // (WARDEN-828) so the single-threaded server answers /api/config mid-sweep
@@ -57,9 +57,28 @@ export function parseJsonlHead(text) {
 // contract: malformed lines, missing/empty usage, and non-message records are
 // skipped (never throws). Returns null when the body has no real usage (no
 // usage objects, or all of them zero) so a row renders without a token badge
-// instead of a misleading "0 tok" — this also keeps the LOCAL full-file path
-// byte-for-byte consistent with the REMOTE grep+awk extractor (which sums to
-// empty → null for the same all-zero case). (WARDEN-367.)
+// instead of a misleading "0 tok" — the REMOTE grep+awk extractor collapses the
+// same all-zero case to empty → null, so both paths share the null-for-zero
+// contract. (WARDEN-367.)
+//
+// PARITY WITH THE REMOTE EXTRACTOR (WARDEN-1088). This function is the
+// REFERENCE side: it parses each line as JSON and reads `message.usage` only.
+// The remote path can't parse JSON (no jq/node on-host), so it text-scans — and
+// the two agree only where the scan is constrained to match this reading. Two
+// places where the shapes differ, and what each side does:
+//
+//   1. `message.usage.iterations[]` — a per-iteration DECOMPOSITION of the very
+//      rollup that sits beside it (measured: parts sum to the rollup exactly on
+//      7611/7611 usage objects locally). Reading `u.input_tokens` takes the
+//      rollup and never descends into `iterations`, so this side counts it once.
+//      The remote awk dedups per JSONL line to match. Before WARDEN-1088 it did
+//      not, and summed rollup + parts ≈ 2× on every remote host.
+//   2. `toolUseResult.usage.*` — subagent turns carry usage under a DIFFERENT
+//      key. This side ignores it (it reads `message.usage` only); the remote
+//      text-scan still counts it, because the scan keys off field names, not
+//      paths. That residual is a deliberate open question, not a bug — see the
+//      note on the remote script below. It cannot interact with (1): no JSONL
+//      line carries both keys (measured 0 of 7617 locally).
 export function parseJsonlTokenUsage(text) {
   let input = 0, output = 0, cacheCreation = 0, cacheRead = 0;
   for (const line of text.split('\n')) {
@@ -183,39 +202,124 @@ export async function localClaudeSessions(limit = 40) {
   }
   return out.filter((s) => s.cwd);
 }
-// `limit` bounds the returned list (most-recent first). Defaults to 40 so
-// `/api/claude-sessions` is unchanged; the "All Sessions" endpoint passes a
-// larger window for pagination (WARDEN-176). The remote script already walks
-// every file and transfers each head, so the per-request SSH cost is the same
-// regardless of limit — only the in-Node slice changes.
-export async function remoteClaudeSessions(host, limit = 40) {
-  // Token usage lives on EVERY assistant turn across the WHOLE file. Computing it
-  // needs the full transcript, but we only ever transfer cwd/summary (the 6KB
-  // head) + four summed ints per file. So the totals are computed ON-HOST with a
-  // portable grep+awk pipeline (no jq/node assumed — remote hosts run docker+
-  // tmux+claude), and only the four ints ride the ___S marker. Single SSH pass,
-  // same shape as before, just an enriched header line. An all-zero / no-usage
-  // file prints nothing → tokenUsage null (matches the local path). (WARDEN-367.)
-  const script = `for f in ~/.claude/projects/*/*.jsonl; do
+// Build the on-host script that `remoteClaudeSessions` runs over SSH. Exported
+// so the bash/awk STRING WE ACTUALLY SHIP is executable in a test (against a
+// fixture HOME) instead of being re-typed there. That matters more than usual
+// here: WARDEN-1088 was a silent 2× drift between this extractor and its local
+// JS twin, and a test that pinned a hand-copied duplicate of the awk would have
+// pinned the copy, not the pipeline — the same two-copies-must-agree failure
+// that caused the bug. See WARDEN-140 on unit-testing embedded bash.
+//
+// Token usage lives on EVERY assistant turn across the WHOLE file. Computing it
+// needs the full transcript, but we only ever transfer cwd/summary (the 6KB
+// head) + four summed ints per file. So the totals are computed ON-HOST with a
+// portable grep+awk pipeline (no jq/node assumed — remote hosts run docker+
+// tmux+claude), and only the four ints ride the ___S marker. Single SSH pass,
+// same shape as before, just an enriched header line. An all-zero / no-usage
+// file prints nothing → tokenUsage null (matches the local path). (WARDEN-367.)
+//
+// ONE ROLLUP PER LINE (WARDEN-1088). Without JSON parsing this scan sees only
+// field NAMES, and `message.usage` carries the four rollup fields AND an
+// `iterations[]` array that repeats those same four names as a decomposition of
+// that rollup. Summing every match therefore added each turn to itself: remote
+// totals ran ~2.00× local on 78/78 transcripts measured, which fed the session
+// token badge (/api/claude-sessions-all) and, worse, the WARDEN-414/415 budget —
+// so a remote host effectively breached at half its configured threshold and
+// dominated `topOffender` on a mixed fleet purely as an artifact.
+//
+// The fix is per-line first-occurrence-wins: `grep -on` keeps the JSONL line
+// number on every match, so awk can reset its four "seen" flags whenever the
+// line number changes and count each field once per record. Adding `-n` costs
+// no portability: it is POSIX, unlike the `-o` this pipeline already relies on.
+//
+// WHAT FIRST-OCCURRENCE-WINS ACTUALLY REQUIRES (WARDEN-1092). "The rollup is
+// emitted before its own iterations[]" is TRUE but is NOT the invariant this
+// dedup needs. It needs the strictly stronger property that NO key named
+// input_tokens / output_tokens / cache_creation_input_tokens /
+// cache_read_input_tokens, FROM ANY JSON PATH, precedes the `message.usage`
+// rollup on that line — `iterations[]` is only one such source. That stronger
+// property is FALSE in the wild: a transcript measured at WARDEN-1088's HEAD
+// carried, on one assistant line, a tool ARGUMENT at
+// `.message.content[].input.metadata.frozen_window_measured.output_tokens`
+// (85502) ahead of the real rollup (3362) — so the scan took 85502 and
+// DISCARDED the true value. That is a new failure direction: pre-WARDEN-1088
+// the scan could only over-add; a naked first-occurrence rule can UNDER-count.
+// Scope was small (1 file in 407, ~2.3% of that file's total) but real.
+//
+// So the match is gated on `"usage":{`: the grep alternation emits that opener
+// as its own token, and awk counts the four names only AFTER it has seen one on
+// the current line (flag `u`, reset with the seen flags on every line change).
+// This is sound rather than heuristic — a rollup key is BY CONSTRUCTION inside
+// its own `"usage":{...}` object, and JSONL puts that whole object on one line,
+// so the opener always precedes the rollup on that line. The gate therefore
+// cannot suppress a true rollup; it can only drop same-named keys that precede
+// every `"usage":{` on the line, and such a key is never the rollup.
+//
+// STILL ASSUMED, NOT PROVEN: a foreign same-named key sitting AFTER some
+// `"usage":{` but BEFORE `message.usage` would still win. Nothing rules that
+// out — it is unobserved, not impossible. Closing it needs to know which object
+// a key belongs to, i.e. brace tracking, i.e. substr/split — see the
+// portability rule below. Falsify this claim by finding a line where the four
+// grep matches after the first `"usage":{` are not the rollup's.
+//
+// The awk deliberately uses ONLY POSIX field splitting, scalar flags, regex
+// match, `next` and printf — no `delete`, arrays, `match()`, `substr()` or
+// `split()` — because a minimal remote host may run busybox/mawk. `-F:` splits
+// each grep record `LINE:"key":VALUE` into the line number ($1), the quoted key
+// ($2) and the value ($NF); the key names contain no colon, so the split is
+// unambiguous. The `"usage":{` token splits the same way ($2 == `"usage"`,
+// $NF == `{`, which numifies to the harmless 0). Verified byte-identical to
+// parseJsonlTokenUsage on all 80 local transcripts (16521 lines, 7779 carrying
+// a rollup) under BOTH busybox awk 1.35.0 and mawk 1.3.4 — the gate changed no
+// local total, since every one of those lines already had `"usage":{` ahead of
+// its first match.
+//
+// KNOWN, DELIBERATE RESIDUAL: subagent turns store usage at
+// `toolUseResult.usage.*` rather than `message.usage.*`. This name-keyed scan
+// counts those; the local JSON-parsing path does not, so such transcripts still
+// read higher remotely. That is a genuine product question — do subagent tokens
+// belong in a session total? — and NOT the double-count fixed here (a total
+// summed with its own parts is wrong under any definition). Left as-is on
+// purpose: `toolUseResult.usage` carries its own `"usage":{` opener, so the gate
+// arms for it exactly as before. On the corpus measured for WARDEN-1088 no
+// JSONL line carried both keys, so the per-line dedup did not interact with
+// this class — but that is a property of that corpus, not a guarantee. On a
+// line that did carry both, whichever came first would win.
+// (WARDEN-1088, WARDEN-1092.)
+export function buildRemoteSessionScript() {
+  return `for f in ~/.claude/projects/*/*.jsonl; do
 [ -f "$f" ] || continue
 id=$(basename "$f" .jsonl)
 mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
-tu=$(grep -oE '"(input_tokens|output_tokens|cache_creation_input_tokens|cache_read_input_tokens)"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | awk '
-/^"cache_creation_input_tokens"/ { if (match($0,/[0-9]+$/)) cc += substr($0,RSTART,RLENGTH) }
-/^"cache_read_input_tokens"/     { if (match($0,/[0-9]+$/)) cr += substr($0,RSTART,RLENGTH) }
-/^"input_tokens"/                { if (match($0,/[0-9]+$/)) inp += substr($0,RSTART,RLENGTH) }
-/^"output_tokens"/               { if (match($0,/[0-9]+$/)) out += substr($0,RSTART,RLENGTH) }
+tu=$(grep -onE '"(input_tokens|output_tokens|cache_creation_input_tokens|cache_read_input_tokens)"[[:space:]]*:[[:space:]]*[0-9]+|"usage"[[:space:]]*:[[:space:]]*[{]' "$f" 2>/dev/null | awk -F: '
+{ if ($1 != pl) { pl = $1; u = 0; si = 0; so = 0; scc = 0; scr = 0 }; v = $NF + 0 }
+$2 ~ /^"usage"/ { u = 1; next }
+!u { next }
+$2 ~ /^"cache_creation_input_tokens"/ { if (!scc) { scc = 1; cc += v } }
+$2 ~ /^"cache_read_input_tokens"/     { if (!scr) { scr = 1; cr += v } }
+$2 ~ /^"input_tokens"/                { if (!si)  { si  = 1; inp += v } }
+$2 ~ /^"output_tokens"/               { if (!so)  { so  = 1; out += v } }
 END { if (inp||out||cc||cr) printf "%d\\t%d\\t%d\\t%d", inp, out, cc, cr }')
 if [ -n "$tu" ]; then printf '___S\\t%s\\t%s\\t%s\\n' "$id" "$mt" "$tu"; else printf '___S\\t%s\\t%s\\n' "$id" "$mt"; fi
 head -c 6000 "$f"
 printf '\\n___E\\t%s\\n' "$id"
 done`;
-  const res = await run(host, script, { timeout: 15000 });
-  if (!res.ok) return [];
+}
+
+// Parse the remote session script's stdout into the session rows, most-recent
+// first, capped at `limit`. Split out of `remoteClaudeSessions` (WARDEN-1196) so
+// the transport-failure channel below could be added WITHOUT the parse loop
+// having to be duplicated or re-tested — the two callers share this one body, so
+// the frozen array contract and the new detail variant cannot drift apart.
+//
+// Pure (no SSH, no fs), so it is unit-testable directly — the `sessionRecovery.js`
+// pattern, and the reason the new failure leg has real coverage under `node --test
+// src` on a repo with no `mock.module` (Node 20).
+export function parseRemoteSessionOutput(stdout, limit = 40) {
   const out = [];
   let cur = null;
   const buf = [];
-  for (const line of res.stdout.split('\n')) {
+  for (const line of String(stdout || '').split('\n')) {
     // ___S now optionally carries four tab-separated token ints after the
     // mtime: ___S  id  mt  input  output  cacheCreation  cacheRead. The token
     // group is optional so a no-usage file (or a pre-token-format archive)
@@ -244,6 +348,58 @@ done`;
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out.slice(0, limit);
+}
+
+// The same enumeration as `remoteClaudeSessions`, keeping the SECOND thing the
+// SSH result carries: WHETHER THE HOST ANSWERED AT ALL (WARDEN-1196).
+//
+// WHY A SIBLING RATHER THAN A WIDER `remoteClaudeSessions`. That function has
+// three production callers (`/api/claude-sessions`, `/api/claude-sessions-all`,
+// and the budget sweep) and the other two consume its return value as a BARE
+// ARRAY — `mergeAndPaginateSessions` wraps it, the sweep calls `.map()` on it
+// directly. Changing its contract to a record would break both. Hence the pair:
+// `remoteClaudeSessions` keeps its narrow array contract (and its callers) and
+// this variant serves the one site that needs to tell "this host has no sessions"
+// apart from "I could not reach this host" — the same shape as
+// `readFileDiff`/`readFileDiffDetail` (web/src/lib/gitDiffApi.ts:149).
+//
+// The distinction is NOT invented here: `isTransportFailure` (src/ssh.js:488) is
+// the house classifier, already used for exactly this call by
+// `sessionRecovery.js:20`. Critically it returns FALSE when stdout is non-empty —
+// a host that answers with a non-zero exit and real output ran the command, so
+// that is a COMMAND failure, not an unreachable host, and it degrades to the
+// existing empty-list behaviour rather than being reported as a dead machine.
+//
+// `deps` is an optional test seam (production callers omit it), mirroring the
+// seams on `detectClaude`/`runWithPool`/`discover` — the repo is on Node 20
+// without `mock.module`, so without it this leg could not be driven without real
+// SSH.
+//
+// @returns `{ sessions, unreachable }`. `unreachable` is true ONLY for a transport
+//          failure; `sessions` is always an array (empty on any failure), so a
+//          caller that ignores the flag behaves exactly as before.
+export async function remoteClaudeSessionsDetail(host, limit = 40, deps = {}) {
+  const exec = deps.run ?? run;
+  const res = await exec(host, buildRemoteSessionScript(), { timeout: 15000 });
+  if (!res.ok) return { sessions: [], unreachable: isTransportFailure(res) };
+  return { sessions: parseRemoteSessionOutput(res.stdout, limit), unreachable: false };
+}
+
+// `limit` bounds the returned list (most-recent first). Defaults to 40 so
+// `/api/claude-sessions` is unchanged; the "All Sessions" endpoint passes a
+// larger window for pagination (WARDEN-176). The remote script already walks
+// every file and transfers each head, so the per-request SSH cost is the same
+// regardless of limit — only the in-Node slice changes.
+//
+// CONTRACT FROZEN (WARDEN-1196): returns a BARE ARRAY, empty on any failure —
+// transport or otherwise. `/api/claude-sessions-all` (src/server.js:1434) and the
+// budget sweep (:2817) both consume it as one, so this signature must not grow a
+// failure channel. It is now a thin projection of `remoteClaudeSessionsDetail`
+// above, which is where a caller that needs to distinguish an unreachable host
+// goes; behaviour here is byte-identical to before that split.
+export async function remoteClaudeSessions(host, limit = 40) {
+  const { sessions } = await remoteClaudeSessionsDetail(host, limit);
+  return sessions;
 }
 
 // ---- read-only transcript view (WARDEN-233) ----

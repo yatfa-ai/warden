@@ -127,13 +127,17 @@ export function inAwayWindow(miss: WatchMiss, since: number): boolean {
 }
 
 // The persistent needs-you states a CURRENT snapshot can reconcile an away miss
-// against (WARDEN-476). Mirrors chatWatch.ts WATCH_DIRECT_STATES (:42) — keep in
-// sync. A watched chat whose current state is NOT one of these has RECOVERED since
-// the miss fired, so its away miss is suppressed at read-time (reconcileAwayMisses)
-// and the catch-up agrees with the live return-banner callout. Mirrored locally
-// (not imported) to preserve this module's dependency-free discipline — the same
-// way WATCH_MISS_REASON_LABEL below mirrors desktopAlerts' WATCH_REASON_LABEL.
-const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['waiting', 'erroring', 'stuck']);
+// against (WARDEN-476). Mirrors chatWatch.ts's WATCH_NEED_STATES (the persistent
+// needs-you set — WATCH_DIRECT_STATES plus 'blocked') — keep in sync. A watched chat
+// whose current state is NOT one of these has RECOVERED since the miss fired, so its
+// away miss is suppressed at read-time (reconcileAwayMisses) and the catch-up agrees
+// with the live return-banner callout. `blocked` (WARDEN-1217) puts a chat that
+// entered blocked while the user was away on the same footing as waiting/erroring/
+// stuck — the class of chat that most clearly needs attention must not be the one
+// silently dropped from the catch-up. Mirrored locally (not imported) to preserve
+// this module's dependency-free discipline — the same way WATCH_MISS_REASON_LABEL
+// below mirrors desktopAlerts' WATCH_REASON_LABEL.
+const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['waiting', 'erroring', 'stuck', 'blocked']);
 
 // Urgency precedence for ranking surviving misses (WARDEN-476). Mirrors chatWatch.ts
 // WATCH_REASON_PRIORITY (:54) — keep in sync. The catch-up ranks survivors by the

@@ -48,74 +48,45 @@ export const SSH_BASE_OPTS = [
 ];
 export const SSH_BIN = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
 
+// Build ssh argv with the end-of-options separator structurally guaranteed.
+//
+// `--` ends ssh's option parsing: a host beginning with `-` is then treated as a
+// (bogus) hostname instead of an option. Without it, `-oProxyCommand=<cmd>`
+// arriving as a `host` makes ssh execute <cmd> on THIS machine. An argv array
+// stops the shell, not the callee's own option parser — so the separator has to
+// be terminated here, in the builder, where every caller is covered
+// (WARDEN-140 Trap 5). Hand-assembling it per call site leaked twice: WARDEN-969
+// fixed "all 5" ssh.js sites and still left the 2 companion.js sites exposed for
+// another ticket cycle (WARDEN-979). `--` is unconditional and always
+// immediately precedes the host, so a caller CANNOT forget it.
+//
+// Pure (just builds an array) so every transport is unit-testable without ssh —
+// same argument as buildDockerGitArgv in gitStatus.js.
+//
+// `baseOpts: false` is a NAMED decision, not an omission: sshControl and
+// ensureControlMaster genuinely do not carry SSH_BASE_OPTS today (no BatchMode,
+// no StrictHostKeyChecking), and passing `false` preserves that argv exactly
+// while making the divergence greppable instead of invisible. Whether that
+// divergence should exist at all is a separate, deliberately out-of-scope
+// question — changing it here would be a behavior change, not a refactor.
+export function buildSshArgv(host, { tty = false, baseOpts = true, opts = [], command } = {}) {
+  const args = [];
+  if (tty) args.push('-tt');
+  if (baseOpts) args.push(...SSH_BASE_OPTS);
+  args.push(...opts);
+  args.push('--', host);                       // the invariant, in exactly one place
+  if (command !== undefined) args.push(command);
+  return args;
+}
+
 // ---------------- Connection Pool ----------------
 // Persistent SSH connections to remote hosts. Reused across operations for
 // better performance (no repeated SSH handshakes) and reliability (fewer
 // connection attempts = fewer transient failures).
 
-const connectionPool = new Map(); // host -> { conn: SSHClient, lastUsed: number, refs: number, healthy: boolean }
+const connectionPool = new Map(); // host -> { socketPath: string, lastUsed: number, refs: number, healthy: boolean, process: ChildProcess }
 const POOL_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const POOL_HEALTH_CHECK_INTERVAL = 60 * 1000; // 1 minute
-
-// Simple SSH client wrapper for persistent connections.
-// NOTE: This class is currently unused. The implementation uses SSH ControlMaster
-// sockets instead (see ensureControlMaster below). This class is retained for
-// potential future implementation alternatives or reference.
-class SSHClient {
-  constructor(host, connectTimeout) {
-    this.host = host;
-    this.connectTimeout = connectTimeout;
-    this.destroyed = false;
-    this.pendingCommands = new Map(); // id -> { resolve, reject, timer }
-    this.commandId = 0;
-    this.process = null;
-    this.buffer = '';
-    this.currentCommand = null;
-  }
-
-  async connect() {
-    return new Promise((resolve, reject) => {
-      const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${this.connectTimeout}`, this.host];
-      const child = spawn(SSH_BIN, args, { windowsHide: true });
-      this.process = child;
-
-      let connected = false;
-      const connectTimer = setTimeout(() => {
-        if (!connected) {
-          this.destroy();
-          reject(new Error(`SSH connection timeout to ${this.host}`));
-        }
-      }, this.connectTimeout * 1000);
-
-      child.on('error', (err) => {
-        clearTimeout(connectTimer);
-        this.destroy();
-        reject(new Error(`SSH connection failed to ${this.host}: ${err.message}`));
-      });
-
-      // SSH master mode: we use multiplexing for persistent connections
-      // For now, we'll use a simpler approach: keep the process alive and use stdin for commands
-      // But SSH doesn't work that way - we need ControlMaster for real pooling
-
-      // For the initial implementation, we'll use SSH ControlMaster sockets
-      // This is the standard way to do SSH connection pooling
-    });
-  }
-
-  destroy() {
-    this.destroyed = true;
-    if (this.process) {
-      this.process.kill('SIGTERM');
-      this.process = null;
-    }
-    // Clear all pending commands
-    for (const { timer, reject } of this.pendingCommands.values()) {
-      clearTimeout(timer);
-      reject(new Error('SSH connection destroyed'));
-    }
-    this.pendingCommands.clear();
-  }
-}
 
 // SSH ControlMaster socket-based connection pooling
 // This uses SSH's built-in multiplexing feature for persistent connections
@@ -138,7 +109,9 @@ const controlMasterPath = () => {
 // control diagnostics never spam the console.
 function sshControl(host, socketPath, sub, timeout = 5000) {
   return new Promise((resolve) => {
-    const child = spawn(SSH_BIN, ['-O', sub, '-S', socketPath, host], {
+    // baseOpts:false — this probe has never carried SSH_BASE_OPTS (see buildSshArgv).
+    const argv = buildSshArgv(host, { baseOpts: false, opts: ['-O', sub, '-S', socketPath] });
+    const child = spawn(SSH_BIN, argv, {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout);
@@ -151,50 +124,143 @@ function sshControl(host, socketPath, sub, timeout = 5000) {
   });
 }
 
-async function ensureControlMaster(host, cfg) {
+// How long the FAILURE path may wait for the dead child's stdio to drain before
+// it gives up and rejects with whatever stderr has arrived. Bounded so a
+// pathological child that exits non-zero and never closes its pipes cannot hang
+// the promise (the connect timer is already cleared by then — see below).
+const CONTROL_MASTER_DRAIN_GRACE_MS = 300;
+
+// Establish (or reuse) the ControlMaster every pooled request multiplexes over.
+//
+// SETTLE-TRIGGER ASYMMETRY (WARDEN-1107) — this is the ONE spawn-and-capture
+// primitive in the repo that legitimately diverges from its siblings' blanket
+// "resolve on 'close', not 'exit'" rule (run() src/ssh.js:371, runLocalTmux(),
+// runLocalCapture() gitRoutes.js:94 — WARDEN-464/766). The two paths settle on
+// DIFFERENT events, on purpose:
+//
+//   success (code === 0) → settle on 'exit'. Unlike its siblings this child is
+//     DAEMONIZING: `ssh -N -o ControlMaster=yes -o ControlPersist=10m` forks a
+//     background master and the foreground process exits 0 while the backgrounded
+//     master RETAINS the inherited stdout/stderr pipe fds. The write ends stay
+//     open, so 'close' may never fire on success — waiting for it would hang until
+//     the connect timer fired and turn every successful remote connection into a
+//     bogus `ControlMaster connect timeout`. A naive one-line 'exit'→'close' swap
+//     here is a severe regression on the primary remote-host path
+//     (getConnection → runWithPool → chats.js discover, every poll tick). It would
+//     also delay resolution past the child's exit, which the pool's
+//     `process.on('exit', …)` eviction listener (src/ssh.js) depends on.
+//
+//   failure (code !== 0) → wait for the stdio drain ('close', bounded by
+//     CONTROL_MASTER_DRAIN_GRACE_MS). The rejection message is built FROM stderr,
+//     and 'exit' can fire before the pipe drains — so settling on 'exit' reads a
+//     still-empty stderr and the real ssh diagnostic ("Permission denied
+//     (publickey)", "Host key verification failed", "Could not resolve hostname")
+//     degrades to the `exit 255` fallback. That fallback firing IS the bug: this
+//     console.error'd message is how an unreachable host actually gets diagnosed
+//     server-side (browser surfaces genericize it by design). On failure no master
+//     is established, so nothing holds the pipes open and 'close' does arrive.
+//
+// `spawn` is injectable (defaults to node's child_process.spawn) so BOTH halves of
+// that asymmetry have deterministic unit tests — a real subprocess can't reproduce
+// 'exit'-before-final-'data', nor a success that never closes, reliably on every
+// machine. Mirrors runLocalCapture's seam (gitRoutes.js:77).
+export async function ensureControlMaster(host, cfg) {
   const socketPath = `${controlMasterPath()}-${host.replace(/[^a-zA-Z0-9]/g, '_')}`;
   const timeout = (cfg?.connectTimeout ?? 10);
+  const spawnFn = cfg?.spawn ?? spawn;
+  const drainGrace = cfg?.drainGrace ?? CONTROL_MASTER_DRAIN_GRACE_MS;
 
   // Check if master is already running (async — never blocks the event loop).
   if ((await sshControl(host, socketPath, 'check', 2000)) === 0) {
     return { socketPath, existing: true };
   }
 
-  // Start new control master
-  const args = [
-    '-o', 'ControlMaster=yes',
-    '-o', 'ControlPath=' + socketPath,
-    '-o', 'ControlPersist=10m',  // Keep alive for 10 minutes after last use
-    '-o', `ConnectTimeout=${timeout}`,
-    '-N',  // No remote command
-    host
-  ];
+  // Start new control master.
+  // baseOpts:false preserves this argv EXACTLY as it has always been — this is
+  // the one connection every pooled request multiplexes over, and it does not
+  // carry SSH_BASE_OPTS. Named rather than silent; see buildSshArgv.
+  const args = buildSshArgv(host, {
+    baseOpts: false,
+    opts: [
+      '-o', 'ControlMaster=yes',
+      '-o', 'ControlPath=' + socketPath,
+      '-o', 'ControlPersist=10m',  // Keep alive for 10 minutes after last use
+      '-o', `ConnectTimeout=${timeout}`,
+      '-N',  // No remote command
+    ],
+  });
 
   return new Promise((resolve, reject) => {
-    const child = spawn(SSH_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnFn(SSH_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
 
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`ControlMaster connect timeout to ${host}`));
+    // Single-settle guard (the pattern sshControl already uses above): 'exit',
+    // 'close', 'error', the connect timer and the drain timer can all fire, and
+    // exactly one of them may settle the promise. Every path clears both timers.
+    let settled = false;
+    let drainTimer = null;
+    let timer = null;
+    const settle = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (drainTimer) clearTimeout(drainTimer);
+      fn();
+    };
+    // The failure rejection, built AFTER the drain so `stderr` is the real ssh
+    // diagnostic. The `stderr || \`exit ${code}\`` fallback is preserved verbatim —
+    // it is still the correct answer for a child that genuinely wrote nothing.
+    const rejectFailure = (code) =>
+      settle(() => reject(new Error(`ControlMaster failed to ${host}: ${stderr || `exit ${code}`}`)));
+
+    timer = setTimeout(() => {
+      settle(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`ControlMaster connect timeout to ${host}`));
+      });
     }, timeout * 1000 + 5000);
 
+    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045): `stdout += d`
+    // on a Buffer decodes each chunk IN ISOLATION, so a multibyte sequence split
+    // across a read boundary is destroyed (both halves → U+FFFD). setEncoding
+    // installs a StringDecoder that carries the partial tail into the next chunk.
+    // Additive consistency here — this stdout is discarded and the stderr is a
+    // short connect diagnostic — but the idiom must not diverge between siblings.
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
 
     child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`ControlMaster spawn failed: ${err.message}`));
+      settle(() => reject(new Error(`ControlMaster spawn failed: ${err.message}`)));
     });
 
     child.on('exit', (code) => {
-      clearTimeout(timer);
+      if (settled) return;
       if (code === 0) {
-        resolve({ socketPath, existing: false, process: child });
+        // SUCCESS — settle HERE, on 'exit', never on 'close'. The ControlPersist
+        // daemon this call just forked holds the inherited pipe fds open, so
+        // 'close' may never arrive. See the function header.
+        settle(() => resolve({ socketPath, existing: false, process: child }));
       } else {
-        reject(new Error(`ControlMaster failed to ${host}: ${stderr || `exit ${code}`}`));
+        // FAILURE — the message is built from stderr, which may still be draining.
+        // Hand off to 'close'. The connect timer is disarmed (the child has already
+        // exited; there is nothing left to time out or SIGTERM) and replaced by a
+        // short bounded grace so a child that never closes its pipes still rejects
+        // — with whatever stderr arrived, exactly as today.
+        clearTimeout(timer);
+        drainTimer = setTimeout(() => rejectFailure(code), drainGrace);
       }
+    });
+
+    // 'close' fires only after the stdio streams drain, and passes the same `code`
+    // as 'exit' — so the reject contract is unchanged, only its message is complete.
+    // Reached on the failure path (and on a spawn failure that emits 'close' with no
+    // 'exit'); a no-op after the success path has already settled on 'exit'.
+    child.on('close', (code) => {
+      if (settled) return;
+      rejectFailure(code ?? -1);
     });
   });
 }
@@ -300,29 +366,6 @@ export function startConnectionPoolCleanup() {
   }, POOL_HEALTH_CHECK_INTERVAL);
 }
 
-// Pre-warm connection pool for configured hosts
-export async function preWarmConnectionPool(hosts, cfg) {
-  const remoteHosts = hosts.filter(h => h !== '(local)');
-  if (remoteHosts.length === 0) return;
-
-  console.log(`[SSH pool] Pre-warming connections for ${remoteHosts.length} hosts...`);
-  const results = await Promise.allSettled(
-    remoteHosts.map(async (host) => {
-      try {
-        await getConnection(host, cfg);
-        releaseConnection(host);
-        console.log(`[SSH pool] Pre-warmed connection to ${host}`);
-      } catch (e) {
-        console.warn(`[SSH pool] Failed to pre-warm ${host}:`, e.message);
-      }
-    })
-  );
-
-  const succeeded = results.filter(r => r.status === 'fulfilled').length;
-  const failed = results.filter(r => r.status === 'rejected').length;
-  console.log(`[SSH pool] Pre-warming complete: ${succeeded} succeeded, ${failed} failed`);
-}
-
 // ---------------- Enhanced Error Handling ----------------
 
 export class HostConnectionError extends Error {
@@ -394,23 +437,36 @@ export function run(host, cmd, opts = {}, cfg = {}) {
   const connectTimeout = Math.min(20, Math.max(3, Math.ceil(timeout / 1000)));
   const remote = `bash -lc ${shellQuote(cmd)}`;
 
-  // Build args with optional ControlMaster for connection pooling
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${connectTimeout}`];
-
-  // Add ControlPath if we have a pooled connection
+  // Build args with optional ControlMaster for connection pooling.
+  // The `--` separator before the host comes from buildSshArgv — see there.
   const socketPath = opts.socketPath;
-  if (socketPath) {
-    args.push('-o', 'ControlPath=' + socketPath);
-  }
-
-  args.push(host, remote);
+  const args = buildSshArgv(host, {
+    opts: [
+      '-o', `ConnectTimeout=${connectTimeout}`,
+      // Add ControlPath if we have a pooled connection
+      ...(socketPath ? ['-o', 'ControlPath=' + socketPath] : []),
+    ],
+    command: remote,
+  });
 
   return new Promise((resolve) => {
     const child = spawnFn(SSH_BIN, args, { windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045). Without it,
+    // `stdout += d` calls Buffer#toString on each chunk IN ISOLATION: a multibyte
+    // character straddling a read boundary (which is what happens once output
+    // exceeds the 64KB pipe buffer and arrives in several chunks) has its leading
+    // bytes decoded at the end of one chunk and its continuation bytes at the
+    // start of the next — both become U+FFFD and the character is destroyed
+    // irrecoverably. setEncoding installs a StringDecoder that holds an incomplete
+    // trailing sequence back and prepends it to the following chunk, so the
+    // accumulated string is byte-identical to the child's output. Mirrors the
+    // sibling primitives runLocalCapture (gitRoutes.js) and runLocalTmux (below).
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -559,7 +615,7 @@ export async function runWithPool(host, cmd, opts = {}, cfg = {}, deps = {}) {
 // Attach with a PTY, inheriting stdio. Used by the CLI for `tmux attach` (remote).
 export function attach(host, cmd, _opts = {}) {
   const remote = `bash -lc ${shellQuote(cmd)}`;
-  const args = ['-tt', ...SSH_BASE_OPTS, host, remote];
+  const args = buildSshArgv(host, { tty: true, command: remote });
   const child = spawn(SSH_BIN, args, { stdio: 'inherit' });
   return new Promise((resolve) => child.on('exit', (c) => resolve(c ?? 0)));
 }
@@ -568,7 +624,7 @@ export function attach(host, cmd, _opts = {}) {
 // change → SIGWINCH → ssh → remote tmux. Returns a node-pty IPty.
 export function attachPty(host, cmd, { cols = 100, rows = 30 } = {}) {
   const remote = `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; bash -lc ${shellQuote(cmd)}`;
-  const args = ['-tt', ...SSH_BASE_OPTS, host, remote];
+  const args = buildSshArgv(host, { tty: true, command: remote });
   return nodePty.spawn(SSH_BIN, args, { cols, rows, useConpty: true });
 }
 
@@ -642,7 +698,19 @@ export function runLocalTmux(args, opts = {}) {
     let stderr = '';
     const ms = Number.isFinite(opts.timeout) ? opts.timeout : null;
     const timer = ms && ms > 0 ? setTimeout(() => child.kill('SIGTERM'), ms) : null;
+    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045). This is the
+    // pane-capture transport: `capture-pane -p -e` output is full of multibyte box
+    // drawing, and /api/pane-export captures 5000 lines (hundreds of KB), so the
+    // read arrives in many chunks. Accumulating Buffers with `+=` decodes each
+    // chunk IN ISOLATION, so any character straddling a chunk boundary is split
+    // into two invalid halves and rendered as U+FFFD in the pane the user reads —
+    // and in the transcript they download. setEncoding installs a StringDecoder
+    // that carries the incomplete trailing sequence into the next chunk. Nothing
+    // downstream can repair this: tmux.js read() returns stdout verbatim and
+    // U+FFFD is valid JSON, so the corruption is silent all the way to the user.
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);

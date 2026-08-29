@@ -93,8 +93,10 @@ export function effectiveRatios(persisted: number[], count: number): number[] {
 // NEW ratio array with the pair's combined weight (ratios[g] + ratios[g+1])
 // reallocated — left track grows by dx, right shrinks by dx — CLAMPED so
 // neither track falls below floorPx. Non-adjacent tracks are untouched.
-// Returns null when the inputs are unusable (caller treats null as "no change"),
-// so a measurement glitch or a stale-shape mismatch can never produce NaN/neg.
+// Returns null when the inputs are unusable OR when the pair is too cramped to
+// honor floorPx on both sides (caller treats null as "no change"), so a
+// measurement glitch, a stale-shape mismatch, or an under-floor render can never
+// produce NaN/neg.
 export function redistributeRatios(
   ratios: number[],
   g: number,
@@ -108,11 +110,22 @@ export function redistributeRatios(
   const pairSum = ratios[g] + ratios[g + 1];
   if (!(pairSum > 0)) return null;
   // Clamp dx so each track stays >= its floor: left can't shrink below floor
-  // (minDx), right can't shrink below floor either (maxDx). A drag always
-  // starts from a valid layout (both tracks >= floor), so minDx <= 0 <= maxDx
-  // initially and the clamp is well-ordered.
+  // (minDx), right can't shrink below floor either (maxDx). In a healthy layout
+  // both tracks are already >= floor, so minDx <= 0 <= maxDx and the clamp is
+  // well-ordered.
   const minDx = floorPx - t0; // left track hits its floor
   const maxDx = t1 - floorPx; // right track hits its floor
+  // WARDEN-1097: that ordering is NOT guaranteed. t0/t1 are the tracks' ACTUAL
+  // rendered widths (read from gridTemplateColumns), and when the container is
+  // too narrow to honor every track's minmax() floor, CSS grid renders tracks
+  // BELOW it. Once floorPx >= t0 + t1 the pair cannot honor the floor on both
+  // sides at once: minDx > maxDx, the clamp below collapses to minDx regardless
+  // of dx, and newLeft >= pairSum drives next[g+1] to zero or NEGATIVE — a value
+  // that persists and then makes parseRatioArray discard the whole saved layout
+  // on the next launch. There is no valid redistribution for a pair this
+  // cramped, so refuse the drag (the caller treats null as "no change") rather
+  // than commit garbage. This is what makes the header's "never NaN/neg" true.
+  if (minDx > maxDx) return null;
   const clamped = Math.max(minDx, Math.min(maxDx, dx));
   const newLeft = (pairSum * (t0 + clamped)) / (t0 + t1);
   const next = ratios.slice();
@@ -233,4 +246,35 @@ export function gutterCenters(ratios: number[], size: number, gap: number, floor
     out.push(cumTrack + (i + 0.5) * gap);
   }
   return out;
+}
+
+// --- Drag-to-reorder panes within the grid (WARDEN-909) -----------------------
+//
+// Swap two panes' positions in an openPanes array, resolved BY ID — never by a
+// filtered/visible index. The grid's rendered tile list can be a strict SUBSET
+// of openPanes (maximized → exactly one tile), so a position derived from the
+// visible array would point at the wrong element of the source array: the
+// index-space trap (WARDEN-108). Both endpoints arrive here as stable pane ids
+// and are located with indexOf against the REAL array, so the visible set's
+// shape is irrelevant to the result.
+//
+// Returns the SAME array reference for every no-op — same id twice (a pane
+// dropped on itself), or either id absent (a stale drag payload, a pane closed
+// mid-drag, a drop from another workspace's grid). App routes this through the
+// `setOpenPanes` shim, whose updater short-circuits on `next === w.openPanes`,
+// so an identity return means no workspace object is replaced: no re-render, no
+// persistence write, no state churn. A no-op is therefore genuinely harmless,
+// not merely "harmless-looking".
+//
+// Swap, not insert/shift: the two panes exchange slots and every other pane
+// stays put (ticket scope — list-style reordering is explicitly out of scope).
+export function swapPanes(arr: string[], idA: string, idB: string): string[] {
+  if (!Array.isArray(arr) || idA === idB) return arr;
+  const a = arr.indexOf(idA);
+  const b = arr.indexOf(idB);
+  if (a < 0 || b < 0) return arr; // one endpoint isn't in this array → no-op
+  const next = arr.slice();
+  next[a] = idB;
+  next[b] = idA;
+  return next;
 }

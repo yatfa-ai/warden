@@ -17,10 +17,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  type PresetNameIssue,
   PRESET_NAME_MAX,
+  presetNameErrorMessage,
   validatePresetName,
 } from '@/lib/storage';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { PresetRow } from '../rows/PresetRow';
 import { SettingsSection } from '../SettingsSection';
 import { type NewChatsPrefs } from '../types';
@@ -49,16 +50,14 @@ export function NewChatsSection(props: NewChatsSectionProps) {
   const [newPresetName, setNewPresetName] = useState('');
   const [newPresetCmd, setNewPresetCmd] = useState('');
 
-  // Human message for a non-null preset-name validation issue. The contract
-  // itself lives in storage.ts (validatePresetName); this just renders it.
-  const presetNameErrorMessage = (name: string, issue: PresetNameIssue): string => {
-    switch (issue) {
-      case 'empty': return 'Preset needs a name.';
-      case 'too-long': return `Preset name must be ${PRESET_NAME_MAX} characters or fewer.`;
-      case 'reserved': return `"${name}" is a reserved preset name (use the built-in claude/shell instead).`;
-      case 'duplicate': return `A preset named "${name}" already exists.`;
-    }
-  };
+  // WARDEN-942 — the preset pending confirmed deletion (`null` = dialog closed).
+  // Presets are a list, so this is ONE piece of state driving ONE shared
+  // ConfirmDialog, not a boolean per row (the WARDEN-928 HostsSection shape).
+  // Unlike the host case there is nothing to Save: this section is a CLIENT pref
+  // written to localStorage on the same tick, so the delete is permanent and a
+  // user-composed spawn command is unrecoverable. Cancel/Escape/overlay-click
+  // clear it WITHOUT touching setCustomPresets (or the cascade setters below).
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   const addPreset = () => {
     const name = newPresetName.trim();
@@ -177,7 +176,29 @@ export function NewChatsSection(props: NewChatsSectionProps) {
     setDefaultShellByHost(next);
   };
 
+  // WARDEN-942 — the confirm copy must name the SIDE EFFECTS deletePreset
+  // performs silently, not just the row: deleting the preset that is the current
+  // default resets the default to claude, and every per-host "Agent type per
+  // host" override naming it is dropped. A confirm that hides the expensive part
+  // of the deletion is worthless, so both clauses are conditional on actually
+  // applying — a preset with neither gets the plain sentence.
+  const pendingDeleteHosts = pendingDelete === null
+    ? []
+    : Object.entries(defaultNewChatPresetByHost)
+      .filter(([, p]) => p === pendingDelete)
+      .map(([h]) => h);
+  const pendingDeleteDescription = [
+    `The command for ${pendingDelete ?? 'this preset'} is deleted from this device immediately and can't be recovered — there is no undo. It stops appearing as a one-click button in the ＋ new chat form.`,
+    pendingDelete !== null && defaultNewChatPreset === pendingDelete
+      ? 'It is your default agent type, so the default falls back to claude.'
+      : '',
+    pendingDeleteHosts.length > 0
+      ? `The per-host agent type ${pendingDeleteHosts.length > 1 ? 'overrides' : 'override'} on ${pendingDeleteHosts.join(', ')} ${pendingDeleteHosts.length > 1 ? 'are' : 'is'} dropped too, so ${pendingDeleteHosts.length > 1 ? 'those hosts fall' : 'that host falls'} back to the default agent type.`
+      : '',
+  ].filter(Boolean).join(' ');
+
   return (
+    <>
     <SettingsSection title="New Chats" className={hidden ? 'hidden' : undefined}>
       <div className="flex flex-col gap-2">
         <Label htmlFor="defaultNewChatPreset">Default agent type</Label>
@@ -229,7 +250,7 @@ export function NewChatsSection(props: NewChatsSectionProps) {
                 isDefault={defaultNewChatPreset === p.name}
                 onRename={renamePreset}
                 onCmdChange={updatePresetCmd}
-                onDelete={deletePreset}
+                onDelete={(name) => setPendingDelete(name)}
               />
             ))}
           </div>
@@ -458,5 +479,27 @@ export function NewChatsSection(props: NewChatsSectionProps) {
         </div>
       </div>
     </SettingsSection>
+
+    {/* WARDEN-942 — a custom preset is a spawn command the user composed, stored
+        only in this browser's localStorage, and deleting it also resets the
+        default agent type and strips per-host overrides. Nothing here is a draft
+        the WARDEN-906 discard guard could roll back (the write lands on the same
+        tick), so the deletion is confirmed and the description names the cascade
+        whenever it applies. Rendered as a sibling of the section (the WARDEN-928
+        HostsSection shape) so it never nests inside the row flow. Dismissal does
+        NOT call setCustomPresets. */}
+    <ConfirmDialog
+      open={pendingDelete !== null}
+      onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+      title={`Delete preset "${pendingDelete ?? ''}"?`}
+      description={pendingDeleteDescription}
+      confirmLabel="Delete preset"
+      destructive
+      onConfirm={() => {
+        if (pendingDelete !== null) deletePreset(pendingDelete);
+        setPendingDelete(null);
+      }}
+    />
+    </>
   );
 }

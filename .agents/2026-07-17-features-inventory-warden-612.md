@@ -150,7 +150,7 @@ _Sources: `ChatSidebar.tsx`, `NewChatForm.tsx`, `sidebar/ChatRows.tsx`, `sidebar
 ### Sidebar root toolbar
 - **Open-panes filter input** — Entry: sidebar root toolbar → "filter..." text box. Does: substring-filters the open-panes list by name/host/type. API: none. Hidden `<20rem`. ☐
 - **"+ New" chat trigger** — Entry: sidebar root body → "＋ new" pill. Does: expands the inline spawn form. API: none. ☐
-- **Agent filter & sort button** — Entry: root toolbar → SlidersHorizontal icon ("filter & sort"). Does: opens filter/sort popover. Icon tints primary when active. API: none. ☐
+- **Agent filter button** — Entry: root toolbar → SlidersHorizontal icon ("filter"). Does: opens the shared popover with the **filter select only** — the root list mirrors the pane grid and never sorts, so the sort select is suppressed (`hideSort`, WARDEN-949). Icon tints primary iff the filter is non-"All". API: none. ☐
 - **Fleet commit/code search button** — Entry: root toolbar → GitCommitHorizontal icon. Does: opens fleet-wide git search popover (see Area 2). Root-header only. API: `/api/git-log`, `/api/search-files`. ☐
 - **Fleet git collision badge (⚠ live / ⏱ impending)** — Entry: root toolbar → red ⚠N and/or amber ⏱N chips (hidden when clean). Does: ⚠ = files edited by 2+ active agents; ⏱ = file one agent committed while another edits. Click → popover → "Compare edits". Re-homed from the abolished project-chip row (WARDEN-565/601). API: none (cached). ☐
 - **Open-panes count badge** — Entry: root toolbar → secondary Badge. Does: count of panes matching filter. Hidden `<18rem`. ☐
@@ -204,7 +204,7 @@ _Sources: `ChatSidebar.tsx`, `NewChatForm.tsx`, `sidebar/ChatRows.tsx`, `sidebar
 - **Host-view multi-select action bar** — Entry: foot bar when ≥1 selected. (See "Multi-select action bar" below.) ☐
 
 ### Collection view (drill-in)
-- **Back (‹) / color dot + name / Broadcast-all / description** — Entry: collection-view header. Does: back→root; identity dot+name; "Broadcast N" one-click selects all matching + opens BroadcastDialog (disabled when none match); description under header. ☐
+- **Back (‹) / color dot + name / filter & sort / Broadcast-all / description** — Entry: collection-view header. Does: back→root; identity dot+name; SlidersHorizontal popover (filter + sort — the same controls the host header renders, but the "Host" sort is kept since a collection can span hosts; WARDEN-949, without it the sticky agentFilter narrowed this list with no way to see or clear it here); "Broadcast N" one-click selects all matching + opens BroadcastDialog (disabled when none match) — N tracks the filtered list; description under header. ☐
 - **Matching agents / idle lists** — Entry: "● matching agents" / "idle" sections. Does: ChatRows matching criteria. Notes: **[RECONCILED 2026-07-20 — FIXED]** these rows now get FULL git context (branch badge, dirty files, ✦ marker, diff/conflict/open-file) — identical to host-view rows (`ChatSidebar.tsx:1022`/`:1026`). See Consolidated #1. Watch still works. ☐
 - **No-match empty / collection-view multi-select action bar** — Entry: "no agents match this collection" EmptyState; action bar when ≥1 selected. ☐
 
@@ -218,8 +218,9 @@ _Sources: `ChatSidebar.tsx`, `NewChatForm.tsx`, `sidebar/ChatRows.tsx`, `sidebar
 - **Neutral watch/unwatch (Eye) / state-aware "needs you" indicator** — Entry: Eye icon, or a red-pulsing/amber dot that replaces it when a watched chat needs you. Does: toggle watch membership; the state-aware dot names the reason + quotes the signal. Clicking it unwatches. ☐
 
 ### Agent filter & sort (popover from SlidersHorizontal)
+Rendered in three headers: **root** (filter only — `hideSort`), **host** (filter + sort, `hideHostSort`), **collection** (filter + sort, host sort included since a collection can span hosts). WARDEN-949.
 - **Filter select** — Options: All · Yatfa agents only · Claude sessions only · Manual/shell only. ☐
-- **Sort select** — Options: Manual order · Name (A-Z) · Host (hidden in host view) · Status (active first) · Last activity. Notes: Manual = no-op. ☐
+- **Sort select** — Options: Manual order · Name (A-Z) · Host (hidden in host view) · Status (active first) · Last activity. Notes: Manual = no-op. Not rendered at root. ☐
 
 ### Session tags (host view)
 - **Per-session tag chips / tag-filter chip row** — (covered above.) ☐

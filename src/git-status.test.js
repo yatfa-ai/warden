@@ -49,6 +49,8 @@ let rebaseEnd;
 let rebaseOntoShort;
 let rebaseStoppedShort;
 let mergeHeadShort;
+let statusFailRepo;
+let unbornRepo;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -163,6 +165,31 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // ---- statusFailRepo (WARDEN-1252): a REAL repo whose `git status --porcelain`
+  // probe fails while the branch probe (`rev-parse --abbrev-ref HEAD`) succeeds.
+  // A corrupted .git/index does exactly that: rev-parse reads refs only, status
+  // dies on "index file smaller than expected" (exit 128). This is the shape a
+  // broken transport/permission would produce for the file-listing leg alone —
+  // the false-clean defect this ticket gates.
+  statusFailRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-statusfail-'));
+  git(['init', '-q'], statusFailRepo);
+  git(['config', 'user.email', 'test@example.com'], statusFailRepo);
+  git(['config', 'user.name', 'Tester'], statusFailRepo);
+  fs.writeFileSync(path.join(statusFailRepo, 'a.txt'), 'a\n');
+  git(['add', '.'], statusFailRepo);
+  git(['commit', '-q', '-m', 'init'], statusFailRepo);
+  // Leave the tree DIRTY (the worst case: real uncommitted work), then corrupt
+  // the index so the probe that would surface it fails instead.
+  fs.writeFileSync(path.join(statusFailRepo, 'a.txt'), 'dirty\n');
+  fs.writeFileSync(path.join(statusFailRepo, '.git', 'index'), 'garbage');
+
+  // ---- unbornRepo (WARDEN-1252): `git init` with no first commit. Both probes
+  // must read as the legitimate empty case: status --porcelain exits 0 with empty
+  // output (clean, no error), while the branch probe fails (branch null) — so the
+  // failure gate keyed on branch-AND-status must NOT fire here.
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-unborn-'));
+  git(['init', '-q'], unbornRepo);
+
   // ---- detachedRepo: one commit, then `git checkout --detach` so HEAD is not
   // on any branch — the state an agent lands in after `git checkout <sha>`. The
   // badge must surface this distinctly (detached:true + a short SHA) instead of
@@ -237,6 +264,8 @@ before(async () => {
       { host: '(local)', session: 'warden-merge', cwd: mergeRepo, cmd: 'bash', name: 'warden-merge' },
       { host: '(local)', session: 'warden-rebase', cwd: rebaseRepo, cmd: 'bash', name: 'warden-rebase' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-statusfail', cwd: statusFailRepo, cmd: 'bash', name: 'warden-statusfail' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
       { host: '(local)', session: 'warden-detached', cwd: detachedRepo, cmd: 'bash', name: 'warden-detached' },
       { host: '(local)', session: 'warden-noupstream', cwd: noUpstreamRepo, cmd: 'bash', name: 'warden-noupstream' },
       { host: '(local)', session: 'warden-tracking', cwd: trackingRepo, cmd: 'bash', name: 'warden-tracking' },
@@ -259,7 +288,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [cleanRepo, mergeRepo, rebaseRepo, nonGitDir, detachedRepo, noUpstreamRepo, trackingRepo, bareRemote, tempHome]) {
+  for (const d of [cleanRepo, mergeRepo, rebaseRepo, nonGitDir, statusFailRepo, unbornRepo, detachedRepo, noUpstreamRepo, trackingRepo, bareRemote, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -338,6 +367,41 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
   it('returns 404 for an unknown chat id', async () => {
     const res = await fetch(`${baseUrl}/api/git-status?id=does-not-exist`);
     assert.strictEqual(res.status, 404);
+  });
+});
+
+describe('/api/git-status file-listing failure gate (WARDEN-1252)', () => {
+  it('reports an error (not a clean tree) when the status probe fails in a real repo', async () => {
+    const res = await fetch(`${baseUrl}/api/git-status?id=warden-statusfail`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    // The headline assertion: a broken file-listing probe must NOT be read as an
+    // empty file list → clean:true. The response carries an error instead.
+    assert.ok(body.error, 'a failed status probe must surface error');
+    assert.notStrictEqual(body.clean, true, 'a broken probe must never report clean:true');
+    assert.strictEqual(body.files, null);
+  });
+
+  it('still reports clean with no error for a repo whose first commit does not exist yet', async () => {
+    const res = await fetch(`${baseUrl}/api/git-status?id=warden-unborn`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    // Legitimate empty output: not dirty, never misread as a probe failure.
+    assert.notStrictEqual(body.clean, false);
+    assert.strictEqual(body.branch, null);
+  });
+
+  it('still reports clean:true with error:null for a genuinely clean repo (no regression)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-clean`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.clean, true);
+  });
+
+  it('keeps error:null for a non-git cwd (branch probe also fails, gate must not fire)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-nongit`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.branch, null);
   });
 });
 

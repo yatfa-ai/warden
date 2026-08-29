@@ -29,16 +29,16 @@ const { code } = await transformWithOxc(src, modPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-schema-test-'));
 const tmpFile = join(tmpDir, 'schema.mjs');
 writeFileSync(tmpFile, code);
+const mod = await import(tmpFile);
 const {
   SCHEMA_VERSION,
   BASE_EVENT_TYPES,
   RUNTIME,
-  resolveConsentTier,
   isBaseEventType,
   isRuntime,
   validateBaseEvent,
   validateEvent,
-} = await import(tmpFile);
+} = mod;
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -99,16 +99,20 @@ test('the contract constants are frozen (immutable shared contract)', () => {
 });
 
 // ==========================================================================
-// (b) Consent tier resolution — unknown/missing defaults to OFF (most-safe)
+// (b) The schema carries NO consent model (WARDEN-1116)
 // ==========================================================================
 
-test('resolveConsentTier passes base/extended through and defaults everything else to off', () => {
-  assert.equal(resolveConsentTier('base'), 'base');
-  assert.equal(resolveConsentTier('extended'), 'extended');
-  assert.equal(resolveConsentTier('off'), 'off');
-  assert.equal(resolveConsentTier(undefined), 'off', 'missing consent is OFF');
-  assert.equal(resolveConsentTier('bogus'), 'off', 'corrupt consent is OFF');
-  assert.equal(resolveConsentTier(true), 'off', 'non-string consent is OFF');
+test('the schema declares NO consent model — the ONE authority is ./consent.ts (WARDEN-1116)', () => {
+  // Consent was never part of the cross-repo WIRE contract (the receiver
+  // validates event SHAPE, not who consented). Keeping a tier resolver here
+  // would be a SECOND place a consent decision gets made, which is exactly what
+  // the per-category model forbids. Its absence is the assertion.
+  assert.equal(mod.ConsentTier, undefined, 'no ConsentTier export');
+  assert.equal(mod.resolveConsentTier, undefined, 'no consent resolver in the schema');
+  assert.ok(
+    !Object.keys(mod).some((k) => /consent/i.test(k)),
+    'nothing consent-shaped is exported from the schema module',
+  );
 });
 
 // ==========================================================================
@@ -178,7 +182,7 @@ test('validateBaseEvent stall needs a numeric lagMs and a known source', () => {
 });
 
 // ==========================================================================
-// (e) validateEvent — extended-tier fields (chat/session names)
+// (e) validateEvent — the optional identifier fields (chat/session names)
 // ==========================================================================
 
 test('validateEvent accepts base fixtures and base + extended name fields', () => {

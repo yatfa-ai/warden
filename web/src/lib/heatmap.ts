@@ -20,11 +20,13 @@
 //                                                    stripe, NOT a blank.
 //
 // Case 3 is what lets a human tell an idle-but-alive agent from one that simply
-// has no row — idle-baseline parity with `selectAgentSparkline`. Pure (only
-// `import type`, erased at transpile time → loadable standalone by the
-// web/*.test.mjs harness, exactly like agentSparkline.ts) so the matrix math is
-// unit-testable WITHOUT a DOM; the renderer (FleetActivityHeatmap.tsx) is a thin
-// call over this.
+// has no row — idle-baseline parity with `selectAgentSparkline`. Pure (no DOM, no
+// wall clock) so the matrix math is unit-testable without a browser; the renderer
+// (FleetActivityHeatmap.tsx) is a thin call over this. Its ONE runtime import is
+// the shared aria-label formatter (WARDEN-1080) — web/heatmap.test.mjs transpiles
+// that module into the same tmpdir and rewrites the specifier, the pattern
+// web/storage.test.mjs established.
+import { activityAriaLabel } from '@/lib/activityAria';
 import type { ActivitySeries, Chat } from '@/lib/types';
 
 /** One agent × one hourly bucket. */
@@ -164,9 +166,11 @@ export function bucketLabelIndices(count: number, step: number): number[] {
 }
 
 /**
- * Screen-reader summary for one row: "N events, M errors in the last 24 hours"
- * (mirrors selectAgentSparkline's ariaLabel grammar exactly, including the
- * singular/plural rules). The renderer prepends the agent's display name.
+ * Screen-reader summary for one row: "N events, M errors in the last 24 hours".
+ * The grammar is NOT written here — it is delegated to the shared
+ * `activityAriaLabel` (web/src/lib/activityAria.ts), the single producer that
+ * selectAgentSparkline also calls, so the two labels a user hears on one Fleet
+ * Health page cannot drift apart. The renderer prepends the agent's display name.
  */
 export function rowAriaLabel(cells: readonly HeatmapCell[]): string {
   let total = 0;
@@ -175,11 +179,7 @@ export function rowAriaLabel(cells: readonly HeatmapCell[]): string {
     total += c.total;
     error += c.error;
   }
-  const ev = total === 1 ? 'event' : 'events';
-  if (error > 0) {
-    return `${total} ${ev}, ${error} error${error === 1 ? '' : 's'} in the last 24 hours`;
-  }
-  return `${total} ${ev} in the last 24 hours`;
+  return activityAriaLabel(total, error);
 }
 
 /**

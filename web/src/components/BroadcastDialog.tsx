@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/select';
 import { Loader2 } from 'lucide-react';
 import { TargetAgentList } from '@/components/TargetAgentList';
+import { useAsyncConfirm } from '@/lib/useAsyncConfirm';
 import type { Chat } from '@/lib/types';
 import type { BroadcastSummary } from '@/lib/broadcast';
 import type { Snippet } from '@/lib/storage';
@@ -54,18 +55,19 @@ interface Props {
 
 export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend }: Props) {
   const [msg, setMsg] = useState('');
-  const [sending, setSending] = useState(false);
+  // The shared async-confirm machine (WARDEN-1017): `sending`, the reset-on-open
+  // for it, the guarded try/finally confirm, and the mid-flight dismissal guard.
+  const { busy: sending, run, guardOpenChange } = useAsyncConfirm(open, onOpenChange);
   // The snippet picker's selected value. Insert-only: picking a snippet fills
   // `msg`; this state only drives the picker's trigger label (so the user sees
   // which snippet they inserted) and resets every open alongside `msg`.
   const [picked, setPicked] = useState('');
 
   // Start every open fresh: a previous attempt's text shouldn't linger to be
-  // re-sent by accident on the next selection.
+  // re-sent by accident on the next selection. (`sending` is reset by the hook.)
   useEffect(() => {
     if (open) {
       setMsg('');
-      setSending(false);
       setPicked('');
     }
   }, [open]);
@@ -74,21 +76,12 @@ export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend 
   const trimmed = msg.trim();
   const canSend = count > 0 && trimmed.length > 0 && !sending;
 
-  const handleSend = async () => {
-    if (!canSend) return;
-    setSending(true);
-    try {
-      // onSend resolves (never rejects) once every per-target send has settled —
-      // close on resolve; the parent has already surfaced the result toast.
-      await onSend(trimmed);
-      onOpenChange(false);
-    } finally {
-      setSending(false);
-    }
-  };
+  // onSend resolves (never rejects) once every per-target send has settled — the
+  // hook closes on resolve; the parent has already surfaced the result toast.
+  const handleSend = () => run(() => onSend(trimmed), canSend);
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!sending) onOpenChange(o); }}>
+    <Dialog open={open} onOpenChange={guardOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Send to {count} agent{count === 1 ? '' : 's'}</DialogTitle>

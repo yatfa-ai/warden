@@ -1,6 +1,8 @@
 // Regression tests for the WARDEN-557 "is anything being sent, and to where?"
 // derivation: `telemetryDestinationLabel` (raw endpoint -> host) and
 // `deriveTelemetrySendingStatus` (the off/unconfigured/configured state machine).
+// WARDEN-1116: the first input is `collecting` — whether a COLLECTING consent
+// category is on — not a base-tier flag.
 //
 // The telemetry subsystem is the most unit-tested part of web/ — every sibling
 // pure-logic module ships a *.test.mjs (client, schema, redact, source, pipeline,
@@ -45,7 +47,7 @@ const { code: destinationCode } = await transformWithOxc(
   {},
 );
 writeFileSync(join(tmpDir, 'destination.mjs'), destinationCode);
-const { telemetryDestinationLabel, deriveTelemetrySendingStatus } = await import(
+const { telemetryDestinationLabel, deriveTelemetrySendingStatus, isUsableTelemetryEndpoint } = await import(
   join(tmpDir, 'destination.mjs')
 );
 rmSync(tmpDir, { recursive: true, force: true });
@@ -111,6 +113,25 @@ test('bare-host lenient parse — a scheme-less host with a path still yields th
   assert.equal(telemetryDestinationLabel('receiver.example'), 'receiver.example');
 });
 
+// WARDEN-1238 — the wrongly-condemned shape. A scheme-less host:port/path PARSES
+// (WHATWG misreads the host as an opaque scheme) with origin "null" and an empty
+// host; the old strict branch therefore returned the RAW trimmed value — path
+// included, a privacy leak — because the lenient retry never ran. Judged by
+// usable web origin instead, the label is the address's host, port kept, path
+// stripped: it reflects the address, never a repaired variant and never the path.
+test('WARDEN-1238: a scheme-less host:port/path yields its host (port kept, NO PATH LEAK)', () => {
+  assert.equal(
+    telemetryDestinationLabel('receiver.example:8080/ingest'),
+    'receiver.example:8080',
+    'the host the address names — not the raw value with its path',
+  );
+  assert.equal(
+    telemetryDestinationLabel('receiver.example:8080/secret/ingest'),
+    'receiver.example:8080',
+    'a sensitive path must never be echoed for the scheme-less shape either',
+  );
+});
+
 test('surrounding whitespace is trimmed before deriving the host', () => {
   assert.equal(telemetryDestinationLabel('  https://r.example/x  '), 'r.example');
 });
@@ -128,12 +149,12 @@ test('garbage that cannot parse falls back to the raw trimmed value rather than 
 // deriveTelemetrySendingStatus — the off / unconfigured / configured machine
 // ==========================================================================
 
-test('base OFF is OFF regardless of endpoint (off is off)', () => {
-  assert.deepEqual(deriveTelemetrySendingStatus({ baseEnabled: false, endpoint: '' }), {
+test('nothing collecting is OFF regardless of endpoint (off is off)', () => {
+  assert.deepEqual(deriveTelemetrySendingStatus({ collecting: false, endpoint: '' }), {
     kind: 'off',
   });
   assert.deepEqual(
-    deriveTelemetrySendingStatus({ baseEnabled: false, endpoint: 'https://r.example/ingest' }),
+    deriveTelemetrySendingStatus({ collecting: false, endpoint: 'https://r.example/ingest' }),
     { kind: 'off' },
     'a configured endpoint does not override base OFF',
   );
@@ -141,21 +162,21 @@ test('base OFF is OFF regardless of endpoint (off is off)', () => {
 
 // THE CORE CASE THE TICKET EXISTS TO SURFACE. Base is on but the endpoint is
 // blank — the opt-in is silently inert (transport no-ops, events buffer + drop).
-test('base ON + empty endpoint -> unconfigured (the silently-inert opt-in)', () => {
-  assert.deepEqual(deriveTelemetrySendingStatus({ baseEnabled: true, endpoint: '' }), {
+test('collecting + empty endpoint -> unconfigured (the silently-inert opt-in)', () => {
+  assert.deepEqual(deriveTelemetrySendingStatus({ collecting: true, endpoint: '' }), {
     kind: 'unconfigured',
   });
 });
 
-test('base ON + whitespace-only endpoint -> unconfigured (whitespace is not a configured endpoint)', () => {
-  assert.deepEqual(deriveTelemetrySendingStatus({ baseEnabled: true, endpoint: '   ' }), {
+test('collecting + whitespace-only endpoint -> unconfigured (whitespace is not a configured endpoint)', () => {
+  assert.deepEqual(deriveTelemetrySendingStatus({ collecting: true, endpoint: '   ' }), {
     kind: 'unconfigured',
   });
 });
 
-test('base ON + configured endpoint -> configured, with a host-only destination', () => {
+test('collecting + configured endpoint -> configured, with a host-only destination', () => {
   assert.deepEqual(
-    deriveTelemetrySendingStatus({ baseEnabled: true, endpoint: 'https://receiver.example/ingest/v1' }),
+    deriveTelemetrySendingStatus({ collecting: true, endpoint: 'https://receiver.example/ingest/v1' }),
     { kind: 'configured', destination: 'receiver.example' },
   );
 });
@@ -165,7 +186,7 @@ test('base ON + configured endpoint -> configured, with a host-only destination'
 // status object.
 test('NO PATH LEAK through the configured status — destination is host-only', () => {
   const status = deriveTelemetrySendingStatus({
-    baseEnabled: true,
+    collecting: true,
     endpoint: 'https://receiver.example/secret/ingest',
   });
   assert.equal(status.kind, 'configured');
@@ -173,6 +194,40 @@ test('NO PATH LEAK through the configured status — destination is host-only', 
     assert.equal(status.destination, 'receiver.example');
     assert.doesNotMatch(status.destination, /secret|ingest/, 'path must not leak');
   }
+});
+
+// ── WARDEN-1238 — a scheme-less endpoint is needs-scheme, never "configured" ────
+// The transport sends to the endpoint EXACTLY as configured (telemetry-send.js
+// never rewrites it), so an address without a scheme cannot receive events — and
+// must not be blessed with the green "events will go to X" banner.
+
+test('collecting + bare-host endpoint -> needs-scheme (NOT configured — transport cannot use it)', () => {
+  const status = deriveTelemetrySendingStatus({ collecting: true, endpoint: 'receiver.example' });
+  assert.equal(status.kind, 'needs-scheme');
+  assert.equal(status.destination, 'receiver.example');
+});
+
+test('collecting + scheme-less host:port/path endpoint -> needs-scheme, host-only destination', () => {
+  const status = deriveTelemetrySendingStatus({
+    collecting: true,
+    endpoint: 'receiver.example:8080/secret/ingest',
+  });
+  assert.equal(status.kind, 'needs-scheme');
+  assert.equal(status.destination, 'receiver.example:8080', 'host reflects the address, path stripped');
+});
+
+test('collecting + garbage endpoint -> needs-scheme (not a usable web address either)', () => {
+  const status = deriveTelemetrySendingStatus({ collecting: true, endpoint: 'not a url with spaces' });
+  assert.equal(status.kind, 'needs-scheme');
+});
+
+test('an http:// endpoint stays configured (both web schemes are usable)', () => {
+  const status = deriveTelemetrySendingStatus({
+    collecting: true,
+    endpoint: 'http://localhost:7421/ingest',
+  });
+  assert.equal(status.kind, 'configured');
+  assert.equal(status.destination, 'localhost:7421');
 });
 
 console.log(`\n✓ TELEMETRY-DESTINATION TESTS PASS (${passed})`);

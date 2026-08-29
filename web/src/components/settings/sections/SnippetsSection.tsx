@@ -8,11 +8,12 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import {
-  type SnippetNameIssue,
   SNIPPET_NAME_MAX,
   SNIPPET_TEXT_MAX,
+  snippetNameErrorMessage,
   validateSnippetName,
 } from '@/lib/storage';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { SnippetRow } from '../rows/SnippetRow';
 import { SettingsSection } from '../SettingsSection';
 import { type SnippetsPrefs } from '../types';
@@ -33,15 +34,14 @@ export function SnippetsSection(props: SnippetsSectionProps) {
   const [newSnippetName, setNewSnippetName] = useState('');
   const [newSnippetText, setNewSnippetText] = useState('');
 
-  // Human message for a non-null snippet-name validation issue. The contract
-  // itself lives in storage.ts (validateSnippetName); this just renders it.
-  const snippetNameErrorMessage = (name: string, issue: SnippetNameIssue): string => {
-    switch (issue) {
-      case 'empty': return 'Snippet needs a name.';
-      case 'too-long': return `Snippet name must be ${SNIPPET_NAME_MAX} characters or fewer.`;
-      case 'duplicate': return `A snippet named "${name}" already exists.`;
-    }
-  };
+  // WARDEN-942 — the snippet pending confirmed deletion (`null` = dialog
+  // closed). Snippets are a list, so this is ONE piece of state driving ONE
+  // shared ConfirmDialog, not a boolean per row (the WARDEN-928 HostsSection
+  // shape). Unlike the host case there is nothing to Save: this section is a
+  // CLIENT pref written to localStorage on the same tick, so the delete is
+  // permanent and a hand-written instruction body is unrecoverable. Cancel/
+  // Escape/overlay-click clear it WITHOUT touching setSnippets.
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   const addSnippet = () => {
     const name = newSnippetName.trim();
@@ -90,6 +90,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
   };
 
   return (
+    <>
     <SettingsSection title="Instruction snippets" className={hidden ? 'hidden' : undefined}>
       <p className="text-xs text-muted-foreground">
         Save instructions you send often ("run the tests", "pull latest", "commit your work") and reuse them from the Broadcast dialog or a pane's right-click menu. New installs start with a few examples you can edit or delete.
@@ -107,7 +108,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
                 snippet={s}
                 onRename={renameSnippet}
                 onTextChange={updateSnippetText}
-                onDelete={deleteSnippet}
+                onDelete={(name) => setPendingDelete(name)}
               />
             ))}
           </div>
@@ -152,5 +153,26 @@ export function SnippetsSection(props: SnippetsSectionProps) {
         </p>
       </div>
     </SettingsSection>
+
+    {/* WARDEN-942 — a snippet is a hand-written instruction body stored only in
+        this browser's localStorage, so deleting it destroys user-authored
+        content with no undo and nothing to discard (the write lands on the same
+        tick). Confirmed and named explicitly, matching the six other destructive
+        controls on this page. Rendered as a sibling of the section (the
+        WARDEN-928 HostsSection shape) so it never nests inside the row flow.
+        Dismissal does NOT call setSnippets. */}
+    <ConfirmDialog
+      open={pendingDelete !== null}
+      onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+      title={`Delete snippet "${pendingDelete ?? ''}"?`}
+      description={`The instruction text for ${pendingDelete ?? 'this snippet'} is deleted from this device immediately and can't be recovered — there is no undo. It disappears from the Broadcast dialog and from every pane's right-click menu. You can add it again from this page if you still have the text.`}
+      confirmLabel="Delete snippet"
+      destructive
+      onConfirm={() => {
+        if (pendingDelete !== null) deleteSnippet(pendingDelete);
+        setPendingDelete(null);
+      }}
+    />
+    </>
   );
 }

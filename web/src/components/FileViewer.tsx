@@ -10,6 +10,14 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Badge } from '@/components/ui/badge';
+import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -21,27 +29,38 @@ import { DiffBlock } from './DiffBlock';
 // classifier (clean/empty vs dirty vs error vs loading) and the toolbar-toggle
 // exclusivity resolver. Pure so both have unit coverage (fileViewerChanges.test.mjs).
 import { classifyChangesView, resolveViewToggles } from '@/lib/fileViewerChanges';
-// Pure finder for the co-editors chip (WARDEN-810): same-project sibling agents
-// also touching the open file (± dirty / ⚑ conflict / ↑ unpushed). Pure + unit-
-// covered (fileCoEditors.test.mjs); the CoEditor type it returns is the self-
-// contained (label-carrying) shape this leaf component renders.
-import type { CoEditor } from '@/lib/fileCoEditors';
+// Pure descriptor for the header toolbar's collapsible half (WARDEN-1019) — which
+// controls collapse into the `⋯` menu below `md`, in what order, and with what
+// pressed state. Unit-tested in fileViewerToolbar.test.mjs.
+import {
+  secondaryToolbarActions,
+  TOOLBAR_LEADING_KEYS,
+  TOOLBAR_TRAILING_KEYS,
+  type ToolbarAction,
+  type ToolbarActionKey,
+} from '@/lib/fileViewerToolbar';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, GitCompare } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, ChevronLeftIcon, EllipsisIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
 // Pure breadcrumb geometry (splitPathSegments / ancestorDir) for the clickable
 // path-segment crumbs (WARDEN-740) — kept UI-free in src/lib so it is unit-
 // tested directly (see web/breadcrumbs.test.mjs).
-import { splitPathSegments, ancestorDir } from '@/lib/pathBreadcrumbs';
+import { splitPathSegments, ancestorDir, collapseCrumbs, crumbRunNeedsFloor } from '@/lib/pathBreadcrumbs';
 // joinPath + the Entry shape are shared with FileBrowserDialog so a navigated
 // sibling path is built identically to the browse dialog's selection.
 import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
+import { readListBody, readListResponse } from '@/lib/api';
+// The per-file git-diff READ seam (WARDEN-1187 / WARDEN-1194). BlameHash reads its
+// popover diff through the DETAIL reader — the sibling that also keeps the commit
+// body (`message`, WARDEN-388) off the same response — so this site honours both
+// halves of warden's error convention instead of gating on `r.ok` alone.
+import { readFileDiffDetail } from '@/lib/gitDiffApi';
 
 interface FileViewerProps {
   chatId: string;
@@ -69,32 +88,6 @@ interface FileViewerProps {
   // Optional so a render site that only needs to display (never navigate)
   // degrades to the plain non-clickable path; all three current sites wire it.
   onNavigate?: (path: string) => void;
-  // Cross-agent co-editors of the open file (WARDEN-810): same-project sibling
-  // agents that ALSO have this path dirty (±) / in a merge conflict (⚑) / in an
-  // unpushed commit (↑). When non-empty, a "↗ N others" chip renders in the header
-  // toolbar whose popover names each sibling + its state — surfacing cross-agent
-  // file contention at the READING moment, without leaving the reader for the
-  // sidebar's fleet ⚠ badge (which is out of view inside this dialog). Transient,
-  // derived by the parent from its cached gitStatus map (no new fetch). Optional +
-  // absent (undefined / empty) at the PaneGrid + HealthDashboard mounts, which have
-  // no gitStatus in scope → no chip (graceful degradation). Self-contained (carries
-  // a display label) so this leaf needs neither the chats array nor a displayName
-  // import.
-  coEditors?: CoEditor[];
-  // Deep-link a co-editor row click to that sibling's version of the SAME file:
-  // the parent swaps the chatId it controls (mirroring onNavigate's path-swap
-  // shape). Optional so a mount without a chatId swap (PaneGrid / HealthDashboard)
-  // renders non-clickable rows. Mirrors onNavigate's optional-degrades-safely shape.
-  onOpenCoEditor?: (key: string) => void;
-  // Open CollisionCompareDialog on a co-editor's version vs the reader's
-  // (WARDEN-868): the parent owns the dialog + its `compareTarget` state and
-  // mounts CollisionCompareDialog as a sibling of this viewer. The sibling's
-  // `unpushed` flag (the row's ↑ glyph) is the source proxy the parent reads —
-  // an unpushed sibling's change lives in a committed range (source 'outgoing');
-  // a dirty-working-tree sibling is 'wip'. Optional so mounts without gitStatus
-  // in scope (PaneGrid / HealthDashboard) render swap-only rows with no Compare
-  // affordance — identical optional-degrades-safely discipline to onOpenCoEditor.
-  onCompare?: (siblingKey: string) => void;
   // Follow live-update cadence (WARDEN-749): the already-resolved web-safe poll
   // interval. App owns + resolves cfg.pollIntervalMs via resolvePollIntervalMs at
   // the source (the same value the catalog poll uses), so Follow shares the
@@ -116,18 +109,30 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
+// One clickable ancestor in the path breadcrumb (WARDEN-740): `dir` is the
+// cwd-relative directory /api/git-ls lists when the crumb is clicked, `label` is
+// the segment name shown (empty for the root crumb, which renders a folder icon).
+type Crumb = { label: string; dir: string; isRoot: boolean };
+
+// Identifies the `…` overflow menu in the single `openCrumb` popover slot
+// (WARDEN-1006). A NUL byte cannot occur in a path segment, so this can never
+// collide with a real crumb's `dir` — including the root crumb's `''`.
+const OVERFLOW_CRUMB_KEY = '\u0000overflow';
+
 // Shared gated-fetch for a git-data slice shown only while a view-mode is on
 // (blame / history). Collapses two byte-mirrored effects into one envelope: the
-// cancelled guard, the loading/error reset, the try → fetch → `!r.ok` early-return
-// → json → cancelled-check → `Array.isArray(j[field]) ? j[field] : []` →
-// `j.error || null` → catch → `finally { setLoading(false) }` body, and the
-// `return () => { cancelled = true }` cleanup. Gates the success path on
-// response.ok so a 4xx/5xx (e.g. unknown chat → 404) surfaces as an error, not a
-// silent success (WARDEN-89). The six per-slice differences are the parameters;
-// the two call sites below are byte-equivalent to the effects they replaced
-// (WARDEN-884; same DRY move as useGitLogFetcher in ChatSidebar + DiffInspectRow
-// in GitBadges). `j` from r.json() is `any`, so `Array.isArray(j[field]) ? j[field]
-// : []` stays `any` and onData typechecks against any typed setter — no cast.
+// cancelled guard, the loading/error reset, the try → fetch → read → catch body,
+// and the `return () => { cancelled = true }` cleanup. The six per-slice
+// differences are the parameters (WARDEN-884; same DRY move as useGitLogFetcher in
+// ChatSidebar + DiffInspectRow in GitBadges).
+//
+// WARDEN-1014: the response-READING step is now the shared `readListResponse` from
+// lib/api.ts rather than an inline `!r.ok` early-return + `Array.isArray(j[field])`
+// + `j.error || null`. Behaviour here is unchanged — this hook was already the only
+// correct copy of the two-halves read, so it is the template the other two hooks
+// adopt, not a site being fixed. A 4xx still reports `Failed to load <label>
+// (<status>)` and still leaves the previously-loaded list untouched; a 2xx carrying
+// `{error}` still surfaces that string.
 function useGatedFetch<T>(opts: {
   gate: boolean;
   buildUrl: () => string;
@@ -147,14 +152,21 @@ function useGatedFetch<T>(opts: {
       onError(null);
       try {
         const r = await fetch(buildUrl());
+        // Tolerant on !ok (the status carries the message), STRICT on 2xx — a body
+        // that fails to parse on a 2xx is a real failure and must reach the catch
+        // below rather than becoming a confident empty list (WARDEN-1014 review).
+        const j = await readListBody(r);
+        if (cancelled) return;
+        const { items, error } = readListResponse<T>(r, j, field, label);
+        // On a hard HTTP failure `items` is the server's placeholder, not data —
+        // report the error and leave whatever was already loaded on screen (the
+        // pre-refactor early-return did exactly this).
         if (!r.ok) {
-          if (!cancelled) onError(`Failed to load ${label} (${r.status})`);
+          onError(error);
           return;
         }
-        const j = await r.json();
-        if (cancelled) return;
-        onData(Array.isArray(j[field]) ? j[field] : []);
-        onError(j.error || null);
+        onData(items);
+        onError(error);
       } catch (e) {
         if (!cancelled) onError(e instanceof Error ? e.message : `Failed to load ${label}`);
       } finally {
@@ -171,7 +183,7 @@ function useGatedFetch<T>(opts: {
   }, deps);
 }
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, coEditors, onOpenCoEditor, onCompare, pollIntervalMs, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -183,12 +195,6 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // null when none. Local to the viewer — the actual file swap is the parent's
   // job via onNavigate; this only owns the open/close of the pick list.
   const [openCrumb, setOpenCrumb] = useState<string | null>(null);
-
-  // Co-editors popover open state (WARDEN-810). Controlled so a row click can close
-  // the popover before deep-linking to the sibling's version of the file (mirrors
-  // GitBadges' setOpen(false) + jump discipline). Local — only the open/close lives
-  // here; the chatId swap is the parent's job via onOpenCoEditor.
-  const [coEditorOpen, setCoEditorOpen] = useState(false);
 
   // Annotate (git blame) state — separate from the file content fetch so toggling
   // annotate doesn't refetch the (already-shown) file. Blame is fetched ONCE when the
@@ -232,6 +238,9 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // Brief in-flight flag for the manual ↻ reload button's spinner. The Follow
   // interval never sets this — its polls are silent background refreshes.
   const [manualReloading, setManualReloading] = useState(false);
+  // The `⋯` header-toolbar overflow menu (WARDEN-1019) — only reachable below
+  // `md`, where the low-priority controls collapse into it.
+  const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
 
   // Changes view (WARDEN-786): the open file's uncommitted working-tree diff vs
   // HEAD — the missing fourth file-understanding surface (History = what committed
@@ -531,7 +540,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       let error: string | null = null;
       try {
         const r = await fetch(`/api/git-cat-file?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(viewAtCommit.hash)}&path=${encodeURIComponent(filePath)}`);
-        const j = await r.json().catch(() => ({}));
+        // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx
+        // body that fails to parse is a real failure and must reach the catch below
+        // rather than becoming empty content with no error at all (WARDEN-1014).
+        // The `?? {}` is load-bearing: readListBody resolves to `undefined` on the
+        // !ok leg, and both fields are dereferenced unconditionally right below.
+        const j = ((await readListBody(r)) as { content?: string; error?: string }) ?? {};
         content = typeof j.content === 'string' ? j.content : null;
         error = j.error || (r.ok ? null : `Failed to load file at commit (${r.status})`);
       } catch (e) {
@@ -615,7 +629,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // is the open file (not clickable). Each crumb carries the dir /api/git-ls
   // lists when clicked (ancestorDir = slice(0, i), exactly the ticket's contract).
   const segments = useMemo(() => splitPathSegments(filePath), [filePath]);
-  const crumbs = useMemo<{ label: string; dir: string; isRoot: boolean }[]>(() => {
+  const crumbs = useMemo<Crumb[]>(() => {
     // A root-level file has a single segment and no proper ancestors — render no
     // crumbs (the file name stands alone), matching the WARDEN-740 segmentation pin.
     if (segments.length <= 1) return [];
@@ -625,29 +639,21 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     ];
   }, [segments]);
   const fileName = segments[segments.length - 1] ?? filePath;
+  // A deep path's crumbs cannot all fit the title row, so the middle of the run
+  // collapses behind the `…` overflow menu (WARDEN-1006). Pure, and unit-tested
+  // in breadcrumbs.test.mjs — `lead + hidden + tail` is always the whole list,
+  // so collapsing hides crumbs from the row but never from the UI.
+  const { lead, hidden, tail } = useMemo(() => collapseCrumbs(crumbs), [crumbs]);
+  // Whether the crumb run gets its minimum width — see crumbRunNeedsFloor for why
+  // this is decided here rather than in CSS (a `min-width` that always applied
+  // would inflate a short path's crumb run).
+  const floorCrumbRun = useMemo(
+    () => crumbRunNeedsFloor([...lead, ...tail], hidden.length > 0),
+    [lead, hidden, tail],
+  );
   // Degrade to the plain non-clickable path when no navigation callback is wired
   // (all three render sites wire it, but the prop is optional for safety).
   const navigable = typeof onNavigate === 'function';
-  // Whether a co-editor row deep-links to that sibling's version of the file
-  // (WARDEN-810). The ChatSidebar mount wires onOpenCoEditor; mounts without a
-  // chatId swap (PaneGrid / HealthDashboard) leave it undefined, and their rows
-  // render non-clickable. Mirrors `navigable`'s optional-degrades-safely shape.
-  const canOpenCoEditor = typeof onOpenCoEditor === 'function';
-  // Whether a co-editor row offers a Compare action (WARDEN-868). The ChatSidebar
-  // mount wires onCompare (it owns the CollisionCompareDialog sibling); mounts
-  // without gitStatus in scope (PaneGrid / HealthDashboard) leave it undefined,
-  // and their rows render swap-only — no Compare affordance. Mirrors
-  // `canOpenCoEditor`'s optional-degrades-safely shape.
-  const canCompare = typeof onCompare === 'function';
-
-  // Copy text to the clipboard through the shared Electron-safe helper, surfacing
-  // the boolean result via toast — never bare navigator.clipboard, which rejects
-  // silently in Electron (WARDEN-285). Matches CollectionsSection / WorkspaceTabs.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
 
   // Manual ↻ reload (WARDEN-749): a one-shot refresh independent of Follow —
   // today no refresh exists at all, so a stale file forces a close/reopen. Runs
@@ -665,205 +671,183 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     }
   }, [loadContent]);
 
+  // The collapsible half of the header toolbar (WARDEN-1019). `secondaryToolbarActions`
+  // owns WHICH controls collapse, in what order, and what state each reports —
+  // pure, so the contract has real unit coverage (fileViewerToolbar.test.mjs) in a
+  // repo with no DOM test runner. Icons and handlers stay here, keyed by `key`, so
+  // the inline row and the `⋯` menu drive the SAME callback and the same pressed
+  // state rather than being two copies that can drift.
+  const secondaryActions = useMemo(
+    () => secondaryToolbarActions({ isMarkdown, viewMode, history, annotate, follow, manualReloading }),
+    [isMarkdown, viewMode, history, annotate, follow, manualReloading],
+  );
+  const leadingActions = secondaryActions.filter((a) => TOOLBAR_LEADING_KEYS.includes(a.key));
+  const trailingActions = secondaryActions.filter((a) => TOOLBAR_TRAILING_KEYS.includes(a.key));
+  const actionMeta: Record<ToolbarActionKey, ToolbarActionMeta> = {
+    viewmode: {
+      icon: viewMode === 'rendered' ? <BookOpenIcon className="w-3.5 h-3.5" /> : <Code2Icon className="w-3.5 h-3.5" />,
+      onSelect: () => onViewModeChange(viewMode === 'rendered' ? 'source' : 'rendered'),
+    },
+    history: {
+      icon: <HistoryIcon className="w-3.5 h-3.5" />,
+      onSelect: () => {
+        // resolveViewToggles (WARDEN-786) centralizes the toolbar's
+        // mutual-exclusivity contract now that Changes joins the set:
+        // turning history on clears annotate + changes. viewAtCommit
+        // (a snapshot reached from the history list) is cleared when
+        // leaving history — its own history-specific asymmetry.
+        const t = resolveViewToggles({ annotate, history, changes }, 'history', !history);
+        setAnnotate(t.annotate);
+        setHistory(t.history);
+        setChanges(t.changes);
+        if (!t.history) setViewAtCommit(null); // leaving history → drop any at-commit snapshot
+      },
+    },
+    annotate: {
+      icon: <GitCommitHorizontalIcon className="w-3.5 h-3.5" />,
+      onSelect: () => {
+        // Turning annotate on clears history + changes (resolveViewToggles)
+        // and drops any at-commit snapshot (annotate replaces the content).
+        const t = resolveViewToggles({ annotate, history, changes }, 'annotate', !annotate);
+        setAnnotate(t.annotate);
+        setHistory(t.history);
+        setChanges(t.changes);
+        if (t.annotate) setViewAtCommit(null); // annotate forces history off → drop any snapshot
+      },
+    },
+    // Manual reload (WARDEN-749): a one-shot refresh. Independently useful —
+    // before this no refresh existed, so a stale file forced a close/reopen.
+    // Spinner swaps in while in-flight; icon-only on the row, labelled in the menu.
+    reload: {
+      icon: manualReloading
+        ? <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+        : <RotateCwIcon className="h-3.5 w-3.5" />,
+      onSelect: handleManualReload,
+      iconOnly: true,
+      disabled: manualReloading,
+    },
+    // Follow toggle (WARDEN-749): live-update the open file on the poll cadence
+    // as an agent writes to it (tail -f). Ephemeral — resets on close. Pauses
+    // while the tab is hidden.
+    follow: {
+      icon: <CircleDotIcon className="h-3.5 w-3.5" />,
+      onSelect: () => setFollow((f) => !f),
+    },
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <DialogContent className="max-w-4xl max-h-[80vh]">
+          <DialogContent className="sm:max-w-4xl max-h-[80vh]">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 pr-8">
                 <FileIcon className="w-4 h-4 shrink-0" />
                 {navigable && crumbs.length > 0 ? (
-                  <nav aria-label="File path" className="flex min-w-0 items-center gap-0.5">
-                    {crumbs.map((c) => (
-                      <Fragment key={c.dir || '__root'}>
-                        <Popover open={openCrumb === c.dir} onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}>
-                          <PopoverTrigger asChild>
-                            <button
-                              type="button"
-                              className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                              title={c.isRoot ? 'Browse repository root' : `Browse ${c.dir}`}
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {c.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : c.label}
-                            </button>
-                          </PopoverTrigger>
-                          <PopoverContent
-                            align="start"
-                            sideOffset={4}
-                            className="w-64 p-1 text-xs"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <DirListing
-                              chatId={chatId}
-                              dir={c.dir}
-                              onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
-                            />
-                          </PopoverContent>
-                        </Popover>
-                        <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>
-                      </Fragment>
-                    ))}
+                  <nav aria-label="File path" className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+                    {/* The crumbs are fixed-size click targets, so a deep path's
+                        min-content width exceeds the title row. Three parts to the
+                        fix (WARDEN-1006):
+
+                        STRUCTURAL — `collapseCrumbs` hides the MIDDLE of a deep
+                        path behind the `…` menu, which still lists those dirs, so
+                        the collapse is visible and none of the navigation it
+                        represents is lost. CSS alone cannot choose which crumbs
+                        to drop; it can only slice whatever runs past the edge.
+
+                        PRIORITY — the crumb run is the heavily-weighted flex item
+                        (`shrink-[9999]`), so it yields the row's shrink long
+                        before the FILENAME — the part that says what you are
+                        looking at — gives up a pixel.
+
+                        FLOOR — but not ALL of it: `lg:min-w-48` stops the run
+                        being squeezed to nothing, which is how the crumbs would
+                        otherwise "survive" a long path (present, 8px wide, empty).
+                        Under the floor the crumbs `truncate` — a squeezed crumb
+                        reads as a word with an ellipsis and stays a real click
+                        target — instead of being sliced mid-glyph. The floor is
+                        applied only to a run wide enough to need it (see
+                        `crumbRunNeedsFloor`: a `min-width` beats content width, so
+                        an unconditional one would INFLATE a short crumb run and
+                        leave a gap before the filename) and only at `lg`, below
+                        which the dialog is narrow enough that reserving 12rem for
+                        the path would starve the filename instead.
+
+                        `overflow-hidden` here is the outer guarantee that makes
+                        the floor safe: if the row is narrower than the floor the
+                        crumb run is clipped at the nav's edge rather than painting
+                        over the toolbar and the close X — the WARDEN-1006 defect
+                        itself. The crumb buttons use `ring-inset` so a focus ring
+                        at the boundary is drawn inside the button and survives the
+                        clip. Before WARDEN-1006 none of this was needed because
+                        the whole dialog stretched to fit the header; now that
+                        DialogContent's children are held to the panel, the header
+                        has to divide a finite row. */}
+                    <span className={`flex min-w-0 shrink-[9999] items-center gap-0.5 overflow-hidden${floorCrumbRun ? ' lg:min-w-48' : ''}`}>
+                      {lead.map((c) => (
+                        <Fragment key={c.dir || '__root'}>
+                          <PathCrumb
+                            crumb={c}
+                            chatId={chatId}
+                            open={openCrumb === c.dir}
+                            onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}
+                            onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                          />
+                          <CrumbSeparator />
+                        </Fragment>
+                      ))}
+                      {hidden.length > 0 && (
+                        <Fragment key={OVERFLOW_CRUMB_KEY}>
+                          <CollapsedCrumbs
+                            crumbs={hidden}
+                            chatId={chatId}
+                            open={openCrumb === OVERFLOW_CRUMB_KEY}
+                            onOpenChange={(o) => setOpenCrumb(o ? OVERFLOW_CRUMB_KEY : null)}
+                            onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                          />
+                          <CrumbSeparator />
+                        </Fragment>
+                      )}
+                      {tail.map((c) => (
+                        <Fragment key={c.dir || '__root'}>
+                          <PathCrumb
+                            crumb={c}
+                            chatId={chatId}
+                            open={openCrumb === c.dir}
+                            onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}
+                            onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                          />
+                          <CrumbSeparator />
+                        </Fragment>
+                      ))}
+                    </span>
                     <span className="min-w-0 truncate text-foreground" title={filePath}>{fileName}</span>
                   </nav>
                 ) : (
                   <span className="truncate">{filePath}</span>
                 )}
+                {/* The header toolbar (WARDEN-1019).
+
+                    Below `md` only `Changes` and the close X stay on the row and
+                    everything else collapses into the `⋯` overflow menu. Every
+                    control is `shrink-0`, so the full toolbar's min-content width
+                    (~510px with a markdown file's six controls) is a floor the row
+                    cannot go under: at 375px it paints through DialogTitle's `pr-8`
+                    close-X reserve and past the panel's right edge, and a click
+                    aimed at `Changes` lands on the close X or the overlay and shuts
+                    the viewer. `Changes` is the control that mis-hit was reported
+                    against, so it is the one that never collapses.
+
+                    Gated in CSS (`hidden md:flex` / `md:hidden`) rather than by a
+                    JS media query so there is no resize listener and no wrong-width
+                    first paint. The two inline groups straddle `Changes` to keep the
+                    desktop row exactly as it shipped — see TOOLBAR_LEADING_KEYS. */}
                 <div className="ml-auto flex items-center gap-2">
-                  {/* Co-editors chip (WARDEN-810): surface cross-agent file contention
-                      at the reading moment. When ≥1 same-project sibling also has this
-                      path dirty (±) / in a merge conflict (⚑) / in an unpushed commit
-                      (↑), a "↗ N others" chip lists each in a popover — the file-level
-                      complement to the sidebar's fleet ⚠ rollup, visible inside this
-                      dialog where the sidebar badge is out of view. Absent (undefined/
-                      empty) at mounts without gitStatus in scope (PaneGrid/HealthDash).
-                      Glyphs + colors reuse the GIT_STATE_KIND conventions (± yellow /
-                      ⚑ rose / ↑ amber) so the chip reads as one system with the fleet. */}
-                  {coEditors && coEditors.length > 0 && (
-                    <Popover open={coEditorOpen} onOpenChange={setCoEditorOpen}>
-                      <PopoverTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 shrink-0 gap-1.5 text-xs"
-                          aria-expanded={coEditorOpen}
-                          title={`${coEditors.length} other ${coEditors.length === 1 ? 'agent is' : 'agents are'} also touching this file`}
-                        >
-                          <span aria-hidden="true">↗</span>
-                          {coEditors.length} {coEditors.length === 1 ? 'other' : 'others'}
-                        </Button>
-                      </PopoverTrigger>
-                      <PopoverContent
-                        align="end"
-                        sideOffset={4}
-                        className="w-72 p-1 text-xs"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div className="px-1.5 py-1 text-[10px] text-muted-foreground">
-                          Also touching this file
-                        </div>
-                        <ul>
-                          {coEditors.map((ce) => (
-                            <li key={ce.key}>
-                              {/* Non-interactive flex row so the swap + Compare controls
-                                  sit as SIBLINGS (no nested interactive elements inside
-                                  the portaled popover content), mirroring AgentDiffPanel's
-                                  "sibling interactive elements inside a non-interactive
-                                  header row" discipline. */}
-                              <div className="flex w-full items-center gap-1">
-                                {/* SWAP — role="button" div (not a <button>) so the row
-                                    is keyboard-operable. Click → deep-link to the sibling's
-                                    version (parent swaps chatId) + close the popover.
-                                    Non-clickable when no onOpenCoEditor is wired (degrades
-                                    gracefully). flex-1 (not w-full) so the Compare control
-                                    below can sit beside it without overflowing. */}
-                                <div
-                                  role={canOpenCoEditor ? 'button' : undefined}
-                                  tabIndex={canOpenCoEditor ? 0 : undefined}
-                                  aria-label={canOpenCoEditor ? `open ${ce.label}'s version of this file` : undefined}
-                                  onClick={canOpenCoEditor ? (e) => { e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } : undefined}
-                                  onKeyDown={canOpenCoEditor ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } } : undefined}
-                                  title={canOpenCoEditor ? `open ${ce.label}'s version of this file` : ce.label}
-                                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left${canOpenCoEditor ? ' hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary' : ''}`}
-                                >
-                                  <span className="min-w-0 flex-1 truncate text-foreground" title={ce.label}>{ce.label}</span>
-                                  <span className="flex shrink-0 items-center gap-1 text-[11px] leading-none">
-                                    {ce.dirty && <span className="text-yellow-400" title="uncommitted changes">±</span>}
-                                    {ce.conflict && <span className="text-rose-400" title="merge conflict">⚑</span>}
-                                    {ce.unpushed && <span className="text-amber-400" title="unpushed commit">↑</span>}
-                                  </span>
-                                </div>
-                                {/* COMPARE (WARDEN-868): diff this sibling's version vs
-                                    the reader's via CollisionCompareDialog. A sibling
-                                    role="button" (no nesting) with the same role/tabIndex/
-                                    aria-label discipline as the swap. stopPropagation +
-                                    close the popover so the dialog takes focus, mirroring
-                                    GitBadges' Compare-edits button. Rendered ONLY when
-                                    onCompare is wired (ChatSidebar mount); omitted at the
-                                    PaneGrid/HealthDashboard mounts → rows render swap-only
-                                    (graceful degradation). */}
-                                {canCompare && (
-                                  <div
-                                    role="button"
-                                    tabIndex={0}
-                                    aria-label={`compare ${ce.label}'s version of this file with yours`}
-                                    onClick={(e) => { e.stopPropagation(); setCoEditorOpen(false); onCompare?.(ce.key); }}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setCoEditorOpen(false); onCompare?.(ce.key); } }}
-                                    title={`compare ${ce.label}'s version with yours`}
-                                    className="flex shrink-0 items-center rounded px-1.5 py-1 text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                                  >
-                                    <GitCompare className="w-3 h-3" aria-hidden="true" />
-                                  </div>
-                                )}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      </PopoverContent>
-                    </Popover>
-                  )}
-                  {isMarkdown && (
-                    <Button
-                      type="button"
-                      variant={viewMode === 'rendered' ? 'default' : 'outline'}
-                      size="sm"
-                      className="h-7 shrink-0 gap-1.5 text-xs"
-                      onClick={() => onViewModeChange(viewMode === 'rendered' ? 'source' : 'rendered')}
-                      title={viewMode === 'rendered' ? 'Show raw markdown source' : 'Show rendered documentation'}
-                      aria-pressed={viewMode === 'rendered'}
-                    >
-                      {viewMode === 'rendered' ? (
-                        <BookOpenIcon className="w-3.5 h-3.5" />
-                      ) : (
-                        <Code2Icon className="w-3.5 h-3.5" />
-                      )}
-                      {viewMode === 'rendered' ? 'Rendered' : 'Source'}
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant={history ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 shrink-0 gap-1.5 text-xs"
-                    onClick={() => {
-                      // resolveViewToggles (WARDEN-786) centralizes the toolbar's
-                      // mutual-exclusivity contract now that Changes joins the set:
-                      // turning history on clears annotate + changes. viewAtCommit
-                      // (a snapshot reached from the history list) is cleared when
-                      // leaving history — its own history-specific asymmetry.
-                      const t = resolveViewToggles({ annotate, history, changes }, 'history', !history);
-                      setAnnotate(t.annotate);
-                      setHistory(t.history);
-                      setChanges(t.changes);
-                      if (!t.history) setViewAtCommit(null); // leaving history → drop any at-commit snapshot
-                    }}
-                    title={history ? 'Hide file commit history' : 'Show commit history for this file (every commit that touched it, across renames)'}
-                    aria-pressed={history}
-                  >
-                    <HistoryIcon className="w-3.5 h-3.5" />
-                    History
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={annotate ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 shrink-0 gap-1.5 text-xs"
-                    onClick={() => {
-                      // Turning annotate on clears history + changes (resolveViewToggles)
-                      // and drops any at-commit snapshot (annotate replaces the content).
-                      const t = resolveViewToggles({ annotate, history, changes }, 'annotate', !annotate);
-                      setAnnotate(t.annotate);
-                      setHistory(t.history);
-                      setChanges(t.changes);
-                      if (t.annotate) setViewAtCommit(null); // annotate forces history off → drop any snapshot
-                    }}
-                    title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
-                    aria-pressed={annotate}
-                  >
-                    <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
-                    Annotate
-                  </Button>
+                  <div className="hidden items-center gap-2 md:flex">
+                    {leadingActions.map((a) => (
+                      <ToolbarActionButton key={a.key} action={a} meta={actionMeta[a.key]} />
+                    ))}
+                  </div>
                   {/* Changes view (WARDEN-786): the missing fourth file-understanding
                       surface — this file's uncommitted working-tree diff vs HEAD, so a
                       coordinator can answer "what has the agent changed here since HEAD?"
@@ -894,40 +878,18 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     <FilePenIcon className="w-3.5 h-3.5" />
                     Changes
                   </Button>
-                  {/* Manual reload (WARDEN-749): a one-shot refresh. Independently
-                      useful — before this no refresh existed, so a stale file
-                      forced a close/reopen. Spinner swaps in while in-flight. */}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-7 w-7 shrink-0 p-0 text-xs"
-                    onClick={handleManualReload}
-                    disabled={manualReloading}
-                    title="Reload file"
-                    aria-label="Reload file"
-                  >
-                    {manualReloading ? (
-                      <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <RotateCwIcon className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                  {/* Follow toggle (WARDEN-749): live-update the open file on the
-                      poll cadence as an agent writes to it (tail -f). Ephemeral —
-                      resets on close. Pauses while the tab is hidden. */}
-                  <Button
-                    type="button"
-                    variant={follow ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 shrink-0 gap-1.5 text-xs"
-                    onClick={() => setFollow((f) => !f)}
-                    title={follow ? 'Stop following — pause live updates' : 'Follow — live-update this file as it changes (tail -f)'}
-                    aria-pressed={follow}
-                  >
-                    <CircleDotIcon className="h-3.5 w-3.5" />
-                    Follow
-                  </Button>
+                  <div className="hidden items-center gap-2 md:flex">
+                    {trailingActions.map((a) => (
+                      <ToolbarActionButton key={a.key} action={a} meta={actionMeta[a.key]} />
+                    ))}
+                  </div>
+                  <ToolbarOverflowMenu
+                    className="md:hidden"
+                    actions={secondaryActions}
+                    metas={actionMeta}
+                    open={toolbarMenuOpen}
+                    onOpenChange={setToolbarMenuOpen}
+                  />
                 </div>
               </DialogTitle>
             </DialogHeader>
@@ -1059,15 +1021,15 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
         <ContextMenuContent>
           {/* Copies the FULL path regardless of the header's truncation
               (FileViewer.tsx span.truncate) — the most natural "copy path" target. */}
-          <ContextMenuItem onSelect={() => handleCopy(filePath)}>Copy file path</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(filePath)}>Copy file path</ContextMenuItem>
           {/* Mirrors the "Copy name" vocabulary of the collection-card / workspace-tab siblings. */}
-          <ContextMenuItem onSelect={() => handleCopy(basename(filePath))}>Copy filename</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(basename(filePath))}>Copy filename</ContextMenuItem>
           {/* Copies whatever is on screen: the live file, or — while viewing a
               historical snapshot (WARDEN-354) — that commit's blob. Disabled while
               nothing is loaded so it can never silently copy an empty string. */}
           <ContextMenuItem
             disabled={displayedContent === null}
-            onSelect={() => { if (displayedContent !== null) handleCopy(displayedContent); }}
+            onSelect={() => { if (displayedContent !== null) copyWithToast(displayedContent); }}
           >
             Copy file content
           </ContextMenuItem>
@@ -1248,26 +1210,49 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetched, setFetched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleOpenChange = async (next: boolean) => {
     setOpen(next);
     if (!next || fetched) return;
     setLoading(true);
+    // Clear any previous failure BEFORE retrying, so a retry that succeeds does not
+    // render its diff underneath a stale error line.
+    setError(null);
     try {
-      const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`);
-      if (!r.ok) { setDiff(null); setMessage(null); return; }
-      const j = await r.json();
-      setDiff(typeof j.diff === 'string' ? j.diff : null);
+      // WARDEN-1194: read through the extracted seam, which honours BOTH halves of
+      // warden's error convention (non-2xx, AND the 200-with-{error} half that the
+      // old `r.ok` gate missed entirely — `no cwd`, a route throw, and since
+      // WARDEN-1192 a genuine `git show failed` for a deleted cwd / non-git cwd /
+      // stopped container / dropped tunnel). It THROWS on failure, so a broken
+      // repository can no longer arrive here disguised as an empty diff and render
+      // the popover's confident "no diff for this file at this commit".
+      // The DETAIL reader, not `readFileDiff`, because this popover renders a second
+      // field off the same response: the commit body (WARDEN-388), below.
+      const { diff: text, message: body } = await readFileDiffDetail(
+        await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`),
+      );
+      // A genuinely empty diff stays empty and still renders "no diff for this file
+      // at this commit" — only a real failure takes the catch below.
+      setDiff(text || null);
       // The commit's body rides the same per-file fetch (no extra round-trip). Empty
       // for a subject-only commit → null so it renders nothing above the diff (the
       // hash row already shows the summary/subject) (WARDEN-388).
-      setMessage(typeof j.message === 'string' && j.message ? j.message : null);
-    } catch {
+      setMessage(body || null);
+      // Cache the SUCCESS only. Setting this in a `finally` (as the pre-fix code did)
+      // pinned a failed popover to its wrong state forever: the guard above is
+      // `if (!next || fetched)`, so closing and re-opening — the user's only recovery
+      // affordance — silently did nothing until the component remounted. On the
+      // failure path `fetched` stays false, so a re-open RE-ISSUES the fetch.
+      // Successful caching (instant re-open) is unchanged. (WARDEN-1187's coupling,
+      // same shape, same reason.)
+      setFetched(true);
+    } catch (e) {
       setDiff(null);
       setMessage(null);
+      setError(e instanceof Error && e.message ? e.message : 'Failed to load diff');
     } finally {
       setLoading(false);
-      setFetched(true);
     }
   };
 
@@ -1301,6 +1286,17 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
         </div>
         {loading ? (
           <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
+        ) : error ? (
+          // WARDEN-1194 / WARDEN-89: a backend failure is NOT "no diff for this file at
+          // this commit". That empty state is a confident factual assertion about the
+          // user's data, and rendering it for a repository we could not read asserts
+          // the opposite of the truth. Kept in-place and quiet at the popover's own
+          // scale (it has no toast surface), visually distinct from the empty state,
+          // `role="status"` so AT announces it. `fetched` is not set on this path, so
+          // closing and re-opening the popover retries the fetch.
+          <div className="px-1 text-[10px] text-muted-foreground" role="status">
+            could not load diff — {error}
+          </div>
         ) : (
           <>
             {message ? (
@@ -1537,6 +1533,290 @@ function CommitBlobView({ commit, filePath, content, loading, error, viewMode, i
   );
 }
 
+// The per-key UI half of a collapsible header-toolbar control (WARDEN-1019): its
+// icon and its click handler. Paired with the pure `ToolbarAction` descriptor by
+// `key`, so the inline row and the `⋯` overflow menu render the SAME action from
+// ONE definition — a menu item and a button that can't drift apart.
+type ToolbarActionMeta = {
+  icon: ReactNode;
+  onSelect: () => void;
+  /** Icon-only on the inline row (the ↻ reload) — still labelled inside the menu. */
+  iconOnly?: boolean;
+  disabled?: boolean;
+};
+
+// One collapsible control as it renders ON the header row (>= `md`). Byte-for-byte
+// the button that shipped before WARDEN-1019 — same variant/size/classes, same
+// title, same aria-pressed — so the desktop toolbar is unchanged by the collapse.
+function ToolbarActionButton({ action, meta }: { action: ToolbarAction; meta: ToolbarActionMeta }) {
+  return (
+    <Button
+      type="button"
+      variant={action.pressed ? 'default' : 'outline'}
+      size="sm"
+      className={meta.iconOnly ? 'h-7 w-7 shrink-0 p-0 text-xs' : 'h-7 shrink-0 gap-1.5 text-xs'}
+      onClick={meta.onSelect}
+      disabled={meta.disabled}
+      title={action.title}
+      // A toggle announces its state; a plain icon-only action needs a name instead.
+      aria-pressed={action.pressed ?? undefined}
+      aria-label={meta.iconOnly ? action.label : undefined}
+    >
+      {meta.icon}
+      {!meta.iconOnly && action.label}
+    </Button>
+  );
+}
+
+// The `⋯` menu holding the toolbar controls that do not fit a narrow row
+// (WARDEN-1019) — the toolbar analog of CollapsedCrumbs, so a collapse stays
+// non-destructive: every collapsed control is still listed, still reachable, and
+// still SHOWS its state.
+//
+// It is a real MENU, not a Popover of buttons (WARDEN-1028). Below `md` this is
+// the SOLE path to History/Annotate/Reload/Follow (+ Rendered⇄Source on a
+// markdown file), so the affordance it replaces must not be downgraded: Radix's
+// DropdownMenu gives the content `role="menu"`, each row
+// `role="menuitemcheckbox"` (or `role="menuitem"` for the one non-toggle),
+// roving focus, arrow-key navigation, typeahead, and Escape-returns-focus —
+// none of which a generic popover of N sequential tab stops has.
+//
+// The rows keep their explicit ON/OFF pill rather than the menu-standard "check
+// mark when active" (hence `indicator={false}`): four of the five are toggles,
+// and a check that simply vanishes when off reads as "this action is
+// unavailable" instead of "this view is currently off". `aria-checked` — set by
+// Radix from `checked` — carries the same fact to assistive tech.
+//
+// Rendered only below `md` (the caller passes `md:hidden`). Above it the controls
+// are on the row and this trigger would be a second, redundant path to them.
+function ToolbarOverflowMenu({ actions, metas, open, onOpenChange, className }: {
+  actions: ToolbarAction[];
+  metas: Record<ToolbarActionKey, ToolbarActionMeta>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  className?: string;
+}) {
+  const on = actions.filter((a) => a.pressed).map((a) => a.label);
+  // Every one of these swaps what the viewer is SHOWING, so the menu must not
+  // stay open over the result. Radix closes on select by default — this makes
+  // the close explicit and orders it before the state change, matching the
+  // behavior the Popover version shipped with. (Never `onSelect: preventDefault`
+  // to keep a CheckboxItem open, which is the usual multi-toggle idiom.)
+  const select = (meta: ToolbarActionMeta) => {
+    onOpenChange(false);
+    meta.onSelect();
+  };
+  return (
+    // Non-modal, matching the Popover it replaces: this menu lives inside the
+    // FileViewer's own modal Dialog, which already owns the outside-interaction
+    // and scroll-lock contract.
+    <DropdownMenu open={open} onOpenChange={onOpenChange} modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className={`h-7 w-7 shrink-0 p-0 text-xs ${className ?? ''}`}
+          // The summary rides in the tooltip/accessible name so the collapsed
+          // state is legible WITHOUT opening the menu.
+          title={on.length > 0 ? `More file actions (on: ${on.join(', ')})` : 'More file actions'}
+          aria-label={on.length > 0 ? `More file actions, ${on.length} on` : 'More file actions'}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <EllipsisIcon className="h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        sideOffset={4}
+        className="w-56 p-1 text-xs"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {actions.map((a) => {
+          const meta = metas[a.key];
+          const body = (
+            <>
+              <span className="shrink-0 text-muted-foreground">{meta.icon}</span>
+              <span className="truncate">{a.label}</span>
+              {a.pressed !== null && (
+                <Badge
+                  variant={a.pressed ? 'default' : 'secondary'}
+                  className="ml-auto uppercase"
+                >
+                  {a.pressed ? 'on' : 'off'}
+                </Badge>
+              )}
+            </>
+          );
+          // `pressed: null` is the one plain action (↻ Reload file) — a
+          // `menuitem`, not a `menuitemcheckbox`. It keeps its disabled +
+          // spinner state while a manual reload is in flight; Radix keeps a
+          // disabled item in the roving-focus ring via `aria-disabled`, which
+          // is correct and deliberate.
+          return a.pressed === null ? (
+            <DropdownMenuItem
+              key={a.key}
+              title={a.title}
+              disabled={meta.disabled}
+              onSelect={() => select(meta)}
+            >
+              {body}
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuCheckboxItem
+              key={a.key}
+              title={a.title}
+              checked={a.pressed}
+              indicator={false}
+              disabled={meta.disabled}
+              onSelect={() => select(meta)}
+            >
+              {body}
+            </DropdownMenuCheckboxItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// One clickable ancestor crumb in the FileViewer's path breadcrumb (WARDEN-740):
+// a Popover trigger whose content lists that directory, so a human can browse a
+// sibling/parent and open it in place.
+//
+// Extracted from the header in WARDEN-1006 because the run now renders crumbs in
+// two groups (before and after the `…` overflow menu) — one component keeps both
+// groups byte-identical instead of two drifting copies.
+//
+// A non-root crumb is `min-w-0 truncate`, NOT `shrink-0`: when the row is tight
+// the label ellipsizes inside the crumb and stays a legible, clickable word,
+// where a fixed-size crumb could only be sliced mid-glyph by the run's clip box.
+// The root crumb is an icon, so it has nothing to truncate and stays `shrink-0`.
+function PathCrumb({ crumb, chatId, open, onOpenChange, onPick }: {
+  crumb: Crumb;
+  chatId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPick: (path: string) => void;
+}) {
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={`rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset ${crumb.isRoot ? 'shrink-0' : 'min-w-0 truncate'}`}
+          title={crumb.isRoot ? 'Browse repository root' : `Browse ${crumb.dir}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {crumb.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : crumb.label}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        className="w-64 p-1 text-xs"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <DirListing chatId={chatId} dir={crumb.dir} onPick={onPick} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// The `…` overflow menu holding the crumbs a deep path collapsed out of the row
+// (WARDEN-1006). This is what makes the collapse non-destructive: every hidden
+// ancestor is still listed here and still opens its own directory listing, so
+// the browse-an-ancestor capability the crumbs exist for survives at any depth —
+// and the `…` itself is the on-screen affordance saying the path was collapsed.
+//
+// Two levels inside one Popover: the hidden ancestors, then (on pick) that dir's
+// DirListing with a back link. The drill-in resets whenever the menu is not
+// open — see the note on the reset below for why that has to key off `open`
+// rather than off the dismiss callback — so it never reopens deep.
+function CollapsedCrumbs({ crumbs, chatId, open, onOpenChange, onPick }: {
+  crumbs: Crumb[];
+  chatId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPick: (path: string) => void;
+}) {
+  const [browsing, setBrowsing] = useState<string | null>(null);
+  const labels = crumbs.map((c) => c.label).join(' / ');
+  // The drill-in resets on `open` itself, NOT in the dismiss callback. Radix
+  // does not fire `onOpenChange` when a CONTROLLED `open` is flipped false by
+  // the parent — and that is exactly what a successful pick does (`onPick` →
+  // `setOpenCrumb(null)`), so a reset that hangs off the dismiss callback is
+  // skipped on the one path that matters: after using the menu, it reopened
+  // into the stale directory instead of the hidden ancestors. Depending on
+  // `open` covers both close paths (dismiss and parent-controlled) with one
+  // reset. `hiddenKey` is in the deps as well so navigating by a VISIBLE crumb,
+  // which changes the hidden set without ever closing the menu, cannot leave a
+  // dir behind that is no longer hidden either. Reopening therefore always
+  // lands on level 1, which is the only level guaranteed to match `crumbs`.
+  const hiddenKey = crumbs.map((c) => c.dir).join('\u0000');
+  useEffect(() => { setBrowsing(null); }, [open, hiddenKey]);
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+          title={`Browse ${crumbs.length} hidden folders: ${labels}`}
+          aria-label={`Show ${crumbs.length} hidden folders`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          …
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        className="w-64 p-1 text-xs"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {browsing === null ? (
+          <div className="flex flex-col">
+            <div className="px-1.5 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Hidden folders
+            </div>
+            {crumbs.map((c) => (
+              <button
+                key={c.dir}
+                type="button"
+                title={`Browse ${c.dir}`}
+                onClick={(e) => { e.stopPropagation(); setBrowsing(c.dir); }}
+                className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent"
+              >
+                <FolderIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <span className="truncate">{c.label}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="flex flex-col">
+            <button
+              type="button"
+              title="Back to the hidden folders"
+              onClick={(e) => { e.stopPropagation(); setBrowsing(null); }}
+              className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-muted-foreground hover:bg-accent"
+            >
+              <ChevronLeftIcon className="h-3 w-3 shrink-0" />
+              <span className="truncate">{browsing}</span>
+            </button>
+            <DirListing chatId={chatId} dir={browsing} onPick={onPick} />
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// The `/` between two crumbs. Decorative only — the path is already announced by
+// the crumb buttons' own labels, so it is aria-hidden.
+function CrumbSeparator() {
+  return <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>;
+}
+
 // The directory listing shown inside a breadcrumb crumb's Popover (WARDEN-740).
 // Fetches GET /api/git-ls?dir=<curDir> and renders one native <button> row per
 // entry — a FILE row picks it (→ onPick → onNavigate → the file swaps in place,
@@ -1572,7 +1852,12 @@ function DirListing({ chatId, dir, onPick }: {
     setError(null);
     fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(curDir)}`)
       .then(async (r) => {
-        const data = await r.json().catch(() => ({}));
+        // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx
+        // body that fails to parse must reach the .catch below rather than becoming
+        // a confident "empty directory" (WARDEN-1014). The `?? {}` is load-bearing:
+        // readListBody resolves to `undefined` on the !ok leg, which the `!r.ok`
+        // branch below dereferences.
+        const data = ((await readListBody(r)) as { error?: string; entries?: Entry[] }) ?? {};
         if (cancelled) return;
         // /api/git-ls returns transport errors at HTTP 200 with an `error` field
         // (no-cwd / not-a-git-repo) and a 400 for an unsafe dir — check BOTH

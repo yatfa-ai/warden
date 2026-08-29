@@ -36,6 +36,7 @@ let tempHome;
 let stashRepo;
 let cleanRepo;
 let nonGitDir;
+let unbornRepo; // healthy repo, `git init` with no commits yet (WARDEN-1021)
 // The subject we stash, captured so the detail test can assert it survives the wire.
 const STASH_SUBJECT_HINT = 'uncommitted wip to stash';
 
@@ -88,6 +89,17 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstash-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // A HEALTHY repo whose HEAD has no commits yet (WARDEN-1021). This route's
+  // primary command exits ZERO here (unlike /api/git-log and /api/git-reflog,
+  // which need an explicit unborn-HEAD probe on their non-zero leg), so no
+  // production code is involved — this pins that asymmetry so a future change
+  // can't start reporting a brand-new repo as a failure.
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstash-unborn-'));
+  git(['init', '-q', '-b', 'main'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'uncommitted\n');
+
   // Catalog with three LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -96,6 +108,7 @@ before(async () => {
       { host: '(local)', session: 'warden-stashed', cwd: stashRepo, cmd: 'bash', name: 'warden-stashed' },
       { host: '(local)', session: 'warden-clean', cwd: cleanRepo, cmd: 'bash', name: 'warden-clean' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
     ]),
   );
 
@@ -113,7 +126,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [stashRepo, cleanRepo, nonGitDir, tempHome]) {
+  for (const d of [stashRepo, cleanRepo, nonGitDir, unbornRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -165,6 +178,9 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
   });
 
   it('returns [] for a repo with no stashes (200, not 500)', async () => {
+    // WARDEN-1021 no-false-positive guard: `git stash list` on a stash-less repo exits
+    // ZERO with empty stdout. That is a legitimate empty, NOT a failure — error stays
+    // null, so the non-git case above is genuinely distinguishable from this one.
     const res = await fetch(`${baseUrl}/api/git-stash?id=warden-clean`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
@@ -172,8 +188,28 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
     assert.deepStrictEqual(body.stashes, []);
   });
 
-  it('returns [] (200, not 500) for a non-git cwd', async () => {
+  it('returns [] with a NON-EMPTY error (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
+    // `git stash list` exits non-zero on a non-git cwd. Before WARDEN-1021 the route
+    // discarded that exit status and answered `error: null`, so the dialog rendered a
+    // confident "no stashes" for a broken repo / deleted cwd / dropped SSH transport.
+    // The error must be non-empty: runGit pipes `2>/dev/null` on BOTH remote branches,
+    // so an `r.stderr` passthrough would be an empty string here — and
+    // readListResponse (web/src/lib/api.ts) treats an empty string as "no error",
+    // making the fix a silent no-op on exactly the transports warden deploys over.
     const res = await fetch(`${baseUrl}/api/git-stash?id=warden-nongit`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.stashes, []);
+    assert.strictEqual(typeof body.error, 'string');
+    assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
+  });
+
+  it('returns [] with error null for a HEALTHY repo with an unborn HEAD (WARDEN-1021)', async () => {
+    // `git stash list` exits ZERO on a fresh `git init` with no commits — unlike
+    // `git log`/`git reflog`, which exit non-zero and therefore need an explicit
+    // unborn-HEAD probe. So this route reaches the empty-list-with-error-null path
+    // on its own. Pinned because a brand-new repo must never read as a failure.
+    const res = await fetch(`${baseUrl}/api/git-stash?id=warden-unborn`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.stashes, []);
@@ -261,6 +297,49 @@ describe('/api/git-stash-show detail endpoint (real Express app from server.js)'
     const body = await res.json();
     assert.deepStrictEqual(body.files, []);
     assert.strictEqual(body.error, null);
+  });
+
+  // ---- per-file leg: a FAILING git command must say so (WARDEN-1192) ----------
+  // The git-show twin of the same rule. The files leg above is a LIST and says "empty"
+  // precisely by being empty, so it stays error:null. The per-file leg is a DIFF —
+  // `diff: null` cannot mean "empty" — so a failure must be worded as an error string
+  // (the /api/git-log carve-out rule). Before this, the leg discarded the exit status
+  // and stamped error:null, so a broken repo was byte-identical on the wire to a clean
+  // empty diff (WARDEN-89's false-empty disease).
+  it('per-file leg surfaces a git failure as an error for a non-git cwd (200, not a false empty diff)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-nongit&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('wip.txt')}`);
+    assert.strictEqual(res.status, 200); // still never a 500
+    const body = await res.json();
+    assert.strictEqual(body.diff, null, 'a failed diff must be null, not an empty string');
+    assert.strictEqual(body.error, 'git stash diff failed');
+    // Fixed literal, never r.stderr: both remote branches pipe 2>/dev/null, so a stderr
+    // passthrough would be an EMPTY string here — which the client reader treats as
+    // "no error", silently restoring the very bug this test pins.
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'error must be a non-empty string');
+  });
+
+  it('per-file leg surfaces an error for a valid-shape but unknown stash ref (deliberately diverges from the files leg)', async () => {
+    // The same ref the files-leg test above asserts answers error:null. The two legs
+    // ANSWER DIFFERENTLY on purpose: a list truthfully says "empty"; a diff cannot, so
+    // it says "failed" rather than assert a clean empty diff for a stash that does not
+    // exist. If this ever goes back to error:null, the false-empty bug is back.
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{999}')}&path=${encodeURIComponent('wip.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, null);
+    assert.strictEqual(body.error, 'git stash diff failed');
+  });
+
+  it('preserves the BENIGN empty: a path not present in the stash stays { diff: "", error: null }', async () => {
+    // committed.txt is in the repo but was NOT part of the stashed change, so
+    // `git diff stash@{0}^ stash@{0} -- committed.txt` exits ZERO with empty stdout.
+    // That is a genuinely unchanged file, NOT a failure — the r.ok gate must let it
+    // through untouched, or the fix would over-correct and report healthy repos broken.
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('committed.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, '', 'a successful-but-empty diff stays an empty STRING');
+    assert.strictEqual(body.error, null, 'a benign empty must not be converted into an error');
   });
 
   it('returns 404 for an unknown chat id', async () => {

@@ -47,3 +47,75 @@ export function parentDir(filePath: string): string {
   const segs = splitPathSegments(filePath);
   return segs.slice(0, -1).join('/');
 }
+
+/** How many crumb boxes the breadcrumb run renders before it collapses the
+ *  middle of the path behind an overflow menu (WARDEN-1006). Four is the
+ *  collapsed total: the root crumb, the `…` trigger, and the two crumbs
+ *  nearest the open file. */
+export const MAX_VISIBLE_CRUMBS = 4;
+
+/** Split the crumb list into the run that stays on screen and the run that
+ *  moves into the `…` overflow menu (WARDEN-1006).
+ *
+ *  WHY THIS EXISTS: the crumbs are fixed-size click targets, so a deep path's
+ *  min-content width exceeds the dialog title row. Before this, a deep path
+ *  either painted over the toolbar buttons or — once the row was made to clip —
+ *  had its tail crumbs silently sliced off past the clip edge: invisible AND
+ *  unclickable, with nothing on screen saying they existed. Collapsing is the
+ *  structural half of the fix (CSS shrink alone cannot choose WHICH crumbs to
+ *  drop): the middle of the path moves into a menu that still lists it, so the
+ *  navigation those crumbs provide survives the collapse, and the `…` says the
+ *  collapse happened.
+ *
+ *  Keeps the ROOT crumb and the crumbs NEAREST THE FILE — the two ends a human
+ *  orients by — and hides the middle, which is the conventional breadcrumb
+ *  collapse and the opposite of clipping the deep end off.
+ *
+ *  Pure and total: `[...lead, ...hidden, ...tail]` always reconstructs the input
+ *  in order, so no crumb can be lost by collapsing (pinned in breadcrumbs.test.mjs).
+ *
+ *  @param maxVisible total crumb BOXES to render when collapsed (the `…` counts
+ *  as one). Clamped to >= 3 so a collapse always leaves a lead crumb, the
+ *  trigger, and at least one tail crumb. */
+export function collapseCrumbs<T>(
+  crumbs: T[],
+  maxVisible: number = MAX_VISIBLE_CRUMBS,
+): { lead: T[]; hidden: T[]; tail: T[] } {
+  const cap = Math.max(3, Math.floor(maxVisible));
+  // Short enough to render whole — nothing hidden, so no `…` is shown either.
+  if (crumbs.length <= cap) return { lead: crumbs, hidden: [], tail: [] };
+  const tailCount = cap - 2; // one box for the root crumb, one for the `…` trigger
+  return {
+    lead: crumbs.slice(0, 1),
+    hidden: crumbs.slice(1, crumbs.length - tailCount),
+    tail: crumbs.slice(crumbs.length - tailCount),
+  };
+}
+
+/** Total characters of visible crumb labels above which the crumb run is given
+ *  its minimum width (WARDEN-1006). ~20 characters of `text-sm` is roughly the
+ *  12rem the floor reserves, so this is the point past which the run would be
+ *  squeezed rather than inflated. */
+export const CRUMB_FLOOR_LABEL_CHARS = 20;
+
+/** Whether the crumb run should be given its minimum width (WARDEN-1006).
+ *
+ *  THE PROBLEM THIS SOLVES: the crumb run yields the title row's shrink before
+ *  the filename does, which is right — but taken to its limit it shrinks the
+ *  crumbs to empty 8px stubs: present and clickable, showing nothing. A CSS
+ *  `min-width` fixes that, and introduces the opposite failure: `min-width` beats
+ *  content width, so a SHORT path (`src/ui/Foo.tsx`) would be inflated to the
+ *  floor and leave a gap before the filename. What CSS wants here is
+ *  "min(content, 12rem)" — which `min-width` cannot express and `fit-content()`
+ *  cannot either, since neither shrinks with the row.
+ *
+ *  So decide it in JS, from the only signal available without measuring the DOM:
+ *  a collapsed path always has a run wide enough to floor, and an uncollapsed one
+ *  is judged by its label length. Being wrong is cheap and bounded in BOTH
+ *  directions — a floor applied too early costs some empty space before the
+ *  filename, applied too late it costs a squeezed crumb. Neither breaks the
+ *  layout, which is why this is a character count and not a ResizeObserver. */
+export function crumbRunNeedsFloor(visible: { label: string }[], collapsed: boolean): boolean {
+  if (collapsed) return true;
+  return visible.reduce((n, c) => n + c.label.length, 0) >= CRUMB_FLOOR_LABEL_CHARS;
+}

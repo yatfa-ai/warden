@@ -54,7 +54,7 @@ describe('config notification preferences', () => {
     assert.strictEqual(cfg.notifyChatOps, true);
     assert.strictEqual(cfg.notifySuccess, true);
     assert.strictEqual(cfg.notifyObserver, true);
-    // The corrupt text was surfaced to a .corrupt-<ts>.json backup, not lost.
+    // The corrupt text was surfaced to a .corrupt-<digest>.json.bak backup, not lost.
     assert.ok(writes.mock.calls.some((c) => String(c.arguments[0]).includes('.corrupt-')));
   });
 
@@ -137,30 +137,88 @@ describe('config llm (Observer model — WARDEN-350)', () => {
   });
 });
 
-describe('config telemetry consent (WARDEN-457)', () => {
+describe('config telemetry consent (WARDEN-457 / WARDEN-1116)', () => {
   afterEach(() => {
     mock.restoreAll();
   });
 
-  it('defaults BOTH telemetry tiers to false at fresh state (off by default)', () => {
+  it('defaults EVERY telemetry consent category to false at fresh state (off by default)', () => {
     // first run — no config file on disk. Off-by-default is a non-negotiable
     // invariant: nothing leaves the machine until the user opts in via Settings.
     mock.method(fs, 'readFileSync', () => {
       throw new Error('ENOENT: config.json does not exist');
     });
     const cfg = load();
-    assert.strictEqual(cfg.telemetryBaseEnabled, false, 'base tier OFF by default');
-    assert.strictEqual(cfg.telemetryExtendedEnabled, false, 'extended tier OFF by default');
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false, 'incidents OFF by default');
+    assert.strictEqual(cfg.telemetryNamesEnabled, false, 'names OFF by default');
   });
 
   it('preserves user-enabled consent through load()', () => {
+    mock.method(fs, 'readFileSync', () => JSON.stringify({
+      telemetryIncidentsEnabled: true,
+      telemetryNamesEnabled: true,
+    }));
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, true);
+    assert.strictEqual(cfg.telemetryNamesEnabled, true);
+  });
+
+  it('resolves a MALFORMED persisted consent value to OFF (off-by-default survives corruption)', () => {
+    mock.method(fs, 'readFileSync', () => JSON.stringify({
+      telemetryIncidentsEnabled: 'true',
+      telemetryNamesEnabled: 1,
+    }));
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false, 'a string never enables a category');
+    assert.strictEqual(cfg.telemetryNamesEnabled, false, 'a number never enables a category');
+  });
+
+  it('MIGRATES a pre-WARDEN-1116 opt-in forward with no behavioral change', () => {
+    // A user who had base + extended on must land on incidents + names on — the
+    // equivalent categories — and nothing else may become enabled.
     mock.method(fs, 'readFileSync', () => JSON.stringify({
       telemetryBaseEnabled: true,
       telemetryExtendedEnabled: true,
     }));
     const cfg = load();
-    assert.strictEqual(cfg.telemetryBaseEnabled, true);
-    assert.strictEqual(cfg.telemetryExtendedEnabled, true);
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, true, 'base → incidents');
+    assert.strictEqual(cfg.telemetryNamesEnabled, true, 'extended → names');
+  });
+
+  it('MIGRATES a base-only opt-in without silently enabling names', () => {
+    mock.method(fs, 'readFileSync', () => JSON.stringify({ telemetryBaseEnabled: true }));
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, true, 'base → incidents');
+    assert.strictEqual(cfg.telemetryNamesEnabled, false, 'nothing new is silently enabled');
+  });
+
+  it('MIGRATES a stale extended-without-base pair to nothing enabled', () => {
+    // The OLD model resolved {base:false, extended:true} to "send nothing". The
+    // migration must carry that EFFECTIVE consent forward, not the raw flag —
+    // otherwise upgrading would enable a category the user never effectively had.
+    mock.method(fs, 'readFileSync', () => JSON.stringify({
+      telemetryBaseEnabled: false,
+      telemetryExtendedEnabled: true,
+    }));
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false);
+    assert.strictEqual(cfg.telemetryNamesEnabled, false,
+      'a stale legacy pair the old model had latched off does not resurrect as consent');
+  });
+
+  it('a MIGRATED config keeps the legacy keys but never lets them override the new ones', () => {
+    // Once the new keys exist they are authoritative: a leftover legacy key on
+    // disk (or a downgrade/upgrade round trip) can never re-enable a category the
+    // user has since turned off.
+    mock.method(fs, 'readFileSync', () => JSON.stringify({
+      telemetryBaseEnabled: true,
+      telemetryExtendedEnabled: true,
+      telemetryIncidentsEnabled: false,
+      telemetryNamesEnabled: false,
+    }));
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false, 'the new key wins over the legacy one');
+    assert.strictEqual(cfg.telemetryNamesEnabled, false, 'the new key wins over the legacy one');
   });
 });
 

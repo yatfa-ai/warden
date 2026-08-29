@@ -3,12 +3,18 @@
 //
 // No front-end test runner in this repo, so (like attentionRollup.test.mjs) this
 // loads the REAL src/lib/desktopAlerts.ts (transpiled TS -> ESM via Vite's OXC
-// transform) and exercises the PURE helpers with plain objects. The `import type`
-// in that file is erased at transpile time, so the emitted module is import-free
-// and loads standalone — the browser-touching helpers (requestAlertPermission /
-// fireAttentionNotification) are not exercised here (no Notification API under
-// Node); they are kept defensive so a construction failure can never crash the
-// poll.
+// transform) and exercises the PURE helpers with plain objects. That module has one
+// runtime import (finalizeRollup, WARDEN-1115), so the loader below transpiles
+// attentionRollup.ts alongside it and rewrites the alias — see the note there.
+//
+// The browser-touching helpers ARE exercised too, via the minimal `makeNotificationShim`
+// harness at the fireWatchNotification block below (added by WARDEN-417 and reused by
+// WARDEN-1109 for fireBudgetNotification) — the earlier version of this header said they
+// were not, which stopped being true the day that shim landed. Still untested: the
+// permission-prompt helper requestAlertPermission. fireAttentionNotification is loaded
+// only so its tag literal can be compared against the budget one (tag-collision drift);
+// its own behaviour is otherwise unexercised. All three stay defensive so a construction
+// failure can never crash the poll.
 //
 // This file is auto-discovered by `npm test` (`node --test` runs every *.test.mjs
 // in web/), so it runs in CI with no package.json wiring.
@@ -25,12 +31,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const helperPath = resolve(__dirname, 'src/lib/desktopAlerts.ts');
 
 // --- Load the REAL desktopAlerts.ts (TS -> ESM via the OXC transform Vite bundles) ----
+// desktopAlerts.ts imports finalizeRollup from @/lib/attentionRollup (WARDEN-1115), so —
+// exactly as storage.test.mjs does for @/lib/themes — we transpile BOTH modules into the
+// same tmp dir and rewrite the bare specifier to a relative path Node can resolve. Without
+// this the emitted module carries an unresolvable '@/lib/attentionRollup' and the WHOLE
+// suite dies with ERR_MODULE_NOT_FOUND at import, not just one test. attentionRollup.ts
+// has no runtime imports of its own, so it loads standalone and the chain ends there.
+const attentionRollupPath = resolve(__dirname, 'src/lib/attentionRollup.ts');
 const src = readFileSync(helperPath, 'utf8');
+const attentionRollupSrc = readFileSync(attentionRollupPath, 'utf8');
 const { code } = await transformWithOxc(src, helperPath, {});
+const { code: attentionRollupCode } = await transformWithOxc(attentionRollupSrc, attentionRollupPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
+writeFileSync(join(tmpDir, 'attentionRollup.mjs'), attentionRollupCode);
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
-writeFileSync(tmpFile, code);
-const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, applyFleetAttentionCooldown, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
+writeFileSync(tmpFile, code.replaceAll('@/lib/attentionRollup', './attentionRollup.mjs'));
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, applyFleetAttentionCooldown, formatInAppEntry, fireWatchNotification, fireBudgetNotification, fireAttentionNotification, watchStateLabel } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -226,7 +242,7 @@ test('defaults → formatAlertMessage over routable == over raw', () => {
   assert.deepEqual(formatAlertMessage(applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set())), formatAlertMessage(r));
 });
 
-console.log('\napplySeverityPrefs: WARDEN-344 pane-state buckets pass through (integration with severity routing)');
+console.log('\napplySeverityPrefs: WARDEN-344 pane-state buckets pass through the four SEVERITY TOGGLES (integration with severity routing)');
 test('pane-state buckets survive applySeverityPrefs under defaults (lengths intact)', () => {
   const r = roll({ stuck: [agent('s1')], erroring: [agent('e1')], waiting: [agent('w1'), agent('w2')], blocked: [agent('b1')] });
   const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set());
@@ -284,7 +300,7 @@ test('all buckets off → empty routable regardless of input', () => {
   assert.equal(out.total, 0);
 });
 
-console.log('\napplySeverityPrefs: per-agent mute filters ONLY the health buckets');
+console.log('\napplySeverityPrefs: per-agent mute filters the per-agent buckets, never the aggregate counts');
 test('a muted critical agent is dropped from routable.critical', () => {
   const out = applySeverityPrefs(roll({ critical: [agent('c1'), agent('c2')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['c1']));
   assert.equal(out.critical.length, 1);
@@ -311,6 +327,127 @@ test('alertAgentKey resolves key || id', () => {
   assert.equal(alertAgentKey({ id: 'i', key: 'k' }), 'k');
   assert.equal(alertAgentKey({ id: 'i' }), 'i');
   assert.equal(alertAgentKey({}), '');
+});
+
+// --- WARDEN-953: per-agent mute/snooze reaches the five pane-state buckets ------
+//
+// Before this, `mutedKeys` was subtracted from critical/warning ONLY — an agent whose
+// attention came from a PANE STATE (stuck / erroring / waiting / blocked / a custom
+// watch-pattern match) could not be individually silenced at all, while the UI toasted
+// "Snoozed 1 agent for 1 hour". The suppressed set the hook passes in is
+// mutedSet ∪ activeSnoozedKeys, so these cases cover BOTH the permanent mute (WARDEN-364)
+// and the time-boxed snooze (WARDEN-551) — the pure helper sees one merged set either way.
+console.log('\napplySeverityPrefs: per-agent mute/snooze suppresses the five pane-state buckets (WARDEN-953)');
+for (const bucket of ['stuck', 'erroring', 'waiting', 'blocked', 'custom']) {
+  test(`a suppressed agent is dropped from routable.${bucket}, and total falls`, () => {
+    const r = roll({ [bucket]: [agent('a1'), agent('a2')] });
+    const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set(['a1']));
+    assert.equal(out[bucket].length, 1, 'the suppressed agent is gone');
+    assert.equal(out[bucket][0].id, 'a2', 'the un-suppressed agent survives');
+    assert.equal(out.total, 1, 'total reflects the reduction');
+    assert.equal(r.total, 2, 'the RAW rollup is untouched (badge still shows both)');
+  });
+}
+test('suppression keys on agent.key when present (a.key || a.id) for a pane state too', () => {
+  const keyed = { id: 'i1', key: 'k1', name: 'n1' };
+  const out = applySeverityPrefs(roll({ stuck: [keyed, agent('s2')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['k1']));
+  assert.equal(out.stuck.length, 1);
+  assert.equal(out.stuck[0].id, 's2');
+});
+test('one suppressed key is dropped from EVERY bucket it appears in at once', () => {
+  // The independent /api/health + /api/agent-states sources share one key space, so a
+  // single agent can be both critical-health AND stuck. One mute silences both.
+  const out = applySeverityPrefs(
+    roll({ critical: [agent('a')], stuck: [agent('a')], erroring: [agent('a')], waiting: [agent('a')], blocked: [agent('a')], custom: [agent('a')] }),
+    ATTENTION_SEVERITY_DEFAULTS,
+    new Set(['a']),
+  );
+  assert.equal(out.total, 0);
+  for (const b of ['critical', 'stuck', 'erroring', 'waiting', 'blocked', 'custom']) {
+    assert.equal(out[b].length, 0, `${b} suppressed`);
+  }
+});
+test('suppression is per-AGENT, not per-bucket: an unrelated stuck agent still routes', () => {
+  const out = applySeverityPrefs(roll({ stuck: [agent('quiet'), agent('loud')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['quiet']));
+  assert.equal(out.stuck.length, 1);
+  assert.equal(out.stuck[0].id, 'loud');
+});
+
+console.log('\napplySeverityPrefs: an EMPTY suppressed set is content-identical for every bucket (behavior-preserving)');
+test('empty suppressed set → same lengths + same total across all seven per-agent buckets', () => {
+  const r = roll({
+    critical: [agent('c1')], warning: [agent('w1')],
+    stuck: [agent('s1'), agent('s2')], erroring: [agent('e1')],
+    waiting: [agent('t1')], blocked: [agent('b1')], custom: [agent('m1')],
+    directives: 2, errors: 3,
+  });
+  const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set());
+  for (const b of ['critical', 'warning', 'stuck', 'erroring', 'waiting', 'blocked', 'custom']) {
+    assert.deepEqual(out[b], r[b], `${b} unchanged`);
+  }
+  assert.equal(out.directives, r.directives);
+  assert.equal(out.errors, r.errors);
+  assert.equal(out.total, r.total);
+  assert.deepEqual(formatAlertMessage(out), formatAlertMessage(r), 'the OS toast wording is unchanged too');
+});
+test('a suppressed key that appears in NO bucket changes nothing', () => {
+  const r = roll({ stuck: [agent('s1')], waiting: [agent('t1')] });
+  const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set(['nobody']));
+  assert.equal(out.total, r.total);
+  assert.equal(out.stuck.length, 1);
+  assert.equal(out.waiting.length, 1);
+});
+
+console.log('\nrouting end-to-end (WARDEN-953): a pane-state increase for a suppressed key fires nothing, and re-arms on expiry');
+test('an agent going stuck while suppressed does NOT fire (routable total flat at 0)', () => {
+  const muted = new Set(['flapper']);
+  const prev = applySeverityPrefs(roll(), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const next = applySeverityPrefs(roll({ stuck: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  assert.equal(next.total, 0, 'the suppressed stuck agent never reaches the routable view');
+  assert.equal(shouldFireAlert(prev, next), false, 'the snoozed hour is actually quiet');
+});
+test('a flapping suppressed agent (stuck → recovered → stuck) stays quiet across polls', () => {
+  const muted = new Set(['flapper']);
+  const p1 = applySeverityPrefs(roll({ stuck: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const p2 = applySeverityPrefs(roll(), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const p3 = applySeverityPrefs(roll({ stuck: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  assert.equal(shouldFireAlert(p1, p2), false);
+  assert.equal(shouldFireAlert(p2, p3), false);
+});
+test('a suppressed pane-state agent produces NO in-app entrant either (both delivery arms)', () => {
+  const muted = new Set(['flapper']);
+  const prev = applySeverityPrefs(roll(), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const next = applySeverityPrefs(roll({ erroring: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  assert.deepEqual(diffNewAttention(prev, next), [], 'no sonner toast for a suppressed agent');
+});
+test('AUTO-REARM: once the snooze expires the STILL-stuck agent fires again', () => {
+  // The hook rebuilds the suppressed set each poll from a FRESH clock, so an expired
+  // snooze simply drops out of the set — modeled here as the same rollup routed with
+  // the key present, then absent. The still-stuck agent re-enters the routable view →
+  // total 0 → 1 → shouldFireAlert fires. A snooze must never become a permanent mute.
+  const stillStuck = roll({ stuck: [agent('flapper')] });
+  const duringSnooze = applySeverityPrefs(stillStuck, ATTENTION_SEVERITY_DEFAULTS, new Set(['flapper']));
+  const afterExpiry = applySeverityPrefs(stillStuck, ATTENTION_SEVERITY_DEFAULTS, new Set());
+  assert.equal(duringSnooze.total, 0);
+  assert.equal(afterExpiry.total, 1);
+  assert.equal(shouldFireAlert(duringSnooze, afterExpiry), true, 'alerts resume on expiry');
+  assert.deepEqual(
+    diffNewAttention(duringSnooze, afterExpiry).map((e) => e.key),
+    ['flapper'],
+    'and the in-app channel re-arms too',
+  );
+});
+test('a non-suppressed agent going stuck STILL fires alongside a suppressed one', () => {
+  const muted = new Set(['quiet']);
+  const prev = applySeverityPrefs(roll({ stuck: [agent('quiet')] }), ATTENTION_SEVERITY_DEFAULTS, muted); // routable []
+  const next = applySeverityPrefs(roll({ stuck: [agent('quiet'), agent('loud')] }), ATTENTION_SEVERITY_DEFAULTS, muted); // routable [loud]
+  assert.equal(shouldFireAlert(prev, next), true, 'silencing one agent is not a fleet-wide mute');
+});
+test('the OS toast body/count omit the suppressed pane-state agent', () => {
+  const out = applySeverityPrefs(roll({ stuck: [agent('quiet'), agent('loud')], waiting: [agent('quiet2')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['quiet', 'quiet2']));
+  const { title, body } = formatAlertMessage(out);
+  assert.equal(title, 'Warden: 1 item needs attention');
+  assert.equal(body, '1 stuck');
 });
 
 console.log('\nrouting end-to-end: an increase in ONLY a disabled/muted bucket stays quiet');
@@ -1198,6 +1335,157 @@ test('away: fires uniformly across waiting/erroring/stuck/completed even when fo
     const row = { id: 'i', key: 'k', state };
     assert.equal(shouldFireWatch(focus, row, 'hidden'), true, `${state} fires when away + focused on it`);
   }
+});
+
+// --- WARDEN-1109: fireBudgetNotification (the token-spend budget alarm, WARDEN-415) ----
+//
+// The "while the founder is away" alarm. Sibling of fireAttentionNotification /
+// fireWatchNotification: same Web Notifications channel, same notificationsSupported /
+// permission guards, same never-throw discipline. It takes PRE-FORMATTED title + body
+// (tokenBudget.ts's formatBudgetMessageWith computes them) so desktopAlerts.ts does not
+// import tokenBudget.ts — keeping this loader's transpile set to the one sibling above.
+//
+// Its sole caller is useTokenBudget.ts:110, which has runtime react + sonner imports and
+// therefore cannot load in this OXC harness at all — so there is no indirect path to this
+// function. It is driven directly, through the same makeNotificationShim built above.
+//
+// fireBudgetNotification returns void (unlike fireWatchNotification's delivered boolean),
+// so "did it fire?" is asserted via `lastNotification` — null means nothing was constructed.
+
+console.log('\nfireBudgetNotification: the three silent no-op guards (nothing must be constructed)');
+test('no-op when the Notifications API is unsupported (no Notification global)', () => {
+  globalThis.window = { focus() {} };
+  delete globalThis.Notification;
+  lastNotification = null;
+  assert.doesNotThrow(() => fireBudgetNotification('Budget', 'over', () => {}));
+  assert.equal(lastNotification, null, 'nothing constructed without a Notification global');
+  restoreGlobals();
+});
+test('no-op when there is no window global at all (headless / non-browser host)', () => {
+  globalThis.window = undefined;
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  lastNotification = null;
+  assert.doesNotThrow(() => fireBudgetNotification('Budget', 'over', () => {}));
+  assert.equal(lastNotification, null, 'nothing constructed without a window global');
+  restoreGlobals();
+});
+test('no-op when permission is denied — the human said no, so no OS ping', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'denied' });
+  lastNotification = null;
+  fireBudgetNotification('Budget', 'over', () => {});
+  assert.equal(lastNotification, null, 'no Notification constructed when denied');
+  restoreGlobals();
+});
+test("no-op when permission is still 'default' — the guard is === 'granted', not !== 'denied'", () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'default' });
+  lastNotification = null;
+  fireBudgetNotification('Budget', 'over', () => {});
+  assert.equal(lastNotification, null, "an unanswered OS prompt ('default') must not fire");
+  restoreGlobals();
+});
+
+console.log('\nfireBudgetNotification: constructs with the pre-formatted title/body verbatim');
+test('passes the caller-formatted title + body straight through to the Notification', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  lastNotification = null;
+  fireBudgetNotification('Token budget exceeded', 'worker-1 used 1.2M of 1M tokens');
+  assert.ok(lastNotification, 'a Notification was constructed');
+  assert.equal(lastNotification.title, 'Token budget exceeded');
+  assert.equal(lastNotification.options.body, 'worker-1 used 1.2M of 1M tokens');
+  restoreGlobals();
+});
+
+console.log("\nfireBudgetNotification: the 'warden-budget' tag — distinct from watch/attention, stable across repeats");
+test("tags the budget ping 'warden-budget'", () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireBudgetNotification('Budget', 'over');
+  assert.equal(lastNotification.options.tag, 'warden-budget');
+  restoreGlobals();
+});
+test('the budget tag is stable across repeats, so a re-crossing REPLACES its prior ping (no stacking)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireBudgetNotification('Budget', 'first crossing');
+  const first = lastNotification.options.tag;
+  fireBudgetNotification('Budget', 'same breach, still over');
+  const second = lastNotification.options.tag;
+  assert.equal(first, second, 'same tag on a repeat crossing => the OS replaces, not stacks');
+  restoreGlobals();
+});
+// The collision guard. desktopAlerts.ts:795-797 states the budget tag is deliberately
+// DISTINCT so the budget alarm "never replaces — and is never replaced by — an
+// attention/watch ping". A drift that made any two of these three literals equal would
+// silently overwrite one alarm with another: no error, no visible symptom. So this reads
+// all three tags from the REAL functions (not from three hardcoded strings, which could
+// not detect the drift at all) and asserts pairwise distinctness.
+test('the budget tag never collides with the attention or watch tag (real tags, read from all three fns)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+
+  fireBudgetNotification('Budget', 'over');
+  const budgetTag = lastNotification.options.tag;
+
+  fireAttentionNotification(roll({ critical: [agent('a1')] }));
+  const attentionTag = lastNotification.options.tag;
+
+  fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting', signal: null }, 'waiting');
+  const watchTag = lastNotification.options.tag;
+
+  assert.notEqual(budgetTag, attentionTag, 'budget must not share the attention tag');
+  assert.notEqual(budgetTag, watchTag, 'budget must not share the watch tag');
+  assert.equal(new Set([budgetTag, attentionTag, watchTag]).size, 3, 'all three channels distinct');
+  restoreGlobals();
+});
+
+console.log('\nfireBudgetNotification: the onclick deep-link into the All Sessions usage view');
+test('onclick calls onOpenSessions, then focuses the window, then closes the ping — in that order', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  const seq = [];
+  globalThis.window.focus = () => { seq.push('focus'); };
+  fireBudgetNotification('Budget', 'over', () => { seq.push('open'); });
+  assert.ok(lastNotification?.onclick, 'onclick handler was wired on construction');
+  lastNotification.close = () => { seq.push('close'); };
+  lastNotification.onclick();
+  assert.deepEqual(seq, ['open', 'focus', 'close'], 'deep-link, then raise the window, then dismiss');
+  restoreGlobals();
+});
+test('onclick does not throw when onOpenSessions is omitted (the param is optional)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  let focused = 0;
+  let closed = 0;
+  globalThis.window.focus = () => { focused += 1; };
+  fireBudgetNotification('Budget', 'over');
+  lastNotification.close = () => { closed += 1; };
+  assert.doesNotThrow(() => lastNotification.onclick(), 'clicking a handler-less budget ping is safe');
+  assert.equal(focused, 1, 'still raises the window');
+  assert.equal(closed, 1, 'still dismisses the ping');
+  restoreGlobals();
+});
+
+console.log('\nfireBudgetNotification: a rejected construction must never crash the budget poll');
+test('swallows a restrictive webview rejecting new Notification (the catch at :815)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted', throws: true });
+  lastNotification = null;
+  assert.doesNotThrow(() => fireBudgetNotification('Budget', 'over', () => {}));
+  assert.equal(lastNotification, null, 'nothing was constructed');
+  restoreGlobals();
+});
+test('a throwing onOpenSessions is the CALLER contract, not swallowed by the try/catch', () => {
+  // The try/catch wraps CONSTRUCTION only — onclick runs later, outside it. Pinning this
+  // stops a future refactor from quietly widening the swallow to cover the click handler,
+  // which would hide a broken deep-link instead of surfacing it in the console.
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireBudgetNotification('Budget', 'over', () => { throw new Error('nav blew up'); });
+  assert.throws(() => lastNotification.onclick(), /nav blew up/);
+  restoreGlobals();
 });
 
 console.log(`\n✓ DESKTOP ALERTS TESTS PASS (${passed})`);

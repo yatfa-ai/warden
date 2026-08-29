@@ -2,7 +2,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
-import { deriveDefaults } from './config-schema.js';
+import { deriveDefaults, migrateConfig } from './config-schema.js';
 import { atomicWriteJson, readJsonDefensive, readJsonDefensiveSync } from './persist.js';
 
 export const dir = path.join(os.homedir(), '.yatfa-warden');
@@ -32,7 +32,10 @@ function reviveConfig(raw) {
 
 export function load() {
   const raw = readJsonDefensiveSync(configPath, { fallback: {}, revive: reviveConfig });
-  return { ...DEFAULTS, ...raw };
+  // WARDEN-1116 — fold an OLDER build's keys forward BEFORE the defaults spread.
+  // Order matters: once DEFAULTS is spread, every declared key is present, so a
+  // migration that keys off "the new field is absent" has to run first.
+  return { ...DEFAULTS, ...migrateConfig(raw) };
 }
 
 // Persist config atomically (WARDEN-831): temp + fsync + rename, async so a
@@ -88,6 +91,41 @@ export async function saveCatalog(list) {
   await atomicWriteJson(catalogPath, list);
 }
 
+// THE serialization point for catalog mutations (WARDEN-991).
+//
+// chats.json is a WHOLE-FILE document: saveCatalog → atomicWriteJson does a full
+// stringify + temp + fsync + rename. That makes each write torn-free, but it gives
+// no ISOLATION — every mutation is a read-modify-write, so two that overlap in the
+// async gap clobber one another last-write-wins. Measured on the unfixed code:
+// 5 concurrent /api/kill left 4 ghost entries, 3 concurrent /api/spawn persisted 1,
+// and a discovery activity-stamp racing a kill resurrected the killed chat in
+// 35/60 trials. The /api/spawn window is the widest — it awaits a real tmux/ssh
+// spawn between its load and its save.
+//
+// Every mutation runs through one promise chain, and the read happens INSIDE the
+// critical section so each mutation observes the previous one's result. Passing a
+// pre-read snapshot in would preserve the bug — that is exactly what /api/spawn
+// used to do. Return a falsy value from `fn` to skip the write (e.g. the
+// "entry not found" and "already fresh" branches).
+//
+// LIMITATION — this is IN-PROCESS ONLY. src/cli.js imports the discovery path and
+// runs in a SEPARATE process, so a `warden` CLI invocation running alongside the
+// server is NOT ordered by this queue. All five server-side writers are serialized
+// here (the dominant, reproduced case); closing the cross-process race needs a
+// file lock and is deliberately out of scope.
+let catalogChain = Promise.resolve();
+export function mutateCatalog(fn) {
+  const run = catalogChain.then(async () => {
+    const next = await fn(await loadCatalog());
+    if (next) await saveCatalog(next);
+    return next;
+  });
+  // A rejecting mutation must not poison the queue for everyone behind it: the
+  // chain swallows the failure while `run` still rejects for THIS caller.
+  catalogChain = run.catch(() => {});
+  return run;
+}
+
 // Stamp a catalog entry's last-known activity timestamp (WARDEN-245). A closed
 // chat keeps a usable lastActivity for recency ordering only if the value
 // survives the chat going inactive; lastActivity is captured for LIVE sessions
@@ -97,15 +135,19 @@ export async function saveCatalog(list) {
 // `lastActivity` is ms-since-epoch. Returns true iff the catalog was updated.
 export async function stampCatalogActivity(host, session, lastActivity) {
   if (lastActivity == null || !Number.isFinite(lastActivity)) return false;
-  const catalog = await loadCatalog();
-  const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
-  if (!entry) return false;
-  if (!entry.lastActivity || entry.lastActivity < lastActivity) {
+  // Serialized (WARDEN-991): this is the BACKGROUND writer — reached from the 60s
+  // lifecycle sweep and from /api/discover on user navigation — so it overlaps a
+  // user's /api/kill or /api/spawn routinely. Unserialized it lost one of the two
+  // writes in 60/60 trials. The "only write when fresher" short-circuit is kept
+  // (it is what stops disk thrash on the 60s re-discover) and now re-reads inside
+  // the critical section, so it tests freshness against the CURRENT catalog.
+  return !!(await mutateCatalog((catalog) => {
+    const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
+    if (!entry) return undefined;
+    if (entry.lastActivity && entry.lastActivity >= lastActivity) return undefined;
     entry.lastActivity = lastActivity;
-    await saveCatalog(catalog);
-    return true;
-  }
-  return false;
+    return catalog;
+  }));
 }
 
 // Parse ~/.ssh/config Host aliases (best-effort, no dep). Used for completion /

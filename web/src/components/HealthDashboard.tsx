@@ -5,6 +5,7 @@ import type { HealthData, Chat } from '@/lib/types';
 import type { FleetGitStatusSlice } from '@/lib/gitStateSummary';
 import {
   HealthState,
+  HEALTH_STATES,
   getHealthIcon,
   formatHealthState,
   normalizeHealthState,
@@ -30,7 +31,7 @@ import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
@@ -38,6 +39,7 @@ import { SelectionActionBar } from './sidebar/SidebarBits';
 import { DiffStatChip } from './sidebar/DiffStatChip';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
+import { showFanoutToast } from '@/lib/fanoutToast';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
@@ -45,7 +47,7 @@ import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
-import { displayName, hostLabelFor, THIS_MACHINE } from '@/lib/chatDisplay';
+import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
 import { useHostLabels } from '@/lib/hostLabels';
 import { cn } from '@/lib/utils';
@@ -95,12 +97,18 @@ interface Props {
   companionTransportEnabled: boolean;
 }
 
-// Closed sits between idle and unknown: a dead session is non-critical and less
-// actionable than an idle (potentially waking) one, so it sinks toward the tail.
-// (WARDEN-245)
-const HEALTH_SECTION_ORDER = ['healthy', 'warning', 'critical', 'idle', 'closed', 'unknown'] as const;
+// Section render order. Derived from the canonical health-state vocabulary
+// (healthUtils.ts `HEALTH_STATES`, WARDEN-1104) rather than re-typed, so a new
+// member gets a section automatically. The canonical order IS the display order:
+// closed sits between idle and unknown because a dead session is non-critical and
+// less actionable than an idle (potentially waking) one, so it sinks toward the
+// tail. (WARDEN-245)
+const HEALTH_SECTION_ORDER = HEALTH_STATES;
 
-const SECTION_LABELS: Record<string, { title: string; color: string; icon: string }> = {
+// Typed Record<HealthStateValue, …> (not Record<string, …>) so omitting a state
+// is a COMPILE error — matching its HEALTH_DIST_COLOR neighbour below, which has
+// always been enforced this way. (WARDEN-1104)
+const SECTION_LABELS: Record<HealthStateValue, { title: string; color: string; icon: string }> = {
   healthy: { title: 'Healthy Agents', color: 'text-green-500', icon: '●' },
   warning: { title: 'Warning Agents', color: 'text-yellow-500', icon: '◐' },
   critical: { title: 'Critical Agents', color: 'text-red-500', icon: '●' },
@@ -570,7 +578,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
   // Per-agent 24h activity series for the row sparklines (WARDEN-299). Fetched on
   // its own slow ~60s cadence inside the hook — explicitly NOT part of the 10s
   // /api/health poll below, so adding the sparklines is a no-op on the hot path.
-  const { series: activitySeries } = useActivitySeries();
+  // `loading` + `error` are threaded to the two fleet-wide panels below so their
+  // empty states can tell "still fetching" from "fetched, and it failed"
+  // — `series == null` alone conflates the two, which is how both panels used to
+  // render "Loading…" forever on a persistently failing endpoint (WARDEN-1078).
+  const {
+    series: activitySeries,
+    loading: activityLoading,
+    error: activityError,
+  } = useActivitySeries();
   // Per-agent uncommitted-WIP fan (WARDEN-766): fans /api/git-status across the
   // eligible fleet (active project agents) and lifts { statusByKey, dirtyCount,
   // errorCount, refresh, loading } so BOTH the per-row WipChip in renderAgent AND the
@@ -765,14 +781,6 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     const id = agentIdOf(agent);
     const isSelected = selectedIds.has(id);
     const selectionActive = selectedIds.size > 0;
-    // Copy + toast — the canonical FileViewer shape. `copyText` (clipboard.ts)
-    // is Electron-safe and returns a boolean so a failure toasts instead of
-    // dying silently (bare navigator.clipboard rejects in non-secure contexts).
-    const copyAndToast = async (text: string) => {
-      const ok = await copyText(text);
-      if (ok) toast.success('Copied');
-      else toast.error('Copy failed');
-    };
     return (
     <ContextMenu key={agent.id}>
       <ContextMenuTrigger asChild>
@@ -905,12 +913,12 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
             menu is the ergonomic way to copy them. Host copies the RAW SSH /
             docker-exec identifier (agent.host) — what a human pastes into a
             command — not the display label. */}
-        <ContextMenuItem onSelect={() => copyAndToast(agent.name || agent.key || agent.id)}>Copy agent name</ContextMenuItem>
-        <ContextMenuItem onSelect={() => copyAndToast(agent.host)}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(agent.name || agent.key || agent.id)}>Copy agent name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(agent.host)}>Copy host</ContextMenuItem>
         {/* Role appears only for yatfa agents that carry one — mirrors the row's
             `agent.isAgent && agent.role` badge; manual/tmux chats show no role. */}
         {agent.isAgent && agent.role && (
-          <ContextMenuItem onSelect={() => copyAndToast(agent.role!)}>Copy role</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(agent.role!)}>Copy role</ContextMenuItem>
         )}
       </ContextMenuContent>
     </ContextMenu>
@@ -942,16 +950,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       );
       await fetchHealth();
     });
-    const outcome = formatKillToast(summary);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKillToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKillToast(summary), prefs.notifyChatOps);
     // The kill's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;
@@ -975,16 +974,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       return a ? displayName(a) : id;
     };
     const summary = await runKeySendFanout(ids, key, nameOf);
-    const outcome = formatKeySendToast(summary, key);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKeySendToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;
@@ -1009,8 +999,18 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host }),
       });
-      const body = await r.json().catch(() => ({}));
-      if (r.ok && body.ok) {
+      // The verdict is `r.ok` ALONE (WARDEN-1094). The route's only 2xx is
+      // res.json({ok:true}), emitted after uninstallCompanion() already
+      // succeeded, and every failure leg is a 400/500 carrying {error} — so the
+      // body tells us nothing the status does not. Reading it as part of the
+      // guard could only get the verdict WRONG: fetch resolves on headers, so a
+      // 200 whose body truncates mid-stream parses to {}, and the old
+      // `r.ok && body.ok` sent a provably-successful removal down the failure
+      // leg — toasting "HTTP 200", leaving the confirm dialog open, and skipping
+      // the refreshes the comment below exists to guarantee. This mirrors the
+      // /api/kill sibling declared above, runFanout in lib/fanout.ts, which
+      // likewise gates on r.ok and lets the body inform only the error string.
+      if (r.ok) {
         toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`);
         setRemoveCompanionHost(null);
         // Reflect the removal immediately. The host-status surface that carries
@@ -1023,6 +1023,10 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         // separate /api/health agent rows in parallel.
         await Promise.all([fetchHealth(), refreshHostStatuses()]);
       } else {
+        // Failure leg only: here the body is genuinely optional — a 4xx/5xx may
+        // carry {error}, or may be a gateway's HTML, so the .catch fallback to
+        // `HTTP ${r.status}` is the legitimate use of this pattern (WARDEN-89).
+        const body = await r.json().catch(() => ({}));
         toast.error(`Failed to remove companion from ${hostLabelFor(host, hostLabels) || host}`, {
           description: body.error || `HTTP ${r.status}`,
         });
@@ -1111,7 +1115,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       {/* Summary Bar */}
       {healthData && (
         <div className="px-3 py-2 border-b bg-muted/30">
-          <div className="flex items-center gap-2 text-xs">
+          {/* flex-wrap, not a single line (WARDEN-1068): this panel is pinned to a
+              fixed HEALTH_WIDTH (320px, web/src/lib/layout.ts) inside an
+              overflow-hidden section, so the row has ~295px of usable width and no
+              viewport-responsive slack. The six health chips alone measure ~324px, and
+              a 2-/3-digit fleet or the conditional git chips below widen it further —
+              without wrapping the trailing chip is silently clipped mid-word ("6 unkno")
+              with no ellipsis or scroll. Wrapping grows the bar by a line instead of
+              hiding a count the user is meant to reconcile against "N agents". */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="font-medium">{healthData.summary.total} agents</span>
             <span className="text-muted-foreground">·</span>
             <span className="text-green-500">{healthData.summary.healthy} healthy</span>
@@ -1119,6 +1131,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
             <span className="text-red-500">{healthData.summary.critical} critical</span>
             <span className="text-gray-500">{healthData.summary.idle} idle</span>
             <span className="text-gray-500">{healthData.summary.closed} closed</span>
+            <span className="text-muted-foreground">{healthData.summary.unknown} unknown</span>
             {/* Fleet-wide uncommitted-WIP count (WARDEN-766): the # of fanned agents
                 whose /api/git-status reported clean === false — the missing
                 repository-state axis in the summary bar. Reuses the sidebar's amber/
@@ -1307,6 +1320,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
               series={activitySeries}
               agents={healthData.agents}
               timestampFormat={timestampFormat}
+              loading={activityLoading}
+              error={activityError}
             />
             {/*
               Fleet-wide 24h per-agent STATE timeline (WARDEN-788). The orthogonal
@@ -1324,6 +1339,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
               series={activitySeries}
               agents={healthData.agents}
               timestampFormat={timestampFormat}
+              loading={activityLoading}
+              error={activityError}
             />
             {/*
               Fleet-wide recent-commits feed (WARDEN-597). The commit-history analog
@@ -1494,7 +1511,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                       */}
                       <div className="flex flex-wrap items-center gap-1.5 min-w-0 pl-7">
                         {summarizeProjectHosts(group.agents, (h) => hostStatuses[h]).map((span, i) => {
-                          const spanLabel = hostLabelFor(span.host, hostLabels) || (span.host === '(local)' ? 'local' : span.host);
+                          const spanLabel = hostTagOf(span.host, hostLabels);
                           return (
                             <Fragment key={span.host}>
                               {i > 0 && <span className="text-[10px] text-muted-foreground/40">·</span>}
@@ -1544,7 +1561,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   const status = hostStatuses[group.host];
                   const collapsed = !!collapsedHosts[group.host];
                   const dist = HEALTH_SECTION_ORDER.filter(s => group.counts[s] > 0);
-                  const hostLabel = hostLabelFor(group.host, hostLabels) || (group.host === '(local)' ? 'local' : group.host);
+                  const hostLabel = hostTagOf(group.host, hostLabels);
                   // Per-host rolled-up CPU/mem (WARDEN-361): mean cpu, MAX mem, or
                   // null when no agent carries docker-stats. Rendered in the line-2
                   // distribution area so an overloaded host (≥90% mem) is red and
@@ -1570,11 +1587,11 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
 
                         Why two lines (UX): the dashboard panel is 320px
                         (HEALTH_WIDTH). Fusing connectivity + a long hostname + a
-                        rich 5-segment distribution onto one line is noisy and
+                        rich 6-segment distribution onto one line is noisy and
                         fragile; giving the distribution line 2 the full panel
                         width (indented under the hostname) keeps it legible. The
                         distribution line itself is `flex-wrap`, so a very wide
-                        distribution (5 states, 3-digit counts) that still exceeds
+                        distribution (6 states, 3-digit counts) that still exceeds
                         the panel width wraps to a third line rather than clipping
                         — no segment is ever cut off.
 
@@ -1655,7 +1672,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                             amber, ≥90 red) so a host whose agents collectively sit at ≥90% mem
                             is red here too. Indented (pl-7) to align under the hostname.
                             `flex-wrap` makes the line bulletproof against overflow: if a very
-                            wide distribution (all 5 states, 3-digit counts) + the load segment
+                            wide distribution (all 6 states, 3-digit counts) + the load segment
                             still exceeds the panel width, the excess wraps to a third line
                             instead of being clipped. Each segment is its own flex item, so a
                             wrapped segment stays whole (it never breaks mid-word). (WARDEN-237) */}

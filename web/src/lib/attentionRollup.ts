@@ -90,6 +90,35 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
 };
 
 /**
+ * The one finalize step every rollup PRODUCER ends with: sum the problem buckets into
+ * `total` and assemble the AttentionRollup. Three different producers converge here —
+ * `buildAttentionRollup` (build from raw endpoints), `filterAttentionRollup` (narrow to
+ * a host/agent), and `desktopAlerts.applySeverityPrefs` (route by severity + mute set) —
+ * each having independently computed the same 10 inputs.
+ *
+ * It exists because the summation encodes a subtle invariant that was being restated by
+ * hand in every copy: **`done` is EXCLUDED from `total`**. A finished agent is a positive
+ * review cue, not an alarm, so it must not inflate the red/amber count nor trip the
+ * increase-only desktop-alert gate (WARDEN-575; see the `total` docstring above). Getting
+ * it wrong in ONE copy makes the badge header contradict the list it heads — and every
+ * bucket added since (WARDEN-540's `custom`, WARDEN-575's `done`) cost an identical
+ * lockstep edit in each then-existing copy. One home, one edit.
+ *
+ * `directives`/`errors` are event COUNTS (added as numbers); the other eight are row
+ * arrays (added as lengths). Pure and dependency-free like the rest of this module.
+ *
+ * NOT used by EMPTY_ATTENTION_ROLLUP above: that is a static constant with nothing to
+ * compute, so routing it through here would add indirection for zero dedup.
+ */
+export function finalizeRollup(parts: Omit<AttentionRollup, 'total'>): AttentionRollup {
+  const { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors } = parts;
+  const total =
+    critical.length + warning.length + directives + errors +
+    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+}
+
+/**
  * Did an open pane JUST finish a task? The fleet "done" DETECTION rule (WARDEN-575):
  * fire ONLY on `active → idle` — the clean "was genuinely working → finished"
  * transition. Pure + dependency-free (only the `import type` above, erased at
@@ -186,10 +215,121 @@ export function buildAttentionRollup(
     ? rows.filter((a) => a && !customKeys.has(a.key ?? a.id) && doneKeys.has(a.key ?? a.id))
     : [];
 
-  const total =
-    critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
+}
+
+// ─── Host / agent narrowing (WARDEN-971) ──────────────────────────────────────
+//
+// The persistent Attention view (WARDEN-880) gained the host + agent filters its
+// Activity/Directives peer tabs already had (WARDEN-879). The filter is applied to
+// the ROLLUP BUCKETS, upstream of rankAttention — NOT to the flattened AttentionItem
+// list — for two reasons:
+//
+//  1. `AttentionItem` carries no host at all, so the ranked list simply cannot be
+//     host-filtered without widening that type.
+//  2. Filtering upstream means rankAttention / pickCalloutTop / rollupSeverity stay
+//     untouched and every derived readout — the directed callout, the section counts,
+//     the severity tone, the summary header — automatically reflects the SAME filtered
+//     set. A callout deep-linking to a pane the list is hiding is the bug this avoids.
+//
+// Pure + dependency-free like everything else in this module, so attentionRollup.test.mjs
+// exercises it directly.
+
+/** The rows both filterable bucket kinds share: `Chat` (host required) and
+ *  `AgentStateRow` (host optional). Structural, so both assign without a cast. */
+type FilterableAttentionRow = { id: string; key?: string; name?: string; host?: string };
+
+/**
+ * The agent-filter identity for a row: the SAME expression `AgentRow` renders as the
+ * row label (`name || key || id`). Sharing one expression between the filter and the
+ * dropdown options is what guarantees every option matches at least one row — deriving
+ * them separately is how a "select an agent, get an empty list" drift bug happens.
+ */
+function attentionAgentIdentity(a: FilterableAttentionRow): string {
+  return a.name || a.key || a.id;
+}
+
+/**
+ * The dropdown option lists for the Attention view's host + agent Selects, derived
+ * from EVERY per-agent bucket (problem buckets AND the positive `done` bucket).
+ *
+ * Callers must derive these from the UNFILTERED rollup — deriving them from the
+ * filtered one would empty the dropdown the human just used, stranding them on a
+ * selection they cannot undo from the control itself.
+ *
+ * Empty/undefined hosts are skipped (an unknown host is not a selectable option; see
+ * the host rule on filterAttentionRollup for how such rows behave under a filter).
+ * Both lists are deduped and sorted so the menu order is stable across polls rather
+ * than following server return order.
+ */
+export function attentionFilterOptions(rollup: AttentionRollup): { hosts: string[]; agents: string[] } {
+  const rows: FilterableAttentionRow[] = [
+    ...rollup.critical, ...rollup.warning,
+    ...rollup.stuck, ...rollup.erroring, ...rollup.waiting, ...rollup.blocked,
+    ...rollup.custom, ...rollup.done,
+  ];
+  const hosts = new Set<string>();
+  const agents = new Set<string>();
+  for (const a of rows) {
+    if (!a) continue;
+    if (a.host) hosts.add(a.host);
+    const id = attentionAgentIdentity(a);
+    if (id) agents.add(id);
+  }
+  return {
+    hosts: Array.from(hosts).sort((x, y) => x.localeCompare(y)),
+    agents: Array.from(agents).sort((x, y) => x.localeCompare(y)),
+  };
+}
+
+/**
+ * Narrow a rollup to one host and/or one agent (`'all'` = no constraint on that axis).
+ *
+ * `'all'`/`'all'` returns the SAME OBJECT REFERENCE — identity, not a copy — so the
+ * unfiltered path allocates nothing and cannot churn a memo/re-render downstream.
+ *
+ * HOST RULE (`AgentStateRow.host` is optional, `types.ts:223`): a row is excluded only
+ * on an EXACT MISMATCH, so a row with NO host is KEPT under a concrete host filter.
+ * A host filter exists to hide the hosts you are not triaging; a row whose host we
+ * never learned is not evidence that it belongs to a different host, and silently
+ * dropping it would hide a real problem — the one failure mode this list must never
+ * have. Keeping it is visible and recoverable ("why is that here?"); hiding it is not.
+ * The agent axis has no such case: `id` is required on both row shapes, so an agent
+ * filter always compares two real identities.
+ *
+ * `directives` and `errors` are EVENT COUNTS, not per-agent rows — they carry no host
+ * or agent, so they pass through untouched (and still contribute to `total`) rather
+ * than being attributed to a fabricated host. `total` is otherwise recomputed over the
+ * filtered problem buckets, with `done` excluded exactly as buildAttentionRollup does
+ * it (the WARDEN-575 invariant: a finished agent is a review cue, not an alarm).
+ */
+export function filterAttentionRollup(
+  rollup: AttentionRollup,
+  hostFilter: string = 'all',
+  agentFilter: string = 'all',
+): AttentionRollup {
+  const byHost = Boolean(hostFilter) && hostFilter !== 'all';
+  const byAgent = Boolean(agentFilter) && agentFilter !== 'all';
+  if (!byHost && !byAgent) return rollup; // identity — no allocation, no re-render churn
+
+  const keep = (a: FilterableAttentionRow): boolean => {
+    if (!a) return false;
+    if (byHost && a.host && a.host !== hostFilter) return false; // exact mismatch only
+    if (byAgent && attentionAgentIdentity(a) !== agentFilter) return false;
+    return true;
+  };
+
+  const critical = rollup.critical.filter(keep);
+  const warning = rollup.warning.filter(keep);
+  const stuck = rollup.stuck.filter(keep);
+  const erroring = rollup.erroring.filter(keep);
+  const waiting = rollup.waiting.filter(keep);
+  const blocked = rollup.blocked.filter(keep);
+  const custom = rollup.custom.filter(keep);
+  const done = rollup.done.filter(keep);
+  const { directives, errors } = rollup;
+
+  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
 }
 
 // ─── Directed ranking (Observer Intelligence roadmap WARDEN-8, Job #2) ────────

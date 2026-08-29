@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -17,7 +16,9 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
+import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
+import { readErrorBody } from '@/lib/api';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 interface SearchResult {
@@ -46,14 +47,6 @@ interface Props {
 // Command/cmdk list primitive to reach for instead, so the raw element is
 // contained here in its own component rather than inlined in the results map.
 function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect: (file: string, line?: number) => void }) {
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern CollectionsSection/ActivityTimeline use for their copy actions.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -71,9 +64,9 @@ function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect:
           Open in file viewer
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(result.text)}>Copy matched line</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.file)}>Copy file path</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(`${result.file}:${result.line}`)}>Copy file:line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.text)}>Copy matched line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.file)}>Copy file path</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(`${result.file}:${result.line}`)}>Copy file:line</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -92,12 +85,26 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // WARDEN-1049: generation counter for doSearch. `searching` serializes the
+  // COMMON case (see the Enter/Button gates below), but a gate read from a render
+  // closure can't see an invocation started in the same tick, and nothing at all
+  // stops a response that lands after the dialog closes. This cell is what makes
+  // "only the newest invocation may write" true regardless.
+  const searchGen = useRef(0);
 
   useEffect(() => {
     if (!open) {
+      // Supersede anything in flight FIRST: without this the fetch below resolves
+      // after these clears and repopulates `results`, so reopening the dialog
+      // renders the previous session's hits under an empty query box.
+      supersedeInFlight(searchGen);
       setQuery('');
       setResults([]);
       setError(null);
+      // Now that a superseded response no longer runs doSearch's `finally`, the
+      // spinner has to be cleared here — otherwise closing mid-search leaves the
+      // dialog permanently "searching" (spinner up, Search button disabled).
+      setSearching(false);
     }
   }, [open]);
 
@@ -111,6 +118,11 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
   const doSearch = async () => {
     const q = query.trim();
     if (!q) return;
+    // WARDEN-1049: claim the newest generation. Every write below is gated on
+    // still holding it, so a superseded response (a second search overtook this
+    // one) or a post-close response (the reset effect superseded it) writes
+    // NOTHING — not results, not error, not the spinner.
+    const isLatest = claimLatest(searchGen);
     setSearching(true);
     setError(null);
     try {
@@ -119,11 +131,14 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: chatId, query: q }),
       });
-      const data = await res.json();
-      // /api/search-files returns some errors at HTTP 200 with an `error` field
-      // (no-cwd, remote transport failure — mirroring /api/git-status), not 4xx.
-      // So check data.error too, not just res.ok: otherwise a real error renders
-      // as "No results found" and the user misdiagnoses a config/runtime problem.
+      // Parsed BEFORE the ok-gate BY DESIGN: /api/search-files returns some
+      // errors at HTTP 200 with an `error` field (no-cwd, remote transport
+      // failure — mirroring /api/git-status), not 4xx, so the gate below reads
+      // `data.error` alongside `res.ok`; otherwise a real error renders as
+      // "No results found" and the user misdiagnoses a config/runtime problem.
+      // Leg gating lives in `readErrorBody`.
+      const data = await readErrorBody(res);
+      if (!isLatest()) return;
       if (!res.ok || data.error) {
         setError(data.error || 'Search failed');
         setResults([]);
@@ -131,10 +146,13 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
         setResults(Array.isArray(data.results) ? data.results : []);
       }
     } catch (e) {
+      if (!isLatest()) return;
       setError(e instanceof Error ? e.message : 'Search failed');
       setResults([]);
     } finally {
-      setSearching(false);
+      // Guarded like every other write: a superseded response that clears the
+      // spinner turns off the indicator for the search still running behind it.
+      if (isLatest()) setSearching(false);
     }
   };
 
@@ -156,12 +174,16 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
           </DialogDescription>
         </DialogHeader>
 
+        {/* WARDEN-1049: the Enter handler is gated on `searching` exactly like the
+            Button's `disabled` below. Enter is the PRIMARY interaction here (the
+            input is auto-focused on open), so an ungated Enter walked straight
+            around the one-search-at-a-time rule the Button already implements. */}
         <div className="flex items-center gap-2">
           <Input
             ref={inputRef}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setError(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') doSearch(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
             placeholder="function name, class, error string…"
           />
           <Button onClick={doSearch} disabled={searching || !query.trim()}>

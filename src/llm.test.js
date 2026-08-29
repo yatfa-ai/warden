@@ -455,6 +455,73 @@ describe('complete', () => {
     });
   });
 
+  describe('no backoff sleep after the final attempt', () => {
+    // The last attempt cannot be followed by another fetch, so a backoff sleep
+    // there is pure dead wait in front of the throw. Same guard the four
+    // canonical sites in notify.js / telemetry-send.js already carry.
+    // These tests replace the beforeEach stub with a counting one so the
+    // scheduled delays themselves are observable.
+    function countingSetTimeout(sleeps) {
+      return (fn, ms) => { sleeps.push(ms); Promise.resolve().then(fn); return 0; };
+    }
+
+    it('sleeps only between attempts on repeated 429s (2 sleeps: 1200, 2400)', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      const f = fetchSequence([
+        { ok: false, status: 429, body: 'rate limited' },
+        { ok: false, status: 429, body: 'rate limited' },
+        { ok: false, status: 429, body: 'rate limited' },
+      ]);
+      globalThis.fetch = f;
+      const sleeps = [];
+      globalThis.setTimeout = countingSetTimeout(sleeps);
+      await assert.rejects(() => m.complete({ messages: [] }), /LLM HTTP 429/);
+      assert.strictEqual(f.count(), 3, 'still makes all 3 attempts');
+      assert.deepStrictEqual(sleeps, [1200, 2400], 'no sleep after the final attempt');
+    });
+
+    it('sleeps only between attempts on repeated network errors (2 sleeps: 1000, 2000)', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      const f = fetchSequence([
+        { throw: new Error('fetch failed: ETIMEDOUT') },
+        { throw: new Error('fetch failed: ETIMEDOUT') },
+        { throw: new Error('fetch failed: ETIMEDOUT') },
+      ]);
+      globalThis.fetch = f;
+      const sleeps = [];
+      globalThis.setTimeout = countingSetTimeout(sleeps);
+      await assert.rejects(() => m.complete({ messages: [] }), /ETIMEDOUT/);
+      assert.strictEqual(f.count(), 3, 'still makes all 3 attempts');
+      assert.deepStrictEqual(sleeps, [1000, 2000], 'no sleep after the final attempt');
+    });
+
+    it('still backs off between a mixed 500 -> network-error -> 500 run (2 sleeps: 1200, 2000)', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      const f = fetchSequence([
+        { ok: false, status: 500, body: 'server error' },
+        { throw: new Error('fetch failed: ECONNRESET') },
+        { ok: false, status: 500, body: 'server error' },
+      ]);
+      globalThis.fetch = f;
+      const sleeps = [];
+      globalThis.setTimeout = countingSetTimeout(sleeps);
+      await assert.rejects(() => m.complete({ messages: [] }), /LLM HTTP 500/);
+      assert.strictEqual(f.count(), 3);
+      assert.deepStrictEqual(sleeps, [1200, 2000], 'both legs keep their own backoff shape');
+    });
+
+    it('does not sleep at all when a non-retryable 4xx throws immediately', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      const f = fetchSequence([{ ok: false, status: 400, body: 'bad request' }]);
+      globalThis.fetch = f;
+      const sleeps = [];
+      globalThis.setTimeout = countingSetTimeout(sleeps);
+      await assert.rejects(() => m.complete({ messages: [] }), /LLM HTTP 400/);
+      assert.strictEqual(f.count(), 1);
+      assert.deepStrictEqual(sleeps, []);
+    });
+  });
+
   describe('non-retryable client errors (4xx except 429)', () => {
     it('throws immediately on 400 without retrying', async () => {
       const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });

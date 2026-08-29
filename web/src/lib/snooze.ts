@@ -71,22 +71,39 @@ export function activeSnoozedKeys(snoozed: SnoozeMap, now: number): Set<string> 
 }
 
 /**
- * Whether a single chat key's desktop alert is suppressed at `now` — TRUE for a
- * permanent mute OR an active snooze. This is the per-row decision the badge uses
- * to render the muted visual (line-through + BellOff) and that useAttentionRollup
- * mirrors (via the unioned set) to gate the OS notification. Pure composition of
- * the permanent-mute set + the snooze map; kept here so the "what counts as
- * suppressed" rule has one source of truth shared by the badge and the rollup.
+ * The per-row mute/snooze props for a single chat key — the derivation every
+ * per-agent section of AttentionList feeds to its row (WARDEN-1043). Returns the
+ * two states SEPARATELY rather than collapsed into one "suppressed" boolean,
+ * because the row must DISTINGUISH them: a permanent mute renders BellOff, an
+ * active snooze renders a Clock + countdown + "End snooze now".
+ *
+ * Three things happen here, and the middle one is the subtle one:
+ *  1. `muteEnabled` is the master desktop-alert gate — off means the whole mute
+ *     routing layer is moot, so both fields read as "not suppressed" (no bell, no
+ *     strike-through), exactly as before WARDEN-364.
+ *  2. `snoozedSet` membership is an ACTIVE-snooze test (see activeSnoozedKeys):
+ *     an EXPIRED entry is still present in `snoozed` but absent from the set, so
+ *     indexing `snoozed[key]` alone would render a stale snooze as active (wrong
+ *     Clock icon + countdown). The set gate is what makes auto-rearm visible.
+ *  3. Only then the index, defensively coalesced with `?? null` so the caller
+ *     never receives `undefined`.
+ *
+ * `snoozedSet` is PASSED IN rather than recomputed from `snoozed`: the call site
+ * builds it once per render (`activeSnoozedKeys(snoozedAlertKeys, Date.now())`)
+ * and reuses it across every row, so this stays O(1) per row and every row of a
+ * render shares one clock reading.
  */
-export function isSuppressed(
+export function alertMuteState(
   key: string,
+  muteEnabled: boolean,
   mutedSet: ReadonlySet<string>,
+  snoozedSet: ReadonlySet<string>,
   snoozed: SnoozeMap,
-  now: number,
-): boolean {
-  if (mutedSet.has(key)) return true;
-  const expiresAt = snoozed[key];
-  return typeof expiresAt === 'number' && Number.isFinite(expiresAt) && now < expiresAt;
+): { muted: boolean; snoozedUntil: number | null } {
+  return {
+    muted: muteEnabled && mutedSet.has(key),
+    snoozedUntil: muteEnabled && snoozedSet.has(key) ? (snoozed[key] ?? null) : null,
+  };
 }
 
 /**

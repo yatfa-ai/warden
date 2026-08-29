@@ -34,6 +34,65 @@ export const CLIENT_SCHEMA_VERSION = 4;
 // receiver serves /capabilities at the same origin as /ingest.
 export const CAPABILITIES_PATH = '/capabilities';
 
+// WARDEN-1238 — is this parsed URL a WEB address the transport could send to?
+// Parse SUCCESS is not a validity test: `new URL('receiver.example:8080/ingest')`
+// parses WITHOUT throwing — WHATWG treats `receiver.example:` as an (opaque,
+// non-special) SCHEME — but yields origin "null" and an empty host, i.e. no usable
+// web origin. Judging by parse success alone produced two opposite wrong answers:
+// that shape was "successfully" parsed into a nonsense probe URL ("null/capabilities")
+// declaring a healthy self-hosted receiver unreachable, while a bare host was
+// silently repaired with an https:// prefix and blessed green even though the
+// transport POSTs the ORIGINAL unmodified string (telemetry-send.js never rewrites
+// the configured address) and would fail. The predicate is therefore "resolves to
+// a usable web origin" — an http/https URL whose origin is real, not the "null"
+// string. This predicate is STATED TWICE (src/ here, web/src/lib/telemetry/
+// destination.ts there) because the Node and browser trees cannot import from each
+// other — the same discipline the inlined CLIENT_SCHEMA_VERSION above uses, kept
+// honest by tests on both sides.
+function isUsableWebUrl(url) {
+  return (url.protocol === 'http:' || url.protocol === 'https:') && url.origin !== 'null';
+}
+
+// Derive the origin a scheme-less address NAMES, without pretending it was
+// configured with one. Returns { origin, schemeless } when a usable web origin can
+// be derived — `schemeless: true` marks the https:// prefix as OUR repair, not the
+// user's configuration, so the verdict layer can tell "the receiver answered at
+// https://host" apart from "your endpoint is usable as configured" (the transport
+// sends to the raw string, so a scheme-less endpoint can never deliver events).
+// Returns null when no usable web origin exists for either form.
+export function webOriginFromEndpoint(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return null;
+  let strict = null;
+  try {
+    strict = new URL(trimmed);
+  } catch {
+    strict = null; // a bare host has no scheme — fall through to the lenient retry
+  }
+  if (strict) {
+    if (isUsableWebUrl(strict)) return { origin: strict.origin, schemeless: false };
+    // Parsed, but not a web URL. If it DID parse a host (postgres://db.example,
+    // ssh://host), the user chose that scheme — respect it: not usable, never
+    // rewritten (the transport never rewrites, and neither do we). If it parsed
+    // NO host at all, the "scheme" is WHATWG's misparse of a scheme-less
+    // host:port/path (`receiver.example:8080/ingest` → scheme "receiver.example",
+    // host "") — that is the wrongly-condemned shape, so fall through to the
+    // lenient retry and recognise the host it names.
+    if (strict.host) return null;
+  }
+  try {
+    // Lenient: prepend https:// so a scheme-less address that names a real
+    // receiver is still RECOGNISED (probed at its origin) rather than declared
+    // missing. The repair is for the PROBE only — flagged via schemeless so the
+    // verdict never reports plain "connected" for it.
+    const lenient = new URL('https://' + trimmed);
+    if (isUsableWebUrl(lenient)) return { origin: lenient.origin, schemeless: true };
+  } catch {
+    // Neither form parses — fall through to null.
+  }
+  return null;
+}
+
 // Derive the GET /capabilities URL from a user-entered endpoint (which may be the
 // /ingest URL or a bare host). Mirrors web/src/lib/telemetry/destination.ts's
 // telemetryDestinationLabel origin-derivation: strict parse first, then a lenient
@@ -42,20 +101,8 @@ export const CAPABILITIES_PATH = '/capabilities';
 // route then reports no-receiver — never a guess). NEVER carries the path/query of
 // the ingest endpoint: /capabilities is a distinct route at the receiver's origin.
 export function capabilitiesUrlFromEndpoint(raw) {
-  const trimmed = String(raw ?? '').trim();
-  if (!trimmed) return null;
-  let origin;
-  try {
-    origin = new URL(trimmed).origin;
-  } catch {
-    try {
-      // Lenient: a bare host has no scheme, so the strict parse above threw.
-      origin = new URL('https://' + trimmed).origin;
-    } catch {
-      return null;
-    }
-  }
-  return origin + CAPABILITIES_PATH;
+  const derived = webOriginFromEndpoint(raw);
+  return derived ? derived.origin + CAPABILITIES_PATH : null;
 }
 
 // The four verdict states a "Test connection" probe can resolve to. `kind`
@@ -72,6 +119,13 @@ export function capabilitiesUrlFromEndpoint(raw) {
 //   auth-required — the receiver rejected the probe as unauthenticated (401). The
 //                   tokenSent flag makes the copy precise: a sent token was
 //                   REJECTED; an absent token is REQUIRED.
+//   scheme-missing (WARDEN-1238) — the receiver IS reachable and schema-matched at
+//                   the origin the address names, but the configured endpoint lacks
+//                   its scheme (e.g. `receiver.example` or `host:8080/ingest`). The
+//                   transport sends to the endpoint EXACTLY as configured and never
+//                   rewrites it, so no event can be delivered until the user adds
+//                   the scheme. NOT ok: a scheme-less address must never read as a
+//                   green "connected" the transport cannot honor.
 //   no-receiver   — nothing answerable at this URL: a network error (host
 //                   unreachable / DNS / refused / bad URL), a non-200, or a 200 body
 //                   that is not a warden-telemetry capabilities payload.
@@ -83,6 +137,7 @@ export function mapCapabilitiesVerdict({
   clientSchemaVersion = CLIENT_SCHEMA_VERSION,
   tokenSent = false,
   fetchError = false,
+  schemeless = false,
 } = {}) {
   // Network error — the fetch threw before a response arrived (host unreachable,
   // DNS failure, connection refused/reset, invalid URL, timeout).
@@ -108,6 +163,17 @@ export function mapCapabilitiesVerdict({
         ? body.schemaVersion
         : undefined;
     if (remoteVersion === clientSchemaVersion) {
+      // WARDEN-1238 — the receiver answered and schema-matched, but the endpoint as
+      // CONFIGURED lacks a scheme. The transport never rewrites the configured
+      // address, so this must NOT be reported as connected: events would fail.
+      if (schemeless) {
+        return {
+          kind: 'scheme-missing',
+          ok: false,
+          message:
+            'A warden-telemetry receiver answered at this host, but the endpoint is missing its scheme. Add https:// to the endpoint so events can be delivered — warden sends to the endpoint exactly as configured.',
+        };
+      }
       const authed = body && typeof body === 'object' && body.authRequired === true;
       return {
         kind: 'connected',
@@ -152,8 +218,8 @@ export async function probeReceiverCapabilities({
   const useToken = draft || (typeof fallbackToken === 'string' ? fallbackToken.trim() : '');
   const tokenSent = useToken.length > 0;
 
-  const capabilitiesUrl = capabilitiesUrlFromEndpoint(endpoint);
-  if (!capabilitiesUrl) {
+  const { origin, schemeless } = webOriginFromEndpoint(endpoint) ?? {};
+  if (!origin) {
     // Unparseable origin — report no-receiver rather than guess a destination.
     return mapCapabilitiesVerdict({ fetchError: true, tokenSent });
   }
@@ -164,7 +230,7 @@ export async function probeReceiverCapabilities({
   let status = null;
   let body = null;
   try {
-    const res = await fetchImpl(capabilitiesUrl, { method: 'GET', headers });
+    const res = await fetchImpl(origin + CAPABILITIES_PATH, { method: 'GET', headers });
     status = res.status;
     try {
       body = await res.json();
@@ -178,6 +244,6 @@ export async function probeReceiverCapabilities({
     return mapCapabilitiesVerdict({ fetchError: true, tokenSent });
   }
 
-  return mapCapabilitiesVerdict({ status, body, tokenSent });
+  return mapCapabilitiesVerdict({ status, body, tokenSent, schemeless });
 }
 

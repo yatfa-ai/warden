@@ -444,7 +444,9 @@ describe('diffDoneTransitions — the pure positive "finished" diff (WARDEN-575)
   });
 
   it('fires on active→idle after sustained recent activity (the primary completion signal)', () => {
-    const prev = new Map([['a', 'active'], ['b', 'idle']]);
+    // WARDEN-1223: rows carry a host, so the baseline is keyed by the
+    // host-qualified identity `${host}:${key}` — one agent per slot.
+    const prev = new Map([['h1:a', 'active'], ['h1:b', 'idle']]);
     const agents = [
       { key: 'a', state: 'idle', signal: null, name: 'worker', host: 'h1' },
       { key: 'b', state: 'idle', signal: null, name: 'reviewer', host: 'h1' },
@@ -455,6 +457,21 @@ describe('diffDoneTransitions — the pure positive "finished" diff (WARDEN-575)
     assert.strictEqual(out[0].state, 'done');
     assert.strictEqual(out[0].name, 'worker');
     assert.strictEqual(out[0].host, 'h1');
+  });
+
+  it('WARDEN-1223: two hosts running a SAME-NAMED session diff independently — only the transitioning agent fires', () => {
+    // host1:myproject-worker is newly erroring; host2 runs the SAME-named agent
+    // and stays active. The one-shot baseline is per agent (host-qualified), so
+    // only host1's agent fires — never attributed to host2's.
+    const prev = new Map([['host1:myproject-worker', 'active'], ['host2:myproject-worker', 'active']]);
+    const agents = [
+      { key: 'myproject-worker', state: 'erroring', signal: 'FATAL', name: 'myproject-worker', host: 'host1' },
+      { key: 'myproject-worker', state: 'active', signal: null, name: 'myproject-worker', host: 'host2' },
+    ];
+    const out = diffAttentionTransitions(prev, agents);
+    assert.strictEqual(out.length, 1, 'only the transitioning agent fires');
+    assert.strictEqual(out[0].host, 'host1');
+    assert.strictEqual(out[0].state, 'erroring');
   });
 
   it('fires ONLY on active→idle — a crash/stall/wait → idle is NOT a finish', () => {

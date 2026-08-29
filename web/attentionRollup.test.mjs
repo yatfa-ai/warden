@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition, rollupSeverity } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition, rollupSeverity, filterAttentionRollup, attentionFilterOptions, finalizeRollup } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -752,6 +752,218 @@ test('a health-group item (critical/warning) carries NO anchor (Chat has no trig
   const byId = Object.fromEntries(rankAttention(r).ranked.map((x) => [x.id, x]));
   assert.equal('anchor' in byId.c1, false, 'critical health → no anchor');
   assert.equal('anchor' in byId.w1, false, 'warning health → no anchor');
+});
+
+console.log('\nfilterAttentionRollup — host/agent narrowing for the Attention tab (WARDEN-971)');
+// WARDEN-971: the Attention tab gained the host + agent filters its Activity/Directives
+// peers already had. The filter is applied to the ROLLUP BUCKETS (upstream of
+// rankAttention), so every derived readout — the directed callout, the section counts,
+// the severity tone, the summary header — describes the SAME narrowed set. These cases
+// pin: identity on 'all'/'all', narrowing across BOTH bucket kinds (Chat, where host is
+// required, and AgentStateRow, where it is optional), `total` recomputation, `done`
+// staying out of `total`, the untouched directives/errors event counts, and the
+// deliberate keep-on-unknown-host rule.
+const mixed = () => roll(
+  health({ critical: [agent('c1', { host: 'h1' })], warning: [agent('w1', { host: 'h2' })] }),
+  stats({ directive_proposed: 2, error: 3 }),
+  [
+    stateRow('s1', 'stuck', { host: 'h1' }),
+    stateRow('e1', 'erroring', { host: 'h2' }),
+    stateRow('wt1', 'waiting', { host: 'h1' }),
+    stateRow('b1', 'blocked', { host: 'h2' }),
+    stateRow('cu1', 'idle', { host: 'h1', customMatch: cm('Deploy', 'deploy failed') }),
+    stateRow('dn1', 'idle', { host: 'h2' }),
+  ],
+  { doneKeys: new Set(['dn1']) },
+);
+
+test("'all'/'all' returns the SAME OBJECT REFERENCE (identity — no allocation, no re-render churn)", () => {
+  const r = mixed();
+  assert.equal(filterAttentionRollup(r, 'all', 'all'), r, 'unfiltered path must not copy');
+  assert.equal(filterAttentionRollup(r), r, 'defaulted args behave as all/all');
+});
+test('a host filter narrows the Chat buckets (critical/warning) AND the AgentStateRow buckets', () => {
+  const f = filterAttentionRollup(mixed(), 'h1', 'all');
+  assert.deepEqual(f.critical.map((a) => a.id), ['c1'], 'h1 critical kept');
+  assert.deepEqual(f.warning.map((a) => a.id), [], 'h2 warning dropped');
+  assert.deepEqual(f.stuck.map((a) => a.id), ['s1']);
+  assert.deepEqual(f.erroring.map((a) => a.id), [], 'h2 erroring dropped');
+  assert.deepEqual(f.waiting.map((a) => a.id), ['wt1']);
+  assert.deepEqual(f.blocked.map((a) => a.id), [], 'h2 blocked dropped');
+  assert.deepEqual(f.custom.map((a) => a.id), ['cu1']);
+  assert.deepEqual(f.done.map((a) => a.id), [], 'h2 done dropped — Finished narrows too');
+});
+test('total is recomputed over the FILTERED problem buckets (the header can never contradict the list)', () => {
+  const f = filterAttentionRollup(mixed(), 'h1', 'all');
+  // critical 1 + warning 0 + stuck 1 + waiting 1 + custom 1 + directives 2 + errors 3
+  assert.equal(f.total, 9);
+  assert.notEqual(f.total, mixed().total, 'the unfiltered total must not survive filtering');
+});
+test('done stays EXCLUDED from total after filtering (the WARDEN-575 invariant holds)', () => {
+  const f = filterAttentionRollup(mixed(), 'h2', 'all');
+  assert.deepEqual(f.done.map((a) => a.id), ['dn1'], 'the h2 finished row is kept');
+  // warning 1 + erroring 1 + blocked 1 + directives 2 + errors 3 — dn1 contributes 0.
+  assert.equal(f.total, 8, 'a finished agent is a review cue, not an alarm');
+});
+test('directives/errors are event COUNTS with no host — passed through untouched, never zeroed or attributed', () => {
+  const f = filterAttentionRollup(mixed(), 'nosuchhost', 'all');
+  assert.equal(f.directives, 2);
+  assert.equal(f.errors, 3);
+  assert.equal(f.total, 5, 'only the event counts remain when no agent matches');
+  assert.deepEqual(f.critical, []);
+  assert.deepEqual(f.done, []);
+});
+test('a row with NO host is KEPT under a concrete host filter (excluded only on an EXACT mismatch)', () => {
+  // AgentStateRow.host is optional (types.ts:223). Hiding an unknown-host row would hide
+  // a REAL problem during exactly the host outage this filter exists for; an unknown host
+  // is not evidence the row belongs to another host.
+  const r = roll(health(), stats(), [
+    stateRow('known', 'stuck', { host: 'h1' }),
+    stateRow('other', 'stuck', { host: 'h2' }),
+    stateRow('hostless', 'stuck'),
+    stateRow('blankhost', 'stuck', { host: '' }),
+  ]);
+  const f = filterAttentionRollup(r, 'h1', 'all');
+  assert.deepEqual(f.stuck.map((a) => a.id), ['known', 'hostless', 'blankhost']);
+  assert.equal(f.total, 3);
+});
+test('an agent filter matches the row LABEL identity (name || key || id) — the same string the row renders', () => {
+  const r = roll(health({ critical: [agent('c1', { host: 'h1', name: 'planner-1' })] }), stats(), [
+    stateRow('s1', 'stuck', { host: 'h1', name: 'worker-1' }),
+    stateRow('s2', 'stuck', { host: 'h1', name: 'worker-2' }),
+    { id: 'k1', key: 'keyed-agent', state: 'waiting', host: 'h1' }, // no name → key
+    { id: 'bare-id', state: 'waiting', host: 'h1' },                // no name/key → id
+  ]);
+  assert.deepEqual(filterAttentionRollup(r, 'all', 'worker-1').stuck.map((a) => a.id), ['s1']);
+  assert.deepEqual(filterAttentionRollup(r, 'all', 'planner-1').critical.map((a) => a.id), ['c1']);
+  assert.deepEqual(filterAttentionRollup(r, 'all', 'keyed-agent').waiting.map((a) => a.id), ['k1']);
+  assert.deepEqual(filterAttentionRollup(r, 'all', 'bare-id').waiting.map((a) => a.id), ['bare-id']);
+});
+test('host + agent compose as AND (an agent on another host is excluded)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('a', 'stuck', { host: 'h1', name: 'worker-1' }),
+    stateRow('b', 'stuck', { host: 'h2', name: 'worker-1' }),
+  ]);
+  assert.deepEqual(filterAttentionRollup(r, 'h1', 'worker-1').stuck.map((x) => x.id), ['a']);
+  assert.equal(filterAttentionRollup(r, 'h2', 'worker-2').total, 0);
+});
+test('the directed callout over a filtered rollup never names a filtered-OUT pane', () => {
+  // The reason to filter upstream of ranking: rankAttention/pickCalloutTop are untouched,
+  // so the promoted "you're needed HERE" target is drawn from the narrowed set only.
+  const r = roll(health(), stats(), [
+    stateRow('wt-other', 'waiting', { host: 'h2' }), // outranks everything on h1
+    stateRow('st-mine', 'stuck', { host: 'h1' }),
+  ]);
+  assert.equal(rankAttention(r).top.id, 'wt-other', 'unfiltered, the h2 waiting pane wins');
+  const { top, ranked } = rankAttention(filterAttentionRollup(r, 'h1', 'all'));
+  assert.equal(top.id, 'st-mine');
+  assert.deepEqual(ranked.map((x) => x.id), ['st-mine'], 'no filtered-out pane survives into the rundown');
+});
+test('filtering an EMPTY rollup is safe (no crash, still empty)', () => {
+  const f = filterAttentionRollup(EMPTY_ATTENTION_ROLLUP, 'h1', 'worker-1');
+  assert.equal(f.total, 0);
+  assert.deepEqual(f.stuck, []);
+});
+
+console.log('\nattentionFilterOptions — the dropdown option lists (WARDEN-971)');
+test('options are collected from EVERY per-agent bucket (problem buckets AND the positive done bucket)', () => {
+  const { hosts, agents } = attentionFilterOptions(mixed());
+  assert.deepEqual(hosts, ['h1', 'h2']);
+  assert.deepEqual(agents, ['b1', 'c1', 'cu1', 'dn1', 'e1', 's1', 'w1', 'wt1']);
+});
+test('hosts are deduped and sorted; empty/undefined hosts are skipped (not selectable)', () => {
+  const r = roll(health({ critical: [agent('c1', { host: 'zeta' })] }), stats(), [
+    stateRow('s1', 'stuck', { host: 'alpha' }),
+    stateRow('s2', 'stuck', { host: 'alpha' }),
+    stateRow('s3', 'stuck'),
+    stateRow('s4', 'stuck', { host: '' }),
+  ]);
+  assert.deepEqual(attentionFilterOptions(r).hosts, ['alpha', 'zeta']);
+});
+test('every offered option selects at least one row (options + filter share ONE identity expression)', () => {
+  const r = mixed();
+  const { hosts, agents } = attentionFilterOptions(r);
+  for (const h of hosts) {
+    assert.ok(filterAttentionRollup(r, h, 'all').total > 0, `host option ${h} must match something`);
+  }
+  for (const a of agents) {
+    const f = filterAttentionRollup(r, 'all', a);
+    const rows = f.critical.length + f.warning.length + f.stuck.length + f.erroring.length
+      + f.waiting.length + f.blocked.length + f.custom.length + f.done.length;
+    assert.ok(rows > 0, `agent option ${a} must match a row`);
+  }
+});
+test('an empty rollup offers no options (the Selects show only their All sentinels)', () => {
+  assert.deepEqual(attentionFilterOptions(EMPTY_ATTENTION_ROLLUP), { hosts: [], agents: [] });
+});
+
+
+console.log('\nfinalizeRollup — the one finalize step all three rollup producers share (WARDEN-1115)');
+// The 10-field input shape, defaulted so each case reads as "which parts differ".
+const parts = (p = {}) => ({
+  critical: [], warning: [], stuck: [], erroring: [], waiting: [], blocked: [],
+  custom: [], done: [], directives: 0, errors: 0, ...p,
+});
+test('sums the eight problem row-buckets by LENGTH', () => {
+  const r = finalizeRollup(parts({
+    critical: [agent('c1'), agent('c2')],
+    warning: [agent('w1')],
+    stuck: [agent('s1')],
+    erroring: [agent('e1')],
+    waiting: [agent('t1')],
+    blocked: [agent('b1')],
+    custom: [agent('x1')],
+  }));
+  assert.equal(r.total, 8);
+});
+test('directives/errors add as NUMBERS, not as lengths', () => {
+  // The trap this pins: `.length` on a number is undefined, and treating these two
+  // event counts as arrays would silently contribute NaN (or 0) instead of 7.
+  const r = finalizeRollup(parts({ directives: 3, errors: 4 }));
+  assert.equal(r.total, 7);
+  // ...and they compose with the row buckets rather than replacing them.
+  const mixedR = finalizeRollup(parts({ critical: [agent('c1')], directives: 2, errors: 5 }));
+  assert.equal(mixedR.total, 8);
+});
+test('done NEVER counts toward total (the WARDEN-575 invariant, in its single home)', () => {
+  const r = finalizeRollup(parts({ done: [agent('d1'), agent('d2'), agent('d3')] }));
+  assert.equal(r.total, 0);
+  // ...and it does not perturb a non-zero total either.
+  const withProblems = finalizeRollup(parts({
+    critical: [agent('c1')], directives: 2, done: [agent('d1'), agent('d2')],
+  }));
+  assert.equal(withProblems.total, 3);
+});
+test('done is still CARRIED THROUGH in full (excluded from the count, not dropped)', () => {
+  const done = [agent('d1'), agent('d2')];
+  const r = finalizeRollup(parts({ done }));
+  assert.deepEqual(r.done, done);
+});
+test('an all-empty input finalizes to total 0 with every bucket intact', () => {
+  assert.deepEqual(finalizeRollup(parts()), EMPTY_ATTENTION_ROLLUP);
+});
+test('preserves the AttentionRollup key ORDER exactly', () => {
+  assert.deepEqual(Object.keys(finalizeRollup(parts())), Object.keys(EMPTY_ATTENTION_ROLLUP));
+});
+test('all three producers agree with the helper on the same buckets (no copy drifted)', () => {
+  // The point of the collapse: build / filter / severity-route must finalize identically.
+  // Here: one critical + one stuck + 2 directives + 1 error, and a done row that must not
+  // count. Every route must land on total 5 and carry the done row.
+  const built = buildAttentionRollup(
+    health({ critical: [agent('c1')] }),
+    { directive_proposed: 2, error: 1 },
+    [agent('s1', { state: 'stuck' }), agent('d1', { state: 'idle' })],
+    { doneKeys: new Set(['d1']) },
+  );
+  assert.equal(built.total, 5);
+  assert.equal(built.done.length, 1);
+  const viaHelper = finalizeRollup(parts({
+    critical: built.critical, stuck: built.stuck, done: built.done,
+    directives: built.directives, errors: built.errors,
+  }));
+  assert.deepEqual(viaHelper, built);
+  // filterAttentionRollup is the second producer — unfiltered it must finalize the same.
+  assert.deepEqual(filterAttentionRollup(built, 'all', 'all'), built);
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

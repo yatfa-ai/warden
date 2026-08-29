@@ -21,19 +21,21 @@
 // WHY DEFENSIVE READS WITH BACKUP: if a file is ever unparseable — external edit,
 // filesystem corruption, a pre-atomic-write file written by an older warden, or a
 // torn write from a crash our atomic-write couldn't prevent on a non-journaled FS
-// — we back it up to `<file>.corrupt-<ts><ext>` and surface it (console.warn with
-// the backup path) before returning the caller's fallback, so the user can recover
+// — we back it up to `<file>.corrupt-<digest><ext>.bak` and surface it (console.warn
+// with the backup path) before returning the caller's fallback, so the user can recover
 // instead of losing their data silently.
 //
 // SYNC vs ASYNC: the async exports (atomicWrite / atomicAppend / readJsonDefensive)
 // are for runtime/request paths — they yield the event loop during I/O so no single
 // persistence op can re-stall the server (this is the WARDEN-828 spinner fix made
 // structural). The single sync export (readJsonDefensiveSync) is BOOT-ONLY — used
-// by the module-load config read where a sync value is required before the first
-// request is served; do not call it from a request handler.
+// by boot/start-up reads where a sync value is required before the first request
+// is served (the module-load config read, the CLI cache read, the Observer
+// constructor's start-up session read); do not call it from a request handler.
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 const fsp = fs.promises;
 
@@ -45,13 +47,34 @@ function tempPath(file) {
   return `${file}.${process.pid}.${Date.now().toString(36)}.${counter}.tmp`;
 }
 
-// Backup path for a corrupt file: <base>.corrupt-<iso-safe-ts><ext>. Filesystem-
-// safe timestamp (no colons, which Windows forbids in paths).
-export function corruptBackupPath(file) {
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+// Backup path for a corrupt file: <base>.corrupt-<content-digest><ext>.bak.
+//
+// Two properties are load-bearing here (WARDEN-1040); neither is cosmetic.
+//
+// 1. The trailing `.bak` takes the artifact OUT of the namespace its scanner
+//    globs. Callers of the defensive reads index a directory by extension
+//    (sessions.js: `endsWith('.json')`), so a backup that kept the source
+//    extension was re-found by the scanner that wrote it, failed to parse
+//    again, and was backed up again — the directory DOUBLED on every
+//    `GET /api/sessions`. Ending outside the indexed extension is what makes
+//    the quarantine a quarantine. The source extension is kept before `.bak`
+//    so a human can still tell what the rescued file was.
+//
+// 2. The name is derived from the CONTENT, not from a timestamp. The backup is
+//    a copy, so the corrupt source stays on disk and is re-read on the next
+//    request; a timestamped name therefore wrote a NEW artifact every time —
+//    slower than doubling, but still unbounded request-driven disk growth for
+//    one unchanging broken file. Content-addressing makes the write idempotent
+//    BY CONSTRUCTION: re-backing-up the same bytes resolves to the same path,
+//    so the file count is stable and concurrent readers cannot race into
+//    duplicates. Bytes that corrupt differently later still get their own
+//    artifact, which is the distinction actually worth keeping. "When" is not
+//    lost — it is the backup's own mtime.
+export function corruptBackupPath(file, text = '') {
+  const digest = createHash('sha256').update(String(text)).digest('hex').slice(0, 12);
   const ext = path.extname(file);
   const base = ext ? file.slice(0, -ext.length) : file;
-  return `${base}.corrupt-${ts}${ext || '.json'}`;
+  return `${base}.corrupt-${digest}${ext}.bak`;
 }
 
 /**
@@ -112,7 +135,7 @@ export async function removeFile(file) {
 
 /**
  * Defensive JSON read (async, for request paths). A missing file returns
- * `fallback`. An unparseable file is backed up to `<file>.corrupt-<ts><ext>`
+ * `fallback`. An unparseable file is backed up to `<file>.corrupt-<digest><ext>.bak`
  * (best-effort), logged with the backup path, and returns `fallback` — never
  * silently swallows corruption into defaults.
  *
@@ -152,7 +175,9 @@ export async function readJsonDefensive(file, { fallback = null, revive } = {}) 
 /**
  * Defensive JSON read (SYNC — BOOT PATHS ONLY). Same backup-on-corrupt semantics
  * as readJsonDefensive. Do NOT call from a request handler (it blocks the event
- * loop); the only sanctioned caller is the module-load config read. The sync
+ * loop). Sanctioned callers are boot/start-up reads that cannot await: the
+ * module-load config read, the CLI's cache read, and the Observer constructor's
+ * start-up session read (sessions.js getSession). The sync
  * backup write inside is itself boot-time/rare-recovery only.
  */
 export function readJsonDefensiveSync(file, { fallback = null, revive } = {}) {
@@ -185,7 +210,7 @@ export function readJsonDefensiveSync(file, { fallback = null, revive } = {}) {
 // Back up a corrupt file (async). Best-effort: even if the backup write fails we
 // still surface the corruption upstream (the fallback is returned regardless).
 async function backupCorrupt(file, text, err) {
-  const backup = corruptBackupPath(file);
+  const backup = corruptBackupPath(file, text);
   console.warn(`[persist] corrupt JSON at ${file} (${err.message}); backing up to ${backup}`);
   try {
     await fsp.writeFile(backup, text);
@@ -198,7 +223,7 @@ async function backupCorrupt(file, text, err) {
 // The single legitimate writeFileSync outside config.js's boot load; see the
 // SYNC vs ASYNC note at the top of this file.
 function backupCorruptSync(file, text, err) {
-  const backup = corruptBackupPath(file);
+  const backup = corruptBackupPath(file, text);
   console.warn(`[persist] corrupt JSON at ${file} (${err.message}); backing up to ${backup}`);
   try {
     fs.writeFileSync(backup, text);

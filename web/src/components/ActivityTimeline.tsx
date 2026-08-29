@@ -5,7 +5,7 @@ import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
-import { formatUpdatedAgo } from '@/lib/timelinePacing';
+import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyText } from '@/lib/clipboard';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger, ContextMenuLabel } from '@/components/ui/context-menu';
@@ -63,6 +63,7 @@ export function ActivityTimeline({
   const {
     events,
     loading,
+    error,
     refreshing,
     isLive,
     setIsLive,
@@ -75,13 +76,15 @@ export function ActivityTimeline({
     return () => clearInterval(id);
   }, []);
 
-  // Extract unique values for filters. The type-guard filters (`: x is string`)
-  // are runtime-identical to `.filter(Boolean)` but narrow the element type to
-  // `string` — Radix SelectItem requires a non-empty `string` value, whereas the
-  // native <option> tolerated `string | undefined`.
-  const allTypes = Array.from(new Set(events.map((e) => e.type)));
-  const allAgents = Array.from(new Set(events.map((e) => e.container).filter((c): c is string => Boolean(c))));
-  const allHosts = Array.from(new Set(events.map((e) => e.host).filter((h): h is string => Boolean(h))));
+  // Extract unique values for filters. `sortedFilterOptions` dedupes, drops
+  // falsy values (Radix SelectItem requires a non-empty `string`, so this also
+  // replaces the old inline `: x is string` type guards) and sorts — events
+  // arrive newest-first, so unsorted options would reorder on every poll.
+  // `allTypes` is included for within-component consistency: it has the same
+  // shape and the same reshuffle.
+  const allTypes = sortedFilterOptions(events.map((e) => e.type));
+  const allAgents = sortedFilterOptions(events.map((e) => e.container));
+  const allHosts = sortedFilterOptions(events.map((e) => e.host));
 
   // Apply filters
   useEffect(() => {
@@ -102,39 +105,29 @@ export function ActivityTimeline({
     setFiltered(result);
   }, [events, typeFilter, agentFilter, hostFilter]);
 
-  // Group events by time period
-  const groupedEvents = useCallback((events: ActivityEvent[]) => {
-    const groups: { [key: string]: ActivityEvent[] } = {};
-    const now = Date.now();
-    const oneHour = 60 * 60 * 1000;
-    const oneDay = 24 * oneHour;
-    const twoDays = 2 * oneDay;
+  // Group events by time period. Bucketing lives in the shared, tested
+  // `dayBucket` helper (lib/timelinePacing.ts) so this feed and DirectiveHistory
+  // can never drift, and so `Today`/`Yesterday` are decided by CALENDAR DAY
+  // (matching what each row's own formatTimestamp renders) rather than by
+  // elapsed milliseconds.
+  //
+  // `now` is the component's 1s-ticking state clock rather than a fresh
+  // `Date.now()` read inside the callback — the header and the "Updated Ns ago"
+  // label then share one clock — so it MUST stay in the dep array or the
+  // callback would capture a stale `now` forever.
+  const groupedEvents = useCallback(
+    (events: ActivityEvent[]) => {
+      const groups: { [key: string]: ActivityEvent[] } = {};
 
-    events.forEach((event) => {
-      const eventTime = new Date(event.timestamp).getTime();
-      const diff = now - eventTime;
+      events.forEach((event) => {
+        const groupKey = dayBucket(new Date(event.timestamp).getTime(), now);
+        (groups[groupKey] ??= []).push(event);
+      });
 
-      let groupKey: string;
-      if (diff < oneHour) {
-        groupKey = 'Last hour';
-      } else if (diff < oneDay) {
-        groupKey = 'Today';
-      } else if (diff < twoDays) {
-        groupKey = 'Yesterday';
-      } else if (diff < 7 * oneDay) {
-        groupKey = 'This week';
-      } else {
-        groupKey = 'Older';
-      }
-
-      if (!groups[groupKey]) {
-        groups[groupKey] = [];
-      }
-      groups[groupKey].push(event);
-    });
-
-    return groups;
-  }, []);
+      return groups;
+    },
+    [now],
+  );
 
   const grouped = groupedEvents(filtered);
 
@@ -433,6 +426,15 @@ export function ActivityTimeline({
         {loading ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Loading activity...
+          </div>
+        ) : error && events.length === 0 ? (
+          // Mirrors DirectiveHistory.tsx:234 — gate on the RAW list, not `filtered`,
+          // so an active filter matching nothing during a healthy fetch still shows
+          // the normal empty state. Render `error.message`: the hook stores an
+          // `Error` instance (unlike DirectiveHistory's `string`), and an Error
+          // object as a React child throws.
+          <div className="flex items-center justify-center h-full text-destructive text-sm">
+            ⚠ {error.message}
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">

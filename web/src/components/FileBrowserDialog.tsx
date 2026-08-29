@@ -19,6 +19,7 @@ import {
 // src/lib so it is unit-testable without a DOM — the WARDEN-573 subdir-expansion
 // decision is asserted against the real function (see web/fileBrowser.test.mjs).
 import { type DirState, EMPTY_DIR, joinPath, applyToggle } from '@/lib/fileBrowserTree';
+import { readErrorBody } from '@/lib/api';
 
 interface Props {
   chatId: string;
@@ -47,11 +48,12 @@ export function FileBrowserDialog({ chatId, cwd, open, onOpenChange, onSelectFil
     setTree((t) => ({ ...t, [dir]: { ...(t[dir] || EMPTY_DIR), loading: true, error: null } }));
     try {
       const res = await fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(dir)}`);
-      const data = await res.json();
-      // /api/git-ls returns transport errors at HTTP 200 with an `error` field
-      // (no-cwd / not-a-git-repo), mirroring /api/git-status + /api/search-files
-      // — so check data.error too, not just res.ok, or a real error renders as
-      // "empty directory" (the same honest-error discipline as the grep dialog).
+      // Parsed BEFORE the ok-gate BY DESIGN: /api/git-ls returns transport errors
+      // at HTTP 200 with an `error` field (no-cwd / not-a-git-repo), mirroring
+      // /api/git-status + /api/search-files — so the gate below reads
+      // `data.error` alongside `res.ok`, or a real error renders as an "empty
+      // directory". Leg gating lives in `readErrorBody`.
+      const data = await readErrorBody(res);
       setTree((t) => ({
         ...t,
         [dir]: {

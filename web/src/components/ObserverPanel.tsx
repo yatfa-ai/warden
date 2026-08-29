@@ -142,7 +142,6 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
   const [draft, setDraft] = useState('');
-  const [userStopped, setUserStopped] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [chatContext, setChatContext] = useState<ChatContextMeta | null>(null);
@@ -189,6 +188,13 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
   useEffect(() => {
     onActivityRef.current = onActivity;
   }, [onActivity]);
+  // WARDEN-1222 — same stale-closure problem as the refs above: `connect` is
+  // memoized on [sessionId] only, so its ws.onclose handler permanently observes
+  // the `userStopped` value captured at connect time (false). Read the latest
+  // value from a ref so a user-initiated stop suppresses the auto-reconnect,
+  // while a genuine disconnect still reconnects. Do NOT widen `connect`'s dep
+  // list with userStopped — that would rebuild the socket on every flag change.
+  const userStoppedRef = useRef(false);
 
   const nextId = useCallback(() => `m${++idCounter.current}`, []);
   const { rootRef, atBottom, scrollToBottom, stickIfPinned } = useStickToBottom();
@@ -279,7 +285,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
       connectionTimeoutRef.current = null;
     }
     if (wsRef.current) wsRef.current.close();
-    setUserStopped(false);
+    userStoppedRef.current = false;
     setConnectionError(null);
     setLoadingTimeout(false);
     setChatContext(null);
@@ -325,7 +331,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
       wsRef.current = null;
       setConn(false);
       setBusy(false);
-      if (!userStopped) {
+      if (!userStoppedRef.current) {
         // A dropped stream mid-generation is recoverable: flag the partial
         // observer turn for retry, then reconnect as before.
         failStreamingObserver();
@@ -469,7 +475,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
   };
 
   const stop = useCallback(() => {
-    setUserStopped(true);
+    userStoppedRef.current = true;
     if (wsRef.current) {
       wsRef.current.close();
       setBusy(false);

@@ -20,14 +20,29 @@ import { toast } from 'sonner';
 import { putJson, fetchJson, postJson } from '@/lib/api';
 import { type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import {
+  describeWebhookTestVerdict,
+  webhookTestRequestFailedVerdict,
+  type WebhookTestVerdict,
+} from '@/lib/webhook/testAlert';
+import {
   getTelemetryRuntimeStatus,
   onTelemetryRuntimeStatus,
   clearTelemetryRuntimeDrift,
   type TelemetryRuntimeStatus,
 } from '@/lib/electron';
 import { type ConfigData } from './types';
+import { isBackendConfigDirty, type BackendConfigDraft } from './configDirty';
+import { normalizeLoadedConfig } from './normalizeLoadedConfig';
 
-/** The default `config` state, used before the GET /api/config load resolves. */
+/**
+ * The initial `config` state, held before the GET /api/config load resolves.
+ *
+ * WARDEN-976 — these values are never RENDERED: SettingsPage mounts the
+ * backend-config sections only once `configLoaded` is true, precisely so a
+ * never-loaded default can neither be displayed as if it were real nor PUT back
+ * over the real persisted configuration. This is the shape the state starts in,
+ * not a set of values the user can ever see or save.
+ */
 const DEFAULT_CONFIG: ConfigData = {
   hosts: [],
   pollIntervalMs: 1500,
@@ -57,8 +72,8 @@ const DEFAULT_CONFIG: ConfigData = {
   showProjectBadges: false,
   hideOfflineHosts: false,
   // Telemetry consent (WARDEN-457) — off by default.
-  telemetryBaseEnabled: false,
-  telemetryExtendedEnabled: false,
+  telemetryIncidentsEnabled: false,
+  telemetryNamesEnabled: false,
   // Receiver endpoint (WARDEN-522) — empty by default = unconfigured = no-op.
   telemetryEndpoint: '',
   // Webhook push channel (WARDEN-555) — off by default; both routing toggles on.
@@ -70,6 +85,42 @@ const DEFAULT_CONFIG: ConfigData = {
   // WARDEN-540 — empty until the GET /api/config load populates it.
   watchPatterns: [],
 };
+
+/**
+ * The write-only-secret state machine, shared by all three secrets Settings
+ * holds (observer auth token / webhook secret / telemetry auth token).
+ *
+ * WARDEN-883 / WARDEN-856 added the `pendingClear` + remove/undo discipline to
+ * all three at once by copy-paste, leaving three byte-identical blocks; this is
+ * that block, written once. It is purely the DECLARATION half — the legs that
+ * legitimately diverge per secret (which config path it hydrates from, how it is
+ * shaped onto the PUT body, which draft field it contributes) stay at their own
+ * call sites.
+ *
+ * The raw `setIsSet` / `setTail` setters are returned because the hydrate and
+ * reset-to-defaults legs drive them from outside the block. `setInputRaw` and
+ * `setPendingClear` deliberately are NOT: the only sanctioned writes to the
+ * input are through `setInput` (which cancels a pending clear first — typing is
+ * the natural undo), `remove`, and `undoRemove`.
+ */
+function useWriteOnlySecret() {
+  const [isSet, setIsSet] = useState(false);
+  const [tail, setTail] = useState<string | null>(null);
+  const [input, setInputRaw] = useState('');
+  const [pendingClear, setPendingClear] = useState(false);
+  const setInput = useCallback((v: string) => {
+    setPendingClear(false);
+    setInputRaw(v);
+  }, []);
+  const remove = useCallback(() => {
+    setInputRaw('');
+    setPendingClear(true);
+  }, []);
+  const undoRemove = useCallback(() => {
+    setPendingClear(false);
+  }, []);
+  return { isSet, setIsSet, tail, setTail, input, setInput, pendingClear, remove, undoRemove };
+}
 
 /**
  * Owns the backend config state + its GET/PUT round-trip + the write-only
@@ -99,15 +150,25 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // unmounting. A hosts failure does NOT set this — see the load effect.
   const [loadError, setLoadError] = useState<{ message: string } | null>(null);
   const [loadToken, setLoadToken] = useState(0);
+  // WARDEN-906 — the BASELINE snapshot of "what is persisted", captured when the
+  // GET load resolves and re-captured after a successful save. Everything the
+  // footer Save would send is diffed against it (see configDirty.ts) to derive
+  // `isDirty`, which SettingsPage uses to warn before Back/Cancel discards typed
+  // edits. null until the first successful load → not dirty (nothing to lose).
+  const [baseline, setBaseline] = useState<BackendConfigDraft | null>(null);
   const reload = useCallback(() => setLoadToken((t) => t + 1), []);
-  // Silent reload — re-fetch config WITHOUT flipping `loading` to true. `loading`
-  // gates the WHOLE content pane (SettingsPage swaps to "Loading configuration…",
-  // unmounting the danger zone), so a plain `reload()` after the instant backend
-  // reset would flash the entire pane to a loader — a jarring response to a
-  // destructive confirm. Instead the form stays mounted showing the prior values
-  // while the GET silently swaps in the restored defaults. The ref is read+cleared
-  // at the top of the load effect, so it only affects the very next load (a later
-  // manual Retry still shows the loader). (WARDEN-889)
+  // Silent reload — re-fetch config WITHOUT flipping `loading` to true, so the
+  // post-reset refetch shows no loading affordance at all: the form stays
+  // mounted showing the prior values while the GET silently swaps in the
+  // restored defaults, rather than reacting to a destructive confirm with a
+  // spinner. The ref is read+cleared at the top of the load effect, so it only
+  // affects the very next load (a later manual Retry still shows its state).
+  // (WARDEN-889)
+  //
+  // WARDEN-976 note: `loading` no longer gates the whole content pane — the
+  // per-section gate keys off `configLoaded`, which stays true across a reset,
+  // so the sections could not flash to a loader here even without this flag.
+  // It is kept because it still expresses the right intent for this refetch.
   const silentNextLoadRef = useRef(false);
   const reloadSilent = useCallback(() => {
     silentNextLoadRef.current = true;
@@ -127,43 +188,43 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // a pending clear (typing is the natural undo); after Remove the input is
   // emptied so a blank field + pendingClear = "clear it", while a blank field +
   // no pendingClear = "leave it" (no-clobber).
-  const [observerAuthTokenSet, setObserverAuthTokenSet] = useState(false);
-  const [observerAuthTokenTail, setObserverAuthTokenTail] = useState<string | null>(null);
-  const [observerAuthTokenInput, setObserverAuthTokenInputRaw] = useState('');
-  const [observerAuthTokenPendingClear, setObserverAuthTokenPendingClear] = useState(false);
-  const setObserverAuthTokenInput = useCallback((v: string) => {
-    setObserverAuthTokenPendingClear(false);
-    setObserverAuthTokenInputRaw(v);
-  }, []);
-  const removeObserverAuthToken = useCallback(() => {
-    setObserverAuthTokenInputRaw('');
-    setObserverAuthTokenPendingClear(true);
-  }, []);
-  const undoRemoveObserverAuthToken = useCallback(() => {
-    setObserverAuthTokenPendingClear(false);
-  }, []);
+  const {
+    isSet: observerAuthTokenSet,
+    setIsSet: setObserverAuthTokenSet,
+    tail: observerAuthTokenTail,
+    setTail: setObserverAuthTokenTail,
+    input: observerAuthTokenInput,
+    setInput: setObserverAuthTokenInput,
+    pendingClear: observerAuthTokenPendingClear,
+    remove: removeObserverAuthToken,
+    undoRemove: undoRemoveObserverAuthToken,
+  } = useWriteOnlySecret();
 
   // Webhook shared secret (WARDEN-555) — write-only, identical discipline to the
   // observer auth token above: GET returns only a set + tail indicator, so the
   // input stays empty until the human types a new secret; on save it is sent ONLY
   // when non-empty, and an untouched field is omitted so the backend no-clobbers
   // the stored secret. WARDEN-883 adds a Remove control (pendingClear → null).
-  const [webhookSecretSet, setWebhookSecretSet] = useState(false);
-  const [webhookSecretTail, setWebhookSecretTail] = useState<string | null>(null);
-  const [webhookSecretInput, setWebhookSecretInputRaw] = useState('');
-  const [webhookSecretPendingClear, setWebhookSecretPendingClear] = useState(false);
-  const setWebhookSecretInput = useCallback((v: string) => {
-    setWebhookSecretPendingClear(false);
-    setWebhookSecretInputRaw(v);
-  }, []);
-  const removeWebhookSecret = useCallback(() => {
-    setWebhookSecretInputRaw('');
-    setWebhookSecretPendingClear(true);
-  }, []);
-  const undoRemoveWebhookSecret = useCallback(() => {
-    setWebhookSecretPendingClear(false);
-  }, []);
+  const {
+    isSet: webhookSecretSet,
+    setIsSet: setWebhookSecretSet,
+    tail: webhookSecretTail,
+    setTail: setWebhookSecretTail,
+    input: webhookSecretInput,
+    setInput: setWebhookSecretInput,
+    pendingClear: webhookSecretPendingClear,
+    remove: removeWebhookSecret,
+    undoRemove: undoRemoveWebhookSecret,
+  } = useWriteOnlySecret();
   const [testingWebhook, setTestingWebhook] = useState(false);
+  // "Send test alert" verdict (WARDEN-970) — the precise, persistent in-section
+  // read of the LAST probe, replacing the transient raw-status toast. Same
+  // discipline as the telemetry probe below: component state only, NEVER
+  // persisted (a cached "Delivered" goes stale the moment the receiver goes down
+  // or the secret is rotated, and would become a false trust signal). null
+  // before the first click, and cleared whenever the URL/secret it was derived
+  // from is edited.
+  const [webhookTestVerdict, setWebhookTestVerdict] = useState<WebhookTestVerdict | null>(null);
 
   // Telemetry receiver auth token (WARDEN-569) — write-only, identical discipline
   // to the webhook secret above: GET returns only a set + tail indicator, so the
@@ -171,21 +232,17 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // sent ONLY when non-empty, and an untouched field is omitted so the backend
   // no-clobbers the stored token. Sent on the wire as `Authorization: Bearer`.
   // WARDEN-883 adds a Remove control (pendingClear → null).
-  const [telemetryAuthTokenSet, setTelemetryAuthTokenSet] = useState(false);
-  const [telemetryAuthTokenTail, setTelemetryAuthTokenTail] = useState<string | null>(null);
-  const [telemetryAuthTokenInput, setTelemetryAuthTokenInputRaw] = useState('');
-  const [telemetryAuthTokenPendingClear, setTelemetryAuthTokenPendingClear] = useState(false);
-  const setTelemetryAuthTokenInput = useCallback((v: string) => {
-    setTelemetryAuthTokenPendingClear(false);
-    setTelemetryAuthTokenInputRaw(v);
-  }, []);
-  const removeTelemetryAuthToken = useCallback(() => {
-    setTelemetryAuthTokenInputRaw('');
-    setTelemetryAuthTokenPendingClear(true);
-  }, []);
-  const undoRemoveTelemetryAuthToken = useCallback(() => {
-    setTelemetryAuthTokenPendingClear(false);
-  }, []);
+  const {
+    isSet: telemetryAuthTokenSet,
+    setIsSet: setTelemetryAuthTokenSet,
+    tail: telemetryAuthTokenTail,
+    setTail: setTelemetryAuthTokenTail,
+    input: telemetryAuthTokenInput,
+    setInput: setTelemetryAuthTokenInput,
+    pendingClear: telemetryAuthTokenPendingClear,
+    remove: removeTelemetryAuthToken,
+    undoRemove: undoRemoveTelemetryAuthToken,
+  } = useWriteOnlySecret();
 
   // "Test connection" probe state (WARDEN-595). The verdict is NOT the destination
   // label's "configured" non-claim — it is a LIVE probe of the receiver's
@@ -257,67 +314,21 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         return;
       }
       const configData = result.data ?? {};
-      setConfig({
-        hosts: configData.hosts || [],
-        pollIntervalMs: configData.pollIntervalMs || 1500,
-        tmuxSession: configData.tmuxSession || 'agent',
-        connectTimeout: configData.connectTimeout || 10,
-        observerConfirmMode: ['always', 'auto-safe'].includes(configData.observerConfirmMode)
-          ? configData.observerConfirmMode
-          : 'always',
-        observerAutoStart: configData.observerAutoStart || false,
-        observerSessionTimeout: configData.observerSessionTimeout ?? 30,
-        llm: {
-          model: configData.llm?.model ?? '',
-          baseUrl: configData.llm?.baseUrl ?? '',
-          maxTokens: typeof configData.llm?.maxTokens === 'number' ? configData.llm.maxTokens : null,
-        },
-        healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
-        healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
-        tokenBudgetEnabled: configData.tokenBudgetEnabled ?? false,
-        tokenBudgetThresholdTokens:
-          typeof configData.tokenBudgetThresholdTokens === 'number'
-            ? configData.tokenBudgetThresholdTokens
-            : 2_000_000,
-        tokenBudgetWindowHours:
-          typeof configData.tokenBudgetWindowHours === 'number'
-            ? configData.tokenBudgetWindowHours
-            : 24,
-        tokenBudgetPerSessionThresholdTokens:
-          typeof configData.tokenBudgetPerSessionThresholdTokens === 'number'
-            ? configData.tokenBudgetPerSessionThresholdTokens
-            : 1_000_000,
-        companionTransportEnabled: configData.companionTransportEnabled ?? false,
-        companionTransportOverridden: configData.companionTransportOverridden ?? false,
-        confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
-        notifyChatOps: configData.notifyChatOps ?? true,
-        notifyErrors: configData.notifyErrors ?? true,
-        notifySuccess: configData.notifySuccess ?? true,
-        notifyObserver: configData.notifyObserver ?? true,
-        // Display customization
-        showHostTags: configData.showHostTags ?? true,
-        showTypeBadges: configData.showTypeBadges ?? true,
-        showStatusIndicators: configData.showStatusIndicators ?? true,
-        showProjectBadges: configData.showProjectBadges ?? false,
-        hideOfflineHosts: configData.hideOfflineHosts ?? false,
-        // Telemetry consent (WARDEN-457) — defensive ?? false so an older
-        // backend that does not return the fields stays safely OFF.
-        telemetryBaseEnabled: configData.telemetryBaseEnabled ?? false,
-        telemetryExtendedEnabled: configData.telemetryExtendedEnabled ?? false,
-        // Defensive ?? '' so an older backend that does not return the field
-        // stays safely unconfigured (empty = sends nothing).
-        telemetryEndpoint: configData.telemetryEndpoint ?? '',
-        // Webhook push channel (WARDEN-555). Defensive fallbacks so an older
-        // backend without these fields stays safely OFF / unconfigured.
-        webhookUrl: configData.webhookUrl ?? '',
-        webhookEnabled: configData.webhookEnabled ?? false,
-        webhookAlertAttention: configData.webhookAlertAttention ?? true,
-        webhookAlertBudget: configData.webhookAlertBudget ?? true,
-        webhookAlertDone: configData.webhookAlertDone ?? true,
-        // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET
-        // response is already well-formed. Defensive ?? [] keeps an older backend
-        // (no watchPatterns field) safely empty → no alerts.
-        watchPatterns: Array.isArray(configData.watchPatterns) ? configData.watchPatterns : [],
+      const loaded: ConfigData = normalizeLoadedConfig(configData);
+      setConfig(loaded);
+      // WARDEN-906 — this GET is the persisted truth, so it is also the dirty
+      // baseline. The write-only secrets are baselined EMPTY: GET never returns
+      // cleartext, so a persisted secret is represented by a blank input +
+      // no pending clear (= "leave it alone" on save). Typing one, or arming a
+      // Remove, therefore reads as an unsaved change — which it is.
+      setBaseline({
+        config: loaded,
+        observerAuthTokenInput: '',
+        observerAuthTokenPendingClear: false,
+        webhookSecretInput: '',
+        webhookSecretPendingClear: false,
+        telemetryAuthTokenInput: '',
+        telemetryAuthTokenPendingClear: false,
       });
       setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
       setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
@@ -342,7 +353,20 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     return () => {
       cancelled = true;
     };
-  }, [loadToken]);
+    // The six secret setters are `useState` setters returned by
+    // `useWriteOnlySecret`, so their identity is stable for the lifetime of the
+    // hook — listing them is a formality the linter can no longer infer now that
+    // they arrive through a helper rather than inline. `loadToken` remains the
+    // only dependency that can actually re-fire this effect.
+  }, [
+    loadToken,
+    setObserverAuthTokenSet,
+    setObserverAuthTokenTail,
+    setWebhookSecretSet,
+    setWebhookSecretTail,
+    setTelemetryAuthTokenSet,
+    setTelemetryAuthTokenTail,
+  ]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -375,6 +399,20 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
       }
+      // WARDEN-906 — the PUT succeeded, so what is on screen IS what is
+      // persisted: re-baseline to the exact draft that was just sent (config +
+      // the secret inputs / pending clears the save consumed) so `isDirty` goes
+      // false. This must happen BEFORE onSaved(), which closes the page — the
+      // normal save-then-close path must never raise the discard dialog.
+      setBaseline({
+        config,
+        observerAuthTokenInput,
+        observerAuthTokenPendingClear,
+        webhookSecretInput,
+        webhookSecretPendingClear,
+        telemetryAuthTokenInput,
+        telemetryAuthTokenPendingClear,
+      });
       onSaved();
     } catch (err) {
       console.error('Failed to save config:', err);
@@ -442,10 +480,19 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // the BODY so the user can test a typo'd URL BEFORE saving — parity with
   // "Test connection" (sendTestConnection) below. A draft secret is sent only
   // when the human typed a new one; an empty field is omitted so the backend
-  // reuses the persisted secret (no-clobber). The button is disabled until both
-  // enabled + a URL are set; the response tells us sent / dropped / not-configured.
+  // reuses the persisted secret (no-clobber).
+  //
+  // WARDEN-970: the button is gated on a non-empty URL ONLY — no enable gate.
+  // The backend already forces `webhookEnabled: true` for this one sanctioned
+  // explicit-send path (src/server.js), so requiring the human to enable + Save
+  // before verifying was a UI-only obstacle to pre-commit verification. The
+  // outcome is now rendered as a precise in-section verdict (delivered / auth
+  // rejected / no receiver / throttled / could not reach) derived from the raw
+  // { ok, dropped, attempts, status } result, instead of a toast carrying a raw
+  // HTTP code the user has to interpret. Never persisted.
   const sendTestAlert = async () => {
     setTestingWebhook(true);
+    setWebhookTestVerdict(null);
     try {
       const draftUrl = config.webhookUrl.trim();
       const draftSecret = webhookSecretInput.trim();
@@ -458,17 +505,13 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         }),
       });
       const body = await res.json();
-      if (body.ok) {
-        toast.success('Test alert sent — check your webhook destination.');
-      } else if (body.attempts === 0) {
-        toast.error('Enable the webhook and set a URL first.');
-      } else if (body.dropped) {
-        toast.error(`Could not deliver (last status ${body.status ?? 'n/a'}). Check the URL and try again.`);
-      } else {
-        toast.error('Test alert did not succeed.');
-      }
+      setWebhookTestVerdict(describeWebhookTestVerdict(body));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to send test alert');
+      // The /api/webhook-test call itself failed — nothing is known about the
+      // user's receiver, so the copy must not blame it.
+      setWebhookTestVerdict(
+        webhookTestRequestFailedVerdict(err instanceof Error ? err.message : String(err))
+      );
     } finally {
       setTestingWebhook(false);
     }
@@ -533,15 +576,51 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     }
   };
 
+  // WARDEN-976 — "a GET /api/config has resolved successfully at least once".
+  // The baseline is captured ONLY in the GET success handler (and re-captured
+  // after a successful PUT), so it already IS that signal — deriving readiness
+  // from it rather than adding a parallel flag keeps the two from drifting.
+  //
+  // This is the readiness input for the per-section gate (sectionLoadGate.ts)
+  // and for Save. Note it is deliberately NOT `!loading`: the silent post-reset
+  // refetch (reloadSilent) never flips `loading`, and a failed load clears
+  // `loading` without ever producing values. "Did a GET ever succeed" is the
+  // only question both consumers actually want answered.
+  const configLoaded = baseline !== null;
+
+  // WARDEN-906 — derived on every render from the live draft vs the baseline
+  // snapshot. Cheap (a structural compare of one small config object) and
+  // always in step with the state it describes.
+  const isDirty = isBackendConfigDirty(
+    {
+      config,
+      observerAuthTokenInput,
+      observerAuthTokenPendingClear,
+      webhookSecretInput,
+      webhookSecretPendingClear,
+      telemetryAuthTokenInput,
+      telemetryAuthTokenPendingClear,
+    },
+    baseline,
+  );
+
   return {
     config,
     setConfig,
     availableHosts,
     loading,
     loadError,
+    // WARDEN-976 — per-section readiness + Save safety both key off this rather
+    // than off `loading`/`loadError`. See the derivation above.
+    configLoaded,
     reload,
     saving,
     handleSave,
+    // WARDEN-906 — "the footer Save would send something different from what is
+    // persisted". Derived (not stored) so it can never go stale behind the
+    // edits it describes. SettingsPage gates Back/Cancel on it; it is also the
+    // reusable signal a follow-up can use to disable Save when nothing changed.
+    isDirty,
     // Reset every backend preference to its default (WARDEN-889). Instant —
     // persists + live-applies via the backend, distinct from the footer Save.
     resetting,
@@ -564,6 +643,8 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     undoRemoveWebhookSecret,
     testingWebhook,
     sendTestAlert,
+    webhookTestVerdict,
+    setWebhookTestVerdict,
     // Telemetry write-only auth token + test-connection probe + runtime drift.
     telemetryAuthTokenSet,
     telemetryAuthTokenTail,

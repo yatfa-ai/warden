@@ -28,33 +28,13 @@
 
 import { randomUUID } from 'node:crypto';
 
-const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Bounded retry cap — mirrors llm.js's `for (attempt < 3)`. A down receiver never
-// loops or blocks the app: after MAX_ATTEMPTS transient failures the batch is
-// dropped, not retried forever.
-const MAX_ATTEMPTS = 3;
-
-// A response status is transient (retryable) when it is a rate-limit (429) or a
-// server error (5xx). 4xx (other than 429) is permanent for this payload — the
-// body is already schema-valid/redacted upstream, so retrying the identical body
-// cannot fix a 400/401/404/422, and we fail fast rather than burn attempts.
-function isTransientStatus(status) {
-  return status === 429 || (status >= 500 && status <= 599);
-}
-
-// Jittered exponential backoff: base doubles per attempt, then +/-25% jitter so a
-// fleet of clients retrying a down receiver do not thunder-herd in lockstep. The
-// jitter is bounded and non-deterministic by design — tests inject a sleepImpl
-// recorder and assert that backoff WAS slept (and how many times), never its exact
-// ms, so Math.random here does not make the suite flaky.
-function backoffMs(attempt) {
-  const base = 200 * 2 ** attempt; // attempt 0 → 200, 1 → 400, 2 → 800 …
-  const jitter = base * 0.25 * (Math.random() * 2 - 1); // +/-25% of base
-  return Math.max(0, Math.round(base + jitter));
-}
-
-const noopLog = () => {};
+// Bounded-retry policy (cap, transient-status predicate, jittered backoff) and
+// the two injectable defaults live in the shared src/retry.js leaf — the same
+// primitives src/notify.js uses. Only the RETRY LOOP below is local to this
+// module: the live consent re-check (WARDEN-585), the 415 schema-drift
+// circuit-break (WARDEN-631) and the `replayable` exhaustion result (WARDEN-671)
+// are this transport's alone and are deliberately not shared.
+import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog } from './retry.js';
 
 // Build the wire payload for a batch — the pure, network-free seam. Split out so
 // the header/body contract (schema-version handshake + JSON body of the events) is

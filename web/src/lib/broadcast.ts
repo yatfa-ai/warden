@@ -1,7 +1,9 @@
 // Pure helpers for the multi-select broadcast-send feature (WARDEN-292).
 //
-// The fan-out itself (Promise.allSettled over /api/send per selected agent) lives
-// in the ChatSidebar component because it touches fetch + toast + selection state.
+// The request loop (one POST /api/send per selected agent) is the shared
+// runFanout in ./fanout (WARDEN-974) — the same loop batch Kill and batch
+// Interrupt use. ChatSidebar calls it and keeps only its view concerns (toast,
+// selection clear); the loop is no longer re-typed in the component.
 // These helpers are the TESTABLE pure seam: reducing the allSettled outcomes into
 // a per-agent summary, and shaping the result toast line. Extracted so the fiddly
 // sent/failed accounting and the failure-list copy have real tests instead of
@@ -11,7 +13,7 @@
 // transpile-to-temp-`.mjs` + dynamic-`import()` harness (see broadcast.test.mjs),
 // matching chatDisplay.test.mjs / gitStateSummary.test.mjs.
 
-import { summarizeFanout } from './fanout';
+import { formatFanoutToast, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/send: either ok, or not-ok with a reason. */
 export interface SendOutcome { ok: boolean; error?: string }
@@ -52,14 +54,14 @@ export function summarizeBroadcast(
   return { total, sent: succeeded, failed };
 }
 
-/** Toast variant for a broadcast summary — success only when every agent got it. */
-export type BroadcastToastVariant = 'success' | 'error';
+/**
+ * Toast variant / shape for a broadcast summary. Both alias the shared fan-out
+ * types (./fanout) — see kill.ts for the rationale. The names are kept as
+ * exported aliases so existing importers are unaffected.
+ */
+export type BroadcastToastVariant = FanoutToastVariant;
 
-export interface BroadcastToast {
-  title: string;
-  description?: string;
-  variant: BroadcastToastVariant;
-}
+export type BroadcastToast = FanoutToast;
 
 /**
  * Shape the result toast for a broadcast summary.
@@ -68,25 +70,18 @@ export interface BroadcastToast {
  * - Some/total failure → an error whose title carries the N/M tally and whose
  *   description lists each failed agent with its reason (so the human can see
  *   WHICH sessions didn't get the message and why — host unreachable, session
- *   dead, etc.). The description is the full failure list (not truncated): the
- *   sidebar's own selection caps it at a human-scale N, and sonner wraps a long
- *   description in a scrollable toast body.
+ *   dead, etc.).
+ *
+ * The three-branch shape itself is the shared formatFanoutToast (./fanout,
+ * WARDEN-1034); only the broadcast COPY lives here. Broadcast is the reason the
+ * failure phrase is passed as its OWN opaque unit: it succeeds with "Sent to"
+ * but fails with "Failed to reach" — no object — so no verb+object
+ * reconstruction can produce both. `sent` is mapped onto the shared `succeeded`
+ * field; the public BroadcastSummary shape is unchanged.
  */
 export function formatBroadcastToast(s: BroadcastSummary): BroadcastToast {
-  if (s.failed.length === 0) {
-    return { title: `Sent to ${s.sent} agent${s.sent === 1 ? '' : 's'}`, variant: 'success' };
-  }
-  const list = s.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
-  if (s.sent === 0) {
-    return {
-      title: `Failed to reach ${s.failed.length} of ${s.total} agent${s.total === 1 ? '' : 's'}`,
-      description: list,
-      variant: 'error',
-    };
-  }
-  return {
-    title: `Sent to ${s.sent} of ${s.total} agents — ${s.failed.length} failed`,
-    description: list,
-    variant: 'error',
-  };
+  return formatFanoutToast(
+    { total: s.total, succeeded: s.sent, failed: s.failed },
+    { success: 'Sent to', failure: 'Failed to reach' },
+  );
 }

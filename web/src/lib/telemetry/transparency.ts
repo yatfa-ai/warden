@@ -4,26 +4,36 @@
 // PURPOSE — make the redaction guarantee INSPECTABLE. This is the roadmap's
 // literal success measure: "trust made verifiable — a user who opts in can
 // confirm, by inspecting what the client actually transmits, that it matches
-// exactly what consent described." `describeCollection` catalogs exactly what
-// each consent tier collects; `previewPayload` shows the EXACT redacted +
-// validated payload the pipeline would transmit for any candidate event. Today
-// verifiability has zero coverage — this slice closes that gap. (Revocability
-// is covered in-flight by slice 3, WARDEN-461; verifiability is this slice.)
+// exactly what consent described." `describeCollection` catalogs exactly what a
+// given PER-CATEGORY consent state collects; `previewPayload` shows the EXACT
+// redacted + validated payload the pipeline would transmit for any candidate
+// event.
 //
-// PURE + ZERO-RUNTIME-DEPENDENCY beyond `./redact`. The ONLY runtime import is
-// `./redact` (the shipped slice-2 redactor + its field-name sets); `ConsentTier`
-// arrives via `import type` and is erased by the Vite OXC transform, so — exactly
-// like redact.ts — the emitted module loads standalone under `node --test` once
-// its single `./redact` sibling is resolvable. See web/telemetry-transparency
-// .test.mjs, which mirrors the OXC-transform harness but transforms BOTH files
-// into the same tmpDir so the relative `./redact` resolves.
+// WARDEN-1116 — this surface is now CATEGORY-KEYED, not tier-keyed. It describes
+// collection PER CATEGORY and tells the truth for ANY combination the user picks,
+// including combinations the old three-value tier could not express (e.g. names
+// on with nothing collecting: honestly reported as "nothing is sent" because a
+// decorating category has no event to ride on). A new category appears in the
+// catalog automatically — it is read from the registry, not enumerated here.
+//
+// PURE. Its runtime imports are `./redact` (the shipped redactor + its field-name
+// sets) and `./consent` (the single consent authority). See
+// web/telemetry-transparency.test.mjs, which transforms all three files into the
+// same tmpDir so the relative specifiers resolve.
 //
 // NOT a Settings UI (slice 1, WARDEN-457, owns that surface) and NOT transport
 // (slice 3) or pipeline assembly (slice 5). This module only READS `redact` and
 // the base-event contract; it changes no invariant and relaxes no gate.
 
-import type { ConsentTier } from './redact';
-import { redact, CONTENT_FIELDS, IDENTIFIER_FIELDS } from './redact';
+import type { TelemetryCategory, TelemetryConsent } from './consent';
+import {
+  GATED_FIELD_CATEGORY,
+  TELEMETRY_CATEGORIES,
+  collectsEvents,
+  enabledCategories,
+  normalizeConsent,
+} from './consent';
+import { redact, CONTENT_FIELDS } from './redact';
 
 // ---------------------------------------------------------------------------
 // LOCAL base-event contract (decision B — do NOT import electron/telemetry-source
@@ -51,7 +61,8 @@ const RUNTIME_VALUES: ReadonlySet<string> = new Set(['main', 'renderer']);
  * the builders in telemetry-source.cjs:153-197 + the appVersion attach at
  * :182-184 + the platform attach at :195-197). These are the fields
  * `describeCollection` advertises per type — none are content and none are
- * chat/session identifiers, so they are collected at every collecting tier.
+ * chat/session identifiers, so they are collected whenever the `incidents`
+ * category is on.
  * `exitCode?` is conditional (present only when the crash reports one).
  * `appVersion?` and `platform?` are OPTIONAL (a source that cannot read the
  * value omits the field; a v3 event without it still validates) — and unlike
@@ -60,7 +71,7 @@ const RUNTIME_VALUES: ReadonlySet<string> = new Set(['main', 'renderer']);
  * and `platform?` is a non-identifying OS LABEL (darwin/win32/linux) identical
  * for millions of users on an OS. Both are carried so a maintainer can attribute
  * event volume to a release / OS. They are disclosed here precisely BECAUSE the
- * panel's contract is to list every field a tier collects — omitting a newly-
+ * panel's contract is to list every field a category collects — omitting a newly-
  * collected field would be a lie of omission even when (as here) the data is
  * benign. See schema.ts:84-97.
  */
@@ -156,46 +167,105 @@ export interface EventTypeCollection {
   readonly fields: readonly string[];
 }
 
-/** A deterministic catalog of exactly what a consent tier collects. */
-export interface TierCollection {
-  /** The tier this catalog describes. */
-  readonly tier: ConsentTier;
-  /** Whether ANY base events are collected (true only for `'base'` / `'extended'`). */
-  readonly collectsBaseEvents: boolean;
-  /** Whether chat/session-name identifiers are collected (true only for `'extended'`). */
-  readonly collectsIdentifiers: boolean;
-  /** The anonymous base-event types + their fields (empty unless base events are collected). */
+/** What ONE consent category means, and whether the user has it on. */
+export interface CategoryCollection {
+  /** The category's stable id (registry order is preserved). */
+  readonly id: TelemetryCategory;
+  /** Settings label for the category. */
+  readonly label: string;
+  /** Honest one-sentence description of what this category collects. */
+  readonly summary: string;
+  /** `'collecting'` (produces events) or `'decorating'` (only adds fields). */
+  readonly role: 'collecting' | 'decorating';
+  /** Whether the user currently has this category enabled. */
+  readonly enabled: boolean;
+  /** Event types this category produces + their anonymous fields (may be empty). */
   readonly eventTypes: readonly EventTypeCollection[];
-  /** Chat/session-name identifier field names collected at this tier (empty unless `'extended'`). */
-  readonly identifierFields: readonly string[];
-  /** Content/prompt field names that are HARD-EXCLUDED at every tier (never collected). */
+  /** Payload field names this category retains when enabled (may be empty). */
+  readonly fields: readonly string[];
+  /**
+   * True when this category is ENABLED but contributes nothing, because it only
+   * decorates events and no collecting category is on. The honest reading of
+   * "names on, incidents off": the switch is on and it still sends nothing.
+   */
+  readonly inert: boolean;
+}
+
+/** A deterministic catalog of exactly what a consent STATE collects. */
+export interface ConsentCollection {
+  /** The normalized consent state this catalog describes. */
+  readonly consent: TelemetryConsent;
+  /** Every category, in registry order, with its enabled/inert state. */
+  readonly categories: readonly CategoryCollection[];
+  /** The enabled category ids, in registry order. */
+  readonly enabled: readonly TelemetryCategory[];
+  /** Whether ANY event is produced (true iff a COLLECTING category is on). */
+  readonly collectsAnything: boolean;
+  /** The base-event types actually collected under this consent state. */
+  readonly eventTypes: readonly EventTypeCollection[];
+  /** Payload field names retained under this consent state (beyond the anonymous ones). */
+  readonly retainedFields: readonly string[];
+  /** Content/prompt field names HARD-EXCLUDED always — no category can enable them. */
   readonly hardExcludedContent: readonly string[];
 }
 
-/** A tier collects anonymous base events iff it is `'base'` or `'extended'`. */
-function tierCollectsBaseEvents(tier: unknown): boolean {
-  return tier === 'base' || tier === 'extended';
-}
-
 /**
- * A deterministic, structured catalog of EXACTLY what is collected at `tier`:
- * each base-event type with its anonymous fields, PLUS (at `'extended'` only) the
- * chat/session-name identifier fields. Content/prompt fields are listed as
- * hard-excluded at every tier (derived from `CONTENT_FIELDS`). Any unrecognized
- * / `'off'` / undefined tier yields the most-redacted catalog (nothing
- * collected). Pure: the same tier always returns an equal catalog.
+ * A deterministic, structured catalog of EXACTLY what `consent` collects: every
+ * category with its enabled state, the event types actually produced, and the
+ * fields actually retained. Content/prompt fields are listed as hard-excluded
+ * always (derived from `CONTENT_FIELDS`).
+ *
+ * Truthful for EVERY combination, including ones the old tier could not express:
+ *  - nothing on            → collectsAnything false, no event types, no fields.
+ *  - incidents on          → the three anonymous event types, no identifiers.
+ *  - names on, nothing else→ collectsAnything false and the `names` category is
+ *                            flagged `inert` — enabled, but there is no event for
+ *                            a name to ride on, so nothing is sent.
+ *  - incidents + names     → the three event types, plus the name fields.
+ *
+ * A missing / malformed / unrecognized consent value normalizes to nothing
+ * enabled, so the catalog is the most-redacted one. Pure: the same consent state
+ * always returns an equal catalog.
  */
-export function describeCollection(tier: ConsentTier): TierCollection {
-  const collectsBase = tierCollectsBaseEvents(tier);
-  const collectsNames = tier === 'extended';
+export function describeCollection(consent: unknown): ConsentCollection {
+  const resolved = normalizeConsent(consent);
+  const collects = collectsEvents(resolved);
+  const categories: CategoryCollection[] = TELEMETRY_CATEGORIES.map((c) => {
+    const enabled = resolved[c.id] === true;
+    return {
+      id: c.id,
+      label: c.label,
+      summary: c.summary,
+      role: c.role,
+      enabled,
+      eventTypes: c.eventTypes.map((type) => ({
+        type,
+        fields: (BASE_EVENT_FIELDS[type] ?? []).slice(),
+      })),
+      fields: c.gatedFields.slice(),
+      inert: enabled && c.role === 'decorating' && !collects,
+    };
+  });
+  const eventTypes: EventTypeCollection[] = [];
+  const retained: string[] = [];
+  for (const c of categories) {
+    if (!c.enabled) continue;
+    for (const et of c.eventTypes) {
+      if (!eventTypes.some((e) => e.type === et.type)) eventTypes.push(et);
+    }
+    // A decorating category retains nothing while nothing is collected — with no
+    // event, there is no field to retain. Reporting its fields anyway would be
+    // the exact "the toggle looks wired" lie this surface exists to prevent.
+    if (c.role === 'decorating' && !collects) continue;
+    for (const f of c.fields) if (!retained.includes(f)) retained.push(f);
+  }
   return {
-    tier,
-    collectsBaseEvents: collectsBase,
-    collectsIdentifiers: collectsNames,
-    eventTypes: collectsBase
-      ? BASE_EVENT_TYPES.map((type) => ({ type, fields: BASE_EVENT_FIELDS[type].slice() }))
-      : [],
-    identifierFields: collectsNames ? Array.from(IDENTIFIER_FIELDS) : [],
+    consent: resolved,
+    categories,
+    enabled: enabledCategories(resolved),
+    collectsAnything: collects,
+    eventTypes,
+    retainedFields: retained,
     hardExcludedContent: Array.from(CONTENT_FIELDS),
   };
 }
@@ -206,9 +276,9 @@ export function describeCollection(tier: ConsentTier): TierCollection {
 
 /** The kind of transformation redaction applied at a field. */
 export type ChangeKind =
-  | 'dropped-content' // a content/prompt field, dropped wholesale (every tier)
-  | 'dropped-identifier' // a chat/session-name, dropped (base / off / unknown)
-  | 'retained-identifier' // a chat/session-name, kept (extended only)
+  | 'dropped-content' // a content/prompt field, dropped wholesale (always)
+  | 'dropped-identifier' // a category-gated field, dropped (its category is off)
+  | 'retained-identifier' // a category-gated field, kept (its category is on)
   | 'redacted'; // a string value had one+ [REDACTED:…] substitutions inserted
 
 /** A single enumerated change redaction made to the candidate event. */
@@ -220,16 +290,24 @@ export interface PreviewChange {
   readonly category?: string;
   /** For `kind === 'redacted'`: how many substitutions of `category` were made at this path. */
   readonly count?: number;
+  /** For a dropped/retained gated field: the CONSENT category that gates it. */
+  readonly gate?: TelemetryCategory;
 }
 
 /** The result of previewing a candidate event through the redaction + validity pipeline. */
 export interface PreviewResult {
-  /** The tier used for this preview. */
-  readonly tier: ConsentTier;
-  /** `redact(rawEvent, { tier })` — the EXACT post-redaction, pre-transport output. */
+  /** The normalized consent state used for this preview. */
+  readonly consent: TelemetryConsent;
+  /** `redact(rawEvent, { consent })` — the EXACT post-redaction, pre-transport output. */
   readonly payload: unknown;
   /** Whether `payload` conforms to the base-event schema (the local isValidBaseEvent proof). */
   readonly valid: boolean;
+  /**
+   * Whether this payload would actually be SENT. A schema-valid payload is still
+   * transmitted only when a COLLECTING category is on — so a names-only consent
+   * previews as "valid, but nothing is sent", which is the truth.
+   */
+  readonly transmitted: boolean;
   /** Enumerated diff of what redaction did (dropped fields + [REDACTED:…] substitutions). */
   readonly changes: readonly PreviewChange[];
 }
@@ -259,7 +337,7 @@ function placeholderCategories(redactedStr: string): Map<string, number> {
 function collectChanges(
   raw: unknown,
   redactedValue: unknown,
-  tier: ConsentTier,
+  consent: TelemetryConsent,
   path: string,
   out: PreviewChange[],
 ): void {
@@ -279,14 +357,16 @@ function collectChanges(
   if (Array.isArray(raw)) {
     if (!Array.isArray(redactedValue)) return;
     for (let i = 0; i < raw.length; i++) {
-      collectChanges(raw[i], redactedValue[i], tier, `${path}[${i}]`, out);
+      collectChanges(raw[i], redactedValue[i], consent, `${path}[${i}]`, out);
     }
     return;
   }
 
   // Object: classify each key the same way redact()'s scrubValue does, then
-  // recurse into retained values. Content keys are dropped at every tier;
-  // identifier keys are dropped (base/off/unknown) or retained (extended).
+  // recurse into retained values. Content keys are dropped always; a
+  // category-gated key is dropped or retained by ITS category's consent — the
+  // same GATED_FIELD_CATEGORY lookup the redactor performs, so a new category's
+  // fields are enumerated here without this function changing.
   if (typeof raw === 'object') {
     if (!redactedValue || typeof redactedValue !== 'object') return;
     const red = redactedValue as Record<string, unknown>;
@@ -298,17 +378,18 @@ function collectChanges(
         out.push({ kind: 'dropped-content', path: childPath });
         continue;
       }
-      if (IDENTIFIER_FIELDS.has(lower)) {
-        if (tier === 'extended') {
-          out.push({ kind: 'retained-identifier', path: childPath });
+      const gate = GATED_FIELD_CATEGORY.get(lower);
+      if (gate !== undefined) {
+        if (consent[gate] === true) {
+          out.push({ kind: 'retained-identifier', path: childPath, gate });
           // Kept, but still scrubbed for embedded secrets — surface those too.
-          collectChanges(v, red[key], tier, childPath, out);
+          collectChanges(v, red[key], consent, childPath, out);
         } else {
-          out.push({ kind: 'dropped-identifier', path: childPath });
+          out.push({ kind: 'dropped-identifier', path: childPath, gate });
         }
         continue;
       }
-      collectChanges(v, red[key], tier, childPath, out);
+      collectChanges(v, red[key], consent, childPath, out);
     }
   }
   // number / boolean / bigint / function — redact() passes these through; no
@@ -317,25 +398,31 @@ function collectChanges(
 
 /**
  * Previews the EXACT redacted + validated payload the pipeline would transmit for
- * `rawEvent` at `tier`:
- *  - `payload` = `redact(rawEvent, { tier })` (redact.ts:127) — the exact
- *    post-redaction, pre-transport output (a fresh copy; the input is untouched).
- *  - `valid`   = whether `payload` conforms to the base-event schema (the local
- *    isValidBaseEvent proof, mirroring telemetry-source.cjs:212-244).
- *  - `changes` = an enumerated diff of what redaction did: dropped content/prompt
- *    fields, dropped/retained identifier fields, and each [REDACTED:…]
- *    substitution.
+ * `rawEvent` under `consent`:
+ *  - `payload`     = `redact(rawEvent, { consent })` — the exact post-redaction,
+ *    pre-transport output (a fresh copy; the input is untouched).
+ *  - `valid`       = whether `payload` conforms to the base-event schema (the
+ *    local isValidBaseEvent proof, mirroring telemetry-source.cjs).
+ *  - `transmitted` = whether the pipeline would actually send it (a COLLECTING
+ *    category must be on). A decorating-only consent previews as valid but not
+ *    transmitted — the honest answer, not a comforting one.
+ *  - `changes`     = an enumerated diff of what redaction did: dropped
+ *    content/prompt fields, dropped/retained category-gated fields (each tagged
+ *    with the category that gates it), and each [REDACTED:…] substitution.
  *
- * Pure + non-mutating (mirrors redact's defensive-copy guarantee, redact.ts:268).
+ * Pure + non-mutating (mirrors redact's defensive-copy guarantee).
  */
-export function previewPayload(rawEvent: unknown, tier: ConsentTier): PreviewResult {
-  const payload = redact(rawEvent, { tier });
+export function previewPayload(rawEvent: unknown, consent: unknown): PreviewResult {
+  const resolved = normalizeConsent(consent);
+  const payload = redact(rawEvent, { consent: resolved });
   const changes: PreviewChange[] = [];
-  collectChanges(rawEvent, payload, tier, '', changes);
+  collectChanges(rawEvent, payload, resolved, '', changes);
+  const valid = isValidBaseEvent(payload);
   return {
-    tier,
+    consent: resolved,
     payload,
-    valid: isValidBaseEvent(payload),
+    valid,
+    transmitted: valid && collectsEvents(resolved),
     changes,
   };
 }

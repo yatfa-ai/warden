@@ -1,49 +1,42 @@
-// useFleetGitStatus — the lifted hook behind Fleet Health's missing repository-state
-// axis (WARDEN-766). Fans /api/git-status across every active project agent (the SAME
-// eligible fleet FleetRecentCommits / FleetCommitSearch fan over) and returns a
-// per-agent { clean, diffstat } map + a fleet-wide dirty count + an honest error
-// count — so HealthDashboard can surface, per agent, whether it has uncommitted WIP
-// and its magnitude (±N via DiffStatChip), plus a "N dirty" count in the summary bar,
-// WITHOUT leaving the fleet view for the sidebar's per-pane gitStatus.
+// useFleetGitStatus — the lifted hook behind Fleet Health's repository-state axis
+// (WARDEN-766). Fans /api/git-status across every active project agent (the SAME
+// eligible fleet FleetRecentCommits fans over) and returns a per-agent
+// { clean, diffstat, ... } map + fleet-wide dirty/conflict/behind/ahead/stalled/
+// stashed counts + an honest error count.
 //
-// Mirrors useHostStatuses / useActivitySeries: a "fleet-wide fan-out lifted into a
-// hook consumed by HealthDashboard" — the established pattern for cross-fleet data the
-// dashboard needs in more than one place (here: a per-row chip inside renderAgent's
-// scope AND a fleet summary count). A sibling self-contained panel like
-// FleetRecentCommits can't reach into each row, so the fetch must live here at the
-// HealthDashboard level (or a hook it calls); this hook delivers both the per-row map
-// and the summary count for the same one fan-out cost.
+// WARDEN-1211: the fan no longer issues PRIVATE fetches. Each leg is a TanStack
+// Query over the SHARED cache key `['git-status', key]` (the same key the
+// sidebar's focused-pane read uses), so a fact fetched by either surface is
+// served to both — the two surfaces can no longer disagree about one agent.
+// One fetch, not two, for an agent held by both.
 //
-// Refresh discipline (mirrors FleetRecentCommits.tsx VERBATIM — WARDEN-766's stated
-// approach): fetch-on-mount + a MANUAL refresh() (bumps refreshTick). NO setInterval,
-// NO auto-poll — this slice's N-fetch fan-out is paid on demand, never on a steady
-// cadence (WARDEN-668's Page-Visibility Poller Gate cost discipline: don't burn
-// SSH/docker-exec in a backgrounded tab). Achieved via an `eligibleKey` membership
-// signature in the effect deps, NOT via a non-existent `useVisiblePoller` (the
-// proposal's `useVisiblePoller` does not exist — visibility-gating is inline per-hook,
-// and FleetRecentCommits achieves no-auto-poll without any visibility gate at all).
+// Refresh discipline (UNCHANGED): fetch-on-mount + a MANUAL refresh() (bumps an
+// invalidation of every git-status key). NO setInterval, NO auto-poll — every
+// query runs staleTime: Infinity with all refetch triggers off, so the N-fetch
+// fan is paid ONLY when a key first enters the fleet, on a real membership
+// change (new keys mount-fetch), or on the manual ↻. The 10s /api/health tick
+// reallocates the agents array but changes no cache key, so it fires nothing.
 //
-// The effect keys on `eligibleKey` (a primitive membership signature) + `refreshTick`
-// — NOT on the `agents` array, whose reference churns every ~10s with healthData
-// (HealthDashboard polls /api/health on a 10s setInterval and setHealthData()s a fresh
-// res.json() each tick). Depending on the churned array would refire N /api/git-status
-// fetches every 10s — the exact silent auto-poll this slice forbids. The freshest
-// fleet is read from a useRef at fire time.
-//
-// The pure aggregation (buildFleetGitStatus + buildFleetGitStatusUrl + the shared
-// fleetCommitSearchEligible gate) lives in @/lib/gitStateSummary (unit-tested without
-// React, mirroring mergeFleetCommitsByEpoch / buildFleetRecentCommitsUrl); this file
-// owns only the fan-out + the WARDEN-89 false-empty guard.
+// The pure aggregation (buildFleetGitStatus + fleetCommitSearchEligible + the
+// shared fetcher/slice seam) lives in @/lib/gitStateSummary and
+// @/lib/gitStatusQuery (unit-tested without React); this file owns only the
+// fan-out + result assembly.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo } from 'react';
+import { useQueries } from '@tanstack/react-query';
 import type { Chat } from '@/lib/types';
 import {
   fleetCommitSearchEligible,
   buildFleetGitStatus,
-  buildFleetGitStatusUrl,
   type FleetGitStatusResult,
   type FleetGitStatusSlice,
 } from '@/lib/gitStateSummary';
+import {
+  fetchGitStatusPayload,
+  gitStatusQueryKey,
+  toFleetSlice,
+} from '@/lib/gitStatusQuery';
+import { GIT_STATUS_QUERY_OPTIONS, useInvalidateAllGitStatus, useLogGitStatusErrors } from '@/lib/gitStatusHooks';
 
 export interface FleetGitStatusState extends FleetGitStatusResult {
   /** # of fanned agents with status.clean === false (the fleet "N dirty" count). */
@@ -66,189 +59,62 @@ export interface FleetGitStatusState extends FleetGitStatusResult {
   loading: boolean;
 }
 
-const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0, stalledCount: 0, stashedCount: 0 };
-
 /**
  * Fan /api/git-status across the eligible fleet and lift the result for
- * HealthDashboard. Pass `healthData?.agents ?? []` from HealthDashboard so the hook
- * no-ops cleanly before the first /api/health response lands (an empty eligible fleet
- * resolves immediately to an empty result rather than spinning loading forever).
+ * HealthDashboard. Pass `healthData?.agents ?? []` so the hook no-ops cleanly
+ * before the first /api/health response lands.
  */
 export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState {
   // The eligible fleet: active project agents, keyed & deduped by key || id, in
-  // catalog order. Memoized on `agents` — a CHEAP filter, fine to recompute. This
-  // GATES on `project` (reused from FleetRecentCommits / FleetCommitSearch for
-  // consistency with the sibling fleet fans): an agent with a cwd but no `project`
-  // is NOT fanned. Acceptable for v1 — matches those siblings, and the WARDEN-89
-  // errorCount discipline below already surfaces any no-cwd miss honestly.
+  // catalog order — the SAME gate the sibling fleet fans use.
   const eligible = useMemo(() => fleetCommitSearchEligible(agents), [agents]);
-  // A primitive SIGNATURE of the eligible fleet (the joined agent keys). A string is
-  // value-compared in the effect's deps, so it is identical across the 10s healthData
-  // array churn and changes ONLY when the actual member SET changes (a key
-  // added/removed/replaced). `fleetCommitSearchEligible` already dedupes by key, so
-  // the key list IS the fleet identity — this is what the fetch effect depends on,
-  // NOT the churned array reference. Mirrors FleetRecentCommits' eligibleKey verbatim.
-  const eligibleKey = eligible.map((a) => a.key).join('\n');
-  // Hand the effect the FRESHEST eligible fleet without putting that churned array
-  // reference in the deps: the effect dereferences this ref at fire time. (Reading
-  // `eligible` straight from the effect closure would also work — same membership
-  // between signature-unchanged renders — but the ref is unambiguously current and
-  // survives any future re-render mid-fan-out.) Mirrors FleetRecentCommits' eligibleRef.
-  const eligibleRef = useRef(eligible);
-  eligibleRef.current = eligible;
+  const keys = useMemo(() => eligible.map((a) => a.key), [eligible]);
 
-  const [result, setResult] = useState<FleetGitStatusResult>(EMPTY_RESULT);
-  const [loading, setLoading] = useState(false);
-  // Bumped by the manual refresh() to force a refetch (fetch-on-mount otherwise).
-  const [refreshTick, setRefreshTick] = useState(0);
+  // One SHARED-cache query per eligible agent (WARDEN-1211). New keys (mount or
+  // membership change) fetch because they have no cached entry; existing keys
+  // with data never refetch here — only an explicit invalidation (the manual ↻,
+  // or the sidebar's catalog-cadence invalidation of ITS focused key) refetches
+  // them. The array identity churn of `agents` is irrelevant: useQueries keys on
+  // the key LIST, value-compared.
+  const queries = useQueries({
+    queries: keys.map((key) => ({
+      queryKey: gitStatusQueryKey(key),
+      queryFn: () => fetchGitStatusPayload(key),
+      ...GIT_STATUS_QUERY_OPTIONS,
+    })),
+  });
 
-  const refresh = useCallback(() => setRefreshTick((t) => t + 1), []);
+  useLogGitStatusErrors(queries, keys);
 
-  // Fetch-on-mount + manual refresh. NO auto-poll: this view's N-fetch fan-out is
-  // paid on demand, never on a steady cadence. The effect keys on `eligibleKey` (a
-  // primitive signature of fleet membership) + `refreshTick` (the manual ↻) — NOT on
-  // the `eligible` array, whose reference churns every ~10s with healthData. So it
-  // fires ONLY on mount, on a real membership change (a key added/removed), or on a
-  // manual refresh — never on the 10s health tick. The freshest eligible fleet is
-  // read from `eligibleRef` at fire time so the fan-out always iterates the current
-  // fleet. Mirrors FleetRecentCommits.tsx's fetch effect discipline verbatim.
-  useEffect(() => {
-    const cur = eligibleRef.current;
-    // No eligible agents → resolve immediately to an empty result rather than spinning
-    // the loading state forever (e.g. a fleet with no active project chats, or before
-    // the first /api/health response lands an empty agents list).
-    if (cur.length === 0) {
-      setResult(EMPTY_RESULT);
-      setLoading(false);
-      return;
+  const refresh = useInvalidateAllGitStatus();
+  const loading = queries.some((q) => q.isFetching);
+
+  // Assemble outcomes in catalog order: a settled error → that agent's honest
+  // error outcome; settled data → the Fleet slice via the shared coercion; a
+  // still-pending first fetch contributes NO outcome yet (loading covers it) —
+  // it is neither a status nor an error until it lands.
+  const result = useMemo(() => {
+    if (keys.length === 0) {
+      return buildFleetGitStatus([] as { ok: false; key: string }[], Date.now());
     }
-    setLoading(true);
-    let cancelled = false;
-    (async () => {
-      // Promise.allSettled (the fleet convention — ChatSidebar's handleBroadcast /
-      // handleKillSelected + FleetRecentCommits / FleetCommitSearch): one unreachable
-      // / non-git agent never rejects the whole; a per-agent failure is counted and
-      // surfaced as an honest "· N unreachable" note (WARDEN-89 — never let a failure
-      // masquerade as a clean/empty status). One fetch per agent (N, not 2N —
-      // /api/git-status is a single-shot probe with no outgoing join).
-      const settled = await Promise.allSettled(
-        cur.map(async ({ key }) => {
-          const r = await fetch(buildFleetGitStatusUrl(key));
-          // WARDEN-89 false-empty guard: fetch() resolves (does NOT reject) on a
-          // 4xx/5xx, AND /api/git-status returns transport/no-cwd errors as HTTP-200
-          // with an `error` body (gitRoutes.js's withGitRepo wrapper spreads
-          // `{ ...defaults, error }`). Gate on BOTH `r.ok` AND `!j.error` so an
-          // unreachable / non-git agent is counted as that agent's error, NEVER read
-          // as a false clean/empty status. Throwing here routes the agent to its
-          // ok:false outcome via the allSettled rejection below.
-          if (!r.ok) throw new Error(`git-status HTTP ${r.status}`);
-          const j = await r.json();
-          if (j.error) throw new Error(`git-status error: ${j.error}`);
-          // Carry the slice the UI reads. clean is boolean | null (null for a non-git
-          // / no-branch cwd — the server gates `clean: branch ? clean : null`); the
-          // `typeof === 'boolean'` coerce keeps null as null (typeof null === 'object'),
-          // so an unknown-state agent is neither dirty nor clean. diffstat is
-          // { files, insertions, deletions } | null (null for clean / non-git /
-          // all-untracked); `?? null` coerces an absent field to null. ahead (WARDEN-822)
-          // is the # of unpushed commits, a top-level number the server ALREADY serves
-          // (`ahead: branch ? ahead : null`, parsed from one `git rev-list --left-right
-          // --count @{u}...HEAD` — RIGHT count = HEAD has, upstream doesn't = unpushed);
-          // the `typeof === 'number'` coerce keeps null as null (null for a non-git /
-          // detached / no-upstream cwd, 0 for in-sync) — the SAME null-is-quiet discipline
-          // clean follows. This is the PER-AGENT commit count (drives the per-row ↑N's
-          // magnitude); the fleet-wide count of stranded AGENTS is derived in
-          // buildFleetGitStatus from `ahead > 0`. conflictCount
-          // (WARDEN-796) is the # of unmerged PATHS, derived from the SAME response's
-          // porcelain `files[]` (each row already tagged `conflict: boolean` by
-          // gitStatus.js's parseGitStatusPorcelain) — the data ALREADY flows on this
-          // fetch; this stops discarding it. `j.files` is null for a clean / non-git
-          // cwd (the server default, gitRoutes.js:517), so the Array.isArray guard
-          // keeps the count 0 there. This is the PER-AGENT path count (drives the
-          // per-row ⚑'s "N unmerged"); the fleet-wide count of blocked AGENTS is
-          // derived in buildFleetGitStatus from `conflictCount > 0`.
-          const status: FleetGitStatusSlice = {
-            clean: typeof j.clean === 'boolean' ? j.clean : null,
-            diffstat: j.diffstat ?? null,
-            ahead: typeof j.ahead === 'number' ? j.ahead : null,
-            conflictCount: (Array.isArray(j.files) ? j.files : []).filter(
-              // Each porcelain row is tagged `conflict: boolean` by gitStatus.js
-              // (isConflictStatus on the unmerged DD/AU/UD/UA/DU/AA/UU codes). `=== true`
-              // (not truthy) defends against a malformed body; a present-but-falsy field
-              // is not a conflict.
-              (f: { conflict?: boolean } | null) => f?.conflict === true,
-            ).length,
-            // behind (WARDEN-815): the # of commits this agent's HEAD is behind its
-            // upstream — the staleness axis. A direct pass-through of /api/git-status's
-            // top-level `behind` (parseAheadBehind → gitRoutes.js:646), NOT derived like
-            // conflictCount. The `typeof === 'number'` coerce keeps null as null (typeof
-            // null === 'object') so a non-git / no-branch / no-upstream cwd reads null
-            // — the same null-is-quiet discipline `clean` follows. The fleet-wide count
-            // of stale AGENTS is derived in buildFleetGitStatus from `behind > 0`.
-            behind: typeof j.behind === 'number' ? j.behind : null,
-            // stashCount (WARDEN-871): the # of `git stash`-shelved WIP entries for this
-            // agent — the parked-WIP axis every state axis is blind to (porcelain status
-            // never surfaces stashes, so a stashed agent reads clean === true). A direct
-            // pass-through of /api/git-status's top-level `stashCount` (gitRoutes.js:654
-            // `stashCount: branch ? stashCount : null`, parsed from `git stash list` line
-            // count via parseStashCount in gitStatus.js), NOT derived. The `typeof ===
-            // 'number'` coerce keeps null as null (typeof null === 'object') so a non-git
-            // / no-branch cwd reads null — the same null-is-quiet discipline clean/ahead/
-            // behind follow. The fleet-wide count of parked-WIP AGENTS is derived in
-            // buildFleetGitStatus from `stashCount > 0`. This is the PER-AGENT magnitude
-            // (drives the per-row 🗄N chip's "N"); the fleet tally is stashedCount below.
-            stashCount: typeof j.stashCount === 'number' ? j.stashCount : null,
-            // headDate (WARDEN-847): the strict ISO-8601 last-commit time /api/git-status
-            // ALREADY serves top-level (gitRoutes.js:664 `headDate: branch ? headDate :
-            // null`, parsed from git `%cI` at gitStatus.js:200) — the sole RECENCY axis
-            // (dirty/conflict/behind/ahead are all state axes). A pure pass-through of one
-            // field — no new fetch, no backend change. The `typeof === 'string'` coerce
-            // keeps null as null (typeof null === 'object') so a non-git / no-branch cwd /
-            // a repo with no commits reads null — the same null-is-quiet discipline `clean`
-            // follows. headAgeMs + stalled are NOT derived here: they need a clock, and the
-            // pure module's discipline is to thread `now` into buildFleetGitStatus rather
-            // than read Date.now() inside it, so they are set to PROVISIONAL null/false
-            // here and enriched by buildFleetGitStatus(now) before the slice reaches
-            // statusByKey (the per-row 💤 chip reads the enriched statusByKey[id].stalled,
-            // never this provisional value). NOTE headDate is the PER-AGENT last-commit
-            // time (a future 💤 popover could rank oldest-first off the enriched headAgeMs);
-            // the fleet-wide count of stalled AGENTS is stalledCount below.
-            headDate: typeof j.headDate === 'string' ? j.headDate : null,
-            headAgeMs: null,  // provisional — enriched by buildFleetGitStatus(now)
-            stalled: false,   // provisional — enriched by buildFleetGitStatus(now)
-          };
-          return { ok: true as const, key, status };
-        }),
-      );
-      if (cancelled) return;
-      // Unwrap allSettled → outcomes in input (catalog) order; a rejected promise (a
-      // thrown !r.ok / j.error, or a bad-JSON throw) becomes that agent's error
-      // outcome, keyed from the same `cur` entry so it still carries its key.
-      const outcomes = settled.map((s, i) =>
-        s.status === 'fulfilled' ? s.value : { ok: false as const, key: cur[i].key },
-      );
-      // WARDEN-89: never swallow a per-agent failure silently — log with context so a
-      // network failure, a non-ok HTTP, or an HTTP-200 `error` body leaves a trace
-      // instead of a silent "clean." Mirrors FleetRecentCommits.tsx's warn loop.
-      for (const s of settled) {
-        if (s.status === 'rejected') console.warn('[fleet git-status] agent fetch failed:', s.reason);
-      }
-      // WARDEN-847: thread `now` into the pure aggregator so it derives each agent's
-      // headAgeMs + stalled against ONE clock (the verbatim mirror of
-      // summarizeProjectGitState(now)). Captured ONCE here at fan-out resolution time so
-      // every agent in this fan shares the same staleness reference (a per-agent Date.now()
-      // would drift by ms across the settled fetches — irrelevant at a 7d threshold, but a
-      // single clock is cleaner and matches the pure fn's single-now discipline).
-      setResult(buildFleetGitStatus(outcomes, Date.now()));
-      setLoading(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `eligibleKey` is the
-    // primitive membership signature (value-stable across the 10s healthData array
-    // churn); the fan-out reads the freshest fleet from `eligibleRef`, so `eligible`
-    // is intentionally NOT in deps — depending on the array would refire every 10s.
-  }, [eligibleKey, refreshTick]);
+    const outcomes = queries.map((q, i) =>
+      q.isError
+        ? { ok: false as const, key: keys[i] }
+        : q.data
+          ? { ok: true as const, key: keys[i], status: toFleetSlice(q.data) as FleetGitStatusSlice }
+          : null,
+    );
+    return buildFleetGitStatus(
+      outcomes.filter((o): o is { ok: true; key: string; status: FleetGitStatusSlice } | { ok: false; key: string } => o !== null),
+      Date.now(),
+    );
+    // `queries` identity changes per render; the outcome-relevant inputs are the
+    // per-key data/error/fetching statuses — the map+filter derives them, and
+    // Date.now() must be read at assembly time, so this memo is per-render-shape
+    // (cheap) rather than stable. Assembly is pure and fast; correctness over
+    // micro-stability.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queries, keys]);
 
   return { ...result, refresh, loading };
 }

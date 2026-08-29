@@ -28,6 +28,12 @@ export async function listSessions() {
   }
   for (const f of files) {
     if (!f.endsWith('.json')) continue;
+    // Legacy quarantine artifacts (WARDEN-1040): backups written by a pre-fix
+    // build kept the source `.json` extension, so this scanner re-read its own
+    // rescue file, failed to parse it, and backed it up again — doubling the
+    // directory on every request. New backups end in `.bak` and are already
+    // excluded above; this skip retires the ones sitting on disk from before.
+    if (f.includes('.corrupt-')) continue;
     // Defensive read per file: a corrupt session is backed up (WARDEN-831) and
     // skipped from the index rather than crashing the list.
     const j = await readJsonDefensive(path.join(DIR, f), { fallback: null });
@@ -49,10 +55,20 @@ export async function listSessions() {
 // observer-connection start — a bounded, sub-millisecond read that is NOT on a
 // hot/poll path and cannot re-stall /api/config (the WARDEN-828 spinner was caused
 // by large JSONL reads, now async). It is still DEFENSIVE: a corrupt session file
-// is backed up rather than silently swallowed. (If a future caller needs this on a
-// hot path, add an async twin instead of widening this one.)
+// is backed up rather than silently swallowed. Runtime/request paths use the async
+// twin below (WARDEN-1218) — do not widen this one onto them.
 export function getSession(id) {
   return readJsonDefensiveSync(jsonPath(id), { fallback: null });
+}
+
+// Async twin of getSession (WARDEN-1218): the same defensive single-session read
+// for the runtime/request paths — renameSession and saveMessages. Identical
+// semantics (fallback null, backup-on-corrupt) via readJsonDefensive; yields the
+// event loop instead of blocking it on the whole-session file read, so the cost
+// no longer grows with conversation length on the per-turn save. getSession stays
+// sync for the Observer constructor's start-up read, which cannot await.
+export async function getSessionAsync(id) {
+  return readJsonDefensive(jsonPath(id), { fallback: null });
 }
 
 export async function createSession(name, { host, container, project, role, chatKey } = {}) {
@@ -73,7 +89,7 @@ export async function createSession(name, { host, container, project, role, chat
 }
 
 export async function renameSession(id, name) {
-  const s = await getSession(id);
+  const s = await getSessionAsync(id);
   if (!s) return null;
   s.name = name;
   s.updatedAt = Date.now();
@@ -81,7 +97,13 @@ export async function renameSession(id, name) {
   // Rename the md heading too (best-effort — a missing/unreadable md is ignored).
   try {
     const md = await fs.promises.readFile(mdPath(id), 'utf8');
-    await atomicWrite(mdPath(id), md.replace(/^# .*/m, `# ${name}`));
+    // The replacement MUST be a function, not a string: as a string, `$&`, `` $` ``,
+    // `$'` and `$<n>` in a user-supplied name are interpreted as replacement patterns
+    // rather than literal text. `$'` is the worst of them — it re-injects everything
+    // after the match, i.e. the whole transcript body, and since the read-back above
+    // returns the file this line writes, every rename would double it. A replacer function
+    // disables pattern interpretation entirely (WARDEN-1044).
+    await atomicWrite(mdPath(id), md.replace(/^# .*/m, () => `# ${name}`));
   } catch { /* md missing or unreadable — ignore */ }
   return s;
 }
@@ -93,7 +115,7 @@ export async function deleteSession(id) {
 
 // Persist the raw LLM message history (so a reconnect resumes the conversation).
 export async function saveMessages(id, messages, name) {
-  const prev = await getSession(id);
+  const prev = await getSessionAsync(id);
   const now = Date.now();
   const out = {
     id,

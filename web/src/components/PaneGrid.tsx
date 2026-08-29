@@ -27,6 +27,7 @@ import {
   PANE_COL_FLOOR_REM,
   PANE_ROW_FLOOR_REM,
 } from '@/lib/paneGrid';
+import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { resolveActingChat } from '@/lib/actingChat';
 import type { ThemeId } from '@/lib/theme';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
@@ -158,9 +159,15 @@ interface Props {
   // grid's own FileViewer — App owns the resolved value (the same one the catalog
   // poll uses), so Follow shares the dashboard cadence instead of hardcoding one.
   pollIntervalMs: number;
+  // WARDEN-909: drag a pane header onto ANOTHER pane tile in this grid to swap
+  // the two panes' positions. App owns the mutation (swapPanes over the active
+  // workspace's openPanes via the setOpenPanes shim); PaneGrid only reports the
+  // two pane IDS — never a visible index, which can be a subset (WARDEN-108).
+  // Must be a stable useCallback in App (handler-identity discipline).
+  onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, onReorderPanes }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -188,6 +195,58 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const [browseOpen, setBrowseOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
+
+  // --- Drag-to-reorder (WARDEN-909) ------------------------------------------
+  //
+  // The pane header is ALREADY an HTML5 drag source (PaneTile sets the pane id
+  // on PANE_DRAG_MIME) whose only drop targets were the workspace tabs. Here
+  // each tile becomes a second kind of drop target: dropping a pane on another
+  // pane SWAPS their positions. The two intents never collide — a drop lands on
+  // exactly one element, so a workspace tab still moves the pane to that
+  // workspace and a pane tile now reorders within this grid.
+  //
+  // Both pieces of drag state are PANE IDS, never indices. `visible` can be a
+  // strict subset of `tiles` (maximized → one tile), so an index would address
+  // the wrong element of openPanes — the WARDEN-108 trap. The highlight compares
+  // in that same id space, which is what keeps the affordance on the real target.
+  //
+  // `dragPaneId` is captured from the bubbling dragstart of the header inside
+  // this tile (drag events bubble), so PaneGrid learns which pane is in flight
+  // without PaneTile needing a new prop. It exists purely to SUPPRESS the drop
+  // highlight over the drag's own tile: `getData` is not readable during
+  // dragover (only `types` is), so self-drop can't be detected from the payload
+  // until the drop itself — where it is rejected anyway.
+  const [dragPaneId, setDragPaneId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+
+  const onTileDragOver = (e: React.DragEvent, id: string) => {
+    // preventDefault on dragover is what makes an element a drop target at all;
+    // gating it on our MIME means a foreign drag (a file, selected text into the
+    // terminal) is untouched and keeps its normal behavior.
+    if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dropTargetId !== id) setDropTargetId(id);
+  };
+  const onTileDragLeave = (e: React.DragEvent, id: string) => {
+    // dragleave also fires when the pointer crosses from the tile into one of its
+    // own children (the header, the terminal surface); clearing on those would
+    // strobe the highlight. relatedTarget is where the pointer went — if it is
+    // still inside this tile, the drag never actually left.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDropTargetId((cur) => (cur === id ? null : cur));
+  };
+  const onTileDrop = (e: React.DragEvent, id: string) => {
+    if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
+    e.preventDefault();
+    setDropTargetId(null);
+    setDragPaneId(null);
+    const dragged = e.dataTransfer.getData(PANE_DRAG_MIME);
+    // Self-drop and an empty payload are both no-ops here; swapPanes rejects
+    // them again (and any id no longer in openPanes) by returning the array
+    // unchanged, so nothing downstream can corrupt state either way.
+    if (dragged && dragged !== id) onReorderPanes(dragged, id);
+  };
 
   // WARDEN-660: non-maximized grid shape (column/row COUNT). Computed up here so
   // the ratio-state initializers below can seed against the matching shape.
@@ -724,8 +783,22 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
             style={{ gridTemplateColumns: colTpl, gridTemplateRows: rowTpl }}>
             {visible.map((t) => {
               const chat = chats.find((c) => (c.key || c.id) === t.id);
+              // WARDEN-909: highlight only a tile that is a REAL swap target —
+              // the drag's own tile is excluded, so a pane dragged over itself
+              // shows no affordance for a swap that would be a no-op. Both sides
+              // of the comparison are pane ids (never a visible index), so the
+              // highlight lands on the same tile the drop will act on even while
+              // `visible` is a subset (WARDEN-108).
+              const isDropTarget = dropTargetId === t.id && dragPaneId !== t.id;
               return (
-                <div key={t.id} data-pane-id={t.id} className="min-h-0 min-w-0">
+                <div key={t.id} data-pane-id={t.id}
+                  data-pane-drop-target={isDropTarget ? 'true' : undefined}
+                  onDragStart={() => setDragPaneId(t.id)}
+                  onDragEnd={() => { setDragPaneId(null); setDropTargetId(null); }}
+                  onDragOver={(e) => onTileDragOver(e, t.id)}
+                  onDragLeave={(e) => onTileDragLeave(e, t.id)}
+                  onDrop={(e) => onTileDrop(e, t.id)}
+                  className={`min-h-0 min-w-0 rounded-lg ${isDropTarget ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''}`}>
                   <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={effectiveMax === t.id}
                     hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}

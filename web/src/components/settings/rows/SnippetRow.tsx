@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Trash2 } from 'lucide-react';
 import { type Snippet, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX } from '@/lib/storage';
+import { decideDraftNameCommit, decideDraftValueCommit } from './draftCommit';
 
 export function SnippetRow({
   snippet,
@@ -37,9 +38,9 @@ export function SnippetRow({
   }, [snippet.text]);
 
   const commitName = () => {
-    const trimmed = nameDraft.trim();
-    if (trimmed && trimmed !== snippet.name) {
-      if (!onRename(snippet.name, trimmed)) setNameDraft(snippet.name); // revert on rejection
+    const decision = decideDraftNameCommit(nameDraft, snippet.name);
+    if (decision.commit) {
+      if (!onRename(snippet.name, decision.value)) setNameDraft(snippet.name); // revert on rejection
     } else {
       setNameDraft(snippet.name); // empty or unchanged → revert
     }
@@ -50,9 +51,9 @@ export function SnippetRow({
   // next reload (silent data loss). Empty on commit reverts to the last saved
   // value, so the field is editable but never goes dangling.
   const commitText = () => {
-    const trimmed = textDraft.trim();
-    if (trimmed) {
-      onTextChange(snippet.name, trimmed);
+    const decision = decideDraftValueCommit(textDraft);
+    if (decision.commit) {
+      onTextChange(snippet.name, decision.value);
     } else {
       setTextDraft(snippet.text); // empty → revert
     }

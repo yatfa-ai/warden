@@ -2,14 +2,14 @@
 // off-by-default telemetry client — roadmap WARDEN-446 / design WARDEN-443).
 //
 // The pipeline composes the four component slices into one `record()` path:
-//   resolve-tier → (off? hard no-op) → redact() → validate() → send()
+//   resolve-consent → (nothing collecting? hard no-op) → redact() → validate() → send()
 //
 // These tests prove the two load-bearing guarantees become ACTUAL runtime behavior:
-//   1. consent OFF ⇒ send() never invoked AND nothing retained/buffered.
-//   2. consent ON  ⇒ send() receives EXACTLY the redacted + schema-validated
+//   1. NOTHING COLLECTING ⇒ send() never invoked AND nothing retained/buffered.
+//   2. COLLECTING ⇒ send() receives EXACTLY the redacted + schema-validated
 //      payload — a credential is [REDACTED:…] at the transport boundary, a
 //      schema-invalid event is dropped pre-send, and chat/session names survive
-//      ONLY at the extended tier.
+//      ONLY while the `names` CATEGORY is on (WARDEN-1116).
 //
 // The REAL slice-2 redact (web/src/lib/telemetry/redact.ts, TS → ESM via Vite's
 // OXC transform) is injected, so the composition is proven against the SHIPPED
@@ -31,22 +31,21 @@ import assert from 'node:assert/strict';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
-// --- Load the REAL slice-2 redact (TS -> ESM via the OXC transform Vite bundles) -
-const redactPath = resolve(__dirname, 'src/lib/telemetry/redact.ts');
-const redactSrc = readFileSync(redactPath, 'utf8');
-const { code: redactCode } = await transformWithOxc(redactSrc, redactPath, {});
+// --- Load the REAL redact + its './consent' sibling (TS -> ESM via OXC) --------
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-pipeline-test-'));
-const redactTmp = join(tmpDir, 'redact.mjs');
-writeFileSync(redactTmp, redactCode);
-const { redact } = await import(redactTmp);
+for (const name of ['consent', 'redact']) {
+  const modPath = resolve(__dirname, `src/lib/telemetry/${name}.ts`);
+  let { code } = await transformWithOxc(readFileSync(modPath, 'utf8'), modPath, {});
+  code = code.replace(/from\s+(["'])\.\/consent\1/g, 'from "./consent.mjs"');
+  writeFileSync(join(tmpDir, `${name}.mjs`), code);
+}
+const { redact } = await import(join(tmpDir, 'redact.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
 // --- Load the pipeline + the shared source contract (CJS) ---------------------
 const {
-  TIERS,
   SCHEMA_VERSION,
   BASE_EVENT_TYPES,
-  resolveTier,
   createTelemetryPipeline,
   isDeliveryFailing,
 } = require('../electron/telemetry-pipeline.cjs');
@@ -70,8 +69,19 @@ function fakeSend() {
   return fn;
 }
 
-// A consent resolver that returns a fixed tier.
-const consentReturning = (tier) => () => tier;
+// The per-category consent states this suite drives the pipeline with
+// (WARDEN-1116). NAMES_ONLY is the combination the old three-value tier could not
+// express: the user consented to names but to no collecting category, so nothing
+// is sent at all.
+const CONSENT = Object.freeze({
+  OFF: Object.freeze({ incidents: false, names: false }),
+  INCIDENTS: Object.freeze({ incidents: true, names: false }),
+  BOTH: Object.freeze({ incidents: true, names: true }),
+  NAMES_ONLY: Object.freeze({ incidents: false, names: true }),
+});
+
+// A consent resolver that returns a fixed per-category state.
+const consentReturning = (state) => () => state;
 
 // GitHub classic PAT — caught by the slice-2 github-token rule.
 const GH_TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789';
@@ -129,10 +139,10 @@ function validEventWithPathIdentifier() {
 // Defaults — off-by-default, sends nothing out of the box
 // ==========================================================================
 
-test('an unconfigured pipeline resolves to the OFF tier and sends nothing', () => {
+test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline(); // no injectables
-  assert.equal(pipeline.effectiveTier(), TIERS.OFF);
+  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false });
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 0, 'default (no transport wired) must not send');
 });
@@ -140,29 +150,27 @@ test('an unconfigured pipeline resolves to the OFF tier and sends nothing', () =
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
   assert.equal(SCHEMA_VERSION, 4);
   assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall']);
-  assert.equal(TIERS.BASE, 'base');
-  assert.equal(TIERS.EXTENDED, 'extended');
-  assert.equal(TIERS.OFF, 'off');
 });
 
-test('resolveTier treats unknown / undefined / null as OFF (most-safe default)', () => {
-  assert.equal(resolveTier('base'), 'base');
-  assert.equal(resolveTier('extended'), 'extended');
-  assert.equal(resolveTier('off'), 'off');
-  assert.equal(resolveTier(undefined), 'off');
-  assert.equal(resolveTier(null), 'off');
-  assert.equal(resolveTier('weird'), 'off');
-  assert.equal(resolveTier(42), 'off');
+test('effectiveConsent normalizes through the ONE authority — garbage resolves to nothing', () => {
+  // The pipeline makes no consent decision of its own; it normalizes whatever the
+  // injected resolver returns. A stale TIER STRING from a pre-WARDEN-1116 build,
+  // a corrupt object, or any non-object all resolve to nothing enabled.
+  for (const bad of [undefined, null, 'base', 'extended', 'off', 'weird', 42, [], { incidents: 'yes' }, { unknown: true }]) {
+    const pipeline = createTelemetryPipeline({ consent: () => bad, redact, send: fakeSend() });
+    assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false },
+      `nothing enabled for ${JSON.stringify(bad)}`);
+  }
 });
 
 // ==========================================================================
 // Guarantee 1 — consent OFF ⇒ hard no-op: send() never called, nothing buffered
 // ==========================================================================
 
-test('consent OFF ⇒ record() is a hard no-op: send() never invoked', () => {
+test('nothing collecting ⇒ record() is a hard no-op: send() never invoked', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact,
     send,
   });
@@ -172,39 +180,58 @@ test('consent OFF ⇒ record() is a hard no-op: send() never invoked', () => {
   assert.equal(send.calls.length, 0, 'send() must never be called when consent is off');
 });
 
-test('consent OFF ⇒ nothing is retained/buffered (the pipeline holds no events)', () => {
+test('nothing collecting ⇒ nothing is retained/buffered (the pipeline holds no events)', () => {
   // There is no buffer — a durable queue is a later, out-of-scope slice. The proof
   // is that nothing reaches transport, and the pipeline exposes no retention state.
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact,
     send,
   });
   for (let i = 0; i < 5; i++) pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 0);
   // Flipping consent ON afterward must not replay any earlier "buffered" event.
-  pipeline.setConsent(consentReturning(TIERS.BASE));
+  pipeline.setConsent(consentReturning(CONSENT.INCIDENTS));
   assert.equal(send.calls.length, 0, 'no earlier event is replayed after consent turns on');
 });
 
-test('unknown / undefined consent tier ⇒ hard no-op (treated as OFF)', () => {
-  for (const tier of [undefined, null, 'weird', '']) {
+test('unknown / undefined / corrupt consent ⇒ hard no-op (resolves to nothing enabled)', () => {
+  for (const bad of [undefined, null, 'weird', '', 'base', 'extended', { incidents: 'yes' }, { usage: true }]) {
     const send = fakeSend();
-    const pipeline = createTelemetryPipeline({ consent: () => tier, redact, send });
+    const pipeline = createTelemetryPipeline({ consent: () => bad, redact, send });
     pipeline.record(validEventWithCredential());
-    assert.equal(send.calls.length, 0, `tier ${JSON.stringify(tier)} must no-op`);
+    assert.equal(send.calls.length, 0, `consent ${JSON.stringify(bad)} must no-op`);
   }
 });
 
-test('a throwing consent resolver degrades to OFF (telemetry must not crash the host)', () => {
+test('a DECORATING-only consent ⇒ hard no-op (names alone sends nothing — inert, not clamped)', () => {
+  // The combination the linear tier could not express. `names` really is enabled
+  // (the resolver reports it), but no COLLECTING category is on, so the pipeline
+  // sends nothing. This is why the categories need no clamp between them.
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.NAMES_ONLY),
+    redact,
+    send,
+  });
+  assert.equal(pipeline.effectiveConsent().names, true, 'names IS on — it was not clamped away');
+  pipeline.record(validEventWithNames());
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls.length, 0, 'but nothing is collected, so nothing reaches transport');
+  // Even a DIRECT dispatch (the layer-2 guard) sends nothing.
+  pipeline.dispatch(validEventWithNames());
+  assert.equal(send.calls.length, 0, 'the layer-2 guard closes for a decorating-only consent too');
+});
+
+test('a throwing consent resolver degrades to nothing enabled (telemetry must not crash the host)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
     consent: () => { throw new Error('pref store down'); },
     redact,
     send,
   });
-  assert.equal(pipeline.effectiveTier(), TIERS.OFF);
+  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false });
   assert.doesNotThrow(() => pipeline.record(validEventWithCredential()));
   assert.equal(send.calls.length, 0);
 });
@@ -214,10 +241,10 @@ test('a throwing consent resolver degrades to OFF (telemetry must not crash the 
 // payload
 // ==========================================================================
 
-test('consent ON (base) ⇒ send() receives the redacted + validated payload exactly once', () => {
+test('collecting ⇒ send() receives the redacted + validated payload exactly once', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -227,7 +254,7 @@ test('consent ON (base) ⇒ send() receives the redacted + validated payload exa
   assert.equal(send.calls.length, 1, 'exactly one send per recorded event');
   const call = send.calls[0];
   assert.ok(Array.isArray(call.events) && call.events.length === 1, 'events is a 1-element array');
-  assert.equal(call.consent, TIERS.BASE, 'the resolved tier is passed as consent');
+  assert.equal(call.consent, true, 'the transport gate receives the resolved "collecting" boolean');
   assert.equal(call.schemaVersion, SCHEMA_VERSION, 'the canonical schema version is threaded');
   assert.equal(call.events[0].type, 'error');
   assert.equal(call.events[0].runtime, 'main');
@@ -236,7 +263,7 @@ test('consent ON (base) ⇒ send() receives the redacted + validated payload exa
 test('a credential planted in the raw event is [REDACTED:…] at the transport boundary', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -251,7 +278,7 @@ test('a credential planted in the raw event is [REDACTED:…] at the transport b
 test('the raw event handed to record() is NOT mutated (defensive copy at redact)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -266,7 +293,7 @@ test('the raw event handed to record() is NOT mutated (defensive copy at redact)
 test('a real source-built base-tier error event flows through redact → validate → send intact', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -294,7 +321,7 @@ test('no redactor wired ⇒ nothing is sent (defaultRedact safety net holds)', (
   // AND carries a credential — so it WOULD reach transport if defaultRedact passed
   // it through. The only thing holding it back is defaultRedact returning null.
   const send = fakeSend();
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), send });
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 0, 'with no redactor wired, no payload reaches transport');
 });
@@ -305,7 +332,7 @@ test('no redactor wired ⇒ nothing is sent (defaultRedact safety net holds)', (
 // and watching the identical event flow through to transport.
 test('positive control: the same event DOES send once the real redact is wired', () => {
   const send = fakeSend();
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 1, 'with redact wired the schema-valid event flows');
 });
@@ -317,7 +344,7 @@ test('positive control: the same event DOES send once the real redact is wired',
 test('a schema-invalid event is dropped pre-send (send() not called for it)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -333,7 +360,7 @@ test('a schema-invalid event is dropped pre-send (send() not called for it)', ()
 test('only the VALID event is sent when valid + invalid are interleaved', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -347,7 +374,7 @@ test('only the VALID event is sent when valid + invalid are interleaved', () => 
 test('an injected validate that rejects an otherwise-redacted event ⇒ no send', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     validate: () => false, // slice-1 canonical validator rejects everything
     send,
@@ -359,7 +386,7 @@ test('an injected validate that rejects an otherwise-redacted event ⇒ no send'
 test('a throwing validator degrades to a dropped event (no send, no crash)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     validate: () => { throw new Error('validator blew up'); },
     send,
@@ -369,56 +396,76 @@ test('a throwing validator degrades to a dropped event (no send, no crash)', () 
 });
 
 // ==========================================================================
-// Tier gating — identifiers only at the extended tier
+// CATEGORY gating — identifiers only while the `names` category is on
 // ==========================================================================
 
-test('base tier ⇒ NO identifiers (chat/session names) at the transport boundary', () => {
+test('`names` OFF ⇒ NO identifiers (chat/session names) at the transport boundary', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
   pipeline.record(validEventWithNames());
   const sent = send.calls[0].events[0];
-  assert.equal(sent.chatName, undefined, 'chatName dropped at base tier');
-  assert.equal(sent.sessionName, undefined, 'sessionName dropped at base tier');
+  assert.equal(sent.chatName, undefined, 'chatName dropped while `names` is off');
+  assert.equal(sent.sessionName, undefined, 'sessionName dropped while `names` is off');
   assert.ok(!('chatName' in sent), 'chatName key is not even present');
   assert.ok(!('sessionName' in sent), 'sessionName key is not even present');
 });
 
-test('extended tier ⇒ chat/session names ARE retained (only at tier === extended)', () => {
+test('`names` ON ⇒ chat/session names ARE retained (only when that category is on)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.EXTENDED),
+    consent: consentReturning(CONSENT.BOTH),
     redact,
     send,
   });
   pipeline.record(validEventWithNames());
   const sent = send.calls[0].events[0];
-  assert.equal(sent.chatName, 'Refactor auth module', 'chatName retained at extended tier');
-  assert.equal(sent.sessionName, 'claude-7b3a2f1', 'sessionName retained at extended tier');
-  // The safe base-tier fields survive at both tiers.
+  assert.equal(sent.chatName, 'Refactor auth module', 'chatName retained while `names` is on');
+  assert.equal(sent.sessionName, 'claude-7b3a2f1', 'sessionName retained while `names` is on');
+  // The anonymous fields survive either way.
   assert.equal(sent.type, 'error');
   assert.equal(sent.timestamp, 1719500000123);
 });
 
-test('the SAME event yields names at extended but not at base (tier-driven, not event-driven)', () => {
-  // One event recorded under each tier — the ONLY difference is the consent tier.
-  for (const tier of [TIERS.BASE, TIERS.OFF]) {
+test('the SAME event yields names only with `names` on (consent-driven, not event-driven)', () => {
+  // One event recorded under each consent state — the ONLY difference is consent.
+  for (const state of [CONSENT.INCIDENTS, CONSENT.OFF, CONSENT.NAMES_ONLY]) {
+    const label = JSON.stringify(state);
     const send = fakeSend();
-    const pipeline = createTelemetryPipeline({ consent: consentReturning(tier), redact, send });
+    const pipeline = createTelemetryPipeline({ consent: consentReturning(state), redact, send });
     pipeline.record(validEventWithNames());
-    if (tier === TIERS.OFF) {
-      assert.equal(send.calls.length, 0);
+    if (state.incidents) {
+      assert.equal(send.calls[0].events[0].chatName, undefined, `no names for ${label}`);
     } else {
-      assert.equal(send.calls[0].events[0].chatName, undefined, `no names at ${tier}`);
+      assert.equal(send.calls.length, 0, `nothing sent at all for ${label}`);
     }
   }
-  const sendExt = fakeSend();
-  const ext = createTelemetryPipeline({ consent: consentReturning(TIERS.EXTENDED), redact, send: sendExt });
-  ext.record(validEventWithNames());
-  assert.equal(sendExt.calls[0].events[0].chatName, 'Refactor auth module', 'names retained at extended');
+  const sendBoth = fakeSend();
+  const both = createTelemetryPipeline({ consent: consentReturning(CONSENT.BOTH), redact, send: sendBoth });
+  both.record(validEventWithNames());
+  assert.equal(sendBoth.calls[0].events[0].chatName, 'Refactor auth module', 'names retained when the category is on');
+});
+
+test('revoking ONLY `names` keeps events flowing, minus the names (independent revoke)', () => {
+  // Turning a category off halts ITS traffic immediately, with no restart — and
+  // touches nothing else. Same pipeline instance, live consent flip.
+  let live = CONSENT.BOTH;
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({ consent: () => live, redact, send });
+  pipeline.record(validEventWithNames());
+  assert.equal(send.calls[0].events[0].chatName, 'Refactor auth module');
+
+  live = CONSENT.INCIDENTS; // revoke ONLY names
+  pipeline.record(validEventWithNames());
+  assert.equal(send.calls.length, 2, 'incident events keep flowing');
+  assert.equal(send.calls[1].events[0].chatName, undefined, 'names stop on the very next event');
+
+  live = CONSENT.NAMES_ONLY; // revoke ONLY incidents — traffic stops entirely
+  pipeline.record(validEventWithNames());
+  assert.equal(send.calls.length, 2, 'revoking the collecting category halts all traffic immediately');
 });
 
 // ==========================================================================
@@ -428,7 +475,7 @@ test('the SAME event yields names at extended but not at base (tier-driven, not 
 test('defense in depth: consent OFF blocks at record() (layer 1)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact,
     send,
   });
@@ -439,7 +486,7 @@ test('defense in depth: consent OFF blocks at record() (layer 1)', () => {
 test('defense in depth: dispatch() ALSO no-ops when consent is OFF (layer 2)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact,
     send,
   });
@@ -449,7 +496,7 @@ test('defense in depth: dispatch() ALSO no-ops when consent is OFF (layer 2)', (
   assert.equal(send.calls.length, 0, 'layer 2 (dispatch) blocks when consent is off');
 
   // Positive control: flipping consent ON lets the same direct dispatch send.
-  pipeline.setConsent(consentReturning(TIERS.BASE));
+  pipeline.setConsent(consentReturning(CONSENT.INCIDENTS));
   pipeline.dispatch(validEventWithCredential());
   assert.equal(send.calls.length, 1, 'a direct dispatch sends once consent is on');
 });
@@ -457,7 +504,7 @@ test('defense in depth: dispatch() ALSO no-ops when consent is OFF (layer 2)', (
 test('dispatch() redacts + validates the payload itself — no bypass can leak', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -481,7 +528,7 @@ test('dispatch() redacts + validates the payload itself — no bypass can leak',
 
 test('a throwing (sync) transport is swallowed — record() does not crash the host', () => {
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: () => { throw new Error('transport down'); },
   });
@@ -490,7 +537,7 @@ test('a throwing (sync) transport is swallowed — record() does not crash the h
 
 test('a rejecting (async) transport is swallowed — record() does not crash the host', async () => {
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: () => Promise.reject(new Error('network gone')),
   });
@@ -506,7 +553,7 @@ test('a rejecting (async) transport is swallowed — record() does not crash the
 
 test('setSend hot-swaps the transport (slice-3 wiring seam)', () => {
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: fakeSend(),
   });
@@ -516,16 +563,16 @@ test('setSend hot-swaps the transport (slice-3 wiring seam)', () => {
   assert.equal(next.calls.length, 1, 'the swapped-in transport received the event');
 });
 
-test('setConsent flips the tier live (slice-1 consent-pref wiring seam)', () => {
+test('setConsent swaps the consent resolver live (the consent-pref wiring seam)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact,
     send,
   });
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 0, 'off initially → nothing sent');
-  pipeline.setConsent(consentReturning(TIERS.BASE));
+  pipeline.setConsent(consentReturning(CONSENT.INCIDENTS));
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 1, 'after flipping consent on, the event flows');
 });
@@ -533,7 +580,7 @@ test('setConsent flips the tier live (slice-1 consent-pref wiring seam)', () => 
 test('setEndpoint / setSchemaVersion thread through to the transport call', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -547,7 +594,7 @@ test('setEndpoint / setSchemaVersion thread through to the transport call', () =
 test('setAuthToken threads the auth token through to the transport call (WARDEN-569)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -560,7 +607,7 @@ test('setAuthToken threads the auth token through to the transport call (WARDEN-
 test('authToken defaults to null — the transport gets no token when none is set (WARDEN-569)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -571,7 +618,7 @@ test('authToken defaults to null — the transport gets no token when none is se
 test('setAuthToken with an empty/null value clears the token (→ no header)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -584,7 +631,7 @@ test('setAuthToken with an empty/null value clears the token (→ no header)', (
 test('authToken is also accepted at construction (opts.authToken)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     authToken: 'constructed-token',
@@ -598,7 +645,7 @@ test('fetchImpl / sleepImpl are threaded through to the transport (slice-3 retry
   const fetchImpl = () => Promise.resolve();
   const sleepImpl = () => Promise.resolve();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     fetchImpl,
@@ -612,46 +659,49 @@ test('fetchImpl / sleepImpl are threaded through to the transport (slice-3 retry
 // ==========================================================================
 // WARDEN-585 — LIVE consent threaded to the transport's in-loop re-check
 // ==========================================================================
-// The pipeline hands the transport a SNAPSHOT tier (call.consent) for its entry
-// gate, but ALSO a LIVE isConsentActive() resolver that re-reads the SAME source
-// the layer-2 guard uses (effectiveTier). So a revoke that lands during the
-// transport's bounded-retry backoff halts the in-flight batch before its next
-// attempt — "halts all traffic immediately" holds end-to-end, not just to dispatch.
+// The pipeline hands the transport a SNAPSHOT gate value (call.consent — the
+// resolved "something is being collected" boolean) for its entry gate, but ALSO a
+// LIVE isConsentActive() resolver that re-reads the SAME source the layer-2 guard
+// uses (effectiveConsent). So a revoke that lands during the transport's
+// bounded-retry backoff halts the in-flight batch before its next attempt —
+// "turning a category off halts its traffic immediately" holds end-to-end.
 
-test('the transport receives a LIVE isConsentActive callback alongside the snapshot tier', () => {
-  let live = TIERS.BASE;
+test('the transport receives a LIVE isConsentActive callback alongside the snapshot gate', () => {
+  let live = CONSENT.INCIDENTS;
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({ consent: () => live, redact, send });
   pipeline.record(validEventWithCredential());
 
   const call = send.calls[0];
   assert.equal(typeof call.isConsentActive, 'function', 'transport gets an isConsentActive resolver');
-  assert.equal(call.consent, TIERS.BASE, 'snapshot tier still passed for the entry gate');
-  assert.equal(call.isConsentActive(), true, 'active while consent resolves to BASE');
-  live = TIERS.OFF;
-  assert.equal(call.isConsentActive(), false, 'flips to inactive once consent re-resolves to OFF');
+  assert.equal(call.consent, true, 'snapshot gate boolean still passed for the entry gate');
+  assert.equal(call.isConsentActive(), true, 'active while a collecting category is on');
+  live = CONSENT.OFF;
+  assert.equal(call.isConsentActive(), false, 'flips to inactive once consent re-resolves to nothing');
+  live = CONSENT.NAMES_ONLY;
+  assert.equal(call.isConsentActive(), false, 'a decorating-only consent is also inactive');
 });
 
 test('isConsentActive re-resolves LIVE: a revoke AFTER dispatch halts the in-flight batch', () => {
   // The callback captured at send-time must STILL reflect a LATER revoke — proving
-  // it holds a live resolver, not a snapshot of the tier at dispatch time.
-  let live = TIERS.BASE;
+  // it holds a live resolver, not a snapshot of consent at dispatch time.
+  let live = CONSENT.INCIDENTS;
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({ consent: () => live, redact, send });
   pipeline.record(validEventWithCredential());
   const { isConsentActive } = send.calls[0];
   assert.equal(isConsentActive(), true);
-  live = TIERS.OFF; // user revokes AFTER dispatch handed the batch to transport
+  live = CONSENT.OFF; // user revokes AFTER dispatch handed the batch to transport
   assert.equal(isConsentActive(), false, 'the in-flight batch is halted by the later revoke');
 });
 
-test('isConsentActive degrades to inactive when the consent resolver throws (effectiveTier safety)', () => {
-  // Proves the resolver uses effectiveTier() (which try/catches → OFF), not a raw
-  // resolveTier(consent()) that would THROW into the transport's retry loop.
+test('isConsentActive degrades to inactive when the consent resolver throws (effectiveConsent safety)', () => {
+  // Proves the callback goes through effectiveConsent() (which try/catches →
+  // nothing enabled), not a raw consent() that would THROW into the retry loop.
   const send = fakeSend();
   let throwNext = false;
   const pipeline = createTelemetryPipeline({
-    consent: () => { if (throwNext) throw new Error('pref store down'); return TIERS.BASE; },
+    consent: () => { if (throwNext) throw new Error('pref store down'); return CONSENT.INCIDENTS; },
     redact,
     send,
   });
@@ -665,7 +715,7 @@ test('isConsentActive degrades to inactive when the consent resolver throws (eff
 test('setValidate overrides the default source-contract validator (slice-1 canonical seam)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
   });
@@ -723,7 +773,7 @@ test('a successful transport result records an outcome:ok entry (WARDEN-583)', (
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -745,7 +795,7 @@ test('a dropped transport result records an outcome:dropped entry', () => {
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: false, dropped: true, attempts: 3, status: 503 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -762,7 +812,7 @@ test('the transport gate no-op {ok:false,dropped:false} records NO entry', () =>
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: false, dropped: false, attempts: 0, status: null });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -775,7 +825,7 @@ test('the transport gate no-op {ok:false,dropped:false} records NO entry', () =>
 test('a transport returning undefined (the default no-op transport) records NO entry', () => {
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: fakeSend(), // returns undefined — the default noopSend shape
     endpointUrl: TLOG_ENDPOINT,
@@ -789,7 +839,7 @@ test('consent OFF records NO entry (the dispatch guard returns before transportS
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -804,7 +854,7 @@ test('a recorded entry is METADATA ONLY — no payload content, redacted text, o
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -828,7 +878,7 @@ test('a pipeline with NO transmissionLog injected still sends and records nothin
   // the recordOutcome call without allocating or retaining anything.
   const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -842,7 +892,7 @@ test('an async (thenable) transport result records the entry via the .then branc
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendThenable({ ok: true, dropped: false, attempts: 2, status: 200 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -858,7 +908,7 @@ test('entries respect the injected log cap (bounded — oldest dropped)', () => 
   const log = createTransmissionLog({ clock: TLOG_CLOCK, cap: 2 });
   const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -884,7 +934,7 @@ test('a pre-send validate rejection records an outcome:rejected entry (WARDEN-81
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact: (p) => p,
     send, // default validate is the REAL validateBaseEvent
     endpointUrl: TLOG_ENDPOINT,
@@ -906,7 +956,7 @@ test('a pre-send validate rejection records an outcome:rejected entry (WARDEN-81
 test('a rejected entry is METADATA ONLY — the caught path/identifier never reaches the log', () => {
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact: (p) => p,
     send: fakeSend(),
     endpointUrl: TLOG_ENDPOINT,
@@ -929,7 +979,7 @@ test('a rejected entry SURVIVES a record → serialize → parse → seed reload
   // record() AND seed() — the entry would render as 'Unknown' after a restart.
   const recorded = createTransmissionLog({ clock: TLOG_CLOCK });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact: (p) => p,
     send: fakeSend(),
     endpointUrl: TLOG_ENDPOINT,
@@ -955,7 +1005,7 @@ test('a THROWING validator also records a rejected entry (the merged drop site c
   // throwing validator — the two analogous silent-drop paths now share one record.
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     validate: () => { throw new Error('validator blew up'); },
     send: fakeSend(),
@@ -973,7 +1023,7 @@ test('consent OFF records NO rejected entry (the rejection site is past the cons
   // rejected never reaches the rejection site — it surfaces as the usual absence.
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.OFF),
+    consent: consentReturning(CONSENT.OFF),
     redact: (p) => p,
     send: fakeSend(),
     endpointUrl: TLOG_ENDPOINT,
@@ -989,7 +1039,7 @@ test('a drifted endpoint records NO rejected entry (the drift guard precedes the
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact: (p) => p,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1049,13 +1099,13 @@ function sendDeferredSeq(results) {
 const DRIFT_EVENT = validEventWithCredential;
 
 test('getRuntimeStatus defaults to { drifted: false } (no drift out of the box)', () => {
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: fakeSend() });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send: fakeSend() });
   assert.deepEqual(pipeline.getRuntimeStatus(), { drifted: false, deliveryFailing: false });
 });
 
 test('a drifted (415) transport outcome arms the breaker → further dispatches send NOTHING', () => {
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(DRIFT_EVENT()); // first send → 415 → arms the breaker
   assert.equal(send.calls.length, 1, 'the first (drifted) send went through');
   assert.equal(pipeline.getRuntimeStatus().drifted, true, 'breaker is armed');
@@ -1069,7 +1119,7 @@ test('a short-circuited (drifted) dispatch records NO transmission-log entry (a 
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1085,7 +1135,7 @@ test('a short-circuited (drifted) dispatch records NO transmission-log entry (a 
 test('a NON-drift drop (e.g. a 503) does NOT arm the breaker — a reachable receiver is never wedged', () => {
   // dropped:true WITHOUT drifted:true (a transient-exhaustion drop, not a 415).
   const send = sendReturning({ ok: false, dropped: true, attempts: 3, status: 503 });
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(DRIFT_EVENT());
   assert.equal(pipeline.getRuntimeStatus().drifted, false, 'a generic drop never arms the breaker');
   pipeline.record(DRIFT_EVENT());
@@ -1095,12 +1145,12 @@ test('a NON-drift drop (e.g. a 503) does NOT arm the breaker — a reachable rec
 test('the gate no-op and a revoked result do NOT arm the breaker', () => {
   // gate no-op {ok:false,dropped:false} — not a real send.
   let send = sendReturning({ ok: false, dropped: false, attempts: 0, status: null });
-  let pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  let pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(DRIFT_EVENT());
   assert.equal(pipeline.getRuntimeStatus().drifted, false, 'the gate no-op does not arm');
   // revoked {ok:false,dropped:false,revoked:true} — a consent halt, not a drift.
   send = sendReturning({ ok: false, dropped: false, revoked: true, attempts: 1, status: null });
-  pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(DRIFT_EVENT());
   assert.equal(pipeline.getRuntimeStatus().drifted, false, 'a revoke does not arm');
 });
@@ -1108,7 +1158,7 @@ test('the gate no-op and a revoked result do NOT arm the breaker', () => {
 test('setEndpoint with a NEW url clears an armed breaker → sends resume', () => {
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: 'https://telemetry.example.invalid/v1/events',
@@ -1130,7 +1180,7 @@ test('setEndpoint with the SAME url does NOT clear the breaker (change-guard aga
   const ENDPOINT = 'https://telemetry.example.invalid/ingest';
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: ENDPOINT,
@@ -1147,7 +1197,7 @@ test('setEndpoint with the SAME url does NOT clear the breaker (change-guard aga
 
 test('setSchemaVersion change clears an armed breaker (the client re-versioned)', () => {
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(DRIFT_EVENT()); // arm
   assert.equal(pipeline.getRuntimeStatus().drifted, true);
   pipeline.setSchemaVersion(SCHEMA_VERSION); // same → no-op
@@ -1166,7 +1216,7 @@ test('a later SUCCESSFUL send clears an armed breaker (interleaved async outcome
     { ok: false, dropped: true, drifted: true, attempts: 1, status: 415 },
     { ok: true, dropped: false, attempts: 1, status: 200 },
   ]);
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   assert.equal(pipeline.getRuntimeStatus().drifted, false);
   pipeline.record(DRIFT_EVENT()); // dispatch #1 — check passes, outcome pending
   pipeline.record(DRIFT_EVENT()); // dispatch #2 — check passes (drift still false), outcome pending
@@ -1179,7 +1229,7 @@ test('a later SUCCESSFUL send clears an armed breaker (interleaved async outcome
 test('onRuntimeStatus fires ONLY on a real arm/clear transition — never on a no-op', () => {
   const spy = statusSpy();
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send, onRuntimeStatus: spy });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send, onRuntimeStatus: spy });
   assert.deepEqual(spy.calls, [], 'no status pushed at construction');
   pipeline.record(DRIFT_EVENT()); // arm → fire
   assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }]);
@@ -1190,7 +1240,7 @@ test('onRuntimeStatus fires ONLY on a real arm/clear transition — never on a n
   // A successful send while NOT drifted fires nothing (no transition).
   const ok = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const spy2 = statusSpy();
-  const p2 = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: ok, onRuntimeStatus: spy2 });
+  const p2 = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send: ok, onRuntimeStatus: spy2 });
   p2.record(DRIFT_EVENT());
   assert.deepEqual(spy2.calls, [], 'a success from a non-drifted state fires nothing');
 });
@@ -1198,7 +1248,7 @@ test('onRuntimeStatus fires ONLY on a real arm/clear transition — never on a n
 test('a throwing onRuntimeStatus tap is swallowed (a status bridge never breaks a send)', () => {
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     onRuntimeStatus: () => { throw new Error('bridge blew up'); },
@@ -1214,7 +1264,7 @@ test('a late 415 for the OLD endpoint does NOT arm drift for a NEW endpoint (sta
   const send = sendDeferredSeq([{ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }]);
   const spy = statusSpy();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: 'https://x.example/ingest',
@@ -1239,7 +1289,7 @@ test('a fresh (non-stale) 415 still arms drift — the guard only skips changed-
   // not a blanket suppression of async drift outcomes.
   const send = sendDeferredSeq([{ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: 'https://x.example/ingest',
@@ -1252,7 +1302,7 @@ test('a fresh (non-stale) 415 still arms drift — the guard only skips changed-
 test('clearRuntimeDrift clears an armed breaker and emits the transition (Test-connection reset)', () => {
   const spy = statusSpy();
   const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send, onRuntimeStatus: spy });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send, onRuntimeStatus: spy });
   pipeline.record(DRIFT_EVENT()); // arm
   assert.equal(pipeline.getRuntimeStatus().drifted, true);
   assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }]);
@@ -1265,7 +1315,7 @@ test('clearRuntimeDrift clears an armed breaker and emits the transition (Test-c
 
 test('clearRuntimeDrift is a no-op (and emits nothing) when drift is not armed', () => {
   const spy = statusSpy();
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: fakeSend(), onRuntimeStatus: spy });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send: fakeSend(), onRuntimeStatus: spy });
   pipeline.clearRuntimeDrift();
   assert.equal(pipeline.getRuntimeStatus().drifted, false);
   assert.deepEqual(spy.calls, [], 'no transition fired when there was nothing to clear');
@@ -1331,7 +1381,7 @@ test('a transient-exhausted (replayable) drop is buffered and replayed on the ne
   // dispatch opportunity": the buffered event is flushed (re-dispatched) BEFORE the
   // new event, and this time it lands.
   const send = sendSeq([REPLAYABLE_DROP, OK_RESULT]);
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(eventAt(100));
   assert.equal(send.calls.length, 1, 'the first record dispatched the event once');
   pipeline.record(eventAt(200));
@@ -1347,7 +1397,7 @@ test('once the replayed event lands it leaves the buffer — no replay churn', (
   // After the replay succeeds the buffer is empty, so a THIRD record must NOT
   // re-dispatch the earlier event again. Proves the buffer drains on success.
   const send = sendSeq([REPLAYABLE_DROP, OK_RESULT]);
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(eventAt(100)); // drop → buffer
   pipeline.record(eventAt(200)); // flush 100 (ok) + dispatch 200 (ok)
   send.calls.length = 0;
@@ -1361,7 +1411,7 @@ test('a NON-retryable 4xx drop is NOT buffered (replaying the identical body is 
   // cannot fix it. The transport OMITS replayable, so the pipeline must not retain
   // it (replaying would just waste the retry budget on a guaranteed re-rejection).
   const send = sendSeq([{ ok: false, dropped: true, attempts: 1, status: 400 }, OK_RESULT]);
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(eventAt(100)); // 400 drop → NOT buffered
   pipeline.record(eventAt(200)); // nothing to flush → only 200 dispatched
   assert.equal(send.calls.length, 2, 'the non-retryable 400 drop was not replayed');
@@ -1374,7 +1424,7 @@ test('a 415 schema-drift drop is NOT buffered (the drift circuit-breaker owns it
   // must not also retain it (that would fight the breaker AND replay a payload the
   // receiver is guaranteed to reject again).
   const send = sendSeq([{ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }, OK_RESULT]);
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(eventAt(100)); // 415 → arms drift, NOT buffered
   assert.equal(pipeline.getRuntimeStatus().drifted, true, 'the existing WARDEN-631 drift path still arms');
   pipeline.record(eventAt(200)); // drifted → dispatch short-circuits; nothing was buffered to flush
@@ -1386,11 +1436,11 @@ test('consent revoke CLEARS the buffer — a buffered event does not survive opt
   // layer-1 guard (the natural clear site) and sends nothing. Re-enabling must NOT
   // replay the old event — it was cleared, not retained.
   const down = sendSeq([REPLAYABLE_DROP]); // always replayable
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: down });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send: down });
   pipeline.record(eventAt(100)); // → buffered
   assert.equal(down.calls.length, 1);
 
-  pipeline.setConsent(consentReturning(TIERS.OFF));
+  pipeline.setConsent(consentReturning(CONSENT.OFF));
   pipeline.record(eventAt(200)); // off → CLEAR the buffer + no-op (no send, no flush)
   assert.equal(down.calls.length, 1, 'nothing sent while off');
 
@@ -1398,7 +1448,7 @@ test('consent revoke CLEARS the buffer — a buffered event does not survive opt
   // event (ts 100) would be flushed first; since it was cleared, only the new event.
   const ok = sendSeq([OK_RESULT]);
   pipeline.setSend(ok);
-  pipeline.setConsent(consentReturning(TIERS.BASE));
+  pipeline.setConsent(consentReturning(CONSENT.INCIDENTS));
   pipeline.record(eventAt(300));
   assert.deepEqual(
     ok.timestamps(),
@@ -1414,7 +1464,7 @@ test('the replay buffer is RETAINED through a drift outage and drains once drift
   // drift outage; it drains once drift clears. This is the critical correctness
   // property that makes the buffer safe to coexist with the drift breaker.
   const send = sendSeq([REPLAYABLE_DROP, REPLAYABLE_DROP, { ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }, OK_RESULT, OK_RESULT]);
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send });
   pipeline.record(eventAt(100)); // → replayable drop → buffer 100. (call 1)
   // record(200): flush 100 (re-drops → re-buffered), then dispatch 200 → 415 → arms drift.
   pipeline.record(eventAt(200));
@@ -1444,7 +1494,7 @@ test('bounded ring — drop-oldest past the cap retains the MOST RECENT events',
   // evicted, not the newest.
   const down = sendSeq([REPLAYABLE_DROP]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: down,
     replayBufferCap: 3,
@@ -1466,7 +1516,7 @@ test('off-by-default: the default no-op transport never fills the buffer (no reg
   // pipeline behaves EXACTLY as before this slice. Proven by swapping in a success
   // transport after several noop records: NONE of the noop'd events is phantomly
   // replayed (the buffer stayed empty throughout).
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact });
   for (let i = 0; i < 5; i++) pipeline.record(eventAt(100 + i)); // noopSend → nothing sent, nothing buffered
   const ok = sendSeq([OK_RESULT]);
   pipeline.setSend(ok);
@@ -1479,7 +1529,7 @@ test('the replay buffer is IN-MEMORY only — the pipeline exposes no disk/persi
   // pipeline factory accepts only the existing injectables + replayBufferCap (a
   // cap override); it exposes NO fs/path/persist option. A durable on-disk queue is
   // a later, trust-heavier slice. This pins that no persistence seam crept in here.
-  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: sendSeq([REPLAYABLE_DROP]) });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(CONSENT.INCIDENTS), redact, send: sendSeq([REPLAYABLE_DROP]) });
   const publicSurface = Object.keys(pipeline);
   assert.ok(
     !publicSurface.some((k) => /persist|disk|fs|path|file|store|queue/i.test(k)),
@@ -1552,7 +1602,7 @@ test('a sustained run of N drops arms deliveryFailing — and does NOT pause sen
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, DOWN_DROP]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1572,7 +1622,7 @@ test('deliveryFailing self-heals the instant the next send lands (an ok clears i
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, OK_RESULT]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1590,7 +1640,7 @@ test('a single transient drop followed by an ok does NOT arm deliveryFailing (no
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendSeq([DOWN_DROP, OK_RESULT]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1605,7 +1655,7 @@ test('the threshold is configurable (a smaller window arms sooner)', () => {
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendSeq([DOWN_DROP, DOWN_DROP]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1625,7 +1675,7 @@ test('deliveryFailing emits on change ONLY — never a push per send (no spam)',
   const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, DOWN_DROP, OK_RESULT]);
   const spy = statusSpy();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1655,7 +1705,7 @@ test('when BOTH drifted and deliveryFailing flip on one outcome, settle emits th
   const send = sendSeq([DRIFTED_DROP_RESULT, DRIFTED_DROP_RESULT, DRIFTED_DROP_RESULT]);
   const spy = statusSpy();
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1686,7 +1736,7 @@ test('schema-drift and delivery-failing can BOTH be true when drift clears mid-r
   const log = createTransmissionLog({ clock: TLOG_CLOCK });
   const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, DRIFTED_DROP_RESULT]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send,
     endpointUrl: TLOG_ENDPOINT,
@@ -1715,7 +1765,7 @@ test('getRuntimeStatus derives deliveryFailing from the ring INCLUDING seeded hi
     { outcome: 'dropped', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 1, attempts: 3, status: 503 },
   ]);
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: sendSeq([OK_RESULT]),
     endpointUrl: TLOG_ENDPOINT,
@@ -1728,7 +1778,7 @@ test('getRuntimeStatus derives deliveryFailing from the ring INCLUDING seeded hi
   pipeline.setSend(sendSeq([OK_RESULT]));
   // Re-create with a spy to observe the clear transition from the seeded state.
   const pipeline2 = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: sendSeq([OK_RESULT]),
     endpointUrl: TLOG_ENDPOINT,
@@ -1745,7 +1795,7 @@ test('an unconfigured pipeline (noop transmission log) never arms deliveryFailin
   // The default noopTransmissionLog returns entries()=[], so isDeliveryFailing is
   // always false — an unconfigured pipeline behaves EXACTLY as before this slice.
   const pipeline = createTelemetryPipeline({
-    consent: consentReturning(TIERS.BASE),
+    consent: consentReturning(CONSENT.INCIDENTS),
     redact,
     send: sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP]),
   });
@@ -1760,7 +1810,7 @@ test('deliveryFailing introduces NO send-gating return in dispatch (grep guardra
   // dispatch. The 415 breaker is `if (drifted) return;` (permanent — stop futile
   // sends). A delivery failure is transient, so the client KEEPS sending. This
   // asserts the guardrail mechanically: in the PRE-TRANSPORT region of dispatch
-  // (the tier/drift/redact/validate gates that decide whether to send at all),
+  // (the consent/drift/redact/validate gates that decide whether to send at all),
   // deliveryFailing is not consulted. (It IS derived later, inside `settle` — the
   // post-send outcome handler — which is observability, not a gate.)
   const src = readFileSync(resolve(__dirname, '../electron/telemetry-pipeline.cjs'), 'utf8');
@@ -1769,11 +1819,290 @@ test('deliveryFailing introduces NO send-gating return in dispatch (grep guardra
   assert.ok(dispatchStart > -1 && transportCall > dispatchStart, 'dispatch + its transportSend call located');
   const preTransport = src.slice(dispatchStart, transportCall);
   // The two legitimate send-gating returns that live in this pre-transport region.
-  assert.ok(/if \(tier === TIERS\.OFF\) return;/.test(preTransport), 'the consent-off guard is present');
+  assert.ok(/if \(!collectsEvents\(consentState\)\) return;/.test(preTransport), 'the consent gate is present');
   assert.ok(/if \(drifted\) return;/.test(preTransport), 'the WARDEN-631 drifted guard is present');
   assert.ok(
     !/deliveryFailing/.test(preTransport),
     'CRITICAL: deliveryFailing is NOT consulted before transportSend — it never gates sending',
+  );
+});
+
+// ==========================================================================
+// WARDEN-1198 — deliveryFailing derives from WIRE outcomes ONLY
+// ==========================================================================
+// isDeliveryFailing was written (WARDEN-808) when the ring held exactly TWO
+// outcomes, 'ok' and 'dropped', so its `!== 'dropped'` bail genuinely meant "a
+// send succeeded". WARDEN-817 added a THIRD outcome, 'rejected' — an event
+// dropped PRE-SEND by the validator, recorded with attempts:0 / status:null
+// because it never reached the wire. The binary predicate read that as a broken
+// run, so ONE malformed event during a real receiver outage silently disarmed
+// the outage banner: the user was told telemetry was fine while the receiver was
+// still down. The derivation now takes its window over WIRE outcomes only
+// ('ok' | 'dropped') and IGNORES a non-wire outcome entirely — it neither arms
+// nor breaks a run, because it is evidence of nothing about reachability.
+//
+// The shape is an ALLOW-LIST of wire outcomes, not a deny-list of 'rejected', so
+// a fourth non-wire outcome added later is ignored by default rather than
+// silently re-introducing this bug.
+
+// An event whose message trips a validator that rejects ONLY this shape — the
+// "one malformed event mid-outage" trigger, driven through the REAL validate
+// seam rather than by hand-building ring entries.
+function rejectableEventAt(ts) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'error',
+    runtime: 'main',
+    timestamp: ts,
+    name: 'Error',
+    message: 'REJECT_ME',
+    frames: [],
+  };
+}
+
+// A validator that rejects exactly the events rejectableEventAt() produces and
+// accepts everything else — so a single test can interleave wire outcomes and
+// pre-send rejections through one pipeline.
+const rejectsMarkedEvents = (e) => !!e && e.message !== 'REJECT_ME';
+
+// --- the pure derivation: non-wire entries are skipped, not counted ----------
+
+test('isDeliveryFailing: a rejected entry does NOT break an all-drops run (the WARDEN-1198 defect)', () => {
+  const d = { outcome: 'dropped' };
+  const rj = { outcome: 'rejected' };
+  // The exact defect shape: 3 drops armed the banner, then one pre-send rejection
+  // cleared it while the receiver was still down.
+  assert.equal(isDeliveryFailing([d, d, d, rj], 3), true, 'a rejection is not a send outcome — the run stands');
+  // The realistic outage shape: rejections INTERLEAVED through a sustained outage.
+  assert.equal(isDeliveryFailing([d, rj, d, rj, d], 3), true, 'interleaved rejections do not reset the run');
+});
+
+test('isDeliveryFailing: a ring of ONLY rejected entries never arms (a rejection is evidence of nothing)', () => {
+  const rj = { outcome: 'rejected' };
+  assert.equal(isDeliveryFailing([rj, rj, rj], 3), false, 'no wire outcome ⇒ nothing is known about the receiver');
+  assert.equal(isDeliveryFailing([rj, rj, rj, rj, rj], 3), false, 'still no wire evidence, however many');
+});
+
+test('isDeliveryFailing: a rejection can NOT mask a heal — filtering must not over-warn', () => {
+  // The important NEGATIVE control. Removing rejections from the window must not
+  // resurrect an 'ok' that already broke the run: [d, d, ok, rj] has wire window
+  // [d, d, ok], which is healed. If this returned true the fix would have traded
+  // a false-clear for a false-alarm.
+  const d = { outcome: 'dropped' };
+  const ok = { outcome: 'ok' };
+  const rj = { outcome: 'rejected' };
+  assert.equal(isDeliveryFailing([d, d, ok, rj], 3), false, 'the ok still breaks the run through the rejection');
+  assert.equal(isDeliveryFailing([d, d, ok, rj, rj], 3), false, 'any number of trailing rejections change nothing');
+});
+
+test('isDeliveryFailing: fewer than N WIRE outcomes → false even when the ring is long', () => {
+  // The threshold counts SEND evidence, not ring length. A ring padded out to
+  // length by rejections has not accumulated enough wire history to arm.
+  const d = { outcome: 'dropped' };
+  const rj = { outcome: 'rejected' };
+  assert.equal(isDeliveryFailing([d, rj, rj, rj, d], 3), false, '5 entries but only 2 wire outcomes');
+});
+
+test('isDeliveryFailing: an unknown/garbage outcome is still not a wire outcome (never arm on garbage)', () => {
+  // The allow-list generalizes :1596's guarantee: a malformed/null seeded entry is
+  // not 'ok' or 'dropped', so it can never fill a window slot and arm a run.
+  const d = { outcome: 'dropped' };
+  assert.equal(isDeliveryFailing([d, d, { outcome: null }], 3), false, 'a null outcome cannot complete a run');
+  assert.equal(isDeliveryFailing([d, d, {}, null, 'nonsense'], 3), false, 'garbage never arms');
+  // And a FUTURE non-wire outcome is ignored by default rather than breaking the
+  // run — the durability property the allow-list buys over a deny-list.
+  assert.equal(
+    isDeliveryFailing([d, d, d, { outcome: 'some-future-non-wire-outcome' }], 3),
+    true,
+    'an unrecognized outcome is skipped, not read as a successful send',
+  );
+});
+
+// --- pipeline integration: driven through the REAL redact/validate/send seams -
+
+test('a validate-rejected event during an outage leaves the banner ARMED (and never reaches the wire)', () => {
+  // THE DEFECT, end to end. 3 drops arm the banner; then one malformed event is
+  // rejected pre-send while the receiver is STILL down. Before WARDEN-1198 this
+  // reported deliveryFailing:false — telemetry "fine" during a live outage.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));
+  pipeline.record(eventAt(2));
+  pipeline.record(eventAt(3));
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, '3 drops → armed, receiver is down');
+  pipeline.record(rejectableEventAt(4)); // one malformed event mid-outage
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    true,
+    'CRITICAL: the receiver is still down — a pre-send rejection must NOT clear the banner',
+  );
+  assert.deepEqual(
+    log.entries().map((e) => e.outcome),
+    ['dropped', 'dropped', 'dropped', 'rejected'],
+    'the rejection IS recorded (WARDEN-817 observability is preserved, not removed)',
+  );
+  const rejectedEntry = log.entries()[3];
+  assert.equal(rejectedEntry.attempts, 0, 'the rejected event never went to the wire');
+  assert.equal(rejectedEntry.status, null, 'the rejected event never went to the wire');
+  assert.equal(send.calls.length, 3, 'transport saw only the 3 real sends — the rejection was dropped pre-send');
+});
+
+test('a pipeline whose sends are ALL validate-rejected never arms deliveryFailing', () => {
+  // No event ever reaches the wire, so nothing is known about the receiver. A ring
+  // of rejections must not be read as a sustained delivery failure.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(rejectableEventAt(1));
+  pipeline.record(rejectableEventAt(2));
+  pipeline.record(rejectableEventAt(3));
+  pipeline.record(rejectableEventAt(4));
+  assert.equal(log.size(), 4, 'all four rejections are recorded');
+  assert.equal(send.calls.length, 0, 'nothing ever reached the wire');
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    false,
+    'no wire evidence ⇒ no delivery-failure claim (must not false-alarm)',
+  );
+});
+
+test('rejections INTERLEAVED through a sustained outage still arm the banner', () => {
+  // The realistic shape: a malformed event or two arriving while the receiver is
+  // down. The wire window is [d, d, d] → armed.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));            // dropped
+  pipeline.record(rejectableEventAt(2));  // rejected
+  pipeline.record(eventAt(3));            // dropped
+  pipeline.record(rejectableEventAt(4));  // rejected
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'only 2 wire drops so far — below threshold');
+  pipeline.record(eventAt(5));            // dropped → 3 wire drops
+  assert.deepEqual(
+    log.entries().map((e) => e.outcome),
+    ['dropped', 'rejected', 'dropped', 'rejected', 'dropped'],
+    'the interleaved ring shape',
+  );
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, 'the interleaved rejections did not reset the run');
+});
+
+test('a rejection after a HEAL does not re-arm the banner (the fix must not over-warn)', () => {
+  // The negative control, end to end: [dropped, dropped, ok, rejected]. The ok
+  // healed the run; filtering the rejection out must not resurrect the outage.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));            // dropped
+  pipeline.record(eventAt(2));            // dropped
+  pipeline.record(eventAt(3));            // ok → healed
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'the ok healed it');
+  pipeline.record(rejectableEventAt(4));  // rejected
+  assert.deepEqual(
+    log.entries().map((e) => e.outcome),
+    ['dropped', 'dropped', 'ok', 'rejected'],
+    'the heal-then-reject ring shape',
+  );
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    false,
+    'CRITICAL: the receiver is reachable — a rejection must not manufacture an outage',
+  );
+});
+
+// --- emit discipline across a rejection: no duplicate emit, no lost edge ------
+
+test('settle emit-on-change is UNCHANGED across a rejection — no duplicate emit, no lost edge', () => {
+  // The four call sites of isDeliveryFailing include the prev/next pair inside
+  // settle (:449/:474) that drives WARDEN-808's emit-on-change check. Both sides
+  // are computed with the SAME pure helper, so the fix moves them together. This
+  // asserts that mechanically rather than assuming it: a rejection produces NO
+  // settle at all (the rejection path returns before transport), and the drop that
+  // follows is a true→true no-op, so exactly ONE push exists across the whole run.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP]);
+  const spy = statusSpy();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+    onRuntimeStatus: spy,
+  });
+  pipeline.record(eventAt(1)); // drop 1 — below threshold, no push
+  pipeline.record(eventAt(2)); // drop 2 — below threshold, no push
+  assert.deepEqual(spy.calls, [], 'no push below threshold');
+  pipeline.record(eventAt(3)); // drop 3 — false→true → ONE push (the edge)
+  assert.deepEqual(spy.calls, [{ drifted: false, deliveryFailing: true }], 'the arm edge fired exactly once');
+  pipeline.record(rejectableEventAt(4)); // rejected — never enters settle
+  assert.deepEqual(
+    spy.calls,
+    [{ drifted: false, deliveryFailing: true }],
+    'a rejection pushes nothing — and crucially does not push a spurious CLEAR',
+  );
+  pipeline.record(eventAt(5)); // drop 4 — true→true → no push (no duplicate emit)
+  assert.deepEqual(
+    spy.calls,
+    [{ drifted: false, deliveryFailing: true }],
+    'the drop after the rejection is a no-op transition — no duplicate emit, no re-arm edge',
+  );
+  // THE BRIDGE/PULL DIVERGENCE, closed. Before the fix getRuntimeStatus() said
+  // false while the last push said true, and the renderer only re-pulls on
+  // Settings mount — so the two stayed divergent until the next real send. They
+  // must now agree without adding a new emit site to the rejection path.
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    spy.calls[spy.calls.length - 1].deliveryFailing,
+    'the Settings-mount pull agrees with the last value pushed to the renderer',
+  );
+});
+
+test('a rejection does not push a status, and the rejection path adds NO emit site (scope guardrail)', () => {
+  // Deliberately OUT of scope for WARDEN-1198: adding a status-push to the
+  // rejection path. Ignoring rejections in the derivation makes the value correct
+  // at BOTH getRuntimeStatus() and the next emit, so no new emit site is needed —
+  // and adding one would risk a no-op re-emit against the WARDEN-808 composite
+  // emit-on-change contract. This pins that decision mechanically.
+  const src = readFileSync(resolve(__dirname, '../electron/telemetry-pipeline.cjs'), 'utf8');
+  const rejectSite = src.indexOf("outcome: 'rejected'");
+  assert.ok(rejectSite > -1, 'the rejection record site is located');
+  // The region from the rejection record to its pre-send `return`.
+  const returnIdx = src.indexOf('return;', rejectSite);
+  assert.ok(returnIdx > rejectSite, 'the pre-send drop return follows the record');
+  const rejectionRegion = src.slice(rejectSite, returnIdx);
+  assert.ok(
+    !/emitRuntimeStatus\(/.test(rejectionRegion),
+    'the rejection path emits no status — the derivation fix alone keeps push and pull in agreement',
   );
 });
 
