@@ -76,10 +76,23 @@ test('no-receiver → warning tone, "No receiver" label', () => {
   assert.equal(d.label, 'No receiver');
 });
 
+// WARDEN-1238 — the fifth state: the receiver answered, but the configured
+// endpoint lacks its scheme, so events cannot be delivered. Warning, not green.
+test('scheme-missing → warning tone, "Add scheme" label', () => {
+  const d = describeTelemetryTestVerdict({
+    kind: 'scheme-missing',
+    ok: false,
+    message:
+      'A warden-telemetry receiver answered at this host, but the endpoint is missing its scheme.',
+  });
+  assert.equal(d.tone, 'warning');
+  assert.equal(d.label, 'Add scheme');
+});
+
 // --- Tone integrity: never show a "positive" tone for a non-ok verdict ---
 
 test('every non-ok kind is a warning — a green tone is reserved for connected only', () => {
-  for (const kind of ['schema-drift', 'auth-required', 'no-receiver']) {
+  for (const kind of ['schema-drift', 'auth-required', 'scheme-missing', 'no-receiver']) {
     const d = describeTelemetryTestVerdict({ kind, ok: false, message: 'm' });
     assert.equal(d.tone, 'warning', `${kind} must not read as success`);
   }
@@ -94,13 +107,13 @@ test('a connected verdict with ok:false is still a warning (defensive — never 
 
 // --- Distinctness: the four labels are all different (legible at a glance) ---
 
-test('the four labels are pairwise distinct (each state is legible at a glance)', () => {
+test('the labels are pairwise distinct (each state is legible at a glance)', () => {
   const labels = new Set(
-    ['connected', 'schema-drift', 'auth-required', 'no-receiver'].map((kind) =>
+    ['connected', 'schema-drift', 'auth-required', 'scheme-missing', 'no-receiver'].map((kind) =>
       describeTelemetryTestVerdict({ kind, ok: kind === 'connected', message: 'm' }).label
     )
   );
-  assert.equal(labels.size, 4, 'four distinct labels for four states');
+  assert.equal(labels.size, 5, 'five distinct labels for five states');
 });
 
 // --- Defensive: an unrecognized kind never throws in the renderer ---
