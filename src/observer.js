@@ -876,7 +876,7 @@ export class Observer {
             [chat.id]: { state: classifyPane(clean, chat).state, phase: null, sig: paneSignature(clean) },
           });
         } catch { /* cache update is best-effort */ }
-        return { id: chat.container, host: chat.host, pane: pane.slice(-8000) };
+        return { id: chat.container || chat.session, host: chat.host, pane: pane.slice(-8000) };
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'read_chats') {
