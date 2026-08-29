@@ -258,6 +258,13 @@ test('KEEPS a completed miss though its landing state idle is not needs-you', ()
   const misses = [miss('a', { reason: 'completed', firedAt: 100 })];
   assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'idle']])).map((m) => m.key), ['a']);
 });
+test('KEEPS a miss whose chat is blocked — blocked IS a needs-you state (WARDEN-1217)', () => {
+  // A chat that entered `blocked` while the user was away must surface in the
+  // catch-up on the same footing as waiting/erroring/stuck (parity with chatWatch's
+  // persistent WATCH_NEED_STATES, which includes blocked).
+  const misses = [miss('a', { reason: 'waiting', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'blocked']])).map((m) => m.key), ['a']);
+});
 test('null currentByKey is a no-op (keeps everything — the pre-poll default)', () => {
   const misses = [miss('a', { reason: 'erroring' }), miss('b', { reason: 'waiting' })];
   assert.equal(reconcileAwayMisses(misses, null).length, 2);
