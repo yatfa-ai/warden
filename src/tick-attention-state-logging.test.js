@@ -29,16 +29,19 @@ const idlePane = '';                                       // no signal → idle
 
 // A yatfa agent (container set) vs a manual/tmux chat (no container).
 const yatfa = (key, container = key) => ({
-  key, container, session: null, host: 'hostA', role: 'worker', project: 'p', name: key, active: true,
+  id: `hostA:${key}`, key, container, session: null, host: 'hostA', role: 'worker', project: 'p', name: key, active: true,
 });
 const manual = (key) => ({
-  key, container: null, session: key, host: '(local)', role: null, name: key, active: true,
+  id: `(local):${key}`, key, container: null, session: key, host: '(local)', role: null, name: key, active: true,
 });
 
 // Inject a capturePanes that serves `panesByKey` (key → pane content). A key ABSENT
 // from the map → capture_failed (mirrors the real capturePanes drop). Same shape as
 // state-transition.test.js's `capture`, adapted to tickAttention's 2-arg call.
-const capture = (panesByKey) => async (_chats, _cfg) => panesByKey;
+// capturePanes is keyed by the HOST-QUALIFIED id (WARDEN-1223); the fixture serves bare keys.
+const capture = (panesByKey) => async (chats, _cfg) => Object.fromEntries(chats
+        .filter((c) => Object.prototype.hasOwnProperty.call(panesByKey, c.key))
+        .map((c) => [c.id, panesByKey[c.key]]));
 
 // fetch recorder — absorbs the fire-and-forget webhook dispatch so the logging test
 // never touches the network. Returns ok; the dispatch's .catch swallows any error.
@@ -144,8 +147,9 @@ describe('WARDEN-788 — tickAttention (60s webhook sweep) logs state_changed', 
     // the 60s server-side sweep (tickAttention inline) both classify the SAME agent
     // while the window is open. They must share the key-keyed lastLoggedState map so a
     // transition observed by one is not re-logged by the other on its next tick.
-    // pollAgentStates establishes the stuck baseline.
-    await pollAgentStates([yatfa('sweep-e')], {}, { capturePanes: (async (_c, _cfg) => ({ 'sweep-e': stuckPane })) });
+    // pollAgentStates establishes the stuck baseline. (capturePanes is keyed by
+    // the HOST-QUALIFIED id — WARDEN-1223.)
+    await pollAgentStates([yatfa('sweep-e')], {}, { capturePanes: (async (chats) => Object.fromEntries(chats.map((c) => [c.id, stuckPane]))) });
     // tickAttention's INLINE classify then sees the SAME agent in the SAME state.
     await tickAttention({ chats: [yatfa('sweep-e')], capturePanes: capture({ 'sweep-e': stuckPane }), fetchImpl: fetchRec() });
     assert.strictEqual((await stateEvents()).length, 1, 'pollAgentStates baseline only — the sweep did NOT double-log the same state');

@@ -227,6 +227,15 @@ export function dispatchWebhook({
 // `agents`     — the pollAgentStates() result rows ({ key, state, signal, name,
 //                 host, ... }). Rows whose state is not a string or not in
 //                 ATTENTION_STATES (active/idle/capture_failed) are skipped.
+// The attention-baseline identity for an agent row (WARDEN-1223): the bare
+// `key` names two different agents when two hosts run a same-named session, so
+// the one-shot webhook baselines key on the HOST-QUALIFIED identity
+// (`${host}:${key}` — exactly the chat's host-qualified `id`). Rows without a
+// host degrade to the bare key, keeping single-host and legacy callers intact.
+export function attentionRowKey(a) {
+  return a && a.host ? `${a.host}:${a.key}` : (a ? a.key : undefined);
+}
+
 export function diffAttentionTransitions(prevStates, agents) {
   if (!prevStates || prevStates.size === 0) return [];
   if (!Array.isArray(agents)) return [];
@@ -234,7 +243,7 @@ export function diffAttentionTransitions(prevStates, agents) {
   for (const a of agents) {
     if (!a || typeof a.state !== 'string') continue;
     if (!ATTENTION_STATES.has(a.state)) continue;
-    const prev = prevStates.get(a.key);
+    const prev = prevStates.get(attentionRowKey(a));
     // Fire only on a transition INTO attention from a NON-attention state (or a
     // newly-seen key, whose prev is undefined → not in ATTENTION_STATES). An
     // agent already in an attention state last sweep is not a NEW transition.
@@ -329,7 +338,7 @@ export function diffDoneTransitions(prevStates, agents) {
   const out = [];
   for (const a of agents) {
     if (!a || a.state !== 'idle') continue; // fires ONLY on a present, idle row
-    const prev = prevStates.get(a.key);
+    const prev = prevStates.get(attentionRowKey(a));
     // Fire only when the agent WAS active (genuinely working) last sweep and is idle
     // now. An agent already idle (idle→idle), newly-seen (prev undefined → never
     // active), or coming from a non-active state (erroring/stuck/waiting/blocked →

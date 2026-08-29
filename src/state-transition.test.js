@@ -31,10 +31,10 @@ const activePane = 'running npm build step\n';            // active keyword (+ c
 
 // A chat shaped like a yatfa agent (container set) vs a manual/tmux chat (none).
 const yatfa = (key, container = key) => ({
-  key, container, session: null, host: 'hostA', role: 'worker', project: 'p', name: key, active: true,
+  id: `hostA:${key}`, key, container, session: null, host: 'hostA', role: 'worker', project: 'p', name: key, active: true,
 });
 const manual = (key) => ({
-  key, container: null, session: key, host: '(local)', role: null, name: key, active: true,
+  id: `(local):${key}`, key, container: null, session: key, host: '(local)', role: null, name: key, active: true,
 });
 
 describe('WARDEN-788 — state-transition logging', () => {
@@ -149,7 +149,10 @@ describe('WARDEN-788 — state-transition logging', () => {
   describe('pollAgentStates — writes REAL state_changed events into the store', () => {
     // Inject a capturePanes that serves `panesByKey` (key → pane content). A key
     // ABSENT from the map → capture_failed (mirrors the real capturePanes drop).
-    const capture = (panesByKey) => async (_chats, _cfg, _deps) => panesByKey;
+    // capturePanes is keyed by the HOST-QUALIFIED id (WARDEN-1223); the fixture serves bare keys.
+const capture = (panesByKey) => async (chats, _cfg, _deps) => Object.fromEntries(chats
+        .filter((c) => Object.prototype.hasOwnProperty.call(panesByKey, c.key))
+        .map((c) => [c.id, panesByKey[c.key]]));
 
     it('first observation writes a from:null baseline into the activity log', async () => {
       await pollAgentStates([yatfa('w788-a')], {}, { capturePanes: capture({ 'w788-a': stuckPane }) });
