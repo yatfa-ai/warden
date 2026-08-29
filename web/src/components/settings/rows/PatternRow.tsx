@@ -37,6 +37,7 @@ import {
   WATCH_PATTERN_EXPRESSION_MAX,
   isValidRegex,
 } from '@/lib/storage';
+import { decideDraftNameCommit, decideDraftValueCommit } from './draftCommit';
 
 export function PatternRow({
   pattern,
@@ -61,17 +62,19 @@ export function PatternRow({
   useEffect(() => { setExprDraft(pattern.expression); }, [pattern.expression]);
 
   const commitName = () => {
-    const trimmed = nameDraft.trim();
-    if (trimmed && trimmed !== pattern.name) {
-      if (!onRename(pattern.id, trimmed)) setNameDraft(pattern.name); // revert on rejection
+    const decision = decideDraftNameCommit(nameDraft, pattern.name);
+    if (decision.commit) {
+      // Divergence from PresetRow/SnippetRow (preserved): patterns are renamed
+      // by id, not by previous name.
+      if (!onRename(pattern.id, decision.value)) setNameDraft(pattern.name); // revert on rejection
     } else {
       setNameDraft(pattern.name); // empty or unchanged → revert
     }
   };
   const commitExpr = () => {
-    const trimmed = exprDraft.trim();
-    if (trimmed) {
-      onExpressionChange(pattern.id, trimmed);
+    const decision = decideDraftValueCommit(exprDraft);
+    if (decision.commit) {
+      onExpressionChange(pattern.id, decision.value);
     } else {
       setExprDraft(pattern.expression); // empty → revert (never persist an empty expression)
     }
