@@ -1,4 +1,4 @@
-import { describe, it, after } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -194,8 +194,24 @@ describe('runLocalTmux() — utf8 decoder state across chunk boundaries (WARDEN-
   const bufferName = `warden-enc-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const expected = paneLike(3000);
 
+  // `load-buffer` does NOT auto-start a tmux server — the tmux client only
+  // spawns one for commands that create sessions. On a fresh runner (or any
+  // host where no session has been created yet and the server has exited after
+  // its last session died) a bare `load-buffer` fails with "no server running
+  // on /tmp/tmux-<uid>/default" — which is exactly what CI on ubuntu-latest
+  // showed: the suite's other tmux tests had torn their sessions down first.
+  // A detached throwaway session pins the server open for this suite's
+  // duration, and is killed in `after` alongside the buffer cleanup.
+  const sessionName = `warden-enc-server-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+
+  before(async () => {
+    const start = await runLocalTmux(['new-session', '-d', '-s', sessionName], { timeout: 15000 });
+    assert.equal(start.ok, true, `could not start a tmux server (new-session failed): ${start.stderr}`);
+  });
+
   after(async () => {
     try { await runLocalTmux(['delete-buffer', '-b', bufferName]); } catch { /* best effort */ }
+    try { await runLocalTmux(['kill-session', '-t', sessionName]); } catch { /* best effort */ }
   });
 
   it('a >64KB multibyte capture comes back byte-identical', async () => {
