@@ -51,6 +51,29 @@ export function TelemetrySendingStatus({
       </div>
     );
   }
+  if (status.kind === 'needs-scheme') {
+    // WARDEN-1238 — a non-blank endpoint with no scheme is just as inert as a
+    // blank one (the transport sends to the endpoint EXACTLY as configured and
+    // never rewrites it), but the cause — and the fix — is different, so it gets
+    // its own amber banner: not "no endpoint" but "add the scheme".
+    return (
+      <div
+        role="status"
+        className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+      >
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <p className="text-amber-800 dark:text-amber-200">
+          <span className="font-medium">
+            Enabled, but nothing is being sent — the endpoint is missing its scheme.
+          </span>{' '}
+          Warden sends to the endpoint exactly as configured, so{' '}
+          <span className="font-medium">{status.destination}</span> cannot receive
+          events without it. Add <span className="font-medium">https://</span> to the
+          endpoint below for signal to flow.
+        </p>
+      </div>
+    );
+  }
   return (
     // role="status": a live region so the transition INTO "configured" (user
     // pastes a receiver URL) is announced alongside the unconfigured notice above.
