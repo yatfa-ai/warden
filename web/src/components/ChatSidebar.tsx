@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -34,6 +34,7 @@ import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
+import { parseLoadedPins, nextPins } from '@/lib/pinSync';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import {
@@ -237,6 +238,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   const [tabSearchQuery, setTabSearchQuery] = useState('');
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
+  // WARDEN-1240: pin persistence bookkeeping. The server's PUT /api/pins
+  // replaces the whole stored list wholesale, so the client must never write
+  // from an unverified snapshot. `pinsRef` mirrors the state so serialized
+  // toggles always build on the last confirmed set (rapid clicks no longer
+  // race); `pinsLoadedRef` gates writes on a verified load — a failed or
+  // error-bodied GET is "unknown", never "no pins", so it can never be written
+  // back as an empty list.
+  const pinsRef = useRef<Set<string>>(new Set());
+  const pinsLoadedRef = useRef(false);
+  const pinWriteChainRef = useRef<Promise<void>>(Promise.resolve());
   // WARDEN-305: per-agent notes — id → short human annotation (mirrors pins).
   const [agentNotes, setAgentNotes] = useState<Record<string, string>>({});
   // WARDEN-342: per-past-session tags — claude-session id → short reusable labels
@@ -402,13 +413,25 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // Outgoing (ahead/unpushed, @{u}..HEAD) via range=outgoing (WARDEN-252); limit hardcoded at 50.
   const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setError: setGitLogOutgoingError, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', label: 'outgoing commits', buildParams: buildOutgoingParams });
 
-  // Load pinned chat ids + per-agent notes from the backend on mount
+  // Load pinned chat ids + per-agent notes from the backend on mount.
+  // WARDEN-1240: a pins response is only adopted when it is ok AND actually a
+  // pin list (parseLoadedPins). A failure leaves the load gate closed — the
+  // client holds "unknown" (rendered as nothing pinned) rather than believing
+  // "no pins", and the first toggle retries the load before writing so the
+  // unknown state can never be written back as an empty list.
   useEffect(() => {
     const fetchPins = async () => {
       try {
         const r = await fetch('/api/pins');
         const j = await r.json();
-        setPinnedChatIds(new Set(j.pins || []));
+        const pins = r.ok ? parseLoadedPins(j) : null;
+        if (pins) {
+          pinsLoadedRef.current = true;
+          pinsRef.current = pins;
+          setPinnedChatIds(pins);
+        } else {
+          console.error('[pins] Load failed: unverified response', { ok: r.ok, body: j });
+        }
       } catch (error) {
         console.error('[pins] Failed:', error);
       }
@@ -436,29 +459,58 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     fetchSessionTags();
   }, []);
 
-  // Toggle a chat's pinned state and persist it
-  const togglePin = async (chatId: string) => {
-    const newPins = new Set(pinnedChatIds);
-    if (newPins.has(chatId)) {
-      newPins.delete(chatId);
-    } else {
-      newPins.add(chatId);
-    }
-    try {
-      const r = await fetch('/api/pins', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pins: Array.from(newPins) }),
-      });
-      if (r.ok) {
-        setPinnedChatIds(newPins);
+  // Toggle a chat's pinned state and persist it (WARDEN-1240). Every write is
+  // serialized through `pinWriteChainRef` and builds on `pinsRef` — the last
+  // confirmed set, not the React snapshot — so rapid clicks each land their own
+  // change instead of racing near-identical arrays where only the last survives.
+  // If the mount-time load never verified, the first toggle re-attempts it and
+  // refuses to write when it still fails: an unknown pin state is never written
+  // back over the stored list. On success we adopt the server's returned list.
+  const togglePin = (chatId: string) => {
+    const attempt = async () => {
+      if (!pinsLoadedRef.current) {
+        try {
+          const r = await fetch('/api/pins');
+          const j = await r.json();
+          const pins = r.ok ? parseLoadedPins(j) : null;
+          if (!pins) {
+            console.error('[pins-save] Aborted: pin state unverified, refusing to overwrite stored list');
+            return;
+          }
+          pinsLoadedRef.current = true;
+          pinsRef.current = pins;
+          setPinnedChatIds(pins);
+        } catch (error) {
+          console.error('[pins-save] Aborted: pin load retry failed:', error);
+          return;
+        }
       }
-    } catch (error) {
-      console.error('[pins-save] Failed:', error);
-    }
+      const newPins = nextPins(pinsRef.current, chatId);
+      try {
+        const r = await fetch('/api/pins', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pins: Array.from(newPins) }),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const confirmed = parseLoadedPins(j) ?? newPins;
+          pinsRef.current = confirmed;
+          setPinnedChatIds(confirmed);
+        } else {
+          console.error('[pins-save] Failed: non-ok response', r.status);
+        }
+      } catch (error) {
+        console.error('[pins-save] Failed:', error);
+      }
+    };
+    pinWriteChainRef.current = pinWriteChainRef.current.then(attempt, attempt);
   };
 
-  // WARDEN-305: set or clear a per-agent note and persist it (mirrors togglePin).
+  // WARDEN-305: set or clear a per-agent note and persist it. Unlike pins, this
+  // sends the per-key change (id + note) and adopts the server's merged map on
+  // success, so it is immune to both the rapid-click race and the wiped-list
+  // failure mode (WARDEN-1240).
   // Empty/blank text clears the note (server deletes the key).
   const setNote = async (chatId: string, text: string) => {
     try {
