@@ -456,6 +456,24 @@ describe('Observer _execTool dispatch (end-to-end via injected I/O)', () => {
     assert.strictEqual(result.pane, 'captured pane text');
   });
 
+  it('read_chat reports the session name as id for a non-containerised chat (WARDEN-1221)', async () => {
+    const chat = tmuxChat();
+    const resolveChat = mock.fn(() => ({ chat }));
+    const readPane = mock.fn(async () => 'manual pane text');
+    const obs = new Observer(cfg, { io: makeIo({ resolveChat, readPane }) });
+    obs.lastChats = [chat];
+
+    const result = await obs._execTool('read_chat', { id: 'manual-session' });
+
+    // The reader must report the same resolved identity (container || session)
+    // as its sibling tools list_chats/read_chats, so a non-containerised chat
+    // stays addressable from the result instead of reporting id: null.
+    assert.strictEqual(result.id, 'manual-session',
+      'non-containerised chat reports its session name, not null');
+    assert.strictEqual(result.host, '(local)');
+    assert.strictEqual(result.pane, 'manual pane text');
+  });
+
   it('read_chat surfaces a readPane failure as { error } (WARDEN-89: never silent)', async () => {
     const chat = yatfaChat();
     const resolveChat = mock.fn(() => ({ chat }));
