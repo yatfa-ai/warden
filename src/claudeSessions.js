@@ -510,14 +510,14 @@ export function transcriptWindow(size, before) {
 
 // Resolve a local session JSONL by id across every project dir (the session id IS
 // the basename; ids are unique per file). Returns the absolute path or null.
-function findLocalSessionFile(id) {
+async function findLocalSessionFile(id) {
   const dir = path.join(os.homedir(), '.claude', 'projects');
-  try {
-    for (const proj of fs.readdirSync(dir)) {
-      const fp = path.join(dir, proj, `${id}.jsonl`);
-      try { if (fs.statSync(fp).isFile()) return fp; } catch { /* not in this project dir */ }
-    }
-  } catch { /* no projects dir */ }
+  let projects;
+  try { projects = await fsp.readdir(dir); } catch { return null; /* no projects dir */ }
+  for (const proj of projects) {
+    const fp = path.join(dir, proj, `${id}.jsonl`);
+    try { if ((await fsp.stat(fp)).isFile()) return fp; } catch { /* not in this project dir */ }
+  }
   return null;
 }
 
@@ -528,9 +528,9 @@ function findLocalSessionFile(id) {
 // it reads the OLDER window [start, before] instead of the tail and SKIPS the head
 // read (cwd is only needed on the first page — the caller already has it). The
 // response carries prevCursor/hasMore so the caller can page further back.
-export function readLocalSessionTranscript(id, opts = {}) {
+export async function readLocalSessionTranscript(id, opts = {}) {
   const before = opts.before;
-  const file = findLocalSessionFile(id);
+  const file = await findLocalSessionFile(id);
   if (!file) return { notFound: true };
   let headText = '';
   let bodyText = '';
@@ -540,28 +540,28 @@ export function readLocalSessionTranscript(id, opts = {}) {
   // construction, so their `truncated` reflects only the within-window message cap.
   let byteTruncated = false;
   try {
-    const size = fs.statSync(file).size;
+    const size = (await fsp.stat(file)).size;
     win = transcriptWindow(size, before);
     if (before == null) byteTruncated = size > SESSION_VIEW_MAX_BYTES;
-    const fd = fs.openSync(file, 'r');
+    const fh = await fsp.open(file, 'r');
     try {
       // Head window (8KB) for cwd — only on the first page. The same head read
       // localClaudeSessions uses; skipped on older pages (cwd already known).
       if (before == null) {
         const hlen = Math.min(size, 8192);
         const hbuf = Buffer.alloc(hlen);
-        fs.readSync(fd, hbuf, 0, hlen, 0);
+        await fh.read(hbuf, 0, hlen, 0);
         headText = hbuf.toString('utf8');
       }
       // Body window [start, end] for this page — bounded, never the whole file.
       const blen = Math.max(0, win.end - win.start);
       if (blen > 0) {
         const bbuf = Buffer.alloc(blen);
-        fs.readSync(fd, bbuf, 0, blen, win.start);
+        await fh.read(bbuf, 0, blen, win.start);
         bodyText = bbuf.toString('utf8');
       }
     } finally {
-      fs.closeSync(fd);
+      await fh.close();
     }
   } catch { /* noop — empty windows yield an empty message list */ }
   const view = buildTranscriptView(headText, bodyText);
