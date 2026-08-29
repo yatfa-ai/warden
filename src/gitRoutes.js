@@ -1004,9 +1004,15 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
   // Because there is NO user-supplied file pathspec, the realpath containment
   // ceremony of /api/git-diff (buildGitDiffScript / isPathWithinCwd) does NOT apply
   // — this route stays simple like /api/git-log. Output is capped at 1MB via capDiff.
-  // A non-zero git exit is surfaced as a clean user-facing error — never a 500:
-  //   outgoing/incoming with no upstream (or detached HEAD) → 'no upstream configured'
-  //   worktree on an unborn HEAD (fresh repo, no commits)     → 'no commits yet ...'
+  // A non-zero git exit is surfaced as a clean user-facing error — never a 500,
+  // and classified via classifyGitFailure (WARDEN-1227) so the cause is one this
+  // route has actually established:
+  //   outgoing/incoming with no upstream (or detached HEAD) on a VALID repo
+  //     → 'no upstream configured' (also for an unborn HEAD, per spec)
+  //   outgoing/incoming on a broken repo (non-git/deleted cwd, dead transport)
+  //     → 'git diff failed' — the honest generic failure, agreeing with git-log
+  //   worktree on an unborn HEAD (fresh repo, no commits)
+  //     → 'no commits yet ...'
   // mirroring how every other git route tolerates a non-git/no-upstream repo.
   router.get('/api/git-range-diff', async (req, res) => {
     const range = String(req.query.range || '');
@@ -1040,10 +1046,23 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // is range-aware: it says so rather than misleadingly claiming "no upstream".
         const r = await runGit(chat, ['diff', rangeRev], cwd);
         if (!r.ok) {
+          // Consult classifyGitFailure before choosing a cause — the SAME gate
+          // /api/git-log applies under ?range= (WARDEN-1021's broken-repo
+          // discipline, this route's sibling for the identical range map).
+          // 'no upstream configured' is a claim about a VALID repo whose branch
+          // tracks nothing; pasting it over a non-git cwd, a deleted cwd, or a
+          // dropped SSH transport (all 'broken') invents a cause and sends the
+          // human to `git branch --set-upstream` for a repo that isn't there —
+          // and would disagree with the git-log pane for the same repo. 'unborn'
+          // KEEPS the tracking message: an unborn HEAD also has no @{u}, and the
+          // route's spec pins that message for it (worktree keeps its own
+          // range-aware wording).
+          const kind = await classifyGitFailure(chat, cwd);
           return res.json({
             diff: null,
             error: range === 'worktree'
               ? 'no commits yet (nothing to compare against HEAD)'
+              : kind === 'broken' ? 'git diff failed'
               : 'no upstream configured',
           });
         }

@@ -412,4 +412,26 @@ describe('/api/git-range-diff invalid range / unknown id / non-git (never a 500)
     assert.strictEqual(body.diff, null);
     assert.ok(typeof body.error === 'string' && body.error.length > 0, 'must surface a non-empty error');
   });
+
+  it('does NOT blame a missing upstream for a BROKEN repo (WARDEN-1227)', async () => {
+    // `git diff @{u}..HEAD` exits non-zero on a non-git cwd too, and before
+    // WARDEN-1227 this route chose its message from the RANGE alone — telling the
+    // human "no upstream configured" for a repository that is not there. The
+    // route must now consult classifyGitFailure (the same gate /api/git-log
+    // applies) and report the honest generic failure for a 'broken' repo, so the
+    // git-log and range-diff panes agree about one repository.
+    for (const range of ['outgoing', 'incoming']) {
+      const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-nongit&range=${range}`);
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.strictEqual(body.diff, null);
+      assert.ok(body.error && body.error.length > 0, `range=${range}: error must be non-empty`);
+      assert.strictEqual(body.error, 'git diff failed', `range=${range}: a broken repo gets the honest generic failure`);
+      assert.notStrictEqual(
+        body.error,
+        'no upstream configured',
+        `range=${range}: a broken repo must not be reported as a missing upstream`,
+      );
+    }
+  });
 });
