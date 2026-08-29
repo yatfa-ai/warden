@@ -29,8 +29,9 @@
 // are for runtime/request paths — they yield the event loop during I/O so no single
 // persistence op can re-stall the server (this is the WARDEN-828 spinner fix made
 // structural). The single sync export (readJsonDefensiveSync) is BOOT-ONLY — used
-// by the module-load config read where a sync value is required before the first
-// request is served; do not call it from a request handler.
+// by boot/start-up reads where a sync value is required before the first request
+// is served (the module-load config read, the CLI cache read, the Observer
+// constructor's start-up session read); do not call it from a request handler.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -174,7 +175,9 @@ export async function readJsonDefensive(file, { fallback = null, revive } = {}) 
 /**
  * Defensive JSON read (SYNC — BOOT PATHS ONLY). Same backup-on-corrupt semantics
  * as readJsonDefensive. Do NOT call from a request handler (it blocks the event
- * loop); the only sanctioned caller is the module-load config read. The sync
+ * loop). Sanctioned callers are boot/start-up reads that cannot await: the
+ * module-load config read, the CLI's cache read, and the Observer constructor's
+ * start-up session read (sessions.js getSession). The sync
  * backup write inside is itself boot-time/rare-recovery only.
  */
 export function readJsonDefensiveSync(file, { fallback = null, revive } = {}) {

@@ -266,6 +266,31 @@ describe('getSession — defensive single read', () => {
   });
 });
 
+// ------------------------ getSessionAsync (WARDEN-1218) -----------------------
+describe('getSessionAsync — async twin for runtime paths', () => {
+  it('returns null for an unknown id', async () => {
+    assert.strictEqual(await mod.getSessionAsync('does-not-exist'), null);
+  });
+
+  it('returns the full persisted record', async () => {
+    const record = {
+      id: 'a1', name: 'a session', createdAt: 1, updatedAt: 2,
+      messages: [{ role: 'user', content: 'hi' }], host: 'dev-box', container: null, project: null, role: null, chatKey: null,
+    };
+    seedJson('a1', record);
+    assert.deepStrictEqual(await mod.getSessionAsync('a1'), record);
+  });
+
+  it('returns null for a corrupt file AND leaves a backup (never a silent default)', async () => {
+    seedCorrupt('torn-a', '{"id":"torn-a","messages":[{"role":');
+    const { result, warnings } = await withSilencedWarnings(() => mod.getSessionAsync('torn-a'));
+    assert.strictEqual(result, null);
+    const backups = corruptBackups();
+    assert.strictEqual(backups.length, 1, 'corruption must be quarantined by the async twin too');
+    assert.ok(warnings.some((w) => w.includes('corrupt JSON')));
+  });
+});
+
 // ------------------------------- saveMessages --------------------------------
 describe('saveMessages — persistence and origin-metadata preservation', () => {
   it('creates a new record when the session does not exist yet, defaulting name to the id', async () => {
