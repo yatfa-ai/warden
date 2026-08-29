@@ -14,9 +14,10 @@ import {
   type FleetRecentCommitsResult,
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
+import { readListBody, readListResponse } from '@/lib/api';
 import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import type { Chat } from '@/lib/types';
-import type { GitFile } from './sidebar/types';
+import type { GitCommit, GitFile } from './sidebar/types';
 
 /**
  * FleetRecentCommits — a no-query, time-sorted "what the fleet just shipped" feed
@@ -170,13 +171,20 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
           // stays single-purpose.
           const base = buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT);
           const [recentR, outgoingR] = await Promise.all([fetch(base), fetch(`${base}&range=outgoing`)]);
-          // WARDEN-89: fetch() resolves (does NOT reject) on a 4xx/5xx — gate on
-          // recentR.ok so an unreachable agent (404) throws and is counted as that
-          // agent's error instead of reading undefined `commits` as an empty list
-          // (false-empty disease). The recent fetch is the reachability probe.
-          if (!recentR.ok) throw new Error(`git-log HTTP ${recentR.status}`);
-          const j = await recentR.json();
-          const commits = Array.isArray(j.commits) ? j.commits : [];
+          // WARDEN-1216: the recent fetch is the reachability probe, and its read now
+          // goes through the shared readListBody + readListResponse pair so BOTH
+          // halves of git-log's failure convention throw and are counted as that
+          // agent's error in the "(N unreachable)" tally (WARDEN-89 false-empty
+          // guard). Half one: a 4xx/5xx (the old explicit !recentR.ok gate — the
+          // reader reports `Failed to load commits (<status>)` for it). Half two —
+          // the one this fix adds: git-log answers SOME failures at HTTP 200 with
+          // { commits: [], error: 'git log failed' } (withGitRepo's no-cwd guard and
+          // catch-all, src/gitRoutes.js:490/:494), which a plain r.ok gate read as a
+          // confident "no commits". A deleted working directory or a dropped SSH
+          // transport now surfaces as an error instead.
+          const j = await readListBody(recentR);
+          const { items: commits, error } = readListResponse<GitCommit>(recentR, j, 'commits', 'commits');
+          if (error) throw new Error(error);
           // The outgoing fetch may 404 / non-ok too, but if `recent` resolved the agent
           // is reachable; a failed outgoing fetch just yields no unpushed marks — a
           // commit is never WRONGLY marked unpushed by a missing outgoing set (the

@@ -874,12 +874,17 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
           try {
             const url = `/api/git-log?id=${encodeURIComponent(chatId)}&grep=${encodeURIComponent(q)}` + (range ? `&range=${range}` : '');
             const r = await fetch(url);
-            // WARDEN-89: fetch() resolves (does not reject) on a 4xx/5xx — gate on r.ok
-            // so a server error surfaces as { status: 'error' } instead of reading
-            // undefined `j.commits` as an empty list (false-empty disease).
-            if (!r.ok) throw new Error(`git-log grep HTTP ${r.status}`);
-            const j = await r.json();
-            return [range, { status: 'ok', commits: Array.isArray(j.commits) ? j.commits : [] }];
+            // WARDEN-1216: the response read goes through the shared readListBody +
+            // readListResponse pair (the reference use lives in useGitListFetcher
+            // above), so a 200 whose body carries {error} — git-log's documented
+            // failure convention (withGitRepo src/gitRoutes.js:490/:494 spreads the
+            // empty gitDefaults alongside error) — becomes { status: 'error' } instead
+            // of a confident "no matches". Gating on r.ok alone (the previous fix)
+            // catches the 404 half but not the 200 half.
+            const j = await readListBody(r);
+            const { items, error } = readListResponse<GitCommit>(r, j, 'commits', 'commits');
+            if (error) throw new Error(error);
+            return [range, { status: 'ok', commits: items }];
           } catch (error) {
             // WARDEN-89: never swallow silently — log with the range + term so a network
             // failure or bad JSON leaves a trace instead of looking like "no matches".
