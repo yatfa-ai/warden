@@ -14,13 +14,16 @@ import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
  * values the consent switches and endpoint field mutate, so it re-renders the
  * instant either changes — there is no shadow state.
  *
- * Three states (see deriveTelemetrySendingStatus):
+ * Four states (see deriveTelemetrySendingStatus):
  *  - nothing collecting → renders nothing (off is off). WARDEN-1116: a
  *    decorating-only consent (names on, nothing collecting) lands here, because
  *    no event is produced for a name to ride on.
  *  - collecting + blank endpoint → amber notice: enabled but no receiver is
  *    configured, so nothing is being sent (the silently-inert opt-in).
- *  - collecting + endpoint set → positive destination confirmation (host only,
+ *  - collecting + endpoint set but no usable web scheme (WARDEN-1238) → amber
+ *    notice: the address parses but the transport cannot use it, so nothing is
+ *    being sent and the label reflects the address as typed.
+ *  - collecting + usable endpoint → positive destination confirmation (host only,
  *    derived from the configured URL; NOT a reachability claim).
  */
 export function TelemetrySendingStatus({
