@@ -130,7 +130,8 @@ for (const cat of TELEMETRY_CATEGORIES) telemetryPrefs[cat.configKey] = false;
 //
 // --- Persistence helpers (WARDEN-782) -----------------------------------------
 // Same userData dir + atomic-rewrite + debounce + skip-malformed discipline as
-// window-state.json (the in-repo template at lines ~262-339). The file is NDJSON
+// window-state.json (the in-repo template at lines ~262-339; saveWindowState below
+// uses the same temp-file + rename shape as saveTransmissionLog). The file is NDJSON
 // (one metadata-only entry per line); the ring is already capped in memory, so the
 // file is bounded over the app's lifetime (never append-only growth). METADATA ONLY
 // by construction — the ring never holds payload content / redacted fields / chat-or-
@@ -340,9 +341,19 @@ function loadWindowState() {
   }
 }
 
+// Atomic rewrite (temp file + rename), mirroring saveTransmissionLog above so a
+// partial write is never observable — an interrupted write (OS logout/shutdown
+// mid-write) leaves either the previous complete state or the new one, never a
+// truncated file the loader would read as absent (defaults). Sync on purpose:
+// main.cjs is CommonJS and the shared atomic-write helper is an async ES module,
+// not importable here. catch + warn (never throws): a persist failure must not
+// break the save path.
 function saveWindowState(state) {
   try {
-    fs.writeFileSync(windowStatePath(), JSON.stringify(state, null, 2));
+    const filePath = windowStatePath();
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
   } catch (e) {
     console.warn('[warden:window-state] failed to persist', e);
   }
