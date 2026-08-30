@@ -23,6 +23,10 @@ import { formatTokens } from '@/lib/formatTokens';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
 import { readAllSessionsPage } from '@/lib/allSessionsApi';
+// Discovery-host selection persistence (localStorage). Extracted to @/lib so it
+// is unit-testable and its failure handling follows the app-wide warn
+// convention like every other local-storage writer. (WARDEN-1230.)
+import { loadDiscoverHosts, saveDiscoverHosts } from '@/lib/discoverHosts';
 import type { ClaudeSession, SessionSearchResult, TokenUsage } from './ChatSidebar';
 
 // Loading placeholder for a session row (two skeleton bars). Local to this page —
@@ -34,21 +38,6 @@ function SessionRowSkeleton() {
       <Skeleton className="h-2.5 w-1/2" />
     </div>
   );
-}
-
-// Persisted host multiselect (the user's browsing scope). Stored under its own key
-// so it can't race with App's centralized UiState save. Undefined = first run →
-// default later. (WARDEN-109 Facet B: keep on `warden:discover-hosts:v1`.)
-const DISCOVER_HOSTS_KEY = 'warden:discover-hosts:v1';
-function loadDiscoverHosts(): string[] | undefined {
-  try {
-    const v = JSON.parse(localStorage.getItem(DISCOVER_HOSTS_KEY) || '');
-    if (Array.isArray(v)) return v.filter((h) => typeof h === 'string');
-  } catch { /* ignore */ }
-  return undefined;
-}
-function saveDiscoverHosts(hosts: string[]) {
-  try { localStorage.setItem(DISCOVER_HOSTS_KEY, JSON.stringify(hosts)); } catch { /* ignore */ }
 }
 
 // One normalized row in the merged discovery list.
