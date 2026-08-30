@@ -2812,6 +2812,113 @@ streamWss.on('connection', (ws) => {
 try { await rotateEvents(); } catch { /* ignore */ }
 try { await rotateDirectives(); } catch { /* ignore */ }
 
+// --- Background sweep supervisor (WARDEN-1169) -------------------------------
+//
+// The three always-resident sweeps below — lifecycle, budget, attention — each
+// hand-rolled the SAME scaffolding: an interval timer, a fire-and-forget kick
+// wrapped in loopMonitor.trace, an in-flight handle, a start, a config-driven
+// restart, and an await-the-seed test seam. The lockstep was measured, not
+// suspected: WARDEN-947 changed 163 lines in this file and 76 of them (46.6%)
+// were this scaffolding written out twice across 6 hunks, and WARDEN-977 then
+// added one hand-written trace() wrapper per sweep. This factory owns the
+// scaffolding ONCE — timer, kick, start/stop/restart, seam.
+//
+// What it deliberately does NOT own: the tick bodies (each keeps its own
+// re-entrancy flag and its own self-gate — their DI shapes genuinely differ),
+// and none of the sweeps' real asymmetries. Every asymmetry is a PARAMETER,
+// because flattening any of them is a silent behavior change:
+//
+//   intervalMs  cadence differs (60s / 120s / 60s), and budget's constant is
+//               IMPORTED from src/budget.js — so this takes a plain value and
+//               never assumes a locally-declared one.
+//   enabled     lifecycle is unconditional; budget/attention gate on cfg.
+//   guardKick   ⚠ lifecycle's kick has NO .catch(). trace() preserves the tick's
+//               own rejection identity so the sweep behaves exactly as untraced,
+//               and attaching a handler would CHANGE lifecycle's crash
+//               semantics. guardKick:false keeps that. It necessarily also turns
+//               off the in-flight handle: a bare .finally() chained onto an
+//               un-caught rejection would itself reject, unhandled. The two
+//               travel together — which is also why lifecycle has no test seam.
+//   startOnce   lifecycle's start is one-shot (a second call must NOT re-kick a
+//               live sweep); budget/attention re-kick on every start so a later
+//               enable wakes their parked timer without a second start call.
+//   onEnable /  restart()'s two legs carry DIFFERENT side effects: budget blanks
+//   onDisable   its cache on disable ONLY; attention resets its diff baseline on
+//               BOTH legs (clean prime on enable, no stale state on disable).
+//   isRunning   read-only view of the tick's own re-entrancy flag, for settled().
+function createSweepSupervisor({
+  name,
+  intervalMs,
+  tick,
+  enabled = null,
+  guardKick = true,
+  startOnce = false,
+  isRunning = () => false,
+  onEnable = null,
+  onDisable = null,
+}) {
+  const label = `sweep:${name}`;
+  let timer = null;
+  // WARDEN-947: handle on the sweep kicked FIRE-AND-FORGET by start()/restart().
+  // Production never reads it; it exists so a test that drives its OWN sweeps can
+  // await the kicked one instead of racing it. See settled().
+  let inFlight = null;
+
+  const kick = guardKick
+    ? () => {
+        // The `.catch` is the same lesson as appendStateEvent: a fire-and-forget async
+        // call needs a REAL rejection handler, or a future throw outside the tick's own
+        // try/catch escapes as an unhandledRejection and kills the process on Node >= 15.
+        // Traced for the stall monitor (WARDEN-977) — see the guardKick:false arm below.
+        const p = loopMonitor.trace(label, tick)
+          .catch(() => { /* a kicked sweep must never take the server down */ })
+          .finally(() => { if (inFlight === p) inFlight = null; });
+        inFlight = p;
+      }
+    // Traced (WARDEN-977): an always-on sweep is the most plausible window for one
+    // of the remaining synchronous sites to land on a user-visible request, so the
+    // stall monitor must be able to name it. `trace` returns the tick's own promise
+    // (rejection identity preserved), so the sweep behaves exactly as untraced.
+    : () => loopMonitor.trace(label, tick);
+
+  function arm() { if (!timer) timer = setInterval(kick, intervalMs); }
+  function disarm() { if (timer) { clearInterval(timer); timer = null; } }
+
+  return {
+    start() {
+      if (startOnce && timer) return;
+      arm();
+      kick();
+    },
+    // Used by the self-gating ticks: a disabled sweep clears its OWN timer so no
+    // sweep runs while off, which is what makes start() safe to call unconditionally
+    // at startup — it parks until the human opts in.
+    stop() { disarm(); },
+    // React to a config change: enable → ensure the timer runs + sweep now;
+    // disable → stop, then run the sweep's own teardown side effect.
+    restart() {
+      if (!enabled || enabled()) {
+        arm();
+        onEnable?.();
+        kick();
+      } else if (timer) {
+        disarm();
+        onDisable?.();
+      }
+    },
+    // Test seam: resolves once no sweep is in flight — the one kicked by
+    // start()/restart() included. A test that enables the feature via PUT /api/config
+    // and then drives its own tick() sweeps MUST await this first, or the kicked sweep
+    // lands mid-test and stomps the baseline/cache it primed. The isRunning() spin
+    // covers the re-entrant case (a kick that no-op'd because an earlier sweep was
+    // still running), so this is deterministic — not a timed sleep.
+    async settled() {
+      await inFlight;
+      while (isRunning()) await new Promise((r) => setImmediate(r));
+    },
+  };
+}
+
 // --- Cross-host agent lifecycle polling -------------------------------------
 // appendEvent() is only reached from the local attach/observe path, so a remote
 // agent that starts/finishes/errors while no Warden pane is open on its host
@@ -2819,7 +2926,6 @@ try { await rotateDirectives(); } catch { /* ignore */ }
 // two snapshots into the pure diffLifecycles() (src/lifecycle.js) to emit
 // host-attributed lifecycle events on state TRANSITIONS only — so event volume
 // stays negligible against the 7-day rotation regardless of the 60s cadence.
-let lifecycleTimer = null;
 let prevSnapshot = new Map(); // id → { host, container, role, project, active, ok }
 // Re-entrancy guard. A single discoverAll sweep can take longer than the 60s tick
 // (slow/unreachable hosts each wait on ConnectTimeout; per-agent SSH on Windows),
@@ -2935,15 +3041,22 @@ async function tickLifecycleBody(deps = {}) {
   prevSnapshot = next;
 }
 
+// Unconditional (no `enabled` gate — the dormancy check lives inside
+// tickLifecycleBody), one-shot start, and NO kick guard: lifecycle's crash
+// semantics are load-bearing, so its kick must stay a bare trace() with no
+// .catch — see createSweepSupervisor's guardKick note. No test seam either.
+const lifecycleSweep = createSweepSupervisor({
+  name: 'lifecycle',
+  intervalMs: LIFECYCLE_INTERVAL_MS,
+  tick: tickLifecycle,
+  guardKick: false,
+  startOnce: true,
+});
+
 function startLifecyclePoll() {
-  if (lifecycleTimer) return;
-  // Traced (WARDEN-977): an always-on sweep is the most plausible window for one
-  // of the remaining synchronous sites to land on a user-visible request, so the
-  // stall monitor must be able to name it. `trace` returns the tick's own promise
-  // (rejection identity preserved), so the sweep behaves exactly as untraced.
-  const kick = () => loopMonitor.trace('sweep:lifecycle', tickLifecycle);
-  lifecycleTimer = setInterval(kick, LIFECYCLE_INTERVAL_MS);
-  kick(); // seed the baseline immediately (fires once, emits nothing)
+  // start() seeds the baseline immediately (fires once, emits nothing) and, being
+  // one-shot, never re-kicks if called a second time.
+  lifecycleSweep.start();
 }
 
 // ---- Token-spend budget slow-cadence accumulator (WARDEN-415) ---------------
@@ -2968,13 +3081,10 @@ let budgetState = null;
 // webhook fires on the !alerted → alerted transition even with the Warden
 // window closed to tray. Baseline-primed: null on the first tick → no fire.
 let prevBudgetState = null;
-let budgetTimer = null;
 // Re-entrancy guard, same rationale as lifecycleRunning: a sweep over slow hosts
-// can exceed the 120s beat, so an in-flight tick makes the next a no-op.
+// can exceed the 120s beat, so an in-flight tick makes the next a no-op. Owned by
+// the tick (not the supervisor), which only reads it for its settle seam.
 let budgetRunning = false;
-// WARDEN-947: handle on the seed sweep kicked FIRE-AND-FORGET by startBudgetPoll /
-// restartBudgetPoll. Production never reads it; see __budgetSweepSettledForTest.
-let budgetInFlight = null;
 // Per-host fetch ceiling. Sessions are mtime-sorted descending and the window is
 // recent, so window-active sessions sit at the front; this caps transcript reads
 // (local) + the grep+awk SSH pass (remote) on a very active host. 100 is far
@@ -2992,7 +3102,7 @@ async function tickBudget(deps = {}) {
   // runs while off. This makes startBudgetPoll safe to call unconditionally at
   // startup — it parks until the human opts in.
   if (!cfg.tokenBudgetEnabled) {
-    if (budgetTimer) { clearInterval(budgetTimer); budgetTimer = null; }
+    budgetSweep.stop();
     budgetState = null;
     return;
   }
@@ -3090,26 +3200,22 @@ async function tickBudget(deps = {}) {
   }
 }
 
+const budgetSweep = createSweepSupervisor({
+  name: 'budget',
+  intervalMs: BUDGET_INTERVAL_MS,
+  tick: tickBudget,
+  isRunning: () => budgetRunning,
+  enabled: () => cfg.tokenBudgetEnabled,
+  // Disable clears the cache so /api/budget reports disabled honestly. Nothing on
+  // the enable leg — unlike attention, budget has no baseline to re-prime.
+  onDisable: () => { budgetState = null; },
+});
+
 function startBudgetPoll() {
   // Always (re)seed the interval; tickBudget self-clears when disabled, so an
   // idle parked timer is harmless and lets a later enable (PUT /api/config) wake
-  // it without a second start call.
-  if (!budgetTimer) budgetTimer = setInterval(kickBudgetSweep, BUDGET_INTERVAL_MS);
-  kickBudgetSweep(); // seed the cache immediately on enable
-}
-
-// Kick a seed sweep without awaiting it (both callers are synchronous), keeping a
-// handle so __budgetSweepSettledForTest can await it. WARDEN-947 — the exact
-// counterpart of kickAttentionSweep below, for the exact same reason.
-function kickBudgetSweep() {
-  // The `.catch` is the same lesson as appendStateEvent above: a fire-and-forget async
-  // call needs a REAL rejection handler, or a future throw outside tickBudget's own
-  // try/catch escapes as an unhandledRejection and kills the process on Node >= 15.
-  // Traced for the stall monitor (WARDEN-977) — see startLifecyclePoll.
-  const p = loopMonitor.trace('sweep:budget', tickBudget)
-    .catch(() => { /* a seed sweep must never take the server down */ })
-    .finally(() => { if (budgetInFlight === p) budgetInFlight = null; });
-  budgetInFlight = p;
+  // it without a second start call. The kick seeds the cache immediately.
+  budgetSweep.start();
 }
 
 // Test seam: resolves once no budget sweep is in flight — the seed one kicked by
@@ -3119,23 +3225,15 @@ function kickBudgetSweep() {
 // budgetRunning guard makes the test's own sweep a silent no-op — which turns the
 // test's priming sweep into a nothing and its breach sweep into the prime, so the
 // expected POST never fires.
-export async function __budgetSweepSettledForTest() {
-  await budgetInFlight;
-  while (budgetRunning) await new Promise((r) => setImmediate(r));
-}
+export const __budgetSweepSettledForTest = budgetSweep.settled;
 
 // React to a config change: enable → ensure the timer runs + recompute now;
 // disable → stop + clear the cache so /api/budget reports disabled honestly;
 // threshold/window tweak → recompute now so the next read is fresh.
+// Kept a NAMED function (not an alias): config-schema.js's afterSave pipeline is
+// injected with it by name — src/config-schema.test.js:393-402 pins that dep list.
 function restartBudgetPoll() {
-  if (cfg.tokenBudgetEnabled) {
-    if (!budgetTimer) budgetTimer = setInterval(kickBudgetSweep, BUDGET_INTERVAL_MS);
-    kickBudgetSweep();
-  } else if (budgetTimer) {
-    clearInterval(budgetTimer);
-    budgetTimer = null;
-    budgetState = null;
-  }
+  budgetSweep.restart();
 }
 
 // ---- Server-side attention sweep for webhook push (WARDEN-555) ---------------
@@ -3157,19 +3255,9 @@ function restartBudgetPoll() {
 // accumulator, and well inside the ticket's "within one sweep (~120s)" bar.
 const ATTENTION_SWEEP_MS = 60_000;
 let prevAttentionStates = new Map(); // key → state (the diff baseline)
-let attentionTimer = null;
-// Re-entrancy guard, same rationale as lifecycleRunning/budgetRunning.
+// Re-entrancy guard, same rationale as lifecycleRunning/budgetRunning. Owned by
+// the tick (not the supervisor), which only reads it for its settle seam.
 let attentionRunning = false;
-// WARDEN-947: a handle on the sweep kicked FIRE-AND-FORGET by startAttentionPoll /
-// restartAttentionPoll. Production never reads it — it exists so a test that drives
-// its OWN sweeps can await the kicked one instead of racing it. That race is real and
-// was flaking server-attention-webhook.test.js on main: PUT /api/config →
-// restartAttentionPoll() → bare tickAttention(); when that sweep lands it STOMPS
-// prevAttentionStates with its own (real-fleet, usually empty) map, so the test's
-// primed baseline vanishes and its next sweep re-primes instead of firing — and while
-// it is still running, the attentionRunning guard turns the test's sweep into a silent
-// no-op. Both manifest as "0 POSTs, expected 1".
-let attentionInFlight = null;
 
 // tickAttention — one server-side attention sweep. Exported so a test can drive
 // a single sweep deterministically (the running server drives it off a 60s
@@ -3193,11 +3281,11 @@ async function tickAttention(deps = {}) {
   // neither dispatches when its own flag is off. The channel gate (webhookEnabled +
   // webhookUrl) is unchanged: off / unconfigured → no sweep, zero capture cost.
   if (!cfg.webhookEnabled || !cfg.webhookUrl) {
-    if (attentionTimer) { clearInterval(attentionTimer); attentionTimer = null; }
+    attentionSweep.stop();
     return;
   }
   if (!cfg.webhookAlertAttention && !cfg.webhookAlertDone) {
-    if (attentionTimer) { clearInterval(attentionTimer); attentionTimer = null; }
+    attentionSweep.stop();
     return;
   }
   if (attentionRunning) return;
@@ -3311,53 +3399,47 @@ async function tickAttention(deps = {}) {
   }
 }
 
+// WARDEN-575: the gate runs the sweep while the channel is on AND at least one
+// routing (attention OR done) is enabled — mirrors tickAttention's own gate so a
+// Settings flip of either routing takes effect on the next sweep. The baseline is
+// reset on BOTH legs: a clean prime on (re)enable, and no stale state left behind
+// on disable.
+const attentionSweep = createSweepSupervisor({
+  name: 'attention',
+  intervalMs: ATTENTION_SWEEP_MS,
+  tick: tickAttention,
+  isRunning: () => attentionRunning,
+  enabled: () => cfg.webhookEnabled && cfg.webhookUrl && (cfg.webhookAlertAttention || cfg.webhookAlertDone),
+  onEnable: () => { prevAttentionStates = new Map(); }, // clean baseline prime on (re)enable
+  onDisable: () => { prevAttentionStates = new Map(); },
+});
+
 function startAttentionPoll() {
   // Self-gates via tickAttention's first line, so a parked idle timer is harmless
   // and a later enable (PUT /api/config → restartAttentionPoll) wakes it without a
   // second start call.
-  if (!attentionTimer) attentionTimer = setInterval(kickAttentionSweep, ATTENTION_SWEEP_MS);
-  kickAttentionSweep();
-}
-
-// Kick a sweep without awaiting it (both callers are synchronous), keeping a handle
-// so __attentionSweepSettledForTest can await it. WARDEN-947.
-function kickAttentionSweep() {
-  // `.catch` for the same reason as kickBudgetSweep / appendStateEvent: fire-and-forget
-  // async must not be able to escape as an unhandledRejection.
-  // Traced for the stall monitor (WARDEN-977) — see startLifecyclePoll.
-  const p = loopMonitor.trace('sweep:attention', tickAttention)
-    .catch(() => { /* a kicked sweep must never take the server down */ })
-    .finally(() => { if (attentionInFlight === p) attentionInFlight = null; });
-  attentionInFlight = p;
+  attentionSweep.start();
 }
 
 // Test seam: resolves once no attention sweep is in flight — the kicked one from
 // startAttentionPoll/restartAttentionPoll included. A test that enables the channel
 // (PUT /api/config) and then drives its own tickAttention() sweeps MUST await this
-// first, or the kicked sweep lands mid-test and stomps the baseline. The
-// attentionRunning spin covers the re-entrant case (a kick that no-op'd because an
-// earlier sweep was still running), so this is deterministic — not a timed sleep.
-export async function __attentionSweepSettledForTest() {
-  await attentionInFlight;
-  while (attentionRunning) await new Promise((r) => setImmediate(r));
-}
+// first, or the kicked sweep lands mid-test and stomps the baseline. That race is
+// real and was flaking server-attention-webhook.test.js on main: PUT /api/config →
+// restartAttentionPoll() → a kicked tickAttention(); when that sweep lands it STOMPS
+// prevAttentionStates with its own (real-fleet, usually empty) map, so the test's
+// primed baseline vanishes and its next sweep re-primes instead of firing — and while
+// it is still running, the attentionRunning guard turns the test's sweep into a silent
+// no-op. Both manifest as "0 POSTs, expected 1".
+export const __attentionSweepSettledForTest = attentionSweep.settled;
 
 // React to a config change: enable → ensure the timer runs + sweep now; disable
 // → stop + reset the baseline so the next enable gets a clean prime (no stale
-// state from a previous run). Mirrors restartBudgetPoll's shape.
+// state from a previous run). Shares restartBudgetPoll's supervisor.
+// Kept a NAMED function (not an alias): config-schema.js's afterSave pipeline is
+// injected with it by name — src/config-schema.test.js:393-402 pins that dep list.
 function restartAttentionPoll() {
-  // WARDEN-575: run while the channel is on AND at least one routing (attention OR
-  // done) is enabled — mirrors tickAttention's gate so a Settings flip of either
-  // routing takes effect on the next sweep.
-  if (cfg.webhookEnabled && cfg.webhookUrl && (cfg.webhookAlertAttention || cfg.webhookAlertDone)) {
-    if (!attentionTimer) attentionTimer = setInterval(kickAttentionSweep, ATTENTION_SWEEP_MS);
-    prevAttentionStates = new Map(); // clean baseline prime on (re)enable
-    kickAttentionSweep();
-  } else if (attentionTimer) {
-    clearInterval(attentionTimer);
-    attentionTimer = null;
-    prevAttentionStates = new Map();
-  }
+  attentionSweep.restart();
 }
 
 // Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
