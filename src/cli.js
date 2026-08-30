@@ -72,7 +72,7 @@ async function cmdScan(argv, cfg) {
   const { flags } = parseFlags(argv, ['json']);
   const hosts = flags.host ? [flags.host] : cfg.hosts;
   const { chats, errors } = await discoverAll(hosts, cfg);
-  writeCache(chats);
+  await writeCache(chats);
   if (flags.json) { console.log(JSON.stringify({ chats, errors })); return; }
   for (const e of errors) console.error(paint(`! ${e.host}: ${e.error}`, C.red));
   if (!chats.length) { console.log(paint('no chats found.', C.dim)); return; }
