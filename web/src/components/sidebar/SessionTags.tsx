@@ -20,8 +20,12 @@
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { MAX_TAGS_PER_SESSION } from '@/lib/sessionTags';
 
 const MAX_TAG_LEN = 40; // mirror the backend per-tag cap (src/server.js)
+// (The per-session COUNT cap mirror lives in lib/sessionTags.ts — MAX_TAGS_PER_SESSION —
+// shared with ChatSidebar's add gate. This file keeps the per-tag LENGTH mirror, which
+// only this component needs.)
 
 // One chip is shared by both surfaces. `onClick` (when given) toggles/marks the
 // chip as a filter target; `onRemove` (when given) renders the inline × and drops
@@ -72,6 +76,13 @@ function TagChip({ tag, active, onClick, onRemove }: {
  * the parent's PUT helper. The "+ tag" affordance opens an inline Input (Enter or
  * blur commits, Escape cancels) — the same inline-edit pattern ChatRow uses for notes.
  *
+ * At the server's count cap (MAX_TAGS_PER_SESSION) the affordance is REPLACED by a
+ * visible "max" note, not merely hidden: past the cap the server silently truncates
+ * and answers ok with the shortened list (no error to surface), so an offered add
+ * would vanish with no chip and no explanation (WARDEN-1241). Below the cap nothing
+ * changes. The parent's addSessionTag separately refuses at-cap adds, covering the
+ * in-flight race where a PUT lands while the inline Input is open.
+ *
  * When the session has no tags the line stays quiet (the "+" reveals on row hover
  * via `group-hover`) so an untagged 12-row list isn't drowned in repeated chrome.
  */
@@ -89,6 +100,12 @@ export function SessionTagChips({ tags, onAdd, onRemove }: {
     if (v) onAdd(v);
   };
 
+  // At the count cap the "+ tag" affordance is REPLACED by a visible limit note —
+  // hiding the button alone would just be a second silent behaviour, and leaving it
+  // would let a 9th tag vanish server-side (the PUT answers ok with the truncated
+  // list, so there is no error to surface). The note is a non-interactive <span>,
+  // same visual weight as the muted "+ tag" button it replaces.
+  const atCap = tags.length >= MAX_TAGS_PER_SESSION;
   const addBtn = adding ? (
     <Input
       autoFocus
@@ -104,6 +121,13 @@ export function SessionTagChips({ tags, onAdd, onRemove }: {
       maxLength={MAX_TAG_LEN}
       className="h-4 w-20 text-[10px] px-1"
     />
+  ) : atCap ? (
+    <span
+      className="shrink-0 text-[10px] px-1 py-0.5 text-muted-foreground/70 select-none cursor-default"
+      title={`Tag limit reached — a session carries at most ${MAX_TAGS_PER_SESSION} tags. Remove one to add another.`}
+    >
+      max {MAX_TAGS_PER_SESSION} tags
+    </span>
   ) : (
     <button
       type="button"

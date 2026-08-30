@@ -14,6 +14,16 @@ export interface TaggedSession {
   id: string;
 }
 
+// Mirror the backend per-session COUNT cap (MAX_TAGS_PER_SESSION = 8 in
+// src/server.js). The server truncates past this cap with NO error — it answers
+// `ok` carrying the already-shortened list — so a client that keeps offering adds
+// at the cap silently discards the user's input (no chip, no explanation;
+// WARDEN-1241). Exported from this shared pure layer because both enforcement
+// points import it: SessionTagChips swaps its "+ tag" affordance for a visible
+// limit note at the cap, and ChatSidebar.addSessionTag refuses the PUT at the cap.
+// Sibling of the per-tag LENGTH mirror (MAX_TAG_LEN in SessionTags.tsx).
+export const MAX_TAGS_PER_SESSION = 8;
+
 // Distinct tags among the IN-LIST session ids only, sorted for stable chip order.
 // A tag on a session that has vanished (an orphan in the sidecar map) is IGNORED —
 // never shown — because its id is absent from `sessions`. This is the same leniency
@@ -53,8 +63,10 @@ export function filterSessionsByTags<S extends TaggedSession>(
 
 // Add a tag client-side (trim + case-insensitive dedupe). The server re-validates
 // (length/count caps), so this is optimistic: it only keeps the local map consistent
-// while the PUT is in flight. Returns the original array reference when the tag is
-// already present or empty after trim (so callers can skip a needless PUT).
+// while the PUT is in flight. Always returns a NEW array — never the caller's
+// reference, even when the add is a no-op (blank/duplicate) — so a rejected add is
+// UNDETECTABLE by reference comparison: enforce the count cap explicitly at the
+// point of adding (see ChatSidebar.addSessionTag, WARDEN-1241), not here.
 export function addTag(existing: readonly string[], tag: string): string[] {
   const v = typeof tag === 'string' ? tag.trim() : '';
   if (!v) return [...existing];

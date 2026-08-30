@@ -54,7 +54,7 @@ import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import type { SourceControlGitInfo } from './sidebar/SourceControlPanel';
 import { useGitStatus, useInvalidateGitStatus } from '@/lib/gitStatusHooks';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
-import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
+import { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION } from '@/lib/sessionTags';
 import { readListBody, readListResponse, readResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
@@ -552,6 +552,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     }
   };
   const addSessionTag = (id: string, tag: string) => {
+    // Explicit count-cap check — NOT a reference comparison: addTag returns a NEW
+    // array on every path (even a rejected add), so identity cannot signal rejection.
+    // Past MAX_TAGS_PER_SESSION the server silently truncates and answers ok with the
+    // shortened list, so a PUT from here would discard the user's tag with no error
+    // to consume (WARDEN-1241). SessionTagChips already swaps its affordance for a
+    // visible "max" note at the cap; this backstop also covers the in-flight race
+    // (a PUT landing while the inline Input is open) and any future add path.
+    if ((sessionTags[id] || []).length >= MAX_TAGS_PER_SESSION) return;
     updateSessionTags(id, addTag(sessionTags[id] || [], tag));
   };
   const removeSessionTag = (id: string, tag: string) => {
