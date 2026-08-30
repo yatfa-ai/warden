@@ -48,18 +48,31 @@ import {
 } from '@/components/ui/dialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useStickToBottom } from '@/lib/useStickToBottom';
-import { decideFailObserverTurn } from '@/lib/observerTurns';
+import {
+  decideFailObserverTurn,
+  describeSocketFailure,
+  GENERIC_OBSERVER_FAILURE,
+  type ObserverFailure,
+} from '@/lib/observerTurns';
 import { ObserverMarkdown } from '@/components/ObserverMarkdown';
 import { StatusDot } from '@/components/StatusDot';
 
 // One entry in the conversation timeline. Observer text is streamed: an observer
 // item is created `streaming` while the assistant is emitting, then finalized on
-// `done` (or when a tool/card interrupts). `errored` marks a turn that ended in
-// an error or a dropped stream so assistant-ui surfaces a retry affordance.
+// `done` (or when a tool/card interrupts). `failure` marks a turn that ended in
+// an error or a dropped stream so assistant-ui surfaces a retry affordance — and
+// carries WHY it failed (WARDEN-1163; it was a bare boolean, which could not).
 // `ts` is the arrival time; replayed history has no timestamp (ts = 0).
 type Item =
   | { id: string; kind: 'user'; text: string; ts: number }
-  | { id: string; kind: 'observer'; text: string; ts: number; streaming: boolean; errored?: boolean }
+  | {
+      id: string;
+      kind: 'observer';
+      text: string;
+      ts: number;
+      streaming: boolean;
+      failure?: ObserverFailure;
+    }
   | { id: string; kind: 'tool'; name: string; arg?: string; ts: number }
   | { id: string; kind: 'meta'; text: string; tone: 'info' | 'error'; ts: number }
   | {
@@ -109,7 +122,7 @@ function convertMessage(item: Item): ThreadMessageLike {
         id: item.id,
         role: 'assistant',
         content: [{ type: 'text' as const, text: item.text }],
-        status: item.streaming ? STATUS_RUNNING : item.errored ? STATUS_ERROR : STATUS_COMPLETE,
+        status: item.streaming ? STATUS_RUNNING : item.failure ? STATUS_ERROR : STATUS_COMPLETE,
       };
     case 'tool':
       return {
@@ -240,28 +253,36 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
   // failure (mark an in-flight stream vs. synthesize an empty errored turn vs.
   // no-op) is decided by the pure decideFailObserverTurn helper — see
   // observerTurns.ts for the failure-mode coverage.
-  const failStreamingObserver = useCallback(() => {
-    setItems((prev) => {
-      const decision = decideFailObserverTurn(prev);
-      if (decision.action === 'mark-streaming') {
-        return prev.map((it) =>
-          it.id === decision.id && it.kind === 'observer'
-            ? { ...it, streaming: false, errored: true }
-            : it,
-        );
-      }
-      if (decision.action === 'none') return prev;
-      const created: Item = {
-        id: nextId(),
-        kind: 'observer',
-        text: '',
-        ts: Date.now(),
-        streaming: false,
-        errored: true,
-      };
-      return [...prev, created];
-    });
-  }, [nextId]);
+  //
+  // WARDEN-1163: `failure` carries WHY the turn failed so the chat can name the
+  // cause instead of a bare "Generation failed.". Callers that have no transport
+  // detail (the backend `error` path, which renders its own real message as a
+  // meta line) omit it and keep the wording they have always had.
+  const failStreamingObserver = useCallback(
+    (failure: ObserverFailure = GENERIC_OBSERVER_FAILURE) => {
+      setItems((prev) => {
+        const decision = decideFailObserverTurn(prev);
+        if (decision.action === 'mark-streaming') {
+          return prev.map((it) =>
+            it.id === decision.id && it.kind === 'observer'
+              ? { ...it, streaming: false, failure }
+              : it,
+          );
+        }
+        if (decision.action === 'none') return prev;
+        const created: Item = {
+          id: nextId(),
+          kind: 'observer',
+          text: '',
+          ts: Date.now(),
+          streaming: false,
+          failure,
+        };
+        return [...prev, created];
+      });
+    },
+    [nextId],
+  );
 
   const pushItem = useCallback(
     (item: Item) => {
@@ -301,6 +322,12 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
       if (!connRef.current && !connectionTimeoutShownRef.current && mountedRef.current) {
         connectionTimeoutShownRef.current = true;
         setConnectionError('Connection timeout. Unable to establish WebSocket connection.');
+        // WARDEN-1163 — name the path that fired in DevTools too, so a hang that
+        // never produced a close event is distinguishable from one that did.
+        console.error('[observer-ws] No connection after 15s; giving up on this attempt:', {
+          path: 'timeout',
+          hadOpened: false,
+        });
         if (notifyObserverRef.current)
           toast.error('Observer connection timeout. Please try reconnecting.');
       }
@@ -314,7 +341,12 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
       encodeURIComponent(sessionId);
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    // Whether THIS socket ever reached OPEN. Tracked per-socket rather than off
+    // the `conn` state so the close handler reads it synchronously and can tell
+    // a connection that was never established from one that dropped mid-stream.
+    let hadOpened = false;
     ws.onopen = () => {
+      hadOpened = true;
       if (!mountedRef.current) return;
       setConn(true);
       setConnectionError(null);
@@ -326,21 +358,33 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
         p.length ? p : [{ id: nextId(), kind: 'meta', text: 'Observer connected', tone: 'info', ts: Date.now() }],
       );
     };
-    ws.onclose = () => {
+    // WARDEN-1163 — the CloseEvent is the ONLY authoritative signal for why a
+    // socket closed (`error` is information-free by specification), so it is
+    // read here at origin rather than discarded. The cause goes to both output
+    // channels: the chat (via the failed turn) and DevTools (full raw detail).
+    ws.onclose = (e: CloseEvent) => {
       if (!mountedRef.current) return;
       wsRef.current = null;
       setConn(false);
       setBusy(false);
       if (!userStoppedRef.current) {
+        const failure = describeSocketFailure({
+          code: e.code,
+          reason: e.reason,
+          wasClean: e.wasClean,
+          hadOpened,
+        });
+        console.error(`[observer-ws] ${failure.message}`, failure.detail);
         // A dropped stream mid-generation is recoverable: flag the partial
-        // observer turn for retry, then reconnect as before.
-        failStreamingObserver();
+        // observer turn for retry (now carrying the cause), then reconnect as
+        // before.
+        failStreamingObserver(failure);
         reconnectTimeoutRef.current = setTimeout(() => {
           if (mountedRef.current) connect();
         }, 1500);
       }
     };
-    ws.onerror = (e) => {
+    ws.onerror = () => {
       if (!mountedRef.current) return;
       // WARDEN-653 — gate on the same guard as the 15s timeout so a single
       // failed connection reports one error. If onerror fires first (e.g.
@@ -350,7 +394,14 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
         connectionTimeoutShownRef.current = true;
         setConnectionError('WebSocket connection error. Will attempt to reconnect...');
       }
-      console.error('WebSocket error:', e);
+      // The `error` event carries no detail by specification (deliberately, so
+      // network failures can't leak to script), so logging it told nobody
+      // anything. Record which path fired and defer the cause to the close
+      // event that always follows — that one has the code and reason.
+      console.error('[observer-ws] WebSocket error event; cause follows on close:', {
+        path: 'error',
+        hadOpened,
+      });
     };
     ws.onmessage = (e) => {
       if (!mountedRef.current) return;
@@ -638,7 +689,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
                           key={message.id}
                           item={item}
                           canRegenerate={
-                            (!!message.isLast || !!item.errored) && !busy && !item.streaming && !pendingGate
+                            (!!message.isLast || !!item.failure) && !busy && !item.streaming && !pendingGate
                           }
                           onRegenerate={regenerate}
                           timestampFormat={timestampFormat}
@@ -835,11 +886,21 @@ function ObserverEntry({
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div className="rounded-2xl rounded-tl-sm border bg-muted/40 px-3 py-2">
-              {item.text.trim() ? (
-                <ObserverMarkdown>{item.text}</ObserverMarkdown>
-              ) : item.errored ? (
-                <span className="text-sm text-destructive">Generation failed.</span>
-              ) : null}
+              {item.text.trim() ? <ObserverMarkdown>{item.text}</ObserverMarkdown> : null}
+              {/*
+                WARDEN-1163 — the cause, in front of the developer using this
+                product. Rendered alongside partial text too: a stream that
+                dropped mid-generation is exactly the case where the text is
+                non-empty and the reason still has to be legible.
+              */}
+              {item.failure && (
+                <div
+                  className={`flex items-start gap-1.5 text-sm text-destructive${item.text.trim() ? ' mt-2' : ''}`}
+                >
+                  <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
+                  <span>{item.failure.message}</span>
+                </div>
+              )}
               {item.streaming && (
                 <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-foreground/60 align-middle" />
               )}
