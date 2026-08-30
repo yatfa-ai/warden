@@ -28,8 +28,9 @@ import { parseRemoteUrl, parseGitRemotes } from './gitStatus.js';
  *     by bare session id so no host/tmux discovery runs. Covers:
  *       - happy path → parsed remotes with web URLs
  *       - a file-path remote → host/owner/repo/web all null (kept in the list)
- *       - a git repo with NO remotes → { remotes: [] } (200, not 500)
- *       - non-git cwd → { remotes: [] } (200, not 500)
+ *       - a git repo with NO remotes → { remotes: [], error: null } (200, not 500)
+ *       - non-git cwd → { remotes: [], error: <non-empty> } — a reported failure,
+ *         never a false "no remotes" (WARDEN-1237)
  *       - unknown id → 404
  *
  * NOTE on the single before(): src/server.js evaluates `const cfg = load()` at module
@@ -47,6 +48,7 @@ let remoteRepo;   // git repo with origin (https) + fork (ssh) remotes
 let fileRemoteRepo; // git repo whose only remote is a bare /path (web null)
 let noRemotesRepo;  // git repo with NO remotes
 let nonGitDir;
+let unbornRepo;     // healthy repo, `git init` with no commits yet (WARDEN-1237)
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -108,6 +110,17 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitremote-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // ---- unbornRepo: a HEALTHY repo whose HEAD is unborn (`git init`, no commits).
+  // `git remote -v` exits ZERO on an unborn HEAD (there simply are no remotes yet),
+  // so the route's plain exit-status gate (WARDEN-1237) must treat it as the
+  // legitimate empty — no classifyGitFailure probe, unlike /api/git-log /
+  // /api/git-reflog whose commands DO exit non-zero there.
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitremote-unborn-'));
+  git(['init', '-q', '-b', 'main'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'uncommitted\n');
+
   // Catalog with LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -117,6 +130,7 @@ before(async () => {
       { host: '(local)', session: 'warden-fileremote', cwd: fileRemoteRepo, cmd: 'bash', name: 'warden-fileremote' },
       { host: '(local)', session: 'warden-noremotes', cwd: noRemotesRepo, cmd: 'bash', name: 'warden-noremotes' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
     ]),
   );
 
@@ -134,7 +148,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [remoteRepo, fileRemoteRepo, noRemotesRepo, nonGitDir, tempHome]) {
+  for (const d of [remoteRepo, fileRemoteRepo, noRemotesRepo, nonGitDir, unbornRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -318,18 +332,47 @@ describe('/api/git-remote HTTP endpoint (real Express app from server.js)', () =
     assert.strictEqual(body.remotes[0].web, null);
   });
 
-  it('returns { remotes: [] } (200, not 500) for a git repo with no remotes', async () => {
+  it('returns { remotes: [], error: null } (200, not 500) for a git repo with no remotes', async () => {
+    // The legitimate empty: `git remote -v` exits ZERO with empty stdout on a repo
+    // with no remotes configured, so the exit-status gate (WARDEN-1237) must NOT
+    // fire — a healthy remote-less repo is not a failure. Pinned so the gate can
+    // never creep over this case.
     const res = await fetch(`${baseUrl}/api/git-remote?id=warden-noremotes`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.remotes, []);
+    assert.strictEqual(body.error, null);
   });
 
-  it('returns { remotes: [] } (200, not 500) for a non-git cwd', async () => {
+  it('returns [] with a NON-EMPTY error (200, not 500) for a non-git cwd (WARDEN-1237)', async () => {
+    // `git remote -v` exits non-zero on a non-git cwd. Before WARDEN-1237 the route
+    // discarded that exit status (`parseGitRemotes(remoteR.ok ? … : '')`) and
+    // answered `error: null`, so the sidebar rendered a confident empty remotes
+    // list for a broken repo / deleted cwd / dropped SSH transport — and the
+    // ListErrorRow the client already renders for remoteError could never appear.
+    // The error must be non-empty: runGit pipes `2>/dev/null` on BOTH remote
+    // branches, so an `r.stderr` passthrough would be an empty string here — and
+    // readListResponse (web/src/lib/api.ts) treats an empty string as "no error",
+    // making the fix a silent no-op on exactly the transports warden deploys over.
     const res = await fetch(`${baseUrl}/api/git-remote?id=warden-nongit`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.remotes, []);
+    assert.strictEqual(typeof body.error, 'string');
+    assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
+  });
+
+  it('returns [] with error null for a HEALTHY repo with an unborn HEAD (WARDEN-1237)', async () => {
+    // `git remote -v` exits ZERO on a fresh `git init` with no commits (there are
+    // simply no remotes yet) — unlike `git log`/`git reflog`, which exit non-zero
+    // and therefore need an explicit unborn-HEAD probe. So the plain exit-status
+    // gate reaches the empty-list-with-error-null path on its own. Pinned because
+    // a brand-new repo must never read as a failure.
+    const res = await fetch(`${baseUrl}/api/git-remote?id=warden-unborn`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.remotes, []);
+    assert.strictEqual(body.error, null);
   });
 
   it('returns 404 for an unknown chat id', async () => {
