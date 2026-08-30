@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, discoverAll, capturePanes, DISCOVER_SCRIPT } from './chats.js';
+import { resolveChat, resolveChatWithRefresh, comparePinned, compareChats, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, discoverAll, capturePanes, DISCOVER_SCRIPT } from './chats.js';
 import { applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, _resetPaneDeltaStateForTests } from './companion.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 
@@ -481,9 +481,11 @@ describe('comparePinned (pin-first sort)', () => {
   // `id` is the host-prefixed contract that the backend sort + config use.
   const aaa = { id: '(local):aaa-agent', key: 'aaa-agent', active: false };
   const zzz = { id: '(local):zzz-agent', key: 'zzz-agent', active: false };
-  // Mirrors the catalogChats() comparator: pin-first, then id localeCompare.
+  // The REAL production comparator every discovery sort uses (WARDEN-1120) —
+  // not a hand-reconstruction of it. These fixtures are all `active: false`, so
+  // compareChats' active tiebreak is inert here and id order is what's exercised.
   const sortById = (chats, pinSet) =>
-    [...chats].sort((a, b) => comparePinned(a, b, pinSet) || a.id.localeCompare(b.id));
+    [...chats].sort((a, b) => compareChats(a, b, pinSet));
 
   it('sorts a pinned id above a non-pinned one regardless of name', () => {
     // zzz sorts last by name; pinning its id surfaces it to the top.
@@ -527,6 +529,62 @@ describe('comparePinned (pin-first sort)', () => {
     const pins = new Set(['remote:agent']);
     assert.ok(comparePinned(localAgent, remoteAgent, pins) > 0, 'remote pinned sorts first');
     assert.ok(comparePinned(remoteAgent, localAgent, pins) < 0);
+  });
+});
+
+// compareChats is the COMPOSED discovery order — pin, then active-desc, then id
+// — that used to be hand-copied at all three `.sort(` sites in chats.js
+// (discoverAll, catalogChats, discoverHost). Only the pin half was under test
+// before WARDEN-1120: the active tiebreak lived inside inline comparator bodies
+// in two functions the spec file never imports, so nothing pinned it. These
+// cases pin the composition itself.
+describe('compareChats (composed pin → active → id order)', () => {
+  const pinnedIdle = { id: '(local):zzz-agent', key: 'zzz-agent', active: false };
+  const unpinnedLive = { id: '(local):aaa-agent', key: 'aaa-agent', active: true };
+  const sorted = (chats, pinSet = new Set()) => [...chats].sort((a, b) => compareChats(a, b, pinSet));
+
+  it('sorts a pinned idle chat above an unpinned ACTIVE one (pin outranks active)', () => {
+    // Pin loses to nothing: zzz is idle AND sorts last by id, but the pin wins.
+    const pins = new Set(['(local):zzz-agent']);
+    assert.ok(compareChats(pinnedIdle, unpinnedLive, pins) < 0);
+    assert.deepStrictEqual(
+      sorted([unpinnedLive, pinnedIdle], pins).map((c) => c.id),
+      ['(local):zzz-agent', '(local):aaa-agent'],
+    );
+  });
+
+  it('sorts an active chat above an idle one whose id sorts earlier (active outranks name)', () => {
+    // With neither pinned, active zzz must beat idle aaa despite losing on id.
+    const idleAaa = { id: '(local):aaa-agent', key: 'aaa-agent', active: false };
+    const liveZzz = { id: '(local):zzz-agent', key: 'zzz-agent', active: true };
+    assert.ok(compareChats(liveZzz, idleAaa, new Set()) < 0);
+    assert.deepStrictEqual(
+      sorted([idleAaa, liveZzz]).map((c) => c.id),
+      ['(local):zzz-agent', '(local):aaa-agent'],
+    );
+  });
+
+  it('treats a null active (undiscovered, as catalogChats builds every row) as inactive', () => {
+    // catalogChats hardcodes active: null. null must read as inactive — sorting
+    // below a live chat, and tying with an explicitly-idle one so id decides.
+    const undiscovered = { id: '(local):aaa-agent', key: 'aaa-agent', active: null };
+    const live = { id: '(local):zzz-agent', key: 'zzz-agent', active: true };
+    assert.ok(compareChats(undiscovered, live, new Set()) > 0, 'null active sorts below active');
+    const idle = { id: '(local):bbb-agent', key: 'bbb-agent', active: false };
+    assert.strictEqual(
+      compareChats(undiscovered, idle, new Set()),
+      '(local):aaa-agent'.localeCompare('(local):bbb-agent'),
+      'null and false tie on active, so id decides',
+    );
+  });
+
+  it('falls back to the host-prefixed id when pin and active status both tie', () => {
+    const a = { id: '(local):aaa-agent', key: 'aaa-agent', active: true };
+    const b = { id: 'remote:aaa-agent', key: 'aaa-agent', active: true };
+    // Same bare key, both active, neither pinned: only the host-prefixed id separates them.
+    assert.ok(compareChats(a, b, new Set()) < 0);
+    assert.ok(compareChats(b, a, new Set()) > 0);
+    assert.strictEqual(compareChats(a, { ...a }, new Set()), 0, 'identical ids tie at 0');
   });
 });
 
