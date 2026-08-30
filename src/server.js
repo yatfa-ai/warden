@@ -1702,7 +1702,7 @@ app.get('/api/claude-session', async (req, res) => {
   try {
     let view;
     if (host === LOCAL) {
-      view = readLocalSessionTranscript(id, { before });
+      view = await readLocalSessionTranscript(id, { before });
     } else {
       const rr = await run(host, buildSessionReadScript(id, { before }), { timeout: 15000 });
       if (!rr.ok) return res.json({ host, error: 'host unreachable' });
