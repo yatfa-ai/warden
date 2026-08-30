@@ -228,6 +228,12 @@ export function reconcileAwayMisses(
     if (m.reason === 'completed') return true; // informational; never recovered-away
     const cur = currentByKey[m.key];
     if (!cur) return true; // no current snapshot → can't confirm recovery → keep
+    // Precedence (WARDEN-1224): a chat whose authored pattern is STILL matching
+    // needs the human whatever its state is — mirror chatWatch.ts's reason-for-
+    // attention rule (:317-319), where a custom match takes precedence over the
+    // pane state. Consulting the state alone here dropped exactly the chats the
+    // user wrote the pattern to catch.
+    if (cur.customMatch) return true;
     return WATCH_NEEDS_YOU_STATES.has(cur.state); // keep only if still needs-you
   });
 }

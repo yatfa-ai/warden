@@ -290,6 +290,47 @@ test('does not mutate the input array', () => {
 });
 
 // ---------------------------------------------------------------------------
+console.log('\nreconcileAwayMisses: a still-matching authored pattern survives whatever the state [WARDEN-1224]');
+//
+// The live watch reason (chatWatch.ts:317-319) gives a custom-pattern match
+// PRECEDENCE over the pane state — a match needs the human regardless of state.
+// The reconciliation honours the same precedence: a chat whose pattern is still
+// matching is kept even when its state is not one of the needs-you states.
+const statesWithMatch = (entries) => Object.fromEntries(
+  entries.map(([k, over]) => {
+    const r = row(k, typeof over === 'string' ? { state: over } : over);
+    // row() projects only its known fields, so carry customMatch through explicitly.
+    const cm = typeof over === 'object' && over ? over.customMatch : undefined;
+    return [k, cm !== undefined ? { ...r, customMatch: cm } : r];
+  }),
+);
+test('keeps a miss whose authored pattern is still matching, on a non-needs-you state', () => {
+  const cur = statesWithMatch([
+    ['a', { state: 'active', customMatch: { pattern: 'Error', line: 'Error: boom' } }],
+  ]);
+  const misses = [miss('a', { reason: 'custom', signal: 'Error: boom' })];
+  assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['a']);
+});
+test('keeps a pattern-matching chat with a customMatch-later non-custom miss too (precedence is per-snapshot, not per-miss)', () => {
+  // The chat fired an `erroring` miss while away and has SINCE recovered to idle —
+  // but its pattern is matching RIGHT NOW. The current snapshot needs the human, so
+  // the miss is kept: the catch-up points at a chat that still needs them.
+  const cur = statesWithMatch([
+    ['a', { state: 'idle', customMatch: { pattern: 'p', line: 'matched line' } }],
+  ]);
+  const misses = [miss('a', { reason: 'erroring' })];
+  assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['a']);
+});
+test('a chat with NO match and a non-needs-you state is still dropped, as today', () => {
+  const cur = statesWithMatch([
+    ['a', { state: 'active', customMatch: null }],
+    ['b', { state: 'idle' }],
+  ]);
+  const misses = [miss('a', { reason: 'custom' }), miss('b', { reason: 'waiting' })];
+  assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), []);
+});
+
+// ---------------------------------------------------------------------------
 console.log('\nwithoutKey: per-key ack-on-open (drop one chat, keep the rest)');
 
 test('drops only the named key', () => {
