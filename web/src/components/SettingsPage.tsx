@@ -17,6 +17,12 @@ import { type HostLabels } from '@/lib/chatDisplay';
 import { useBackendConfig } from '@/components/settings/useBackendConfig';
 import { sectionPersistence } from '@/components/settings/sectionPersistence';
 import { sectionGate, canSaveBackendConfig } from '@/components/settings/sectionLoadGate';
+import {
+  SETTINGS_SECTIONS,
+  searchSections,
+  normalizeSearchText,
+  type SectionId,
+} from '@/components/settings/sectionSearch';
 import { SettingsSection } from '@/components/settings/SettingsSection';
 import {
   type AppearancePrefs,
@@ -39,28 +45,6 @@ import { SnippetsSection } from '@/components/settings/sections/SnippetsSection'
 import { PatternsSection } from '@/components/settings/sections/PatternsSection';
 import { NotificationsSection } from '@/components/settings/sections/NotificationsSection';
 import { ResetSection } from '@/components/settings/sections/ResetSection';
-
-// The settings section nav entries: a left rail on wide screens, a dropdown on
-// narrow ones. Order is the display order. The `id` doubles as the active-section
-// discriminator — each section component hides itself unless its id matches
-// `activeSection`. (Reset is intentionally absent here: it is always visible at
-// the bottom of the content pane, outside the activeSection gating.)
-const SETTINGS_SECTIONS = [
-  { id: 'hosts', label: 'Hosts & Connection', description: 'Manage SSH hosts and connection settings for Warden.' },
-  { id: 'observer', label: 'Observer Preferences', description: 'Control the observer meta-chat: directive confirmation, auto-start, idle auto-stop, and its model.' },
-  { id: 'safety', label: 'Safety', description: 'Choose whether Warden confirms before destructive actions like force-killing a chat.' },
-  { id: 'attention', label: 'Attention thresholds', description: 'Set how long an agent waits before Warden flags it as needing attention.' },
-  { id: 'tokenbudget', label: 'Token budget', description: 'Configure token-budget alerts that notify you — they never auto-kill or pause agents.' },
-  { id: 'performance', label: 'Performance', description: 'Route remote tmux operations through a persistent SSH channel (experimental).' },
-  { id: 'telemetry', label: 'Telemetry', description: 'Opt-in usage telemetry — off by default. Nothing leaves your machine until you turn it on.' },
-  { id: 'display', label: 'Display', description: 'Choose which badges and indicators Warden shows for hosts and chats.' },
-  { id: 'appearance', label: 'Appearance', description: 'Theme, terminal font, and color preferences — applied instantly.' },
-  { id: 'newchats', label: 'New Chats', description: 'Set the defaults for new chats: agent type, host, shell, and working directory.' },
-  { id: 'snippets', label: 'Instruction snippets', description: 'Manage reusable instruction snippets for broadcasts and pane sends.' },
-  { id: 'patterns', label: 'Watch patterns', description: 'Define watch patterns that flag matching agent output, matched server-side.' },
-  { id: 'notifications', label: 'Notifications', description: 'Control toast, desktop, and webhook notifications for agent events.' },
-] as const;
-type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 
 // The section Settings opens on (WARDEN-976). Deliberately decoupled from the
 // rail ORDER — which is unchanged — because the landing section is now chosen
@@ -152,21 +136,22 @@ export function SettingsPage({
     onClose();
   };
 
-  // Section search: a case-insensitive substring match over each section's
-  // label AND description, so any preference is findable by term (e.g.
-  // `font`→Appearance, `kill`→Safety, `webhook`→Notifications). Pure UI over
-  // the static SETTINGS_SECTIONS metadata — adds no preferences, touches no
-  // config/persistence, so it cannot disturb the client-pref / PUT /api/config
-  // invariant. When the query hides the active section, the content pane stays
-  // put until the user picks a match (VS-Code-style filter-then-click).
+  // Section search: a case- AND punctuation-insensitive substring match over
+  // each section's label, description AND per-row keyword corpus, so any
+  // preference is findable both by a fragment (`font`→Appearance,
+  // `kill`→Safety, `webhook`→Notifications, `scrollback`/`density`/`tray`→
+  // Appearance, `poll`→Hosts) and by its full on-screen name, punctuation and
+  // all (`Terminal scrollback (lines)`, `Anonymous errors, crashes & freezes`).
+  // Pure UI over the static SETTINGS_SECTIONS metadata — adds no preferences,
+  // touches no config/persistence, so it cannot disturb the client-pref /
+  // PUT /api/config invariant. When the query hides the active section, the
+  // content pane stays put until the user picks a match (VS-Code-style
+  // filter-then-click). See sectionSearch.ts (WARDEN-912).
   const [search, setSearch] = useState('');
-  const q = search.trim().toLowerCase();
-  const matches =
-    q === ''
-      ? SETTINGS_SECTIONS
-      : SETTINGS_SECTIONS.filter(
-          (s) => s.label.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
-        );
+  // Normalized here too so a punctuation-only query ('???') counts as empty for
+  // the header description and reveals all sections, exactly like a blank box.
+  const q = normalizeSearchText(search);
+  const matches = searchSections(search);
   // The narrow-screen Select resolves its trigger label from the rendered item
   // matching `value`; if the active section is filtered out of the list the
   // trigger would go blank, so always include the active section here.
@@ -202,7 +187,7 @@ export function SettingsPage({
           </span>
         )}
         {/* Section search — filters the wide-screen rail and the narrow-screen
-            dropdown by label+description (see `matches`/`selectItems` above).
+            dropdown by label+description+keywords (see `matches`/`selectItems` above).
             Leading SearchIcon uses the established icon-input convention
             (relative wrapper, absolute affordance, padded input). */}
         <div className="relative ml-auto w-40 sm:w-64">
