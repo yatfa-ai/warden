@@ -421,6 +421,31 @@ export function ActivityTimeline({
         </div>
       </div>
 
+      {/* Fetch-failure strip. The hook RETAINS stale events on a failed poll
+          (useLiveTimeline.ts:70-74) — without this, a feed that already had rows
+          and then started failing would keep presenting stale state as live with
+          no indicator at all, since the error arm below is unreachable while the
+          list is non-empty. Non-blocking by design: the rows stay on screen.
+          Gate on the RAW `events`, never `filtered` — an active filter matching
+          nothing during a healthy fetch must not be dressed up as a failure.
+          Render `error.message`: the hook stores an `Error` instance (unlike
+          DirectiveHistory's `string`), and an Error object as a React child
+          throws. */}
+      {!loading && error && events.length > 0 && (
+        <div
+          role="status"
+          title={`Live updates failed: ${error.message}`}
+          className="flex-shrink-0 flex items-start gap-2 px-3 py-1.5 border-b border-destructive/30 bg-destructive/10 text-destructive text-sm leading-snug"
+        >
+          <span aria-hidden="true">⚠</span>
+          {/* No `truncate`: the panel is narrow, and clipping the message would
+              hide the one diagnostic part of the strip (e.g. "HTTP 503"). */}
+          <span className="min-w-0">
+            Live updates failed ({error.message}) — showing last known activity.
+          </span>
+        </div>
+      )}
+
       {/* Event list */}
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading ? (
