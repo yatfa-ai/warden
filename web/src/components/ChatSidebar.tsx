@@ -38,7 +38,7 @@ import { parseLoadedPins, nextPins } from '@/lib/pinSync';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import {
-  matchesAgentFilter, sortChats, findChat,
+  matchesAgentFilter, sortChats, findChat, displayNameFor,
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { chatMatchesCriteria } from '@/lib/collections';
@@ -642,10 +642,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   const handleBroadcastSend = async (text: string) => {
     const ids = Array.from(selectedIds);
     const results = await runFanout('/api/send', ids, (id) => ({ id, text }));
-    const nameOf = (id: string) => {
-      const c = findChat(chats, id);
-      return c ? displayName(c) : id;
-    };
+    const nameOf = (id: string) => displayNameFor(chats, id);
     const summary = summarizeBroadcast(results, ids, nameOf);
     showFanoutToast(formatBroadcastToast(summary), prefs.notifyChatOps);
     // The broadcast's intent is discharged — clear the selection regardless of
@@ -669,10 +666,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // per-agent failure rather than silently dropped.
   const handleKillSelected = async () => {
     const ids = Array.from(selectedIds);
-    const nameOf = (id: string) => {
-      const c = findChat(chats, id);
-      return c ? displayName(c) : id;
-    };
+    const nameOf = (id: string) => displayNameFor(chats, id);
     const summary = await runKillFanout(ids, nameOf, async () => {
       // Reconcile rows after the fan-out: re-read the catalog (manual tmux chats
       // are forgotten server-side) AND re-discover each unique host so yatfa
@@ -707,10 +701,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // tick. Stale ids are still signaled-at and reported as a per-agent failure.
   const handleInterruptSelected = async (key: string) => {
     const ids = Array.from(selectedIds);
-    const nameOf = (id: string) => {
-      const c = findChat(chats, id);
-      return c ? displayName(c) : id;
-    };
+    const nameOf = (id: string) => displayNameFor(chats, id);
     const summary = await runKeySendFanout(ids, key, nameOf);
     showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of
