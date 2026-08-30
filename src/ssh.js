@@ -6,6 +6,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import * as nodePty from 'node-pty';
 import fs from 'node:fs';
+import { captureAndSettle } from './childCapture.js';
 import { isNativeLocal, runNative, attachNative } from './winsession.js';
 
 // POSIX single-quote. Safe for the local ssh arg layer and remote bash.
@@ -451,36 +452,19 @@ export function run(host, cmd, opts = {}, cfg = {}) {
 
   return new Promise((resolve) => {
     const child = spawnFn(SSH_BIN, args, { windowsHide: true });
-    let stdout = '';
-    let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
-    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045). Without it,
-    // `stdout += d` calls Buffer#toString on each chunk IN ISOLATION: a multibyte
-    // character straddling a read boundary (which is what happens once output
-    // exceeds the 64KB pipe buffer and arrives in several chunks) has its leading
-    // bytes decoded at the end of one chunk and its continuation bytes at the
-    // start of the next — both become U+FFFD and the character is destroyed
-    // irrecoverably. setEncoding installs a StringDecoder that holds an incomplete
-    // trailing sequence back and prepends it to the following chunk, so the
-    // accumulated string is byte-identical to the child's output. Mirrors the
-    // sibling primitives runLocalCapture (gitRoutes.js) and runLocalTmux (below).
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ ok: false, code: -1, stdout, stderr: stderr + String(err) });
-    });
-    // 'close' (NOT 'exit') — see the function header: 'close' fires only after the
-    // stdio streams drain, so stdout/stderr are complete. 'exit' can fire first and,
-    // under the fleet-wide concurrency, capture empty stdout (false-clean git-status)
-    // (WARDEN-464/766). 'close' passes the same `code`, so the {ok, code, stdout, stderr}
-    // contract is unchanged — it only makes stdout complete, which helps (not hazards)
-    // isTransportFailure's classifier: it sees real stdout instead of an emptied one.
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
+    // The stdout/stderr accumulation + 'close'-not-'exit' settlement is the shared
+    // core — see captureAndSettle (childCapture.js). Passing `timer` is equivalent
+    // to the old unconditional clearTimeout: the line above arms unconditionally,
+    // so it is always a truthy Timeout here. The complete stdout that settling on
+    // 'close' yields helps (not hazards) isTransportFailure's classifier: it sees
+    // real stdout instead of an emptied one.
+    captureAndSettle(child, resolve, {
+      timer,
+      // run()'s error leg folds the spawn error INTO stderr — deliberately unlike
+      // runLocalCapture's separate `error` field. Both directions are pinned by
+      // green tests (sshRun.test.js:133, runLocalCapture.test.js:106).
+      onSpawnError: (err, stdout, stderr) => ({ ok: false, code: -1, stdout, stderr: stderr + String(err) }),
     });
   });
 }
@@ -694,37 +678,18 @@ export function runLocalTmux(args, opts = {}) {
   if (isNativeLocal()) return runNative(args, opts);
   return new Promise((resolve) => {
     const child = spawn(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
     const ms = Number.isFinite(opts.timeout) ? opts.timeout : null;
     const timer = ms && ms > 0 ? setTimeout(() => child.kill('SIGTERM'), ms) : null;
-    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045). This is the
-    // pane-capture transport: `capture-pane -p -e` output is full of multibyte box
-    // drawing, and /api/pane-export captures 5000 lines (hundreds of KB), so the
-    // read arrives in many chunks. Accumulating Buffers with `+=` decodes each
-    // chunk IN ISOLATION, so any character straddling a chunk boundary is split
-    // into two invalid halves and rendered as U+FFFD in the pane the user reads —
-    // and in the transcript they download. setEncoding installs a StringDecoder
-    // that carries the incomplete trailing sequence into the next chunk. Nothing
-    // downstream can repair this: tmux.js read() returns stdout verbatim and
-    // U+FFFD is valid JSON, so the corruption is silent all the way to the user.
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      resolve({ ok: false, code: -1, stdout, stderr: stderr + String(err) });
-    });
-    // Resolve on 'close' (NOT 'exit'): 'close' fires only AFTER the stdio streams
-    // have fully drained, so stdout/stderr hold the COMPLETE output. 'exit' can
-    // fire while buffered pipe data is still being read — for a large capture
-    // (e.g. full-scrollback `capture-pane -S - -E -`, which can exceed the 64KB
-    // pipe buffer) that would truncate the tail and lose the most-recent content.
-    // The old spawnSync returned complete stdout; 'close' preserves that.
-    child.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-      resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
+    // The stdout/stderr accumulation + 'close'-not-'exit' settlement is the shared
+    // core — see captureAndSettle (childCapture.js). It matters especially here:
+    // this is the pane-capture transport, and `capture-pane -p -e` output is full
+    // of multibyte box drawing while /api/pane-export captures 5000 lines (hundreds
+    // of KB), so the read arrives in many chunks and both the utf8 decoder state
+    // and the full drain are load-bearing. `timer` is null when no finite positive
+    // timeout was given, which captureAndSettle tolerates.
+    captureAndSettle(child, resolve, {
+      timer,
+      onSpawnError: (err, stdout, stderr) => ({ ok: false, code: -1, stdout, stderr: stderr + String(err) }),
     });
   });
 }

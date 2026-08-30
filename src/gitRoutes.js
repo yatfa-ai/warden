@@ -25,6 +25,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import express from 'express';
 import { run, shellQuote } from './ssh.js';
+import { captureAndSettle } from './childCapture.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, isValidGitHash, parseGitBlame, buildGitBlameScript, parseGitLsEntries } from './git.js';
 
@@ -77,23 +78,17 @@ const LOCAL = '(local)';
 export function runLocalCapture(bin, args, { cwd, timeout, spawn: spawnFn = spawn } = {}) {
   return new Promise((resolve) => {
     const child = spawnFn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    let stdout = '';
-    let stderr = '';
     const timer = timeout ? setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout) : null;
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      resolve({ ok: false, code: -1, stdout, stderr, error: err });
-    });
-    // 'close' (NOT 'exit') — see the function header: 'close' fires only after stdio
-    // drains, so stdout/stderr are complete. 'exit' can fire first and, under the
-    // fleet-wide concurrency, capture empty stdout (false-clean git-status) (WARDEN-464/766).
-    child.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-      resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
+    // The stdout/stderr accumulation + 'close'-not-'exit' settlement is the shared
+    // core — see captureAndSettle (childCapture.js). `timer` is null when no timeout
+    // was given, which captureAndSettle tolerates.
+    captureAndSettle(child, resolve, {
+      timer,
+      // runLocalCapture carries the spawn error as a separate `error` field — NOT
+      // folded into stderr the way run() does. The two contracts point in opposite
+      // directions and both are pinned by green tests (runLocalCapture.test.js:106
+      // asserts `r.error === err`; sshRun.test.js:133 asserts the stderr fold).
+      onSpawnError: (err, stdout, stderr) => ({ ok: false, code: -1, stdout, stderr, error: err }),
     });
   });
 }
