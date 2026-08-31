@@ -33,6 +33,12 @@ contextBridge.exposeInMainWorld('wardenWindow', {
   // (opt-in). See WARDEN-330.
   getCloseToTray: () => ipcRenderer.invoke('window:get-close-to-tray'),
   setCloseToTray: (on) => ipcRenderer.invoke('window:set-close-to-tray', on),
+  // WARDEN-1256 — open an http(s) URL in the OS browser. The renderer's terminal
+  // URL links call this on Ctrl/Cmd+click; main validates the scheme (http/https
+  // only) and hands the URL to shell.openExternal. Returns a boolean promise
+  // (true = handed to the OS). Same allowlisted-bridge contract as the rest of
+  // wardenWindow: the renderer passes one string and gets one boolean.
+  openExternal: (url) => ipcRenderer.invoke('window:open-external', url),
 });
 
 // Telemetry runtime-status bridge (WARDEN-631). The drift flag lives in MAIN (the

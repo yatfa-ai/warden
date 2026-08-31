@@ -6,6 +6,8 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
+import { findUrlCandidates } from '@/lib/url-links';
+import { openExternalUrl } from '@/lib/electron';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { handleOsc52 } from '@/lib/clipboard';
@@ -254,7 +256,10 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const existsCacheRef = useRef<Map<string, boolean>>(new Map());
   const existsPendingRef = useRef<Map<string, Promise<boolean>>>(new Map());
   const tooltipElRef = useRef<HTMLDivElement | null>(null);
-  const hoveredPathRef = useRef<string | null>(null);
+  // The link token currently hovered (a file path OR a URL — WARDEN-1256 made
+  // the tooltip guard kind-agnostic). Guards the path side's slow-probe race:
+  // a tooltip only shows if the cursor is still over that exact token.
+  const hoveredLinkRef = useRef<string | null>(null);
   // Per-pane FileViewer bound to THIS pane's chat — a Ctrl/Cmd+clicked path opens
   // here, never assuming the focused pane (AC: correct id/cwd per pane).
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -470,7 +475,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       return p;
     };
 
-    const showTooltip = (event: MouseEvent) => {
+    const showTooltip = (event: MouseEvent, label: string) => {
       let el = tooltipElRef.current;
       if (!el) {
         el = document.createElement('div');
@@ -478,9 +483,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         // the link's hover/leave then fire normally instead of flickering on/off
         // as the cursor crosses the tooltip.
         el.className = 'fixed z-[9999] pointer-events-none px-2 py-1 rounded-md border bg-popover text-popover-foreground text-[11px] shadow-md';
-        el.textContent = isMac ? '⌘+Click to open file' : 'Ctrl+Click to open file';
         tooltipElRef.current = el;
       }
+      // Set on EVERY call (not just creation): the same element serves the file
+      // and URL labels, and a reused tooltip must never show the previous
+      // token's label.
+      el.textContent = label;
       el.style.left = `${event.clientX + 12}px`;
       el.style.top = `${event.clientY + 12}px`;
       if (!el.isConnected) document.body.appendChild(el);
@@ -491,9 +499,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     };
 
     // xterm calls provideLinks only for visible viewport lines (lazy), so existence
-    // probes are inherently limited to what's on screen. Each candidate starts with
-    // NO decorations and the (mutable, tracked) decorations object flips to
-    // underline+pointer once the async check confirms a real file — non-blocking.
+    // probes are inherently limited to what's on screen. Two kinds of links come
+    // out of this one provider (so a pane never hosts two link mechanisms):
+    //   - URLs (WARDEN-1256): decorated at CONSTRUCTION time — a URL is valid by
+    //     construction, no async probe, so the underline + pointer + tooltip are
+    //     there on the very first hover.
+    //   - File paths (WARDEN-227): each candidate starts with NO decorations and
+    //     the (mutable, tracked) decorations object flips to underline+pointer
+    //     once the async check confirms a real file — non-blocking.
     const linkProvider = term.registerLinkProvider({
       provideLinks(bufferLineNumber: number, callback) {
         // bufferLineNumber is 1-based (matches the range `y`); buffer line indexing
@@ -502,8 +515,49 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         const lineObj = term.buffer.active.getLine(bufferLineNumber - 1);
         if (!lineObj) { callback(undefined); return; }
         const text = lineObj.translateToString(true);
+        // WARDEN-1256: wrap context. When the NEXT buffer line is a wrapped
+        // continuation of this one, a URL running to end-of-line was split by
+        // the wrap — the matcher drops it rather than linking a truncated URL
+        // (and neighbouring tokens are unaffected). 0-based index
+        // bufferLineNumber is the line AFTER the 1-based bufferLineNumber.
+        const nextLine = term.buffer.active.getLine(bufferLineNumber);
+        const urls = findUrlCandidates(text, { wrappedAtEol: !!nextLine?.isWrapped });
+        // findPathCandidates masks http(s) URLs out first (url-links.ts), so its
+        // candidates can never land inside a URL — the matcher-level precedence.
         const candidates = findPathCandidates(text);
-        if (!candidates.length) { callback(undefined); return; }
+        if (!urls.length && !candidates.length) { callback(undefined); return; }
+        // URLs first in the array: on a line with both kinds, the URL wins any
+        // range contest (they cannot overlap after masking — belt and braces).
+        const urlLinks = urls.map((u) => ({
+          range: {
+            start: { x: u.start + 1, y: bufferLineNumber },
+            end: { x: u.start + u.length, y: bufferLineNumber },
+          },
+          text: u.url,
+          // The key difference from paths: decorated NOW, not after an async
+          // probe. The affordance must be immediate (no late/absent underline —
+          // the affordance flaw the file side inherited from its probe design).
+          decorations: { underline: true, pointerCursor: true },
+          activate(event: MouseEvent) {
+            // Same contract as paths: only the modifier-click acts; a plain
+            // click falls through to xterm (selection stays working).
+            if (!(event.metaKey || event.ctrlKey)) return;
+            // Open in the SYSTEM browser over the wardenWindow bridge
+            // (shell.openExternal in main). Identical for local and remote
+            // chats — recognition consulted no host state, and neither does
+            // the open. Fire-and-forget: the wrapper never rejects.
+            void openExternalUrl(u.url);
+          },
+          hover(event: MouseEvent) {
+            hoveredLinkRef.current = u.url;
+            // Immediate — no probe to await, no cursor-left race to guard.
+            showTooltip(event, isMac ? '⌘+Click to open link' : 'Ctrl+Click to open link');
+          },
+          leave() {
+            if (hoveredLinkRef.current === u.url) hoveredLinkRef.current = null;
+            hideTooltip();
+          },
+        }));
         const links = candidates.map((c) => {
           const decorations = { underline: false, pointerCursor: false };
           const cached = existsCacheRef.current.get(c.path);
@@ -535,21 +589,21 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
               });
             },
             hover(event: MouseEvent) {
-              hoveredPathRef.current = c.path;
+              hoveredLinkRef.current = c.path;
               checkExists(c.path).then((ok) => {
                 // Only show the affordance+tooltip for confirmed files, and only if
                 // the cursor is still over this path (guard against a slow probe
                 // resolving after the cursor already left).
-                if (ok && hoveredPathRef.current === c.path) showTooltip(event);
+                if (ok && hoveredLinkRef.current === c.path) showTooltip(event, isMac ? '⌘+Click to open file' : 'Ctrl+Click to open file');
               });
             },
             leave() {
-              if (hoveredPathRef.current === c.path) hoveredPathRef.current = null;
+              if (hoveredLinkRef.current === c.path) hoveredLinkRef.current = null;
               hideTooltip();
             },
           };
         });
-        callback(links);
+        callback([...urlLinks, ...links]);
       },
     });
 

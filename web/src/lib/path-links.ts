@@ -4,6 +4,15 @@
 // parsing has direct unit-test coverage — there is no front-end component test
 // runner in this repo, but this module loads cleanly under Vite's OXC transform
 // (see web/path-links.test.mjs, mirroring storage.test.mjs's harness).
+//
+// WARDEN-1256: http(s) URLs take precedence — findPathCandidates masks them out
+// (maskUrls) before matching, so the path regex can never fire inside one. In
+// `See http://localhost:7421/api/foo.json` the fragment `7421/api/foo.json`
+// used to surface as a path candidate (it passes the slash+extension heuristic);
+// now the whole URL span is blanked first and the path matcher only sees text
+// outside URLs. PaneTile links URLs separately via url-links.ts.
+
+import { maskUrls } from './url-links';
 
 export interface PathCandidate {
   /** Index in the source line where the FULL token (path + optional `:line[:col]`) starts. */
@@ -32,11 +41,16 @@ const TOKEN_RE = /(\/?(?:[\w.~-]+\/)*[\w.~-]*\.[A-Za-z0-9][\w.~-]*)(?::(\d+)(?::
 // side-effect-free; PaneTile maps each candidate's start/length to an xterm range.
 export function findPathCandidates(line: string): PathCandidate[] {
   const out: PathCandidate[] = [];
-  for (const m of line.matchAll(TOKEN_RE)) {
+  // WARDEN-1256: URL precedence. Run the matcher over the URL-masked line (same
+  // length — URL interiors become spaces) so no path candidate can start inside
+  // or span across an http(s) URL. Candidate start/length stay valid against the
+  // ORIGINAL line because masking preserves every index.
+  for (const m of maskUrls(line).matchAll(TOKEN_RE)) {
     const start = m.index ?? 0;
-    // Skip URL authorities (https://host/path…): the path-like tail never resolves
-    // under cwd, so don't waste a probe. The match begins right after the URL's
-    // `:/`, so the text immediately before it ends in `:/`.
+    // Skip URL authorities for NON-http(s) schemes (file://, ssh://, ftp://…):
+    // the path-like tail never resolves under cwd, so don't waste a probe. The
+    // match begins right after the URL's `:/`, so the text immediately before it
+    // ends in `:/`. (http/https URLs are already masked out above — WARDEN-1256.)
     if (/:\/$/.test(line.slice(0, start))) continue;
     const path = m[1];
     const lineNo = m[2] ? parseInt(m[2], 10) : undefined;

@@ -18,12 +18,25 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const pathLinksPath = resolve(__dirname, 'src/lib/path-links.ts');
+const libDir = resolve(__dirname, 'src/lib');
 
-// --- Load the REAL path-links.ts (TS -> ESM via the OXC transform Vite bundles) -
-const src = readFileSync(pathLinksPath, 'utf8');
-const { code } = await transformWithOxc(src, pathLinksPath, {});
+// --- Load the REAL path-links.ts + its url-links.ts dependency (TS -> ESM via
+// the OXC transform Vite bundles). path-links imports maskUrls from ./url-links
+// (WARDEN-1256 URL precedence), so transpile BOTH and rewrite path-links's
+// source import to point at the transpiled url-links.mjs in the temp dir —
+// the same two-module harness broadcast.test.mjs uses for ./fanout.
+const urlSrc = readFileSync(join(libDir, 'url-links.ts'), 'utf8');
+const { code: urlCode } = await transformWithOxc(urlSrc, join(libDir, 'url-links.ts'), {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-pathlinks-test-'));
+const urlFile = join(tmpDir, 'url-links.mjs');
+writeFileSync(urlFile, urlCode);
+
+// Rewrite the ./url-links import on the SOURCE string before transform so the
+// relative specifier resolves from the temp dir (transformWithOxc keeps import
+// specifiers as-is).
+const src = readFileSync(join(libDir, 'path-links.ts'), 'utf8')
+  .replace(/from ['"]\.\/url-links['"]/, 'from "./url-links.mjs"');
+const { code } = await transformWithOxc(src, join(libDir, 'path-links.ts'), {});
 const tmpFile = join(tmpDir, 'path-links.mjs');
 writeFileSync(tmpFile, code);
 const { findPathCandidates } = await import(tmpFile);
@@ -110,6 +123,14 @@ test('an http(s) URL authority is skipped (no wasted probe)', () => {
   // https://github.com/repo/file.js contains a path-like tail but never resolves
   // under cwd; the extractor must not offer it.
   assert.deepEqual(picks('see https://github.com/org/repo/blob/main/file.js here'), []);
+});
+test('WARDEN-1256: a host:port URL path is not offered as a path candidate', () => {
+  // The ticket's acceptance case. `7421/api/foo.json` (slash + extension) passes
+  // the path heuristic, and the old `:/` guard missed it because a `:port`
+  // precedes it — masking the whole http(s) URL first removes it structurally.
+  assert.deepEqual(picks('See http://localhost:7421/api/foo.json'), []);
+  assert.deepEqual(picks('docs: https://a.dev/guide/setup.md and src/server.js left'),
+    [{ path: 'src/server.js', line: undefined, col: undefined }]);
 });
 test('a slashless name.ext without a line is skipped even next to a real candidate', () => {
   // package.json (no slash, no line) is ignored; src/index.js (slash) is kept.

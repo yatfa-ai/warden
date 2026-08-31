@@ -59,6 +59,7 @@ const {
   setLaunchAtLogin,
   getCloseToTray,
   setCloseToTray,
+  openExternalUrl,
   getTelemetryRuntimeStatus,
   onTelemetryRuntimeStatus,
   clearTelemetryRuntimeDrift,
@@ -886,6 +887,52 @@ test('is IDEMPOTENT — a second install does not stack duplicate listeners', ()
   globalThis.window = { wardenTelemetry: { reportError: (p) => seen.push(p) } };
   w.fire('error', { error: new Error('boom') });
   assert.equal(seen.length, 1, 'a single error reports once');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nopenExternalUrl — WARDEN-1256 OS-browser open over the bridge');
+// The terminal's Ctrl/Cmd+clickable URLs call this. Invariants: inside Electron
+// the URL goes ONLY through the bridge (never window.open — that would open an
+// internal window, not the OS browser); outside Electron it degrades via
+// window.open (browser host) or a caught no-op (headless host); a rejecting
+// bridge must degrade to false, never surface an unhandled rejection into the
+// terminal's click handler.
+// ---------------------------------------------------------------------------
+await testAsync('forwards to the bridge and returns its true verdict (Electron host)', async () => {
+  const seen = [];
+  windowBridge({ openExternal: async (u) => { seen.push(u); return true; } });
+  assert.equal(await openExternalUrl('https://a.dev/x'), true);
+  assert.deepEqual(seen, ['https://a.dev/x']);
+});
+await testAsync('returns false (never rejects) when the bridge verdict is false (refused url)', async () => {
+  windowBridge({ openExternal: async () => false });
+  assert.equal(await openExternalUrl('https://a.dev/x'), false);
+});
+await testAsync('returns false (never rejects) when the bridge throws', async () => {
+  silenceWarn();
+  windowBridge({ openExternal: async () => { throw new Error('boom'); } });
+  assert.equal(await openExternalUrl('https://a.dev/x'), false);
+});
+await testAsync('no bridge: falls back to window.open (a plain browser host)', async () => {
+  const opened = [];
+  globalThis.window = { open: (u, target, feats) => { opened.push([u, target, feats]); return {}; } };
+  assert.equal(await openExternalUrl('https://a.dev/x'), true);
+  assert.deepEqual(opened, [['https://a.dev/x', '_blank', 'noopener,noreferrer']]);
+});
+await testAsync('no bridge and no window.open: caught no-op resolving to false (headless host)', async () => {
+  noBridge();
+  assert.equal(await openExternalUrl('https://a.dev/x'), false);
+});
+await testAsync('a bridge that predates WARDEN-1256 (no openExternal method) takes the browser path', async () => {
+  const opened = [];
+  globalThis.window = { wardenWindow: { getRememberWindowBounds: async () => true }, open: (u) => { opened.push(u); return {}; } };
+  assert.equal(await openExternalUrl('https://a.dev/x'), true);
+  assert.deepEqual(opened, ['https://a.dev/x']);
+});
+await testAsync('a throwing window.open is caught and degrades to false', async () => {
+  silenceWarn();
+  globalThis.window = { open: () => { throw new Error('popup blocked'); } };
+  assert.equal(await openExternalUrl('https://a.dev/x'), false);
 });
 
 console.log(`\n✓ ELECTRON BRIDGE TESTS PASS (${passed})`);
