@@ -246,6 +246,81 @@ func TestDiffPanes(t *testing.T) {
 	})
 }
 
+// TestBuildCaptureScript locks the byte-exact, sentinel-framed batched capture
+// script the companion runs host-side for pane content (WARDEN-276 slice 2, the
+// capturePanes RPC + the subscribe watcher both drive it). It is byte-for-byte
+// identical to src/chats.js buildCaptureScript(list): each pane is bracketed by
+// ___B_<key>___ / ___E_<key>___ sentinels, the tmux invocation is
+// `docker exec <container> tmux` when a container is set, else bare `tmux`, the
+// target falls back session -> container -> "agent", and the capture flags are
+// -p -e -S -60 -E - (escape-preserving, trailing 60 lines) — NOT the activity
+// script's `-p -S - -E - | head -1` shape. The containerised branch is the
+// production path for container-backed chats and was previously executed by no
+// test (every Container in this file was ""); both branches are pinned here so a
+// change to either shape fails loudly instead of shipping silently. (WARDEN-1236)
+func TestBuildCaptureScript(t *testing.T) {
+	t.Run("containerised chat: docker exec prefix, session target", func(t *testing.T) {
+		got := buildCaptureScript([]capturePaneReq{{Key: "p-worker", Container: "p-worker", Session: "agent"}})
+		want := "printf '___B_p-worker___\\n'; docker exec 'p-worker' tmux capture-pane -t 'agent' -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_p-worker___\\n'"
+		if got != want {
+			t.Fatalf("buildCaptureScript containerised mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("bare-tmux chat: no container, custom session shellQuoted", func(t *testing.T) {
+		got := buildCaptureScript([]capturePaneReq{{Key: "bare1", Container: "", Session: "my session"}})
+		want := "printf '___B_bare1___\\n'; tmux capture-pane -t 'my session' -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_bare1___\\n'"
+		if got != want {
+			t.Fatalf("buildCaptureScript bare-tmux mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("containerised pane with an empty session targets the container itself", func(t *testing.T) {
+		got := buildCaptureScript([]capturePaneReq{{Key: "c1", Container: "p-worker", Session: ""}})
+		if !strings.Contains(got, "docker exec 'p-worker' tmux capture-pane -t 'p-worker' ") {
+			t.Fatalf("expected empty session to fall back to the container as target; got: %s", got)
+		}
+	})
+
+	t.Run("empty session and container default the target to agent", func(t *testing.T) {
+		got := buildCaptureScript([]capturePaneReq{{Key: "bare1", Container: "", Session: ""}})
+		if !strings.Contains(got, "tmux capture-pane -t 'agent' ") {
+			t.Fatalf("expected target to default to 'agent'; got: %s", got)
+		}
+	})
+
+	t.Run("multiple panes joined with '; ', order preserved, one sentinel pair each", func(t *testing.T) {
+		got := buildCaptureScript([]capturePaneReq{
+			{Key: "p-worker", Container: "p-worker", Session: "agent"},
+			{Key: "bare1", Container: "", Session: "agent"},
+		})
+		pi := strings.Index(got, "___B_p-worker___")
+		bi := strings.Index(got, "___B_bare1___")
+		if pi < 0 || bi < 0 || pi > bi {
+			t.Fatalf("expected p-worker before bare1; got: %s", got)
+		}
+		if c := strings.Count(got, "___B_"); c != 2 {
+			t.Fatalf("expected 2 begin sentinels; got %d", c)
+		}
+		if c := strings.Count(got, "___E_"); c != 2 {
+			t.Fatalf("expected 2 end sentinels; got %d", c)
+		}
+		if n := strings.Count(got, "capture-pane"); n != 2 {
+			t.Fatalf("expected one capture-pane per pane; got %d", n)
+		}
+	})
+
+	t.Run("container name with an apostrophe is shellQuoted", func(t *testing.T) {
+		// The apostrophe lives in the CONTAINER, not the key: keys are trusted to
+		// match ^[A-Za-z0-9_.-]+$ (see buildCaptureScript's NOTE), so only the
+		// container/session positions are quoted.
+		got := buildCaptureScript([]capturePaneReq{{Key: "cx", Container: "c'x", Session: "agent"}})
+		if !strings.Contains(got, "docker exec 'c'\\''x' tmux") {
+			t.Fatalf("expected shellQuoted container; got: %s", got)
+		}
+	})
+}
+
 // TestCaptureOncePushesInitialDelta drives the watcher's push path (captureOnce
 // -> capturePanesList -> diffPanes -> writeLine) against a REAL tmux session: an
 // empty hash map means the first capture marks every pane changed and pushes the
