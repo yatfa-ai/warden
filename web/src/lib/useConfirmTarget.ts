@@ -6,7 +6,8 @@
 // confirm, clear the target on cancel. Before this hook that machine was
 // hand-copied 3x — the confirm/cancel legs of the force-kill and kill-chat
 // copies were byte-identical once identifiers were normalised (a MANUAL
-// convergence: 90f0f1f rewrote the force-kill legs to match kill's), while the
+// convergence: 8fefe68, WARDEN-137, rewrote the force-kill legs to match
+// kill's), while the
 // close-workspace copy differed only in that its action is synchronous and its
 // cancel was a one-line arrow. Hand-copied machines drift; the third copy was
 // literally born ungated because it had no shared function to inherit the gate
