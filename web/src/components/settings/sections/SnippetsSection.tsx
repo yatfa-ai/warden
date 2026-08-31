@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import {
+  SNIPPET_MAX_COUNT,
   SNIPPET_NAME_MAX,
   SNIPPET_TEXT_MAX,
   snippetNameErrorMessage,
@@ -48,6 +49,15 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     const text = newSnippetText.trim();
     if (!name || !text) {
       toast.error('Snippet needs both a name and instruction text.');
+      return;
+    }
+    // WARDEN-1247 — refuse at the cap instead of letting the user create an
+    // entry parseSnippets would silently drop on the next reload. The loader
+    // keeps the FIRST fifty valid entries (pinned by storage.test.mjs), so an
+    // appended 51st is exactly the entry it discards. Same shape and wording
+    // as addPattern's watch-pattern guard in PatternsSection.
+    if (snippets.length >= SNIPPET_MAX_COUNT) {
+      toast.error(`You can have at most ${SNIPPET_MAX_COUNT} instruction snippets.`);
       return;
     }
     const issue = validateSnippetName(name, snippets);
