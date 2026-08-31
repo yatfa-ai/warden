@@ -87,9 +87,6 @@ export function loadManifest() {
   return raw;
 }
 
-// Test seam: override the manifest (and thus the version + binary map).
-export function _setManifestForTests(m) { _manifest = m; }
-
 // Map a host's reported (uname -s, uname -m) to a cross-compile target
 // {goos, goarch}, or null if the pair isn't in the supported matrix.
 //
