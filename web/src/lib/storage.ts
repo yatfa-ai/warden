@@ -323,7 +323,9 @@ export interface Snippet {
 // the Inputs' maxLength) agrees with the load-time sanitizer on one bound — the
 // in-memory list can never hold a name/text the sanitizer would silently drop
 // on next reload. SNIPPET_MAX_COUNT caps the payload so a runaway list can
-// never bloat localStorage; the load-time sanitizer drops the overflow.
+// never bloat localStorage; the load-time sanitizer drops the overflow, and
+// the Settings add site refuses at the cap (WARDEN-1247) so a user can never
+// create an entry the loader would silently discard.
 export const SNIPPET_NAME_MAX = 32;
 export const SNIPPET_TEXT_MAX = 2000;
 export const SNIPPET_MAX_COUNT = 50;

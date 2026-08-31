@@ -1750,6 +1750,41 @@ test('the count cap drops overflow (first SNIPPET_MAX_COUNT win)', () => {
   assert.equal(loaded.length, SNIPPET_MAX_COUNT, 'overflow entries dropped');
   assert.deepEqual(loaded[0], { name: 's0', text: 't0' });
 });
+
+// WARDEN-1247 — the WRITE-SITE sibling of the loader cap above. That cap is
+// deliberate and pinned: parseSnippets keeps the FIRST SNIPPET_MAX_COUNT valid
+// entries, so a 51st entry appended by addSnippet is precisely the one the next
+// reload discards — silently, with no toast. The add site is the only place the
+// overflow can be prevented, and this repo has no React test runner, so the
+// guard is pinned as a source contract on SnippetsSection.tsx (the approach
+// sectionSearch.test.mjs takes for component structure).
+const snippetsSectionSrc = readFileSync(
+  resolve(__dirname, 'src/components/settings/sections/SnippetsSection.tsx'), 'utf8');
+test('the add site imports SNIPPET_MAX_COUNT from the shared storage contract (not a hand-typed 50)', () => {
+  // storage.ts centralizes the bounds so every write site agrees with the
+  // load-time sanitizer on ONE constant; a literal 50 in the component would
+  // drift silently the day the cap changes.
+  assert.match(
+    snippetsSectionSrc,
+    /import\s*\{[^}]*\bSNIPPET_MAX_COUNT\b[^}]*\}\s*from\s*'@\/lib\/storage'/,
+    'SnippetsSection must guard with the SAME constant parseSnippets caps by');
+});
+test('addSnippet refuses at the cap with a toast naming the limit, before appending', () => {
+  const fnStart = snippetsSectionSrc.indexOf('const addSnippet = () =>');
+  assert.notEqual(fnStart, -1, 'addSnippet is findable in the section source');
+  // The append form appears ONLY in addSnippet (rename maps, text-edit maps,
+  // delete filters), so its index inside the function scopes both probes.
+  const appendIdx = snippetsSectionSrc.indexOf('setSnippets([...snippets', fnStart);
+  assert.notEqual(appendIdx, -1, 'the append call is findable');
+  const guardIdx = snippetsSectionSrc.indexOf('snippets.length >= SNIPPET_MAX_COUNT', fnStart);
+  assert.ok(guardIdx !== -1 && guardIdx > fnStart && guardIdx < appendIdx,
+    'the count guard must run BEFORE the append — a guard placed after it refuses nothing');
+  assert.match(
+    snippetsSectionSrc.slice(guardIdx, appendIdx),
+    /toast\.error\(`You can have at most \$\{SNIPPET_MAX_COUNT\} instruction snippets\.`\);/,
+    'the refusal is a toast that names the limit, in the addPattern wording style');
+});
+
 test('names and text are trimmed on load', () => {
   reset();
   mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: [{ name: '  Run tests  ', text: '  run it  ' }] }));
