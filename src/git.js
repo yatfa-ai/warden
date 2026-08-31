@@ -6,14 +6,19 @@
 // the same reason). The log/show/diff/blame/ls-files parsers were added later but
 // dumped inline in server.js; this finishes that extraction.
 //
-// Side-effect-free at module load: the only project import is `shellQuote` from
-// ./ssh.js, which has no top-level statements, so importing this module boots
-// nothing. (WARDEN-606.)
+// Side-effect-free at module load: the only project imports are pure helper
+// modules with no top-level statements (`shellQuote` from ./ssh.js,
+// `unescapeGitPath` from ./gitStatus.js, and the containment rule from
+// ./pathContainment.js), so importing this module boots nothing. (WARDEN-606.)
 
 import path from 'node:path';
 import fs from 'node:fs';
 import { shellQuote } from './ssh.js';
 import { unescapeGitPath } from './gitStatus.js';
+// The single source of the working-directory containment rule (WARDEN-1234):
+// the JS clause both isPathWithinCwd arms consume, and the bash fragment
+// buildGitDiffScript splices into its remote script.
+import { isWithinResolvedCwd, CWD_CONTAINMENT_CASE } from './pathContainment.js';
 
 // ===== In-progress operation detection (status) =============================
 
@@ -167,7 +172,9 @@ export function capDiff(diff) {
 // the same way buildReadFileScript is. Containment uses `realpath -m` (NOT `-e`):
 // a deleted/untracked-not-yet-committed file has no realpath, so `-e` would wrongly
 // reject it; `-m` resolves `..` lexically without requiring existence, so the
-// cwd-containment `case` still catches `../etc/passwd` escapes. shellQuote yields a
+// cwd-containment `case` still catches `../etc/passwd` escapes. That `case` is the
+// shared separator-bearing fragment from src/pathContainment.js (WARDEN-1234) —
+// the same string read-file/file-exists splice in. shellQuote yields a
 // single-quoted POSIX token spliced in bare — same WARDEN-122 quoting discipline as
 // read-file/git-log. The `--` before the path stops option parsing so a path named
 // like a flag can't inject options.
@@ -207,23 +214,27 @@ export function buildGitDiffScript(cwd, filePath, staged, rangeRev) {
   const diffCmd = rangeRev
     ? `git diff ${shellQuote(rangeRev)}`
     : (staged ? 'git diff --cached' : 'git diff HEAD');
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; cd "$RESOLVED_CWD" && ${diffCmd} -- "$FILE" 2>/dev/null`;
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; ${CWD_CONTAINMENT_CASE}; cd "$RESOLVED_CWD" && ${diffCmd} -- "$FILE" 2>/dev/null`;
 }
 
 // Is a cwd-relative `filePath` contained within `cwd`? Mirrors /api/read-file's guard,
 // but tolerates a missing target (a deleted file — status 'D' — has no realpath, yet
 // its deletion diff is valid). Lexical resolve catches `..` escapes even when the file
-// doesn't exist; realpath then hardens against symlink escapes when it does. Exported
-// so the local path has a direct unit test. Returns true if the path stays within cwd.
+// doesn't exist; realpath then hardens against symlink escapes when it does. Both
+// containment arms are the shared separator-bearing clause from src/pathContainment.js
+// (WARDEN-1234) — the lexical arm is the only gate for a nonexistent target (the
+// realpath arm is skipped via the ENOENT catch), so its separator is independently
+// load-bearing. Exported so the local path has a direct unit test. Returns true if
+// the path stays within cwd.
 export function isPathWithinCwd(cwd, filePath) {
   const lexicalCwd = path.resolve(cwd);
   const lexicalPath = path.resolve(cwd, filePath);
-  const lexicalWithin = lexicalPath === lexicalCwd || lexicalPath.startsWith(lexicalCwd + path.sep);
+  const lexicalWithin = isWithinResolvedCwd(lexicalPath, lexicalCwd);
   if (!lexicalWithin) return false;
   try {
     const realCwd = fs.realpathSync.native(cwd);
     const realPath = fs.realpathSync.native(lexicalPath);
-    return realPath === realCwd || realPath.startsWith(realCwd + path.sep);
+    return isWithinResolvedCwd(realPath, realCwd);
   } catch {
     // File doesn't exist (deleted, or untracked not yet created): lexical check passed.
     return true;
