@@ -742,7 +742,9 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
   // `github · owner/repo` and deep-link the branch/HEAD/upstream to the host.
   //
   // Mirrors /api/git-status exactly: resolve(chatId) → 404 guard → gitCwd(chat) →
-  // graceful `{ remotes: [] }` when no cwd / non-git / zero remotes (never 500).
+  // graceful `{ remotes: [] }` when no cwd / zero remotes (never 500). A cwd where
+  // the git command itself FAILS (non-git dir, deleted cwd, dropped transport) is
+  // an explicit error since WARDEN-1237 — see the gate below.
   // `git remote -v` is read-only (no `-v` mutation path exists), and runGit routes
   // it through the same transport as the status probes (argv `docker exec … git -C`
   // for yatfa containers, ssh for manual-remote) so it lights up for every agent
@@ -753,7 +755,20 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
       defaults: { remotes: [] },
       handler: async ({ chat, cwd, res }) => {
         const remoteR = await runGit(chat, ['remote', '-v'], cwd);
-        const remotes = parseGitRemotes(remoteR.ok ? remoteR.stdout : '');
+        // Non-zero exit → an explicit error, never a manufactured empty list
+        // (WARDEN-1237). Same rule as the /api/git-stash, /api/git-reflog and
+        // /api/git-branch siblings: see the /api/git-log leg for the full
+        // rationale. The string is a FIXED non-empty literal because runGit's
+        // `2>/dev/null` remote branches leave remoteR.stderr empty, and
+        // readListResponse (web/src/lib/api.ts) treats an empty error string as
+        // no error at all — the UI's ListErrorRow can only light up on this
+        // branch if the string is non-empty. No unborn-HEAD probe here (unlike
+        // /api/git-log and /api/git-reflog): `git remote -v` exits ZERO both on
+        // a repo with no remotes and on a fresh `git init` with no commits, so a
+        // plain exit-status gate cannot misread a healthy repo as a failure —
+        // both of those land on the legitimate-empty path below.
+        if (!remoteR.ok) return res.json({ remotes: [], error: 'git remote -v failed' });
+        const remotes = parseGitRemotes(remoteR.stdout);
         res.json({ remotes, error: null });
       },
     });
