@@ -45,6 +45,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
+import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
 import { reconcileMainOwnedPref } from '@/lib/mainOwnedPref';
@@ -480,8 +481,9 @@ function App() {
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
   // from /api/config on mount and refreshed after Settings saves. Declared up
-  // here because the forceKill/requestKill callbacks below read it eagerly via
-  // their dependency arrays.
+  // here because the shared destructive-confirm gate predicate below (feeding
+  // the force-kill / kill-chat useConfirmTarget machines) reads it via its
+  // dependency array.
   const [confirmDestructiveActions, setConfirmDestructiveActions] = useState(true);
   // WARDEN-332 — the two observer lifecycle preferences (auto-start + session
   // auto-stop). Initialized to the config.js defaults (false / 30) and refreshed
@@ -1253,13 +1255,16 @@ function App() {
   const toggleObserver = useCallback(() => setObserverCollapsed((c) => !c), []);
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
 
+  // The destructive-action gate BOTH kill machines consult. One predicate, two
+  // useConfirmTarget call sites below — the close-workspace machine deliberately
+  // passes none (see its comment).
+  const shouldConfirmDestructive = useCallback(() => confirmDestructiveActions, [confirmDestructiveActions]);
+
   // Force-kill confirmation. The ⏹ force-kill button sits directly beside
   // clear/download/close in the pane toolbar — a single misclick otherwise
   // kills a possibly-running agent's tmux session with no guard. When "Confirm
   // before destructive actions" is on (default), open a ConfirmDialog first;
   // when off (power-user opt-out), kill immediately with no friction.
-  const [forceKillTarget, setForceKillTarget] = useState<string | null>(null);
-
   const performForceKill = useCallback(async (id: string) => {
     const { ok, error, res } = await postJson('/api/session-kill', { id });
     if (!ok) {
@@ -1271,20 +1276,12 @@ function App() {
     if (prefs.notifyChatOps) toast.success('Session force-killed');
   }, [prefs.notifyChatOps]);
 
-  const forceKill = useCallback((id: string) => {
-    if (confirmDestructiveActions) setForceKillTarget(id);
-    else void performForceKill(id);
-  }, [confirmDestructiveActions, performForceKill]);
-
-  const confirmForceKill = useCallback(() => {
-    const id = forceKillTarget;
-    setForceKillTarget(null);
-    if (id) void performForceKill(id);
-  }, [forceKillTarget, performForceKill]);
-
-  const cancelForceKill = useCallback(() => {
-    setForceKillTarget(null);
-  }, []);
+  const {
+    target: forceKillTarget,
+    request: forceKill,
+    confirm: confirmForceKill,
+    cancel: cancelForceKill,
+  } = useConfirmTarget(performForceKill, shouldConfirmDestructive);
 
   // Kill-chat confirmation + optimistic UI. The native `window.confirm` guard is
   // replaced by a controlled ConfirmDialog: `requestKill` opens it (or, when the
@@ -1294,8 +1291,6 @@ function App() {
   // rolls the row back (chats entry + tab + pane) on failure. Because the row
   // vanishes instantly there is no longer a blocking kill spinner, so requestKill
   // no longer returns an awaitable promise.
-  const [killTarget, setKillTarget] = useState<string | null>(null);
-
   const performKill = useCallback(async (id: string) => {
     const existing = chatsRef.current.find((x) => (x.key || x.id) === id);
     const host = existing?.host;
@@ -1355,24 +1350,12 @@ function App() {
     }
   }, [refresh, discoverHost, removeActive, setOpenPanes, setFocused, prefs.notifyChatOps]);
 
-  const requestKill = useCallback((id: string) => {
-    if (confirmDestructiveActions) {
-      setKillTarget(id); // opens the ConfirmDialog; confirmKill/cancelKill close it
-    } else {
-      // preference off: honor the opt-out — skip the confirm and kill immediately.
-      void performKill(id);
-    }
-  }, [confirmDestructiveActions, performKill]);
-
-  const confirmKill = useCallback(() => {
-    const id = killTarget;
-    setKillTarget(null);
-    if (id) void performKill(id);
-  }, [killTarget, performKill]);
-
-  const cancelKill = useCallback(() => {
-    setKillTarget(null);
-  }, []);
+  const {
+    target: killTarget,
+    request: requestKill,
+    confirm: confirmKill,
+    cancel: cancelKill,
+  } = useConfirmTarget(performKill, shouldConfirmDestructive);
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
     try {
@@ -1545,14 +1528,17 @@ function App() {
     if (activeWorkspaceIdRef.current === id) setActiveWorkspaceId(remaining[0].id);
   }, []);
 
-  const [workspaceCloseTarget, setWorkspaceCloseTarget] = useState<string | null>(null);
-  const requestCloseWorkspace = useCallback((id: string) => setWorkspaceCloseTarget(id), []);
-  const confirmCloseWorkspace = useCallback(() => {
-    const id = workspaceCloseTarget;
-    setWorkspaceCloseTarget(null);
-    if (id) closeWorkspace(id);
-  }, [workspaceCloseTarget, closeWorkspace]);
-  const cancelCloseWorkspace = useCallback(() => setWorkspaceCloseTarget(null), []);
+  // Pending-target confirm machine for the close above. NOTE: no gate predicate
+  // is passed — unlike the two kill machines, closing a workspace is NOT
+  // destructive (its panes leave the grid but the chats stay in the sidebar
+  // catalog and can be reopened), so the dialog is unconditional by design.
+  // That asymmetry is deliberate and load-bearing (WARDEN-1239 out-of-scope).
+  const {
+    target: workspaceCloseTarget,
+    request: requestCloseWorkspace,
+    confirm: confirmCloseWorkspace,
+    cancel: cancelCloseWorkspace,
+  } = useConfirmTarget(closeWorkspace);
 
   const openPaneSet = new Set(openPanes);
   // WARDEN-514: per-key CURRENT-state lookup for the watched rows — so a watched chat
