@@ -27,7 +27,7 @@ import express from 'express';
 import { run, shellQuote } from './ssh.js';
 import { captureAndSettle } from './childCapture.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
-import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, isValidGitHash, parseGitBlame, buildGitBlameScript, parseGitLsEntries } from './git.js';
+import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, isValidGitHash, parseGitBlame, buildGitBlameScript, buildCwdReachableScript, parseGitLsEntries } from './git.js';
 
 // The host sentinel for "run on this machine, not over SSH" (mirrors server.js's
 // LOCAL — duplicated rather than imported to keep this a leaf module; the test suites
@@ -222,6 +222,46 @@ export async function runInContext(chat, script, { timeout = 8000 } = {}) {
     return run(chat.host, `docker exec ${shellQuote(chat.container)} bash -lc ${shellQuote(script)}`, { timeout });
   }
   return run(chat.host, script, { timeout });
+}
+
+
+// Is the chat's working directory REACHABLE — a directory one could enter where
+// the repo lives — NOT "is it a repository"? (WARDEN-1255) The finer discriminator
+// /api/git-blame's failure gate keys on, and deliberately NOT classifyGitFailure:
+// its 'broken' bucket fuses the benign-for-blame cases (a plain non-repo cwd,
+// which must stay a success-shaped empty) with the real failures (a deleted cwd,
+// a gone container, a dropped transport) — its own comment groups them — so
+// keying blame's gate on it would either report the benign empties its pinned
+// tests protect or excuse the unreachable cwd the gate exists to catch.
+// Reachability alone splits the two exactly:
+//   reachable  + failed blame → repo-level conditions (non-repo cwd, untracked
+//                               file) → empty result, no error
+//   unreachable + anything    → deleted cwd / gone container / dead transport
+//                               → the fixed-literal failure the client renders
+// Called ONLY on an already-failing leg — mirroring classifyGitFailure's
+// discipline — so the extra round-trip never touches the hot path.
+// Exported for the WARDEN-1255 unit tests (both transports' unreachable shapes —
+// the HTTP suite can only fixture the LOCAL one, since the disk catalog hardcodes
+// container:null for seeded chats).
+export async function isCwdReachable(chat, cwd) {
+  // manual-LOCAL: cwd is a real host path, so the host fs answers directly — the
+  // same host-fs probe discipline detectInProgress's manual-LOCAL leg uses.
+  // statSync (not existsSync) so a cwd that survives as a non-directory reads as
+  // unreachable exactly the way a `cd` into it would fail; ANY stat error (deleted
+  // cwd above all) is unreachable.
+  if (!chat.container && chat.host === LOCAL) {
+    try { return fs.statSync(cwd).isDirectory(); } catch { return false; }
+  }
+  // container (local+remote) or manual-remote: ask over the SAME in-context
+  // transport the blame script took, so "reachable" means reachable where the
+  // repo lives. buildCwdReachableScript is `test -d` — bash's directory predicate,
+  // no git involvement. A dropped SSH transport or a missing container fails the
+  // probe exactly the way it failed the blame, which is the failure being
+  // reported; a present-but-non-repo directory passes it, which is the benign
+  // empty. runInContext resolves (never rejects), and run()'s ok:false-on-dead-
+  // transport contract is pinned by sshRun.test.js.
+  const probe = await runInContext(chat, buildCwdReachableScript(cwd));
+  return probe.ok;
 }
 
 
@@ -1640,7 +1680,9 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
   // blame` only, no checkout or any mutating op (the WARDEN-199 line the roadmap
   // stays on the read-only side of). Mirrors /api/git-show's resolve → cwd guard →
   // isSafeRelativePath → local async runLocalGit vs remote run() → capDiff → never-500
-  // shape. A non-git / no-cwd / binary / unblamable file yields an empty list.
+  // shape. A non-git / no-cwd / binary / unblamable file yields an empty list; a
+  // cwd that cannot be reached at all (deleted, container gone, transport dropped)
+  // yields the fixed-literal error instead (WARDEN-1255).
 
   //   GET /api/git-blame?id=<chatId>&path=<file> → { lines: [{line,hash,author,date,summary}], error }
   //
@@ -1662,24 +1704,50 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
       },
       handler: async ({ chat, cwd, res }) => {
         let raw = '';
+        let failed = false;
         if (!chat.container && chat.host === LOCAL) {
           // manual-LOCAL: runLocalGit (async, non-blocking) on the host fs.
           // `--line-porcelain` for the stable, machine-parseable per-line header block
-          // the parser above consumes.
+          // the parser above consumes. The exit status is READ (WARDEN-1255) but is
+          // ambiguous on its own — a non-repo cwd and an untracked file exit non-zero
+          // as legitimately as a cwd so gone the spawn itself fails — so it only arms
+          // the reachability-gated error below.
           const r = await runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
           raw = capDiff(r.stdout || '');
+          failed = !r.ok;
         } else {
           // container (local+remote) or manual-remote: buildGitBlameScript delivered
           // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)
           // so the `cd <cwd>` + `git blame` run where the repo lives. The `2>/dev/null`
           // in the script swallows git's "no such file" / "not a git repo" noise so a
-          // non-git cwd reads as empty, not an error. See WARDEN-235.
+          // non-git cwd reads as empty, not an error. See WARDEN-235. The exit status
+          // is READ (WARDEN-1255): this one invocation FUSES directory entry (`cd`)
+          // with the blame itself, so a failure of either looks identical here — the
+          // reachability-gated error below is what separates them.
           const rr = await runInContext(chat, buildGitBlameScript(cwd, filePath));
           raw = capDiff(rr.ok ? (rr.stdout || '') : '');
+          failed = !rr.ok;
         }
 
+        // Failure gate (WARDEN-1255): a failing blame used to be reported as a
+        // confident empty gutter — the file with a blank margin and error:null —
+        // while the sibling history view of the SAME repository said "git log
+        // failed"; two views of one repo disagreeing about whether it is reachable.
+        // A plain exit-status gate cannot key this (the benign empties the pinned
+        // tests protect — a non-repo cwd, an untracked file — exit non-zero exactly
+        // like the real failures, and classifyGitFailure's 'broken' bucket cannot
+        // split them either), so the discriminator is REACHABILITY of the cwd (see
+        // isCwdReachable): unreachable → the error; reachable → the benign empty it
+        // always was. The string is a FIXED non-empty literal — runInContext's remote
+        // legs discard stderr, and readListResponse (web/src/lib/api.ts) treats an
+        // empty error string as "not an error", so a passthrough would be a no-op on
+        // exactly the deployed shapes. Never a 500.
+        const error = failed && !(await isCwdReachable(chat, cwd))
+          ? 'git blame failed'
+          : null;
+
         const lines = parseGitBlame(raw);
-        res.json({ lines, error: null });
+        res.json({ lines, error });
       },
     });
   });

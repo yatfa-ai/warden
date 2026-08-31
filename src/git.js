@@ -338,6 +338,22 @@ export function buildGitBlameScript(cwd, filePath) {
   return `cd ${shellQuote(cwd)} && git blame --line-porcelain -- ${shellQuote(filePath)} 2>/dev/null`;
 }
 
+// Build the remote (SSH) shell command that probes whether `cwd` is REACHABLE — a
+// directory one could enter where the repo lives — while saying NOTHING about
+// repository-ness. This is the finer discriminator /api/git-blame's failure gate
+// keys on (WARDEN-1255): blame legitimately exits non-zero for a plain non-repo
+// directory and for an untracked file, so those failures must stay success-shaped
+// empties; only a cwd that cannot be entered at all (deleted on the remote host,
+// container gone, transport dropped) is a real failure to report. `test -d` is
+// exactly that predicate and nothing more — a rev-parse probe cannot serve, because
+// it fails for the benign non-repo cwd just as it does for the deleted one (the one
+// 'broken' bucket classifyGitFailure groups them in). shellQuote keeps a cwd with
+// spaces one literal argument (the WARDEN-122 discipline). Exported for unit tests,
+// same as buildGitBlameScript.
+export function buildCwdReachableScript(cwd) {
+  return `test -d ${shellQuote(cwd)}`;
+}
+
 // ===== Git ls-files ========================================================
 
 // Derive ONE directory's immediate children (files + subdirs) from the flat,
