@@ -544,7 +544,7 @@ export type FleetGitAxis = {
   label: string;
 };
 
-export const FLEET_GIT_AXES: FleetGitAxis[] = [
+const FLEET_GIT_AXES: FleetGitAxis[] = [
   {
     // Fleet-wide uncommitted-WIP count (WARDEN-766): the # of fanned agents
     // whose /api/git-status reported clean === false — the missing
