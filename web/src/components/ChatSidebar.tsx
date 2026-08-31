@@ -922,6 +922,44 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     );
   };
 
+  // Shared fleet-action dialog group (broadcast / kill / key-send / snooze) for
+  // the collection, host and root returns (WARDEN-1231). The three copies were
+  // byte-identical — every dialog reads the same multi-select state
+  // (selectedChats) and the same handlers, so nothing needs parameterising; the
+  // helper closes over all of it. Invoked in each view's own return because
+  // host/collection are early-return branches — a single copy at the root would
+  // never mount while a fleet view (where selection lives) is active. Only one
+  // view is mounted at a time, so only one dialog instance exists.
+  const renderFleetDialogs = () => (
+    <>
+      <BroadcastDialog
+        open={broadcastOpen}
+        onOpenChange={setBroadcastOpen}
+        targets={selectedChats}
+        snippets={snippets}
+        onSend={handleBroadcastSend}
+      />
+      <KillDialog
+        open={killOpen}
+        onOpenChange={setKillOpen}
+        targets={selectedChats}
+        onKill={handleKillSelected}
+      />
+      <KeySendDialog
+        open={interruptOpen}
+        onOpenChange={setInterruptOpen}
+        targets={selectedChats}
+        onSend={handleInterruptSelected}
+      />
+      <SnoozeDialog
+        open={snoozeOpen}
+        onOpenChange={setSnoozeOpen}
+        targets={selectedChats}
+        onSnooze={handleSnoozeSelected}
+      />
+    </>
+  );
+
   // Wrapper functions for loading states
   const handleResume = async (id: string, description: string, cwd: string, host: string) => {
     if (resumingSessionId) return; // Prevent double-click
@@ -1032,35 +1070,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onKill={() => setKillOpen(true)}
           />
         )}
-        {/* Rendered in each view's own return because host/collection are
-            early-return branches — a single copy at the root would never mount
-            while a fleet view (where selection lives) is active. Only one view
-            is mounted at a time, so only one dialog instance exists. */}
-        <BroadcastDialog
-          open={broadcastOpen}
-          onOpenChange={setBroadcastOpen}
-          targets={selectedChats}
-          snippets={snippets}
-          onSend={handleBroadcastSend}
-        />
-        <KillDialog
-          open={killOpen}
-          onOpenChange={setKillOpen}
-          targets={selectedChats}
-          onKill={handleKillSelected}
-        />
-        <KeySendDialog
-          open={interruptOpen}
-          onOpenChange={setInterruptOpen}
-          targets={selectedChats}
-          onSend={handleInterruptSelected}
-        />
-        <SnoozeDialog
-          open={snoozeOpen}
-          onOpenChange={setSnoozeOpen}
-          targets={selectedChats}
-          onSnooze={handleSnoozeSelected}
-        />
+        {renderFleetDialogs()}
       </div>
     );
   }
@@ -1263,31 +1273,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onKill={() => setKillOpen(true)}
           />
         )}
-        <BroadcastDialog
-          open={broadcastOpen}
-          onOpenChange={setBroadcastOpen}
-          targets={selectedChats}
-          snippets={snippets}
-          onSend={handleBroadcastSend}
-        />
-        <KillDialog
-          open={killOpen}
-          onOpenChange={setKillOpen}
-          targets={selectedChats}
-          onKill={handleKillSelected}
-        />
-        <KeySendDialog
-          open={interruptOpen}
-          onOpenChange={setInterruptOpen}
-          targets={selectedChats}
-          onSend={handleInterruptSelected}
-        />
-        <SnoozeDialog
-          open={snoozeOpen}
-          onOpenChange={setSnoozeOpen}
-          targets={selectedChats}
-          onSnooze={handleSnoozeSelected}
-        />
+        {renderFleetDialogs()}
       </div>
     );
   }
@@ -1523,31 +1509,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
-      <BroadcastDialog
-        open={broadcastOpen}
-        onOpenChange={setBroadcastOpen}
-        targets={selectedChats}
-        snippets={snippets}
-        onSend={handleBroadcastSend}
-      />
-      <KillDialog
-        open={killOpen}
-        onOpenChange={setKillOpen}
-        targets={selectedChats}
-        onKill={handleKillSelected}
-      />
-      <KeySendDialog
-        open={interruptOpen}
-        onOpenChange={setInterruptOpen}
-        targets={selectedChats}
-        onSend={handleInterruptSelected}
-      />
-      <SnoozeDialog
-        open={snoozeOpen}
-        onOpenChange={setSnoozeOpen}
-        targets={selectedChats}
-        onSnooze={handleSnoozeSelected}
-      />
+      {renderFleetDialogs()}
     </div>
   );
 }
