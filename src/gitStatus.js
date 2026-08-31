@@ -156,6 +156,44 @@ export function isDetachedHead(symbolicRefExitCode, inGitRepo) {
 }
 
 /**
+ * Parse one single-line scalar out of raw git stdout into a trimmed string or
+ * `null` — the one shared implementation of the scalar-output contract that was
+ * hand-copied into three parsers (normalizeHeadSha / parseUpstream /
+ * parseHeadDate), one per feature commit (WARDEN-239/243/545). Mirrors what
+ * `splitGitLines` did for the line-splitting preambles: each new single-value
+ * git axis now inherits the contract instead of re-typing it. See WARDEN-1233.
+ *
+ * The contract, in three parts:
+ *   1. a SUPPLIED non-zero `exitCode` → `null` — the git command itself failed
+ *      (non-git cwd, unborn branch, no configured upstream …), so its stdout is
+ *      noise. Strict `!== 0` (not a truthiness check) means only a genuine 0
+ *      counts as success, and a `null` exit (process killed by a signal) reads
+ *      as failure, never as attached/successful.
+ *   2. an OMITTED `exitCode` → the output is TRUSTED. The route's upstream call
+ *      already encodes the failure in what it passes — `parseUpstream(upR.ok ?
+ *      upR.stdout : '')` (src/gitRoutes.js) hands over only stdout on success —
+ *      so it relies on this branch; nulling here would discard a valid value.
+ *   3. `(output ?? '').toString().trim() || null` — accept
+ *      string | Buffer | null | undefined so a parser never throws on an
+ *      absent/binary stdout, then strip the trailing newline / surrounding
+ *      whitespace; empty or whitespace-only output collapses to `null` — the
+ *      "no value" sentinel every caller renders as an absent field, never `''`.
+ *
+ * Module-private on purpose: the exported surface is the three domain-named
+ * wrappers below (each carrying WHY its value matters); nothing outside this
+ * module needs the generic scalar shape.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from a scalar git command.
+ * @param {number|null|undefined} [exitCode] - exit status; when omitted/unknown the output is trusted.
+ * @returns {string | null}
+ */
+function parseScalarGitOutput(output, exitCode) {
+  if (exitCode !== undefined && exitCode !== 0) return null;
+  const value = (output ?? '').toString().trim();
+  return value || null;
+}
+
+/**
  * Normalize `git rev-parse --short HEAD` output into a short SHA string (or null).
  *
  * A non-zero exit / empty output (non-git cwd, or a freshly-init'd repo with no
@@ -165,14 +203,16 @@ export function isDetachedHead(symbolicRefExitCode, inGitRepo) {
  * render for a detached repo (WARDEN-239). Extracted as a pure helper so the
  * normalization is unit-testable, mirroring `parseAheadBehind`.
  *
+ * Thin wrapper over `parseScalarGitOutput` (WARDEN-1233): the exit-code /
+ * trim / null-on-empty mechanics live there once; this doc and the export name
+ * carry the SHA-specific rationale above.
+ *
  * @param {string|Buffer|undefined} output - Raw stdout from `git rev-parse --short HEAD`.
  * @param {number|null|undefined} [exitCode] - exit status; when omitted/unknown the output is trusted.
  * @returns {string | null}
  */
 export function normalizeHeadSha(output, exitCode) {
-  if (exitCode !== undefined && exitCode !== 0) return null;
-  const sha = (output ?? '').toString().trim();
-  return sha || null;
+  return parseScalarGitOutput(output, exitCode);
 }
 
 /**
@@ -195,14 +235,17 @@ export function normalizeHeadSha(output, exitCode) {
  * indistinguishable from in-sync — a durability risk (local-only work, no remote
  * backup) a human glancing at the badge needs to see (WARDEN-243).
  *
+ * NOTE: this is the ONE caller that exercises the omitted-exitCode trusting
+ * branch of `parseScalarGitOutput` (WARDEN-1233) in production — the route calls
+ * `parseUpstream(upR.ok ? upR.stdout : '')` with no code (src/gitRoutes.js), so
+ * that branch is load-bearing, not vestigial.
+ *
  * @param {string|Buffer|undefined} output - Raw stdout from `git rev-parse --abbrev-ref @{u}`.
  * @param {number|null|undefined} [exitCode] - exit status; when omitted/unknown the output is trusted.
  * @returns {string | null}
  */
 export function parseUpstream(output, exitCode) {
-  if (exitCode !== undefined && exitCode !== 0) return null;
-  const name = (output ?? '').toString().trim();
-  return name || null;
+  return parseScalarGitOutput(output, exitCode);
 }
 
 /**
@@ -215,9 +258,10 @@ export function parseUpstream(output, exitCode) {
  * `new Date(headDate).getTime()` and there is no silent `* 1000` footgun (an
  * epoch field would read as a date under this name).
  *
- * Tolerance mirrors `normalizeHeadSha`/`parseUpstream`: a non-zero exit / empty
- * output → null, never throws. The caller MUST fetch this UNCONDITIONALLY for any
- * repo that has a branch (gated on `branch` truthiness, like ahead/behind/
+ * Tolerance mirrors `normalizeHeadSha`/`parseUpstream` (via the shared
+ * `parseScalarGitOutput`, WARDEN-1233): a non-zero exit / empty output → null,
+ * never throws. The caller MUST fetch this UNCONDITIONALLY for any repo that
+ * has a branch (gated on `branch` truthiness, like ahead/behind/
  * upstream/stashCount/diffstat) — NOT inside the detached-HEAD branch — because
  * the whole point is to flag a normally-committing BRANCH agent that has gone
  * quiet (committed days ago, silent since); those agents are on a branch, not
@@ -236,9 +280,7 @@ export function parseUpstream(output, exitCode) {
  * @returns {string | null}
  */
 export function parseHeadDate(output, exitCode) {
-  if (exitCode !== undefined && exitCode !== 0) return null;
-  const iso = (output ?? '').toString().trim();
-  return iso || null;
+  return parseScalarGitOutput(output, exitCode);
 }
 
 /**
