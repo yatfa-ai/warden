@@ -57,16 +57,28 @@ const CURSOR_OPTIONS: Record<TerminalCursorStyle, { cursorStyle: 'block' | 'unde
 // handler below uses (navigator.clipboard fails silently in Electron, per the
 // inline note there). No-op on an empty selection so a CLEARED selection never
 // clobbers the clipboard (onSelectionChange also fires on de-select). Factored
-// out so the two callers — Ctrl/Cmd+C and copy-on-select — share one clipboard
-// routine instead of duplicating it. (WARDEN-285)
-function copySelectionToClipboard(term: Terminal): void {
+// out so the three callers — Ctrl/Cmd+C, copy-on-select, and the Copy menu
+// item — share one clipboard routine instead of duplicating it. (WARDEN-285)
+//
+// WARDEN-1244: execCommand('copy') can REFUSE without throwing — it returns
+// false and writes NOTHING, so the previous clipboard contents survive (the
+// shared helper already handles this; see clipboard.test.mjs's "returns false"
+// case). Discarding the boolean made the pane treat that refusal as success,
+// and the next paste sent the OLD text into a live agent pane. So the result
+// is consulted: a refusal (false return, or the legacy throw) fires the pane's
+// standard error toast, gated on the caller-supplied notifyErrors pref — the
+// same WARDEN-400 convention as every other error toast in this file, and
+// error-only by design (success stays silent; no new noise on the happy path).
+function copySelectionToClipboard(term: Terminal, notifyErrors: boolean): void {
   const s = term.getSelection();
   if (!s) return;
   const ta = document.createElement('textarea');
   ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
   document.body.appendChild(ta); ta.select();
-  try { document.execCommand('copy'); } catch {}
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch { /* refused — copied stays false */ }
   document.body.removeChild(ta);
+  if (!copied && notifyErrors) toast.error('Copy failed — clipboard still holds the old text');
 }
 
 // Paste the system clipboard INTO the terminal via xterm's own paste path
@@ -301,6 +313,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const copyOnSelectRef = useRef(copyOnSelect);
   copyOnSelectRef.current = copyOnSelect;
 
+  // WARDEN-1244: mirror the latest notifyErrors pref into a ref for the
+  // copy-failure toast in copySelectionToClipboard. Two of its three call
+  // sites (copy-on-select and Ctrl/Cmd+C) live inside the mount-once terminal
+  // effect below, so reading prefs directly there would capture the MOUNT-TIME
+  // value — a Settings toggle would never reach already-open panes. The context
+  // menu site re-renders on prefs change so it would be fresh either way, but
+  // all three read the ref for one uniform, provably-never-stale pattern.
+  // Assigned during render, the same latest-value mirror pattern as
+  // copyOnSelectRef above.
+  const notifyErrorsRef = useRef(prefs.notifyErrors);
+  notifyErrorsRef.current = prefs.notifyErrors;
+
   // The xterm palette + container background for this pane's resolved terminal
   // theme, looked up from the named-theme registry (one palette per theme). The
   // fallback to the GitHub Dark palette only fires for an unknown id (a programming
@@ -388,7 +412,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // cleared one, so copySelectionToClipboard guards on a non-empty getSelection
     // — de-selecting never clobbers the clipboard.
     const selectionDisposable = term.onSelectionChange(() => {
-      if (copyOnSelectRef.current) copySelectionToClipboard(term);
+      if (copyOnSelectRef.current) copySelectionToClipboard(term, notifyErrorsRef.current);
     });
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
@@ -396,7 +420,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       if (!ctrl) return true;
       if (e.code === 'KeyC') {
         if (term.getSelection()) {
-          copySelectionToClipboard(term);
+          copySelectionToClipboard(term, notifyErrorsRef.current);
           return false;
         }
         return true;
@@ -998,7 +1022,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
               loses NO capability. termRef.current is non-null here: the menu can
               only open by right-clicking this terminal surface, which exists only
               while the pane is mounted and its Terminal has been created. */}
-          <ContextMenuItem onSelect={() => copySelectionToClipboard(termRef.current!)}>Copy</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copySelectionToClipboard(termRef.current!, notifyErrorsRef.current)}>Copy</ContextMenuItem>
           <ContextMenuItem onSelect={() => pasteIntoTerm(termRef.current!)}>Paste</ContextMenuItem>
           <ContextMenuItem onSelect={() => termRef.current?.clear()}>Clear</ContextMenuItem>
           <ContextMenuItem onSelect={() => setShowSearch(!showSearch)}>Search</ContextMenuItem>
