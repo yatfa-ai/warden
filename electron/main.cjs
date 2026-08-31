@@ -1,6 +1,6 @@
 // Yatfa Warden — Electron main process (CommonJS).
 // Spawns the backend server (ESM) as a child process, then opens a window.
-const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu } = require('electron');
+const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu, shell } = require('electron');
 const { fork, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -715,6 +715,32 @@ ipcMain.handle('window:set-close-to-tray', (_event, on) => {
   closeToTray = on === true;
   saveWindowState(withCloseToTray(loadWindowState(), closeToTray));
   return closeToTray;
+});
+
+// WARDEN-1256 — open an http(s) URL in the user's SYSTEM browser. The renderer's
+// terminal URL links (Ctrl/Cmd+click in an agent pane) invoke this over the
+// wardenWindow bridge; main is the only place with shell access, so the hardened
+// webPreferences (contextIsolation: true, nodeIntegration: false) stay exactly as
+// they are. shell.openExternal delegates to the OS default browser (not an
+// Electron window, and it never navigates the app window). The scheme allow-list
+// is enforced HERE, not in the renderer: a compromised renderer must not be able
+// to aim openExternal at file:// or other OS handlers — only http/https are in
+// scope for this feature (and for this handler). Returns true when the URL was
+// handed to the OS, false when it was refused or the OS open failed.
+ipcMain.handle('window:open-external', (_event, url) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+    console.warn('[warden:open-external] refused non-http(s) url:',
+      typeof url === 'string' ? url.slice(0, 100) : typeof url);
+    return false;
+  }
+  return shell.openExternal(url)
+    .then(() => true)
+    .catch((e) => {
+      // openExternal rejects (no OS handler / OS refusal) rather than throwing
+      // synchronously; degrade to false so the renderer never sees a rejection.
+      console.warn('[warden:open-external] shell.openExternal failed', e);
+      return false;
+    });
 });
 
 // WARDEN-631 — PULL the current runtime telemetry drift status. The renderer queries

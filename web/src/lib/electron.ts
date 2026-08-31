@@ -26,6 +26,10 @@ interface WardenWindowBridge {
   setLaunchAtLogin: (openAtLogin: boolean) => Promise<boolean>;
   getCloseToTray: () => Promise<boolean>;
   setCloseToTray: (on: boolean) => Promise<boolean>;
+  // WARDEN-1256 — hand an http(s) URL to the OS browser (shell.openExternal in
+  // main, which enforces the http/https allow-list). Resolves true when the URL
+  // was handed to the OS.
+  openExternal?: (url: string) => Promise<boolean>;
 }
 
 interface WindowWithWarden extends Window {
@@ -133,6 +137,43 @@ export async function setCloseToTray(on: boolean): Promise<boolean> {
   } catch (e) {
     console.warn('[warden:electron] setCloseToTray failed', e);
     return on;
+  }
+}
+
+// WARDEN-1256 — open an http(s) URL in the user's SYSTEM browser. The terminal's
+// URL links (Ctrl/Cmd+click, web/src/lib/url-links.ts recognition) call this;
+// the call is routed over the wardenWindow bridge to main's shell.openExternal
+// so it reaches the OS default browser — NOT an internal Electron window, and
+// the app window never navigates away.
+//
+// Outside Electron the call degrades cleanly, feature-detected the same way as
+// every other accessor here:
+//   - `npm run dev` in a plain browser: window.open(url, '_blank', 'noopener')
+//     — a new browser tab IS that host's system-browser equivalent, so the
+//     affordance keeps working instead of silently doing nothing.
+//   - `node web/smoke.cjs` headless / any host without window.open: a caught
+//     no-op resolving to false.
+// The method is optional on the bridge interface (an older preload that
+// predates WARDEN-1256 simply lacks it) — absence falls through to the same
+// browser path as a missing bridge. Never rejects.
+export async function openExternalUrl(url: string): Promise<boolean> {
+  const b = bridge();
+  if (!b || typeof b.openExternal !== 'function') {
+    try {
+      if (typeof window !== 'undefined' && typeof window.open === 'function') {
+        window.open(url, '_blank', 'noopener,noreferrer');
+        return true;
+      }
+    } catch (e) {
+      console.warn('[warden:electron] browser window.open fallback failed', e);
+    }
+    return false;
+  }
+  try {
+    return (await b.openExternal(url)) === true;
+  } catch (e) {
+    console.warn('[warden:electron] openExternal failed', e);
+    return false;
   }
 }
 
