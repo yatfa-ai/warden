@@ -330,6 +330,44 @@ describe('isPathWithinCwd', () => {
   it('rejects an absolute path outside cwd', () => {
     assert.equal(isPathWithinCwd(repo, '/etc/hosts'), false);
   });
+  it('rejects a prefix-sibling path that extends the cwd name (lexical arm, nonexistent target)', () => {
+    // WARDEN-1234: pin the LEXICAL clause's separator. A sibling whose name
+    // merely extends the cwd must not pass because its path string starts with
+    // the cwd. The target deliberately does NOT exist: for a missing file the
+    // lexical arm is the ONLY gate (the realpath arm is skipped via the ENOENT
+    // catch), so a lexical clause that dropped the separator returns true here
+    // and fails this test. With an EXISTING sibling the still-correct realpath
+    // arm would mask a broken lexical arm — the wrong tool for pinning it.
+    const base = path.basename(repo);
+    assert.equal(fs.existsSync(`${repo}-secret.txt`), false, 'precondition: sibling must not exist');
+    assert.equal(
+      isPathWithinCwd(repo, `../${base}-secret.txt`),
+      false,
+      'sibling extending the cwd name must be rejected by the lexical arm',
+    );
+  });
+  it('rejects a symlink resolving to a prefix-sibling of the cwd (realpath arm keeps its separator)', () => {
+    // WARDEN-1234: pin the REALPATH clause's separator. A symlink INSIDE cwd
+    // (lexically contained) whose target is a real sibling extending the cwd
+    // name: the lexical arm passes, both realpaths succeed (the target exists),
+    // and only the separator distinguishes ${repo}-secret.txt from ${repo}/...
+    // — a bare prefix match would accept it. A symlink to /etc/passwd would NOT
+    // pin this: it shares no prefix with the cwd, so any clause shape rejects
+    // it (WARDEN-96: the payload must drive the dangerous input class).
+    const sibling = `${repo}-secret.txt`;
+    fs.writeFileSync(sibling, 'TOPSECRET\n');
+    try {
+      fs.symlinkSync(sibling, path.join(repo, 'escape-link.txt'));
+      assert.equal(
+        isPathWithinCwd(repo, 'escape-link.txt'),
+        false,
+        'symlink resolving to a sibling extending the cwd name must be rejected',
+      );
+    } finally {
+      fs.rmSync(path.join(repo, 'escape-link.txt'), { force: true });
+      fs.rmSync(sibling, { force: true });
+    }
+  });
 });
 
 // --- Remote diff script (buildGitDiffScript) ---------------------------------
@@ -389,6 +427,25 @@ describe('buildGitDiffScript (remote SSH script)', () => {
     const r = runScript(repo, '/etc/hosts');
     assert.equal(r.ok, false);
     assert.match(r.stdout, /ERROR path must be within working directory/);
+  });
+  it('blocks prefix-sibling traversal (regression: cwd glob had no separator)', () => {
+    // WARDEN-1234: same hole read-file.test.js / file-exists.test.js pin for
+    // their scripts. The containment case — now the shared fragment from
+    // src/pathContainment.js — must reject a sibling whose name merely extends
+    // the cwd even though the path string STARTS WITH the cwd. realpath -m
+    // resolves ../<base>-secret.txt to the sibling; the `/*` arm refuses it.
+    // The sibling is a real readable file so a bare-prefix regression has
+    // something to wrongly succeed on (ok:true, no ERROR) and fail this test.
+    const base = path.basename(repo);
+    const sibling = `${repo}-secret.txt`;
+    fs.writeFileSync(sibling, 'TOPSECRET\n');
+    try {
+      const r = runScript(repo, `../${base}-secret.txt`);
+      assert.equal(r.ok, false, 'sibling extending the cwd name must be rejected');
+      assert.match(r.stdout, /ERROR path must be within working directory/);
+    } finally {
+      fs.rmSync(sibling, { force: true });
+    }
   });
 
   it('yields empty stdout (ok) for a clean tracked file', () => {

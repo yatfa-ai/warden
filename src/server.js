@@ -32,6 +32,10 @@ import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
 import { run, runLocalTmux, shellQuote, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
+// The single source of the working-directory containment rule (WARDEN-1234):
+// the JS clause for local resolution, and the bash fragment spliced into every
+// remote script that guards a path against its cwd.
+import { isWithinResolvedCwd, CWD_CONTAINMENT_CASE } from './pathContainment.js';
 import {
   parseJsonlHead, snippetFromLine,
   // `remoteClaudeSessions` (the frozen bare-array variant) is deliberately NOT
@@ -2016,34 +2020,24 @@ export function buildReadFileScript(cwd, filePath) {
   // from a variable): bash tokenizes case-pattern `|` alternation at parse time,
   // before expansion, so `case "$EXT" in $BINARY)` would match the literal string
   // "png|jpg|...", never any extension.
-  // The cwd-containment `case` pattern MUST include the path separator
-  // ("$RESOLVED_CWD"/*|"$RESOLVED_CWD"): without the separator, "$RESOLVED_CWD"*
-  // is a pure prefix match that also accepts a sibling whose name merely extends
-  // the cwd (e.g. /x/proj-secret.txt when cwd is /x/proj) — a path-traversal hole.
-  // See the prefix-sibling regression test in src/read-file.test.js.
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ -n "$SIZE" ] && [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
+  // The cwd-containment `case` is the shared separator-bearing fragment from
+  // src/pathContainment.js (WARDEN-1234) — see there for why the `/*` arm is
+  // load-bearing. The prefix-sibling regression test lives in
+  // src/read-file.test.js ("blocks prefix-sibling traversal").
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; ${CWD_CONTAINMENT_CASE}; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ -n "$SIZE" ] && [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
 }
 
 // Build the remote (SSH) shell script that checks a path under `cwd` resolves to
 // a real file — WITHOUT reading or transferring any content. The lightweight twin
 // of buildReadFileScript: it runs the SAME realpath + cwd-containment + is-file
-// guards (same `realpath -e`, same separator-bearing containment `case` glob that
-// blocks the prefix-sibling traversal hole), then stops — no size/binary/cat. Used
-// by /api/file-exists so the terminal linkifier (WARDEN-227) can confirm a
-// candidate is a real file cheaply; it runs per visible terminal candidate, so it
-// must not move file bytes. Exported for unit testing, parallel to buildReadFileScript.
+// guards (same `realpath -e`, same shared separator-bearing containment fragment
+// from src/pathContainment.js that blocks the prefix-sibling traversal hole),
+// then stops — no size/binary/cat. Used by /api/file-exists so the terminal
+// linkifier (WARDEN-227) can confirm a candidate is a real file cheaply; it runs
+// per visible terminal candidate, so it must not move file bytes. Exported for
+// unit testing, parallel to buildReadFileScript.
 export function buildFileExistsScript(cwd, filePath) {
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; echo EXISTS`;
-}
-
-// Is a resolved absolute path contained within a resolved cwd? The separator
-// (resolvedCwd + path.sep) is REQUIRED: without it a pure prefix match also
-// accepts a sibling whose name merely extends the cwd (e.g. /x/proj-secret.txt
-// under cwd /x/proj) — a path-traversal hole. This is the local twin of the
-// separator-bearing `case` glob in buildReadFileScript/buildFileExistsScript.
-// Factored out of /api/read-file so the existence probe shares the exact same rule.
-function isWithinCwd(resolvedPath, resolvedCwd) {
-  return resolvedPath === resolvedCwd || resolvedPath.startsWith(resolvedCwd + path.sep);
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; ${CWD_CONTAINMENT_CASE}; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; echo EXISTS`;
 }
 
 // Shared LOCAL resolution for a chat file: realpath (follow symlinks) both cwd and
@@ -2061,7 +2055,10 @@ export function resolveLocalFile(cwd, filePath) {
     if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
     return { ok: false, status: 400, error: 'invalid path' };
   }
-  if (!isWithinCwd(resolvedPath, resolvedCwd)) {
+  // Containment is the shared separator-bearing clause from src/pathContainment.js
+  // (WARDEN-1234) — the local twin of the bash fragment in
+  // buildReadFileScript/buildFileExistsScript above.
+  if (!isWithinResolvedCwd(resolvedPath, resolvedCwd)) {
     return { ok: false, status: 403, error: 'path must be within working directory' };
   }
   try {
