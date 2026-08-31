@@ -39,10 +39,19 @@ export async function copyText(text: string): Promise<boolean> {
     ta.style.position = 'fixed';
     ta.style.opacity = '0';
     doc.body.appendChild(ta);
-    ta.select();
-    const ok = doc.execCommand('copy');
-    doc.body.removeChild(ta);
-    return ok;
+    try {
+      ta.select();
+      return doc.execCommand('copy');
+    } finally {
+      // Remove the textarea on EVERY exit of the copy attempt — success,
+      // refused copy, or a thrown select/execCommand — so a failed copy
+      // leaves the document as it found it. This used to sit after (not
+      // around) the copy command, so any throw skipped it and leaked the
+      // hidden, focused element into the document (WARDEN-1232). The
+      // terminal pane's own copy (PaneTile copySelectionToClipboard)
+      // guards only the copy command for exactly this reason.
+      doc.body.removeChild(ta);
+    }
   } catch {
     return false;
   }
