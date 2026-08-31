@@ -61,12 +61,18 @@ const restore = () => {
 
 // A mock DOM whose textarea captures the copied value and whose execCommand
 // reports whether it "succeeded". Mirrors the real fallback's element lifecycle
-// (createElement → set value → append → select → execCommand → removeChild).
-function mockDoc({ execReturns = true } = {}) {
+// (createElement → set value → append → select → execCommand → removeChild);
+// `attached`/`removed` count body mutations so tests can assert the textarea
+// never leaks — the fallback must remove the element on EVERY exit path, not
+// just the success path (WARDEN-1232). `execThrows`/`selectThrows` simulate the
+// throwing failure modes the leak fix guards against.
+function mockDoc({ execReturns = true, execThrows = false, selectThrows = false } = {}) {
   let taValue;
+  let attached = 0;
+  let removed = 0;
   const ta = {
     style: {},
-    select() {},
+    select() { if (selectThrows) throw new Error('select failed'); },
     set value(v) { taValue = v; },
     get value() { return taValue; },
   };
@@ -74,11 +80,20 @@ function mockDoc({ execReturns = true } = {}) {
   return {
     document: {
       createElement: () => ta,
-      body: { appendChild() {}, removeChild() {} },
-      execCommand: () => { execCalled = true; return execReturns; },
+      body: {
+        appendChild() { attached += 1; },
+        removeChild() { removed += 1; },
+      },
+      execCommand: () => {
+        execCalled = true;
+        if (execThrows) throw new Error('execCommand threw');
+        return execReturns;
+      },
     },
     captured: () => taValue,
     execCalled: () => execCalled,
+    attached: () => attached,
+    removed: () => removed,
   };
 }
 
@@ -106,6 +121,7 @@ await testAsync('no clipboard API → execCommand fallback, textarea holds the t
   assert.equal(ok, true);
   assert.equal(m.execCalled(), true);
   assert.equal(m.captured(), 'fallback!');
+  assert.equal(m.removed(), 1, 'a successful copy removes the textarea it created');
   restore();
 });
 
@@ -127,6 +143,30 @@ await testAsync('execCommand returns false → false (copy unsupported)', async 
   const ok = await copyText('unsupported');
   assert.equal(ok, false);
   assert.equal(m.execCalled(), true);
+  assert.equal(m.removed(), 1, 'a refused (non-throwing) copy still removes the textarea');
+  restore();
+});
+
+await testAsync('execCommand THROWS → false, and the textarea is still removed (no leak)', async () => {
+  const m = mockDoc({ execThrows: true });
+  setGlobal('navigator', {});
+  setGlobal('document', m.document);
+  const ok = await copyText('leaky');
+  assert.equal(ok, false, 'a thrown copy still resolves false, not rejects');
+  assert.equal(m.execCalled(), true);
+  assert.equal(m.attached(), 1);
+  assert.equal(m.removed(), 1, 'a thrown copy must not leave the hidden textarea in the document');
+  restore();
+});
+
+await testAsync('select() THROWS → false, and the textarea is still removed (no leak)', async () => {
+  const m = mockDoc({ selectThrows: true });
+  setGlobal('navigator', {});
+  setGlobal('document', m.document);
+  const ok = await copyText('leaky-select');
+  assert.equal(ok, false, 'a thrown select still resolves false, not rejects');
+  assert.equal(m.attached(), 1);
+  assert.equal(m.removed(), 1, 'a thrown select must not leave the hidden textarea in the document');
   restore();
 });
 
