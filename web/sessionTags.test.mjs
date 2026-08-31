@@ -8,6 +8,7 @@
 //   · computeTagsInUse hides orphan tags (a vanished session's tag is never shown)
 //   · filterSessionsByTags is a union (ANY active tag) and a no-op when unfiltered
 //   · addTag trims + case-insensitive-dedupes; removeTag is exact-match
+//   · MAX_TAGS_PER_SESSION mirrors the server's count cap (WARDEN-1241)
 //
 // Run: node sessionTags.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -26,7 +27,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-sessiontags-test-'));
 const tmpFile = join(tmpDir, 'sessionTags.mjs');
 writeFileSync(tmpFile, code);
-const { computeTagsInUse, filterSessionsByTags, addTag, removeTag } = await import(tmpFile);
+const { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -126,6 +127,34 @@ test('removeTag returns a new array, never mutating the input', () => {
   const out = removeTag(existing, 'auth');
   assert.deepStrictEqual(existing, ['shipped', 'auth'], 'input must be unchanged');
   assert.deepStrictEqual(out, ['shipped']);
+});
+
+console.log('\nMAX_TAGS_PER_SESSION (WARDEN-1241):');
+test('exports the per-session count cap the UI gates adds on', () => {
+  assert.equal(MAX_TAGS_PER_SESSION, 8);
+});
+
+test("client cap mirrors the server's MAX_TAGS_PER_SESSION (cannot drift)", () => {
+  // The server truncates past its cap with a SUCCESS response (pinned by
+  // src/server-session-tags.test.js), so the client mirror going stale silently
+  // reintroduces the discarded-tag defect. Read the server constant straight from
+  // source and require the two to agree.
+  const serverSrc = readFileSync(resolve(__dirname, '../src/server.js'), 'utf8');
+  const m = serverSrc.match(/const MAX_TAGS_PER_SESSION = (\d+)/);
+  assert.ok(m, 'src/server.js must define MAX_TAGS_PER_SESSION');
+  assert.equal(Number(m[1]), MAX_TAGS_PER_SESSION, 'client mirror must equal the server cap');
+});
+
+test('addTag itself does NOT enforce the count cap — the check belongs at the call site', () => {
+  // addTag always returns a NEW array (see the notStrictEqual below), so a caller
+  // cannot detect a rejected add by comparing references; the count limit is checked
+  // explicitly at the point of adding (ChatSidebar.addSessionTag). This pins that
+  // contract: if addTag ever grows a silent internal cap, its callers — which gate
+  // on the shared constant themselves — are the enforcement points to update.
+  const eight = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  const out = addTag(eight, 'i');
+  assert.deepStrictEqual(out, [...eight, 'i'], 'a 9th add is NOT silently dropped here');
+  assert.notStrictEqual(out, eight, 'always a new array, so reference comparison cannot detect rejection');
 });
 
 console.log(`\n${passed} passed`);
