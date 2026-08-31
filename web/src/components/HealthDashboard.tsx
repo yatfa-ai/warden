@@ -525,6 +525,132 @@ function StashChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+// The Fleet Health summary bar's git axes as ONE ordered set (WARDEN-1228).
+// The order of this array IS the severity ordering — stated here, once:
+// dirty → conflict → behind → unpushed → stalled → stashed, then the muted
+// "N unreachable" note the summary bar renders after the loop. These axes used
+// to be six hand-copied JSX blocks, five of which restated this ordering in
+// their own comments (three of those restatements had already drifted stale);
+// no entry restates it now, so it can no longer disagree with itself. Adding a
+// seventh axis is one entry below, not a new copy plus five comment edits.
+export type FleetGitAxis = {
+  // The FleetGitStatusResult field driving this axis's fleet-wide count.
+  count: 'dirtyCount' | 'conflictCount' | 'behindCount' | 'aheadCount' | 'stalledCount' | 'stashedCount';
+  // Tailwind text colour — the sidebar chip family's colour for this state.
+  color: string;
+  // The tooltip tail appended after the shared `${n} agent(s) ` prefix.
+  titleTail: string;
+  // The label word (always singular — "2 conflict", never "conflicts").
+  label: string;
+};
+
+export const FLEET_GIT_AXES: FleetGitAxis[] = [
+  {
+    // Fleet-wide uncommitted-WIP count (WARDEN-766): the # of fanned agents
+    // whose /api/git-status reported clean === false — the missing
+    // repository-state axis in the summary bar. Reuses the sidebar's amber/
+    // yellow dirty vocabulary (the ±N chip family) so "dirty" reads in the
+    // same color everywhere. Only rendered when > 0 so a clean fleet stays
+    // quiet. dirtyCount excludes error/loading agents (counted below), so a
+    // transiently-unreachable agent is never misread as clean OR dirty.
+    count: 'dirtyCount',
+    color: 'text-yellow-500',
+    titleTail: 'with uncommitted working-tree WIP (fanned /api/git-status across active project agents)',
+    label: 'dirty',
+  },
+  {
+    // Fleet-wide merge-conflict count (WARDEN-796): the # of fanned agents
+    // BLOCKED mid-merge/rebase/cherry-pick (conflictCount > 0) — the conflict
+    // axis alongside the dirty count, the one git state that means "stuck and
+    // needs attention." Reuses the sidebar's rose ⚑ vocabulary (the atRisk
+    // chip family) so "conflict" reads in the same color everywhere. Only
+    // rendered when > 0 so a healthy fleet stays quiet. conflictCount counts
+    // BLOCKED AGENTS (the mirror of dirtyCount), not total unmerged files, and
+    // excludes error/loading agents (counted in errorCount), so a
+    // transiently-unreachable agent is never misread as blocked.
+    count: 'conflictCount',
+    color: 'text-rose-500',
+    titleTail: 'blocked mid-merge/rebase/cherry-pick with unmerged paths (fanned /api/git-status across active project agents)',
+    label: 'conflict',
+  },
+  {
+    // Fleet-wide behind-upstream count (WARDEN-815): the # of fanned agents
+    // running on stale, behind-upstream code (behind > 0) — the staleness axis
+    // alongside the dirty/conflict counts, the one git state that means "this
+    // agent's base is outdated and further edits will diverge." Reuses the
+    // sidebar's blue ↓ vocabulary (the behind chip family) so "behind" reads in
+    // the same color everywhere. Only rendered when > 0 so a fresh fleet stays
+    // quiet. behindCount counts stale AGENTS (the mirror of
+    // dirtyCount/conflictCount/aheadCount), not total behind-commits, and
+    // excludes error/loading agents (counted in errorCount) + null-behind
+    // non-git/no-upstream cwds, so a transiently-unreachable or non-git agent
+    // is never misread as stale.
+    count: 'behindCount',
+    color: 'text-blue-500',
+    titleTail: 'behind upstream (stale — pulling re-syncs before further edits diverge; fanned /api/git-status across active project agents)',
+    label: 'behind',
+  },
+  {
+    // Fleet-wide unpushed-commits count (WARDEN-822): the # of fanned agents
+    // with committed-but-unpushed work (ahead > 0) — the ahead axis alongside
+    // the dirty/conflict/behind counts, surfacing the blind spot clean cannot
+    // speak to: such an agent has clean === true, so WITHOUT this axis it is
+    // indistinguishable from an agent fully in sync — its finished work is
+    // stranded locally and invisible to the rest of the fleet. Reuses the
+    // sidebar's amber ↑ vocabulary (the unpushed chip family, GitBadges.tsx) so
+    // "unpushed" reads in the same color everywhere. Only rendered when > 0 so
+    // a fresh fleet stays quiet. aheadCount counts stranded AGENTS (the mirror
+    // of dirtyCount/conflictCount/behindCount), not total unpushed commits, and
+    // excludes error/loading agents (counted in errorCount) and
+    // no-upstream/in-sync agents (ahead: null / 0), so a transiently-unreachable
+    // agent is never misread as stranded.
+    count: 'aheadCount',
+    color: 'text-amber-500',
+    titleTail: "with committed-but-unpushed work (fanned /api/git-status across active project agents; stranded locally — pulling/re-syncing elsewhere won't see this work yet)",
+    label: 'unpushed',
+  },
+  {
+    // Fleet-wide stalled-HEAD count (WARDEN-847): the # of fanned agents whose
+    // HEAD commit is >7d old (stalled) — the sole RECENCY axis alongside the
+    // dirty/conflict/behind/unpushed STATE axes, surfacing the canonical blind
+    // spot: such an agent is clean, conflict-free, in sync, AND fully pushed, so
+    // WITHOUT this axis it is indistinguishable from a healthy agent — yet its
+    // HEAD has gone quiet for >7d and the work may be stalled or forgotten.
+    // Reuses the sidebar's sky 💤 vocabulary (the stalled chip family,
+    // GitBadges.tsx) so "stalled" reads in the same color everywhere. Only
+    // rendered when > 0 so a fresh fleet stays quiet. stalledCount counts
+    // stalled AGENTS (the mirror of
+    // dirtyCount/conflictCount/behindCount/aheadCount), not a sum, and excludes
+    // error/loading agents (counted in errorCount) + null-headDate non-git /
+    // no-commits cwds (Date.parse → NaN → not stalled), so a transiently-
+    // unreachable or non-git agent is never misread as stalled.
+    count: 'stalledCount',
+    color: 'text-sky-500',
+    titleTail: 'whose HEAD commit is >7d old (fanned /api/git-status across active project agents; may be silently stalled, abandoned, or rotting)',
+    label: 'stalled',
+  },
+  {
+    // Fleet-wide parked-WIP count (WARDEN-871): the # of fanned agents holding
+    // `git stash`-shelved work (stashCount > 0) — the parked-WIP axis alongside
+    // the dirty/conflict/behind/unpushed/stalled axes, surfacing the canonical
+    // blind spot: such an agent has a clean tree (porcelain status never surfaces
+    // stashes), so WITHOUT this axis it is indistinguishable from a healthy agent
+    // — yet it holds easily-forgotten, drift-prone shelved WIP. Reuses the
+    // sidebar's fuchsia 🗄 vocabulary (the stashed chip family, GitBadges.tsx) so
+    // "stashed" reads in the same color everywhere. Only rendered when > 0 so a
+    // stash-free fleet stays quiet. stashedCount counts parked-WIP AGENTS (the
+    // mirror of dirtyCount/conflictCount/behindCount/aheadCount/stalledCount),
+    // not a sum of stashes, and excludes error/loading agents (counted in
+    // errorCount) + stashCount: null / 0 non-git / no-branch / stash-free
+    // agents, so a transiently-unreachable or stash-free agent is never
+    // misread as parked.
+    count: 'stashedCount',
+    color: 'text-fuchsia-500',
+    titleTail: 'with parked git-stash WIP (fanned /api/git-status across active project agents; easily forgotten / drift-prone shelved work)',
+    label: 'stashed',
+  },
+];
+
 // Companion transport indicator (WARDEN-878 / roadmap WARDEN-270 Visibility): a
 // per-host dot placed next to the connectivity dot so the human can tell at a
 // glance whether the companion transport is working on each host — active (with
@@ -1132,148 +1258,25 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
             <span className="text-gray-500">{healthData.summary.idle} idle</span>
             <span className="text-gray-500">{healthData.summary.closed} closed</span>
             <span className="text-muted-foreground">{healthData.summary.unknown} unknown</span>
-            {/* Fleet-wide uncommitted-WIP count (WARDEN-766): the # of fanned agents
-                whose /api/git-status reported clean === false — the missing
-                repository-state axis in the summary bar. Reuses the sidebar's amber/
-                yellow dirty vocabulary (the ±N chip family) so "dirty" reads in the
-                same color everywhere. Only rendered when > 0 so a clean fleet stays
-                quiet. dirtyCount excludes error/loading agents (counted below), so a
-                transiently-unreachable agent is never misread as clean OR dirty. */}
-            {fleetGit.dirtyCount > 0 && (
-              <>
-                <span className="text-muted-foreground">·</span>
-                <span
-                  className="text-yellow-500"
-                  title={`${fleetGit.dirtyCount} agent${fleetGit.dirtyCount === 1 ? '' : 's'} with uncommitted working-tree WIP (fanned /api/git-status across active project agents)`}
-                >
-                  {fleetGit.dirtyCount} dirty
-                </span>
-              </>
-            )}
-            {/* Fleet-wide merge-conflict count (WARDEN-796): the # of fanned agents
-                BLOCKED mid-merge/rebase/cherry-pick (conflictCount > 0) — the conflict
-                axis alongside the dirty count, the one git state that means "stuck and
-                needs attention." Reuses the sidebar's rose ⚑ vocabulary (the atRisk
-                chip family) so "conflict" reads in the same color everywhere; placed
-                adjacent to the dirty count (severity-descending: dirty → conflict →
-                muted unreachable). Only rendered when > 0 so a healthy fleet stays
-                quiet. conflictCount counts BLOCKED AGENTS (the mirror of dirtyCount),
-                not total unmerged files, and excludes error/loading agents (counted in
-                errorCount), so a transiently-unreachable agent is never misread as
-                blocked. */}
-            {fleetGit.conflictCount > 0 && (
-              <>
-                <span className="text-muted-foreground">·</span>
-                <span
-                  className="text-rose-500"
-                  title={`${fleetGit.conflictCount} agent${fleetGit.conflictCount === 1 ? '' : 's'} blocked mid-merge/rebase/cherry-pick with unmerged paths (fanned /api/git-status across active project agents)`}
-                >
-                  {fleetGit.conflictCount} conflict
-                </span>
-              </>
-            )}
-            {/* Fleet-wide behind-upstream count (WARDEN-815): the # of fanned agents
-                running on stale, behind-upstream code (behind > 0) — the staleness axis
-                alongside the dirty/conflict counts, the one git state that means "this
-                agent's base is outdated and further edits will diverge." Reuses the
-                sidebar's blue ↓ vocabulary (the behind chip family) so "behind" reads in
-                the same color everywhere; placed after the conflict count
-                (severity-descending: dirty → conflict → behind → unpushed → muted
-                unreachable). Only rendered when > 0 so a fresh fleet stays quiet.
-                behindCount counts stale AGENTS (the mirror of
-                dirtyCount/conflictCount/aheadCount), not total behind-commits, and
-                excludes error/loading agents (counted in errorCount) + null-behind
-                non-git/no-upstream cwds, so a transiently-unreachable or non-git agent
-                is never misread as stale. */}
-            {fleetGit.behindCount > 0 && (
-              <>
-                <span className="text-muted-foreground">·</span>
-                <span
-                  className="text-blue-500"
-                  title={`${fleetGit.behindCount} agent${fleetGit.behindCount === 1 ? '' : 's'} behind upstream (stale — pulling re-syncs before further edits diverge; fanned /api/git-status across active project agents)`}
-                >
-                  {fleetGit.behindCount} behind
-                </span>
-              </>
-            )}
-            {/* Fleet-wide unpushed-commits count (WARDEN-822): the # of fanned agents
-                with committed-but-unpushed work (ahead > 0) — the ahead axis alongside
-                the dirty/conflict/behind counts, surfacing the blind spot clean cannot
-                speak to: such an agent has clean === true, so WITHOUT this axis it is
-                indistinguishable from an agent fully in sync — its finished work is
-                stranded locally and invisible to the rest of the fleet. Reuses the
-                sidebar's amber ↑ vocabulary (the unpushed chip family, GitBadges.tsx) so
-                "unpushed" reads in the same color everywhere; placed after the behind
-                count (severity-descending: dirty → conflict → behind → unpushed → muted
-                unreachable). Only rendered when > 0 so a healthy fleet stays quiet.
-                aheadCount counts stranded AGENTS (the mirror of
-                dirtyCount/conflictCount/behindCount), not total unpushed commits, and
-                excludes error/loading agents (counted in errorCount) and
-                no-upstream/in-sync agents (ahead: null / 0), so a transiently-unreachable
-                agent is never misread as stranded. */}
-            {fleetGit.aheadCount > 0 && (
-              <>
-                <span className="text-muted-foreground">·</span>
-                <span
-                  className="text-amber-500"
-                  title={`${fleetGit.aheadCount} agent${fleetGit.aheadCount === 1 ? '' : 's'} with committed-but-unpushed work (fanned /api/git-status across active project agents; stranded locally — pulling/re-syncing elsewhere won't see this work yet)`}
-                >
-                  {fleetGit.aheadCount} unpushed
-                </span>
-              </>
-            )}
-            {/* Fleet-wide stalled-HEAD count (WARDEN-847): the # of fanned agents whose
-                HEAD commit is >7d old (stalled) — the sole RECENCY axis alongside the
-                dirty/conflict/behind/unpushed STATE axes, surfacing the canonical blind
-                spot: such an agent is clean, conflict-free, in sync, AND fully pushed, so
-                WITHOUT this axis it is indistinguishable from a healthy agent — yet its
-                HEAD has gone quiet for >7d and the work may be stalled or forgotten.
-                Reuses the sidebar's sky 💤 vocabulary (the stalled chip family,
-                GitBadges.tsx) so "stalled" reads in the same color everywhere; placed
-                after the unpushed count (severity-descending: dirty → conflict → behind →
-                unpushed → stalled → stashed → muted unreachable). Only rendered when > 0 so a fresh
-                fleet stays quiet. stalledCount counts stalled AGENTS (the mirror of
-                dirtyCount/conflictCount/behindCount/aheadCount), not a sum, and excludes
-                error/loading agents (counted in errorCount) + null-headDate non-git /
-                no-commits cwds (Date.parse → NaN → not stalled), so a transiently-
-                unreachable or non-git agent is never misread as stalled. */}
-            {fleetGit.stalledCount > 0 && (
-              <>
-                <span className="text-muted-foreground">·</span>
-                <span
-                  className="text-sky-500"
-                  title={`${fleetGit.stalledCount} agent${fleetGit.stalledCount === 1 ? '' : 's'} whose HEAD commit is >7d old (fanned /api/git-status across active project agents; may be silently stalled, abandoned, or rotting)`}
-                >
-                  {fleetGit.stalledCount} stalled
-                </span>
-              </>
-            )}
-            {/* Fleet-wide parked-WIP count (WARDEN-871): the # of fanned agents holding
-                `git stash`-shelved work (stashCount > 0) — the parked-WIP axis alongside
-                the dirty/conflict/behind/unpushed/stalled axes, surfacing the canonical
-                blind spot: such an agent has a clean tree (porcelain status never surfaces
-                stashes), so WITHOUT this axis it is indistinguishable from a healthy agent
-                — yet it holds easily-forgotten, drift-prone shelved WIP. Reuses the
-                sidebar's fuchsia 🗄 vocabulary (the stashed chip family, GitBadges.tsx) so
-                "stashed" reads in the same color everywhere; placed after the stalled
-                count (severity-descending: dirty → conflict → behind → unpushed → stalled
-                → stashed → muted unreachable). Only rendered when > 0 so a stash-free
-                fleet stays quiet. stashedCount counts parked-WIP AGENTS (the mirror of
-                dirtyCount/conflictCount/behindCount/aheadCount/stalledCount), not a sum of
-                stashes, and excludes error/loading agents (counted in errorCount) +
-                stashCount: null / 0 non-git / no-branch / stash-free agents, so a
-                transiently-unreachable or stash-free agent is never misread as parked. */}
-            {fleetGit.stashedCount > 0 && (
-              <>
-                <span className="text-muted-foreground">·</span>
-                <span
-                  className="text-fuchsia-500"
-                  title={`${fleetGit.stashedCount} agent${fleetGit.stashedCount === 1 ? '' : 's'} with parked git-stash WIP (fanned /api/git-status across active project agents; easily forgotten / drift-prone shelved work)`}
-                >
-                  {fleetGit.stashedCount} stashed
-                </span>
-              </>
-            )}
+            {/* The six git axes, rendered by ONE loop (WARDEN-1228): each
+                FLEET_GIT_AXES entry contributes its separator dot + coloured
+                count span when its count is > 0 (a zero axis renders nothing,
+                keeping a healthy fleet quiet), in the array's
+                severity-descending order — stated once, above the set. */}
+            {FLEET_GIT_AXES.map((axis) => {
+              const n = fleetGit[axis.count];
+              return n > 0 ? (
+                <Fragment key={axis.count}>
+                  <span className="text-muted-foreground">·</span>
+                  <span
+                    className={axis.color}
+                    title={`${n} agent${n === 1 ? '' : 's'} ${axis.titleTail}`}
+                  >
+                    {n} {axis.label}
+                  </span>
+                </Fragment>
+              ) : null;
+            })}
             {/* Honest partial-failure note (WARDEN-89): a per-agent git-status fetch
                 that failed (host unreachable / non-ok HTTP / an HTTP-200 `error` body)
                 is surfaced here rather than read as a false clean/empty — mirrors
