@@ -201,7 +201,7 @@ console.log('\n(a) describeCollection — PER-CATEGORY catalog of what is collec
 
 test('every category is listed, in registry order, with its enabled state', () => {
   const c = cat(INCIDENTS_ONLY);
-  assert.deepEqual(c.categories.map((x) => x.id), ['incidents', 'names']);
+  assert.deepEqual(c.categories.map((x) => x.id), ['incidents', 'names', 'operational-metrics']);
   assert.equal(catOf(INCIDENTS_ONLY, 'incidents').enabled, true);
   assert.equal(catOf(INCIDENTS_ONLY, 'names').enabled, false);
   assert.deepEqual([...c.enabled], ['incidents']);

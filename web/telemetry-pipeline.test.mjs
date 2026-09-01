@@ -74,7 +74,7 @@ function fakeSend() {
 // express: the user consented to names but to no collecting category, so nothing
 // is sent at all.
 const CONSENT = Object.freeze({
-  OFF: Object.freeze({ incidents: false, names: false }),
+  OFF: Object.freeze({ incidents: false, names: false, 'operational-metrics': false }),
   INCIDENTS: Object.freeze({ incidents: true, names: false }),
   BOTH: Object.freeze({ incidents: true, names: true }),
   NAMES_ONLY: Object.freeze({ incidents: false, names: true }),
@@ -142,14 +142,14 @@ function validEventWithPathIdentifier() {
 test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline(); // no injectables
-  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false });
+  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false });
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 0, 'default (no transport wired) must not send');
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 4);
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall']);
+  assert.equal(SCHEMA_VERSION, 5);
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics']);
 });
 
 test('effectiveConsent normalizes through the ONE authority — garbage resolves to nothing', () => {
@@ -158,7 +158,7 @@ test('effectiveConsent normalizes through the ONE authority — garbage resolves
   // a corrupt object, or any non-object all resolve to nothing enabled.
   for (const bad of [undefined, null, 'base', 'extended', 'off', 'weird', 42, [], { incidents: 'yes' }, { unknown: true }]) {
     const pipeline = createTelemetryPipeline({ consent: () => bad, redact, send: fakeSend() });
-    assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false },
+    assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false },
       `nothing enabled for ${JSON.stringify(bad)}`);
   }
 });
@@ -231,7 +231,7 @@ test('a throwing consent resolver degrades to nothing enabled (telemetry must no
     redact,
     send,
   });
-  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false });
+  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false });
   assert.doesNotThrow(() => pipeline.record(validEventWithCredential()));
   assert.equal(send.calls.length, 0);
 });

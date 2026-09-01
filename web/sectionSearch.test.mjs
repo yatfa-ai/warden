@@ -227,6 +227,7 @@ const SHIPPED_LABELS = [
   // WARDEN-1116) — authored as data, so their SOURCE is the module.
   ['telemetry', 'Anonymous errors, crashes & freezes', 'src/lib/telemetry/consent.ts'],
   ['telemetry', 'Chat & session names', 'src/lib/telemetry/consent.ts'],
+  ['telemetry', 'Operational metrics', 'src/lib/telemetry/consent.ts'],
   ['telemetry', 'Receiver endpoint'],
   ['telemetry', 'Receiver auth token (optional)'],
 

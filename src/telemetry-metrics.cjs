@@ -3,22 +3,20 @@
 // Telemetry OPERATIONAL-METRICS aggregator — slice M1 of the latency /
 // operational-metrics channel (roadmap WARDEN-446 / design WARDEN-443).
 //
-// This module is the bounded-aggregate primitive the metrics channel needs. It
-// is deliberately PURE and UNWIRED: nothing in electron/main.cjs or
-// electron/telemetry-pipeline.cjs requires it, no schema version is bumped, no
-// event type is added, no consent surface changes, and no real operation is
-// instrumented. Those are the follow-on slices (M2–M5). Because the module is
-// unreachable from the live pipeline, this slice collects nothing and sends
-// nothing — the trust posture is unchanged BY CONSTRUCTION.
+// This module is the bounded-aggregate primitive the metrics channel needs.
+// Since WARDEN-1258 it has a LIVE producer: the terminal linkifier's
+// file-existence probe (src/fileExistsTelemetry.js → /api/file-exists in
+// src/server.js) folds each probe's duration + ok/fail verdict into it, and the
+// windowed snapshot rides to the Electron main process over the fork's IPC
+// channel as a 'telemetry-metrics' message, where main records it as an
+// `operational-metrics` event through the standard consent-gated pipeline.
 //
-// WHY CJS in electron/ (not TS in web/src/lib/telemetry/):
-// The eventual call sites are main-process operations (window/Settings open,
-// sync, discover/connect) reached from `electron/main.cjs`, which is CommonJS.
-// There is no TS→CJS build available at runtime (vite is a devDependency that
-// emits a browser bundle, not Node modules), so main.cjs cannot require() a .ts
-// file. This follows the established pattern of `electron/telemetry-source.cjs`
-// and `electron/telemetry-redact.cjs`: a CJS module that main.cjs require()s and
-// that `web/telemetry-metrics.test.mjs` loads via `createRequire`.
+// WHY CJS IN src/ (moved from electron/ by WARDEN-1258): the first wired call
+// site is the BACKEND SERVER (ESM, src/server.js), and a `.cjs` file is
+// CommonJS regardless of the package's "type": "module" — so one artifact
+// serves the server AND stays require()-able from the Electron main process,
+// exactly the discipline src/telemetry-consent.cjs established. The test
+// harness (web/telemetry-metrics.test.mjs) loads it via createRequire.
 //
 // Everything here is PURE and ZERO-DEPENDENCY (no `require` of any kind) so it
 // loads standalone under `node --test`, same as telemetry-source.cjs /

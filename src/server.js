@@ -20,6 +20,9 @@ import { buildGetResponse, applyConfigPut, afterSave, resetConfig } from './conf
 // WARDEN-1116 — THE telemetry consent authority (pure, dependency-free CJS shared
 // by the server and the Electron main process; see src/telemetry-consent.cjs).
 import { resolveConsent } from './telemetry-consent.cjs';
+// WARDEN-1258 — usage-telemetry producer for the linkifier's existence probe
+// (the operational-metrics consent category; see src/fileExistsTelemetry.js).
+import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 // NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
@@ -1095,6 +1098,23 @@ app.post('/api/config/reset', async (_req, res) => {
   res.json({ ok: true });
 });
 
+// WARDEN-1258 — the file-exists probe metrics producer. Consent is resolved
+// LIVE through the one authority (cfg is mutated in place by applyConfigPut,
+// so a Settings flip gates the very next record()), and the windowed snapshot
+// is forwarded to the Electron main process over the fork's IPC channel — the
+// same channel forwardTelemetryConfig below uses, with the same process.send
+// guard for standalone `node src/server` runs (no parent → no forward; the
+// module is inert on the wire). Started immediately: the interval is unref'd,
+// so importing server.js in a test never hangs on it.
+const fileExistsTelemetry = createFileExistsTelemetry({
+  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
+  send: (snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-metrics', snapshot });
+  },
+});
+fileExistsTelemetry.start();
+
 // Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
 // signal without an app restart — the source + pipeline live in MAIN, but the
@@ -2006,6 +2026,28 @@ export function isBinaryBlob(content) {
   return content.includes('\0');
 }
 
+// WARDEN-1258 — expand a leading `~` to $HOME ON THE HOST RUNNING THE SCRIPT,
+// spliced AFTER the single-quoted FILE assignment in both remote script builders.
+// This is how a `~` path resolves remotely WITHOUT removing the quoting around
+// the user-supplied value: the expansion is pure bash parameter expansion on the
+// VARIABLE, so a payload containing quotes / $(…) / backticks stays inert inside
+// the single quotes (the injection hardening WARDEN-39 established is untouched —
+// the value is never re-interpolated into the script text). Only the EXACT forms
+// expand: `~` alone and `~/…` — a `~user/…` tilde-USER prefix is deliberately
+// left literal (bash cannot expand it without getpwnam, and the linkifier's
+// local branch agrees: see expandChatFilePath, which also refuses it) so the
+// existence probe answers no and the candidate never gains its affordance.
+// Defined as ONE shared constant so buildReadFileScript and buildFileExistsScript
+// (the probe and the open) can never disagree on tilde semantics.
+//
+// NOTE the `${FILE#…}` inside a plain single-quoted JS string, NOT a template
+// literal: in a template literal `${…}` would be interpolated by JS (the
+// WARDEN-140 interop trap). Single-quoted, it emits the literal bash expansion.
+// `#\~` strips one leading literal tilde from the value; the case patterns
+// "~") and "~/"* are quoted, so they match the literal characters only.
+const TILDE_PREFIX_CASE =
+  'case "$FILE" in "~") FILE=$HOME ;; "~/"*) FILE=$HOME${FILE#\\~} ;; esac';
+
 // Build the remote (SSH) shell script that safely reads a file under `cwd`.
 // Extracted so it can be unit-tested — this template has been fragile (a bash
 // `${...}` parameter expansion collides with JS template-literal interpolation,
@@ -2024,7 +2066,7 @@ export function buildReadFileScript(cwd, filePath) {
   // src/pathContainment.js (WARDEN-1234) — see there for why the `/*` arm is
   // load-bearing. The prefix-sibling regression test lives in
   // src/read-file.test.js ("blocks prefix-sibling traversal").
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; ${CWD_CONTAINMENT_CASE}; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ -n "$SIZE" ] && [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; ${TILDE_PREFIX_CASE}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; ${CWD_CONTAINMENT_CASE}; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ -n "$SIZE" ] && [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
 }
 
 // Build the remote (SSH) shell script that checks a path under `cwd` resolves to
@@ -2037,7 +2079,37 @@ export function buildReadFileScript(cwd, filePath) {
 // per visible terminal candidate, so it must not move file bytes. Exported for
 // unit testing, parallel to buildReadFileScript.
 export function buildFileExistsScript(cwd, filePath) {
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; ${CWD_CONTAINMENT_CASE}; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; echo EXISTS`;
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; ${TILDE_PREFIX_CASE}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; ${CWD_CONTAINMENT_CASE}; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; echo EXISTS`;
+}
+
+// WARDEN-1258 — resolve a linkifier/read candidate path AGAINST the chat's cwd
+// BEFORE any filesystem work. Two forms used to be unresolvable (WARDEN-1258):
+//   • an ABSOLUTE path was joined onto cwd, silently relocating it INSIDE the
+//     working directory (`/etc/passwd` became `<cwd>/etc/passwd`) — usually a
+//     guaranteed miss, and worse, a coincidentally-existing RELATIVE path of the
+//     same shape would resolve to the WRONG file;
+//   • a leading `~` stayed a literal filename character (`<cwd>/~/ops/…`), a
+//     guaranteed miss on any host.
+// Now: an absolute path is used AS-IS; `~` alone / `~/…` expands to `homeDir`
+// (the caller passes the home directory of the host that owns the chat — for a
+// LOCAL chat, os.homedir() of the machine running the server; the remote branch
+// expands with the REMOTE $HOME inside its own script, see TILDE_PREFIX_CASE);
+// everything else joins onto cwd exactly as before. A `~user/…` tilde-USER
+// prefix is deliberately NOT expanded (matching the remote branch — bash cannot
+// expand it without getpwnam): it stays literal, joins onto cwd, and fails the
+// existence probe. Pure (no fs); exported for unit tests.
+//
+// ORDERING (security, WARDEN-96): this expansion happens BEFORE realpath, and
+// the cwd-containment guard runs on the FULLY RESOLVED path, never before —
+// expanding `~` first is exactly what lets `~/.ssh/id_rsa` under a cwd of
+// `~/ops` resolve to its true location and then be REJECTED by the unchanged
+// containment clause.
+export function expandChatFilePath(cwd, filePath, homeDir) {
+  const home = typeof homeDir === 'string' && homeDir ? homeDir : os.homedir();
+  if (filePath === '~') return home;
+  if (filePath.startsWith('~/')) return path.join(home, filePath.slice(2));
+  if (path.isAbsolute(filePath)) return filePath;
+  return path.join(cwd, filePath);
 }
 
 // Shared LOCAL resolution for a chat file: realpath (follow symlinks) both cwd and
@@ -2050,7 +2122,10 @@ export function resolveLocalFile(cwd, filePath) {
   let resolvedCwd, resolvedPath;
   try {
     resolvedCwd = fs.realpathSync.native(cwd);
-    resolvedPath = fs.realpathSync.native(path.join(cwd, filePath));
+    // WARDEN-1258 — absolute paths are used as-is and `~` expands to the local
+    // home directory BEFORE resolution (expandChatFilePath); the containment
+    // guard below still runs on the fully-resolved path, unchanged.
+    resolvedPath = fs.realpathSync.native(expandChatFilePath(cwd, filePath));
   } catch (e) {
     if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
     return { ok: false, status: 400, error: 'invalid path' };
@@ -2196,14 +2271,32 @@ app.post('/api/file-exists', async (req, res) => {
   const chat = r.chat;
   const cwd = chat.cwd || '.';
 
+  // WARDEN-1258 — fold the renderer's cache-hit DELTA for this pane before the
+  // probe runs: `cacheHits` counts the candidates served from the pane's
+  // per-path cache since its last request (a hit never fetches, so this
+  // piggyback is the only way the server ever learns about them). Aggregate
+  // count only — no path travels with it.
+  fileExistsTelemetry.recordCacheHits(req.body?.cacheHits);
+
+  // WARDEN-1258 — usage telemetry for the probe itself: count + ok/fail +
+  // latency, split local/remote, gated on the operational-metrics category
+  // (off by default). Timing wraps ONLY the resolution work.
+  const probeStart = Date.now();
+  const finishProbe = (kind, ok) =>
+    fileExistsTelemetry.recordProbe(kind, Date.now() - probeStart, ok);
+
   if (chat.host === LOCAL) {
-    return res.json({ exists: resolveLocalFile(cwd, filePath).ok });
+    const exists = resolveLocalFile(cwd, filePath).ok;
+    finishProbe('local', exists);
+    return res.json({ exists });
   }
 
   // Remote: run the existence script; success + the EXISTS marker ⇒ real file.
   const result = await run(chat.host, buildFileExistsScript(cwd, filePath), { timeout: 8000 });
   const out = `${result.stdout || ''}${result.stderr || ''}`;
-  return res.json({ exists: result.ok && out.includes('EXISTS') });
+  const exists = result.ok && out.includes('EXISTS');
+  finishProbe('remote', exists);
+  return res.json({ exists });
 });
 
 // ---- Workspace content search (grep) — WARDEN-145 ---------------------------
@@ -3455,6 +3548,12 @@ function restartAttentionPoll() {
 // localClaudeSessions → computeBudgetState → this cache → /api/budget, including
 // the '(local)' host tag and the window filter over a planted transcript.
 export { app, tickLifecycle, tickBudget, tickAttention, server };
+
+// WARDEN-1258 — the file-exists probe metrics producer, exported as the test
+// seam for the /api/file-exists instrumentation (the HTTP suite flips consent
+// on in its pre-import config and asserts observations folded through the REAL
+// route wiring). Also lets an operator snapshot probe costs from a REPL.
+export { fileExistsTelemetry };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {

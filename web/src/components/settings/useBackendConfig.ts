@@ -74,6 +74,9 @@ const DEFAULT_CONFIG: ConfigData = {
   // Telemetry consent (WARDEN-457) — off by default.
   telemetryIncidentsEnabled: false,
   telemetryNamesEnabled: false,
+  // WARDEN-1258 — the operational-metrics usage category, off by default like
+  // every other category.
+  telemetryOperationalMetricsEnabled: false,
   // Receiver endpoint (WARDEN-522) — empty by default = unconfigured = no-op.
   telemetryEndpoint: '',
   // Webhook push channel (WARDEN-555) — off by default; both routing toggles on.

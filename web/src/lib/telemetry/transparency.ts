@@ -73,6 +73,10 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   error: ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'name', 'message', 'frames'],
   crash: ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'reason', 'exitCode?'],
   'performance-stall': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'lagMs', 'source'],
+  // WARDEN-1258 — the aggregate usage event. Every field is a number or a
+  // constant kebab-case operation literal; there is no free text and no
+  // identifier anywhere in the shape (the validator enforces the name pattern).
+  'operational-metrics': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'boundaries', 'operations', 'rejected'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the
@@ -109,6 +113,39 @@ function containsPath(text: unknown): boolean {
   return PATH_TEST.test(text);
 }
 
+// WARDEN-1258 — the operational-metrics shape check (a local mirror of the
+// canonical schema's isOperationalMetricsShape, kept local for the same reason
+// isValidBaseEvent itself is: this validator is the transparency panel's OWN
+// proof, a strict superset of the wire shape check).
+const OPERATION_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const MAX_METRIC_OPERATIONS = 129;
+
+function isValidOperationalMetricsShape(e: Record<string, unknown>): boolean {
+  const finiteNonNegative = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (!Number.isInteger(e.rejected) || (e.rejected as number) < 0) return false;
+  if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
+  for (let i = 0; i < e.boundaries.length; i += 1) {
+    const b = e.boundaries[i];
+    if (!finiteNonNegative(b) || b === 0) return false;
+    if (i > 0 && b <= (e.boundaries as number[])[i - 1]) return false;
+  }
+  if (!Array.isArray(e.operations) || e.operations.length > MAX_METRIC_OPERATIONS) return false;
+  for (const op of e.operations) {
+    if (!op || typeof op !== 'object') return false;
+    const o = op as Record<string, unknown>;
+    if (typeof o.operation !== 'string' || !OPERATION_NAME_RE.test(o.operation)) return false;
+    if (!finiteNonNegative(o.min) || !finiteNonNegative(o.avg) || !finiteNonNegative(o.max)) return false;
+    if (!Number.isInteger(o.count) || !Number.isInteger(o.okCount) || !Number.isInteger(o.failCount)) return false;
+    if (!Array.isArray(o.buckets) || o.buckets.length !== e.boundaries.length + 1) return false;
+    for (const b of o.buckets) {
+      if (!Number.isInteger(b) || (b as number) < 0) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Base-event schema conformance — a LOCAL copy mirroring the
  * `validateBaseEvent` proof shape from telemetry-source.cjs:212-244. Returns
@@ -140,6 +177,15 @@ export function isValidBaseEvent(event: unknown): boolean {
   } else if (e.type === 'performance-stall') {
     if (typeof e.lagMs !== 'number') return false;
     if (e.source !== 'event-loop' && e.source !== 'unresponsive') return false;
+  } else if (e.type === 'operational-metrics') {
+    // WARDEN-1258 — the aggregate event: shape-check per the canonical schema
+    // PLUS this module's hard-exclusion proof extended to the ONLY string the
+    // type carries — the operation names must be kebab-case literals, so a
+    // path/hostname can never ride the aggregate key.
+    if (!isValidOperationalMetricsShape(e)) return false;
+    for (const op of e.operations as unknown[]) {
+      if (containsIdentifier(String((op as Record<string, unknown>).operation))) return false;
+    }
   }
   // Hard-exclusion proof: the redacted message must be free of any identifier;
   // structured frame fields must be free of paths (a bare filename basename is

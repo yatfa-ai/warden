@@ -42,9 +42,13 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION = 4;
+// v5 (WARDEN-1258): + 'operational-metrics' — the aggregate usage-category
+// event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
+// note). This inline copy stays byte-aligned with the canonical module; the
+// drift tests pin the pair.
+const SCHEMA_VERSION = 5;
 
-const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall']);
+const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics']);
 
 const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer' });
 
@@ -345,6 +349,12 @@ function validateBaseEvent(event) {
   } else if (event.type === 'performance-stall') {
     if (typeof event.lagMs !== 'number') return false;
     if (event.source !== 'event-loop' && event.source !== 'unresponsive') return false;
+  } else if (event.type === 'operational-metrics') {
+    // WARDEN-1258 — the aggregate event. Mirrors the canonical schema's shape
+    // checks (see web/src/lib/telemetry/schema.ts); the kebab-case operation
+    // name pattern doubles as THIS module's hard-exclusion proof: the name is
+    // the only string the type carries, and a path/hostname can never match it.
+    if (!isValidOperationalMetrics(event)) return false;
   }
   // Hard-exclusion proof: the built event must not leak an identifier.
   //   - The free-text MESSAGE is fully redacted at the collection boundary, so
@@ -360,6 +370,49 @@ function validateBaseEvent(event) {
       if (f.function != null && containsPath(String(f.function))) return false;
       if (f.file != null && containsPath(String(f.file))) return false;
     }
+  }
+  return true;
+}
+
+// An `operational-metrics` event's operation name: constant kebab-case literal
+// by the aggregator's caller contract (WARDEN-1258) — mirrors the canonical
+// schema's OPERATION_NAME_RE. Lowercase letters, digits, and hyphens only, so
+// no path (needs a separator) and no hostname (needs a dot + TLD) can match.
+const OP_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// The aggregator's footprint bound (maxOperations + the reserved overflow key).
+const MAX_METRIC_OPERATIONS = 129;
+
+function isFiniteNonNegative(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0;
+}
+
+function isValidMetricOperation(op) {
+  if (!op || typeof op !== 'object') return false;
+  if (typeof op.operation !== 'string' || !OP_NAME_RE.test(op.operation)) return false;
+  if (!isFiniteNonNegative(op.min) || !isFiniteNonNegative(op.avg) || !isFiniteNonNegative(op.max)) return false;
+  for (const k of ['count', 'okCount', 'failCount']) {
+    if (!Number.isInteger(op[k]) || op[k] < 0) return false;
+  }
+  if (!Array.isArray(op.buckets)) return false;
+  for (const b of op.buckets) {
+    if (!Number.isInteger(b) || b < 0) return false;
+  }
+  return true;
+}
+
+function isValidOperationalMetrics(e) {
+  if (!Number.isInteger(e.rejected) || e.rejected < 0) return false;
+  if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
+  for (let i = 0; i < e.boundaries.length; i += 1) {
+    const b = e.boundaries[i];
+    if (typeof b !== 'number' || !Number.isFinite(b) || b <= 0) return false;
+    if (i > 0 && b <= e.boundaries[i - 1]) return false; // strictly ascending
+  }
+  if (!Array.isArray(e.operations) || e.operations.length > MAX_METRIC_OPERATIONS) return false;
+  for (const op of e.operations) {
+    if (!isValidMetricOperation(op)) return false;
+    if (op.buckets.length !== e.boundaries.length + 1) return false;
   }
   return true;
 }

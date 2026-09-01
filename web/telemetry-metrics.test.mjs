@@ -2,7 +2,7 @@
 // slice M1 of the latency/operational-metrics channel — roadmap WARDEN-446 /
 // design WARDEN-443).
 //
-// electron/telemetry-metrics.cjs is the bounded-aggregate primitive the metrics
+// src/telemetry-metrics.cjs is the bounded-aggregate primitive the metrics
 // channel needs: it folds each (operation, durationMs, ok) observation into a
 // fixed-size histogram + counters and RETAINS NO ROW, so its footprint is
 // O(maxOperations × buckets) and independent of the observation count. The
@@ -29,7 +29,7 @@ const {
   DEFAULT_MAX_NAME_LENGTH,
   OVERFLOW_OPERATION,
   createMetricAggregator,
-} = require('../electron/telemetry-metrics.cjs');
+} = require('../src/telemetry-metrics.cjs');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -437,7 +437,7 @@ test('invalid FACTORY options throw at wire-up time (not at record time)', () =>
 
 test('the module has ZERO runtime imports (no require(), no import)', () => {
   const src = readFileSync(
-    fileURLToPath(new URL('../electron/telemetry-metrics.cjs', import.meta.url)),
+    fileURLToPath(new URL('../src/telemetry-metrics.cjs', import.meta.url)),
     'utf8',
   );
   assert.equal(src.startsWith("'use strict';"), true, "'use strict' is the first line");

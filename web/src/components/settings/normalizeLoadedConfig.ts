@@ -123,6 +123,9 @@ export function normalizeLoadedConfig(rawConfigData: any): ConfigData {
     // category on by accident).
     telemetryIncidentsEnabled: configData.telemetryIncidentsEnabled === true,
     telemetryNamesEnabled: configData.telemetryNamesEnabled === true,
+    // WARDEN-1258 — the operational-metrics category rides the same defensive
+    // `=== true` rule: an older backend omitting the field stays safely OFF.
+    telemetryOperationalMetricsEnabled: configData.telemetryOperationalMetricsEnabled === true,
     // Defensive ?? '' so an older backend that does not return the field
     // stays safely unconfigured (empty = sends nothing).
     telemetryEndpoint: configData.telemetryEndpoint ?? '',

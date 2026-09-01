@@ -37,7 +37,7 @@
 // ---------------------------------------------------------------------------
 
 /** A telemetry collection category. Each one is an independent user choice. */
-export type TelemetryCategory = 'incidents' | 'names';
+export type TelemetryCategory = 'incidents' | 'names' | 'operational-metrics';
 
 /**
  * How a category relates to the payload:
@@ -63,19 +63,25 @@ export type CategoryRole = 'collecting' | 'decorating';
  * categories are fully independent and `requires` is never consulted again.
  */
 export interface LegacyConsentSource {
-  readonly key: string;
+  /** The pre-WARDEN-1116 persisted key this category folded forward from. */
+  readonly key?: string;
   readonly requires?: string;
 }
 
 /**
- * The persisted `/api/config` key for a category, DERIVED from its id by
- * construction: `incidents` → `telemetryIncidentsEnabled`. Because it is a
- * template-literal type over {@link TelemetryCategory}, a typed consumer (e.g. the
- * Settings `ConfigData`) gains the new field the moment a category id is added —
- * and a descriptor whose `configKey` does not follow the convention fails to
- * compile.
+ * The persisted `/api/config` key for a category. Each entry is written out by
+ * hand rather than derived from {@link TelemetryCategory} by a template-literal
+ * type: the registry's first two ids are single words (`incidents` →
+ * `telemetryIncidentsEnabled`), but `operational-metrics` hyphenates and
+ * `Capitalize` cannot produce the camelCase the key convention wants. The union
+ * stays exhaustive over the registry — a descriptor whose `configKey` is not in
+ * this set fails to compile, the same compile-time guarantee the derived form
+ * gave.
  */
-export type TelemetryConsentConfigKey = `telemetry${Capitalize<TelemetryCategory>}Enabled`;
+export type TelemetryConsentConfigKey =
+  | 'telemetryIncidentsEnabled'
+  | 'telemetryNamesEnabled'
+  | 'telemetryOperationalMetricsEnabled';
 
 export interface TelemetryCategoryDescriptor {
   /** Stable identifier — the key in a {@link TelemetryConsent} map. */
@@ -130,6 +136,27 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategoryDescriptor[] = Obje
       'Adds the chat name and Claude session name to whatever else you have turned on. Chat content is never sent — names only. On its own this sends nothing: there is no event for a name to ride on.',
     eventTypes: Object.freeze([]),
     gatedFields: Object.freeze(['chatname', 'sessionname', 'chattitle', 'sessiontitle']),
+  }),
+  // WARDEN-1258 — the first usage category with a live producer (the 2026-08-19
+  // authorization in the telemetry design article approved building these).
+  // Collects AGGREGATES ONLY: counts, success/fail shares, and latency
+  // histograms of app operations, folded into fixed-size windows — never a row
+  // per operation, never a file path, never a hostname, never content. The
+  // producer is the terminal linkifier's file-existence probe
+  // (src/fileExistsTelemetry.js); more operations can ride the same category
+  // later without a consent change.
+  Object.freeze({
+    id: 'operational-metrics' as const,
+    configKey: 'telemetryOperationalMetricsEnabled' as const,
+    // Younger than the WARDEN-1116 migration — there is no legacy key to fold
+    // forward from, so the legacy source is empty by design.
+    legacy: Object.freeze({}) as LegacyConsentSource,
+    role: 'collecting' as const,
+    label: 'Operational metrics',
+    summary:
+      'Aggregate counts, success rates, and latency histograms of app operations (currently: the terminal file-link existence probes) — no file paths, no hostnames, no chat content, no credentials, just numbers.',
+    eventTypes: Object.freeze(['operational-metrics']),
+    gatedFields: Object.freeze([]),
   }),
 ]);
 
@@ -207,8 +234,13 @@ export function resolveConsent(prefs: unknown): TelemetryConsent {
       out[cat.id] = p[cat.configKey] === true;
       continue;
     }
+    // A category younger than the WARDEN-1116 migration has NO legacy key —
+    // there is nothing to fold forward from, and p[undefined] is never ===
+    // true, so it resolves off: exactly the off-by-default posture for a
+    // config written before the category existed.
+    const legacyVal = cat.legacy.key === undefined ? undefined : p[cat.legacy.key];
     out[cat.id] =
-      p[cat.legacy.key] === true &&
+      legacyVal === true &&
       (cat.legacy.requires === undefined || p[cat.legacy.requires] === true);
   }
   return Object.freeze(out);

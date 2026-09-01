@@ -102,9 +102,9 @@ function makeSource(overrides = {}) {
 // (e) Schema conformance — contract shapes + shared schemaVersion
 // ==========================================================================
 
-test('base-tier contract: shared SCHEMA_VERSION + the three event types', () => {
+test('base-tier contract: shared SCHEMA_VERSION + the event types', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall']);
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics']);
   assert.equal(RUNTIME.MAIN, 'main');
   assert.equal(RUNTIME.RENDERER, 'renderer');
 });

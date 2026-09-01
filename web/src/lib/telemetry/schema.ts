@@ -52,6 +52,15 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v5 (WARDEN-1258): added the `operational-metrics` event type — the first
+// usage-category event (design-article authorization of 2026-08-19). It carries
+// AGGREGATES ONLY: a folded window of per-operation counts / ok-fail split /
+// min-avg-max / fixed-boundary latency histogram, produced by the bounded
+// aggregator (src/telemetry-metrics.cjs) and fed by the terminal linkifier's
+// file-existence probe. No new identifying field, no content, no free text —
+// operation names are constant kebab-case literals (validator-enforced), so
+// this is a new TYPE, not new data exposure. Client + receiver bump together
+// so the x-telemetry-schema handshake (the receiver's ingest.mjs) does not 415.
 // v4 (WARDEN-687): relaxed `CrashEvent.runtime` from the literal `'renderer'`
 // to the full `Runtime` so a main-process hard kill (native segfault / OOM-kill
 // / SIGKILL / power loss / abrupt process.exit) — invisible to the main-process
@@ -61,10 +70,10 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
-export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall'] as const);
+export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics'] as const);
 export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
@@ -148,8 +157,65 @@ export interface StallEvent {
   source: 'event-loop' | 'unresponsive';
 }
 
+// ---------------------------------------------------------------------------
+// Operational metrics (WARDEN-1258) — the first usage-category event. AGGREGATES
+// ONLY, by construction of the producer (the bounded aggregator in
+// src/telemetry-metrics.cjs folds N observations into a fixed-size window and
+// retains no per-observation row): counts, ok/fail split, min/avg/max, and a
+// fixed-boundary latency histogram per operation. There is no free-text field
+// anywhere in this event — `operation` names are CONSTANT kebab-case literals
+// chosen at development time (the aggregator's caller contract), and the
+// validator enforces the shape so a path/hostname can never ride one. File
+// paths and hostnames remain hard exclusions at every consent category
+// (WARDEN-443); nothing in this event type can carry them.
+// ---------------------------------------------------------------------------
+
+/** One folded operation aggregate — the aggregator's projected accumulator. */
+export interface OperationalMetricOperation {
+  /** Constant kebab-case literal identifying the operation (≤64 chars). */
+  operation: string;
+  /** Total observations folded into this window. */
+  count: number;
+  /** Observations that succeeded. */
+  okCount: number;
+  /** Observations that failed. */
+  failCount: number;
+  /** Minimum observed duration, ms. */
+  min: number;
+  /** Mean observed duration, ms. */
+  avg: number;
+  /** Maximum observed duration, ms. */
+  max: number;
+  /** Latency histogram: buckets.length === boundaries.length + 1 (the last is
+   *  the overflow bucket for everything above the largest boundary). */
+  buckets: number[];
+}
+
+/** A window of folded operational-metrics aggregates. */
+export interface OperationalMetricsEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: 'operational-metrics';
+  runtime: Runtime;
+  timestamp: number;
+  appVersion?: string; // non-identifying release label; optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
+  /** When the window opened (epoch-ms, from the aggregator). */
+  windowStartedAt: number;
+  /** When the window closed (epoch-ms, from the aggregator). */
+  windowEndedAt: number;
+  /** The histogram bucket boundaries the `buckets` arrays are keyed against
+   *  (ascending inclusive ms upper bounds). Travels ONCE per event so every
+   *  operation's histogram is interpretable on its own. */
+  boundaries: number[];
+  /** The folded per-operation aggregates (bounded by the aggregator's
+   *  maxOperations cap + its reserved overflow key). */
+  operations: OperationalMetricOperation[];
+  /** Observations the aggregator REFUSED (invalid input) — a health signal. */
+  rejected: number;
+}
+
 /** Any base-tier event, discriminated by `type`. */
-export type BaseEvent = ErrorEvent | CrashEvent | StallEvent;
+export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent;
 
 // ---------------------------------------------------------------------------
 // Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
@@ -187,6 +253,53 @@ export function isBaseEventType(value: unknown): value is BaseEventType {
   return typeof value === 'string' && (BASE_EVENT_TYPES as readonly string[]).includes(value);
 }
 
+// An `operational-metrics` event's operation name: a CONSTANT kebab-case
+// literal by the aggregator's caller contract (WARDEN-1258). Enforced
+// structurally so no path, hostname, or arbitrary string can ever ride the
+// aggregate key — the shape check IS the hard-exclusion proof for this type.
+const OPERATION_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// The aggregator's footprint bound: at most maxOperations distinct keys (64 by
+// default) + the one reserved overflow accumulator.
+const MAX_OPERATIONS_PER_EVENT = 129;
+
+/** True iff `op` is a structurally valid OperationalMetricOperation. */
+function isOperationalMetricOperation(op: unknown): op is OperationalMetricOperation {
+  if (!op || typeof op !== 'object') return false;
+  const o = op as Record<string, unknown>;
+  if (typeof o.operation !== 'string' || !OPERATION_NAME_RE.test(o.operation)) return false;
+  for (const k of ['count', 'okCount', 'failCount', 'min', 'avg', 'max'] as const) {
+    const v = o[k];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return false;
+  }
+  if (!Number.isInteger(o.count) || !Number.isInteger(o.okCount) || !Number.isInteger(o.failCount)) return false;
+  if (!Array.isArray(o.buckets)) return false;
+  for (const b of o.buckets) {
+    if (typeof b !== 'number' || !Number.isInteger(b) || b < 0) return false;
+  }
+  return true;
+}
+
+/** True iff `e` is a structurally valid OperationalMetricsEvent. */
+function isOperationalMetricsShape(e: Record<string, unknown>): boolean {
+  if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
+  if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
+  if (typeof e.rejected !== 'number' || !Number.isInteger(e.rejected) || e.rejected < 0) return false;
+  if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
+  for (let i = 0; i < e.boundaries.length; i += 1) {
+    const b = e.boundaries[i];
+    if (typeof b !== 'number' || !Number.isFinite(b) || b <= 0) return false;
+    // Strictly ascending, exactly as the aggregator produces them.
+    if (i > 0 && b <= (e.boundaries as number[])[i - 1]) return false;
+  }
+  if (!Array.isArray(e.operations) || e.operations.length > MAX_OPERATIONS_PER_EVENT) return false;
+  for (const op of e.operations) {
+    if (!isOperationalMetricOperation(op)) return false;
+    // Every operation's histogram is keyed against the event's boundaries.
+    if ((op as OperationalMetricOperation).buckets.length !== e.boundaries.length + 1) return false;
+  }
+  return true;
+}
+
 /** True iff `event` has a valid base-tier SHAPE (correct version, a known type,
  *  a valid runtime, a finite timestamp, and the type-specific fields). Does not
  *  inspect field VALUES for identifier leaks (that is redaction's concern). */
@@ -211,6 +324,8 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
     case 'performance-stall':
       return typeof e.lagMs === 'number' &&
         (e.source === 'event-loop' || e.source === 'unresponsive');
+    case 'operational-metrics':
+      return isOperationalMetricsShape(e);
     default:
       return false;
   }

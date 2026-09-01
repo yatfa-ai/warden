@@ -106,7 +106,12 @@ function fetchSeq(responses) {
 // transmission log main.cjs injects (WARDEN-583) — so the actual-outcome criteria
 // assert on what the REAL transport produced.
 function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {}) {
-  const prefs = { telemetryIncidentsEnabled: false, telemetryNamesEnabled: false, telemetryEndpoint: '' };
+  const prefs = {
+    telemetryIncidentsEnabled: false,
+    telemetryNamesEnabled: false,
+    telemetryOperationalMetricsEnabled: false,
+    telemetryEndpoint: '',
+  };
   const log = transmissionLog || createTransmissionLog({ clock: () => TS, cap: logCap });
   const pipeline = createTelemetryPipeline({
     consent: () => resolveTelemetryConsent(prefs),
@@ -131,6 +136,7 @@ function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {})
     if (next && typeof next === 'object') {
       if (typeof next.telemetryIncidentsEnabled === 'boolean') prefs.telemetryIncidentsEnabled = next.telemetryIncidentsEnabled;
       if (typeof next.telemetryNamesEnabled === 'boolean') prefs.telemetryNamesEnabled = next.telemetryNamesEnabled;
+      if (typeof next.telemetryOperationalMetricsEnabled === 'boolean') prefs.telemetryOperationalMetricsEnabled = next.telemetryOperationalMetricsEnabled;
       if (typeof next.telemetryEndpoint === 'string') prefs.telemetryEndpoint = next.telemetryEndpoint;
     }
     // Exactly what main.cjs's applyTelemetryConfig does: hand the source the whole
@@ -140,6 +146,89 @@ function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {})
   };
   return { prefs, pipeline, source, main, apply, log };
 }
+
+// ==========================================================================
+// WARDEN-1258 — the operational-metrics window rides the SAME wire
+// ==========================================================================
+// main.cjs builds the event from the server child's 'telemetry-metrics' IPC
+// snapshot (recordOperationalMetricsWindow) and records it through the SAME
+// pipeline. This test mirrors that builder EXACTLY against a REAL aggregator
+// snapshot and asserts the wire body: consent-gated per category, redacted,
+// schema-valid, and aggregate-only (no path can survive).
+await test('an operational-metrics window POSTs through the same pipeline when its category is on', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  // ONLY the metrics category on — incidents/names stay off. The event must
+  // still send (a collecting category in its own right).
+  w.apply({ telemetryOperationalMetricsEnabled: true, telemetryEndpoint: ENDPOINT });
+
+  // A REAL aggregator window, folded like src/fileExistsTelemetry.js folds it.
+  const { createMetricAggregator } = require('../src/telemetry-metrics.cjs');
+  const agg = createMetricAggregator({ now: () => TS - 300_000 });
+  agg.record('file-exists-local', 1, { ok: true });
+  agg.record('file-exists-local', 2, { ok: false });
+  agg.record('file-exists-remote', 400, { ok: true });
+  agg.record('file-exists-cache-hit', 0, { ok: true });
+  agg.record('file-exists-cache-hit', 0, { ok: true });
+  const snapshot = agg.flush();
+
+  // The main.cjs builder, verbatim in shape.
+  w.pipeline.record({
+    schemaVersion: SCHEMA_VERSION,
+    type: 'operational-metrics',
+    runtime: 'main',
+    timestamp: TS,
+    appVersion: '0.1.50',
+    platform: 'linux',
+    windowStartedAt: snapshot.startedAt,
+    windowEndedAt: snapshot.endedAt,
+    boundaries: snapshot.boundaries,
+    operations: snapshot.operations,
+    rejected: snapshot.rejected,
+  });
+  await tick();
+
+  assert.equal(fetch.calls.length, 1, 'exactly one POST for one metrics window');
+  const { opts } = fetch.calls[0];
+  assert.equal(opts.headers['x-telemetry-schema'], String(SCHEMA_VERSION));
+  const body = JSON.parse(opts.body);
+  assert.equal(body.events.length, 1);
+  const ev = body.events[0];
+  assert.equal(ev.type, 'operational-metrics');
+  assert.equal(ev.runtime, 'main');
+  const byOp = Object.fromEntries(ev.operations.map((o) => [o.operation, o]));
+  assert.equal(byOp['file-exists-local'].count, 2);
+  assert.equal(byOp['file-exists-local'].failCount, 1);
+  assert.equal(byOp['file-exists-remote'].count, 1);
+  assert.equal(byOp['file-exists-cache-hit'].count, 2);
+  assert.equal(ev.boundaries.length + 1, byOp['file-exists-local'].buckets.length,
+    'histograms keyed against the event boundaries');
+});
+
+await test('an operational-metrics window does NOT send when NOTHING is collecting', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  // NOTE the per-category gate for this event type lives at the PRODUCERS (the
+  // server child refuses to record + drops the window while its category is
+  // off, and main.cjs re-checks consent on IPC receipt — see
+  // electron/telemetry-metrics-event.cjs's header). What the PIPELINE itself
+  // guarantees — the same contract every event type flows under — is the
+  // nothing-collecting hard no-op, pinned here at the wire.
+  w.apply({ telemetryEndpoint: ENDPOINT });
+  w.pipeline.record({
+    schemaVersion: SCHEMA_VERSION,
+    type: 'operational-metrics',
+    runtime: 'main',
+    timestamp: TS,
+    windowStartedAt: TS - 1000,
+    windowEndedAt: TS,
+    boundaries: [50, 100],
+    operations: [{ operation: 'file-exists-local', count: 1, okCount: 1, failCount: 0, min: 1, avg: 1, max: 1, buckets: [1, 0, 0] }],
+    rejected: 0,
+  });
+  await tick();
+  assert.equal(fetch.calls.length, 0, 'the metrics window sends nothing while its category is off');
+});
 
 // ==========================================================================
 // Criterion #1 — sends when opted in (base on + endpoint set)
