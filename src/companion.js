@@ -35,6 +35,11 @@ import { loopMonitor } from './loop-monitor.js';
 
 const LOCAL = '(local)';
 const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
+// The LOCAL-refusal message every companion client op returns — one constant so
+// the text cannot drift between ops (WARDEN-1253). The ENVELOPE carrying it is
+// NOT shared: five distinct refusal shapes exist across the ops, and each op
+// still builds its own (see companionOp below).
+const LOCAL_REFUSAL = 'companion transport does not apply to the local host';
 
 // ----------------------------- opt-in + manifest -----------------------------
 
@@ -894,6 +899,40 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
   }
 }
 
+// --------------------------- the shared op skeleton ---------------------------
+// WARDEN-1253: the ONE place the companion client-op skeleton lives. Eight ops
+// (discover, capturePanes, hasSession, spawnSession, killSession, resize, send,
+// sendKey) run the identical four steps — refuse when the target is LOCAL,
+// acquire the bootstrapped+cached channel, make the call, catch ANY failure
+// into an envelope (companion-or-fail: NEVER a raw-SSH fallback). The skeleton
+// used to be hand-copied into all eight, which is why WARDEN-933's one
+// catch-body change had to be edited in lockstep across seven of them.
+//
+// Each op supplies exactly what genuinely differs — nothing about the envelope
+// shapes is unified here:
+//
+//   refuse()  the LOCAL refusal envelope. Five distinct forms exist across the
+//             eight ({error, chats:[]}, {error, panes:{}}, {error, exists:
+//             false}, bare {error}, and the raw runTmux {code, stdout, stderr}
+//             family); each op builds its own because callers pin the exact
+//             shape they read (chats.js, tmux.js, server.js).
+//   run(ch)   the payload + channel.call(s) + result mapping. Runs INSIDE the
+//             try, so a payload/mapping throw is enveloped exactly as before;
+//             send/sendKey consult channelMethods for the stale-binary gate
+//             here, before their call.
+//   fail(e)   the thrown-error envelope: the {error} ops format with the op
+//             name; the raw-shape family (resize/send/sendKey) maps through
+//             mapCmdError, which deliberately OMITS the op name (WARDEN-933).
+async function companionOp(host, cfg, deps, { refuse, run, fail }) {
+  if (host === LOCAL) return refuse();
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    return await run(channel);
+  } catch (e) {
+    return fail(e);
+  }
+}
+
 // --------------------------------- discover ---------------------------------
 
 // discover() over the companion channel. Returns the same { host, ok, chats } /
@@ -901,28 +940,26 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
 // failure it returns { ok:false } with an actionable error — it NEVER falls back
 // to raw SSH (the experimental path's contract; opt out via the env var).
 export async function discover(host, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, error: 'companion transport does not apply to the local host', chats: [] };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    const session = cfg.tmuxSession || 'agent';
-    // Forward opts.activity over the wire (lean-mode parity — WARDEN-376). The
-    // default path gates its per-agent capture-pane pass on `opts.activity !==
-    // false` (chats.js:265); the 60s lifecycle poll runs lean (`activity: false`)
-    // to SKIP that per-agent work (WARDEN-147). Mirror the same semantics so the
-    // companion's host-side leading-line capture runs on the user-facing discover
-    // but NOT on the lean lifecycle poll — otherwise the poll would suddenly do
-    // per-active-container capture-pane work every tick (a quiet local-cost
-    // regression and a behavioral divergence from the default path's lean mode).
-    const activity = opts.activity !== false;
-    const result = await channel.call('discover', { session, activity }, { timeout: opts.timeout ?? 60000 });
-    const chats = mapCompanionContainers(host, result?.containers || [], session);
-    return { host, ok: true, chats };
-  } catch (e) {
-    const msg = formatCompanionError(host, e, 'discover');
-    return { host, ok: false, error: msg, chats: [] };
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => ({ host, ok: false, error: LOCAL_REFUSAL, chats: [] }),
+    run: async (channel) => {
+      const session = cfg.tmuxSession || 'agent';
+      // Forward opts.activity over the wire (lean-mode parity — WARDEN-376). The
+      // default path gates its per-agent capture-pane pass on `opts.activity !==
+      // false` (chats.js:265); the 60s lifecycle poll runs lean (`activity: false`)
+      // to SKIP that per-agent work (WARDEN-147). Mirror the same semantics so the
+      // companion's host-side leading-line capture runs on the user-facing discover
+      // but NOT on the lean lifecycle poll — otherwise the poll would suddenly do
+      // per-active-container capture-pane work every tick (a quiet local-cost
+      // regression and a behavioral divergence from the default path's lean mode).
+      const activity = opts.activity !== false;
+      const result = await channel.call('discover', { session, activity }, { timeout: opts.timeout ?? 60000 });
+      const chats = mapCompanionContainers(host, result?.containers || [], session);
+      return { host, ok: true, chats };
+    },
+    // {error}-family envelope: the op name rides the formatted message.
+    fail: (e) => ({ host, ok: false, error: formatCompanionError(host, e, 'discover'), chats: [] }),
+  });
 }
 
 // -------------------------------- capturePanes --------------------------------
@@ -941,20 +978,17 @@ export async function discover(host, cfg = {}, opts = {}, deps = {}) {
 // returned map is the SAME shape the default runWithPool capturePanes path
 // produces (sentinel framing reproduced faithfully on the host side).
 export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, error: 'companion transport does not apply to the local host', panes: {} };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    // Send the per-host pane list. `container` is null for bare-tmux / manual
-    // chats so the companion selects bare `tmux` (vs `docker exec <c> tmux`).
-    const panes = describePanes(list);
-    const result = await channel.call('capturePanes', { panes }, { timeout: opts.timeout ?? 15000 });
-    return { host, ok: true, panes: (result && result.panes) || {} };
-  } catch (e) {
-    const msg = formatCompanionError(host, e, 'capturePanes');
-    return { host, ok: false, error: msg, panes: {} };
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => ({ host, ok: false, error: LOCAL_REFUSAL, panes: {} }),
+    run: async (channel) => {
+      // Send the per-host pane list. `container` is null for bare-tmux / manual
+      // chats so the companion selects bare `tmux` (vs `docker exec <c> tmux`).
+      const panes = describePanes(list);
+      const result = await channel.call('capturePanes', { panes }, { timeout: opts.timeout ?? 15000 });
+      return { host, ok: true, panes: (result && result.panes) || {} };
+    },
+    fail: (e) => ({ host, ok: false, error: formatCompanionError(host, e, 'capturePanes'), panes: {} }),
+  });
 }
 
 
@@ -973,21 +1007,26 @@ export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
 // — the whole point of the slice: reachability vs session-existence, separated by
 // the channel contract instead of the raw-SSH isTransportFailure heuristic.
 export async function hasSession(host, { container, session } = {}, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, error: 'companion transport does not apply to the local host', exists: false };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    // `container` is null for bare-tmux / manual chats so the companion selects
-    // bare `tmux`.
-    const target = paneTarget(session, container);
-    const result = await channel.call('hasSession', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
-    return { host, ok: true, exists: !!(result && result.exists) };
-  } catch (e) {
-    const transport = e instanceof CompanionTransportError;
-    const msg = formatCompanionError(host, e, 'hasSession');
-    return { host, ok: false, transport, error: msg, exists: false };
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => ({ host, ok: false, error: LOCAL_REFUSAL, exists: false }),
+    run: async (channel) => {
+      // `container` is null for bare-tmux / manual chats so the companion selects
+      // bare `tmux`.
+      const target = paneTarget(session, container);
+      const result = await channel.call('hasSession', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
+      return { host, ok: true, exists: !!(result && result.exists) };
+    },
+    // The one {error}-family envelope with an extra computed field: `transport`
+    // flags a CompanionTransportError so tmux.js maps it to 'host_unreachable'
+    // rather than 'session_dead'. Absent from the refusal above, as ever.
+    fail: (e) => ({
+      host,
+      ok: false,
+      transport: e instanceof CompanionTransportError,
+      error: formatCompanionError(host, e, 'hasSession'),
+      exists: false,
+    }),
+  });
 }
 
 // --------------------------------- lifecycle ---------------------------------
@@ -1011,23 +1050,20 @@ export async function hasSession(host, { container, session } = {}, cfg = {}, op
 // tmux's default shell, WARDEN-223). The argv is reproduced byte-for-byte on the
 // host side (companion/main.go spawnSession), matching the default runTmux path.
 export async function spawnSession(host, params, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, error: 'companion transport does not apply to the local host' };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    const payload = {
-      container: params?.container || null,
-      session: paneTarget(params?.session, params?.container),
-      cwd: params?.cwd || '',
-      cmd: Array.isArray(params?.cmd) ? params.cmd : [],
-    };
-    await channel.call('spawnSession', payload, { timeout: opts.timeout ?? 30000 });
-    return { host, ok: true };
-  } catch (e) {
-    const msg = formatCompanionError(host, e, 'spawnSession');
-    return { host, ok: false, error: msg };
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => ({ host, ok: false, error: LOCAL_REFUSAL }),
+    run: async (channel) => {
+      const payload = {
+        container: params?.container || null,
+        session: paneTarget(params?.session, params?.container),
+        cwd: params?.cwd || '',
+        cmd: Array.isArray(params?.cmd) ? params.cmd : [],
+      };
+      await channel.call('spawnSession', payload, { timeout: opts.timeout ?? 30000 });
+      return { host, ok: true };
+    },
+    fail: (e) => ({ host, ok: false, error: formatCompanionError(host, e, 'spawnSession') }),
+  });
 }
 
 // killSession() over the companion channel — the DESTROY half of the agent
@@ -1037,21 +1073,18 @@ export async function spawnSession(host, params, cfg = {}, opts = {}, deps = {})
 // session is already gone — exactly what the caller wanted), so /api/kill's
 // existing best-effort semantics are preserved. Mirrors capturePanes' shape.
 export async function killSession(host, params, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, error: 'companion transport does not apply to the local host' };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    const payload = {
-      container: params?.container || null,
-      session: paneTarget(params?.session, params?.container),
-    };
-    await channel.call('killSession', payload, { timeout: opts.timeout ?? 15000 });
-    return { host, ok: true };
-  } catch (e) {
-    const msg = formatCompanionError(host, e, 'killSession');
-    return { host, ok: false, error: msg };
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => ({ host, ok: false, error: LOCAL_REFUSAL }),
+    run: async (channel) => {
+      const payload = {
+        container: params?.container || null,
+        session: paneTarget(params?.session, params?.container),
+      };
+      await channel.call('killSession', payload, { timeout: opts.timeout ?? 15000 });
+      return { host, ok: true };
+    },
+    fail: (e) => ({ host, ok: false, error: formatCompanionError(host, e, 'killSession') }),
+  });
 }
 
 
@@ -1098,23 +1131,32 @@ function mapCmdError(host, e) {
   return { host, ok: false, code: -1, stdout: '', stderr: formatCompanionError(host, e) };
 }
 
+// The LOCAL refusal for the raw-shape family (resize/send/sendKey): the exact
+// envelope mapCmdError produces — {ok:false, code:-1, stdout:''} with the
+// message on stderr — carrying the standard local-refusal text. Shared across
+// the family exactly like mapCmdError itself; deliberately NOT shared with the
+// {error}-family ops (a different envelope). (WARDEN-1253)
+function mapCmdLocalRefusal(host) {
+  return { host, ok: false, code: -1, stdout: '', stderr: LOCAL_REFUSAL };
+}
+
 // resize() over the companion channel: runs `set-option -t <target> window-size
 // latest` host-side. Returns {host, ok, code, stdout, stderr} (the raw runTmux
 // shape) or {host, ok:false, code:-1, stderr} on ANY failure — it NEVER falls back
 // to raw SSH. `container` is null for bare-tmux / manual chats so the companion
 // selects bare `tmux`.
 export async function resize(host, { container, session } = {}, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    const target = paneTarget(session, container);
-    const result = await channel.call('resize', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
-    return mapCmdResult(host, result);
-  } catch (e) {
-    return mapCmdError(host, e);
-  }
+  return companionOp(host, cfg, deps, {
+    // Raw-shape family: the refusal rides stderr (the runTmux envelope), NOT an
+    // `error` field.
+    refuse: () => mapCmdLocalRefusal(host),
+    run: async (channel) => {
+      const target = paneTarget(session, container);
+      const result = await channel.call('resize', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
+      return mapCmdResult(host, result);
+    },
+    fail: (e) => mapCmdError(host, e),
+  });
 }
 
 // --------------------------------- send --------------------------------------
@@ -1146,27 +1188,25 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
 // send-keys Enter) host-side. <text> is an arbitrary user directive carried as a
 // JSON param and shell-quoted HOST-SIDE (never interpolated raw).
 export async function send(host, { container, session, text } = {}, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    const methods = await channelMethods(channel, opts);
-    if (!methods.includes('send')) {
-      // Stale cached binary (predates WARDEN-888): degrade to runTmux. The channel
-      // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
-      return { host, unsupported: true };
-    }
-    const target = paneTarget(session, container);
-    const result = await channel.call('send', {
-      container: container || null,
-      session: target,
-      text: text == null ? '' : String(text),
-    }, { timeout: opts.timeout ?? 15000 });
-    return mapCmdResult(host, result);
-  } catch (e) {
-    return mapCmdError(host, e);
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => mapCmdLocalRefusal(host),
+    run: async (channel) => {
+      const methods = await channelMethods(channel, opts);
+      if (!methods.includes('send')) {
+        // Stale cached binary (predates WARDEN-888): degrade to runTmux. The channel
+        // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
+        return { host, unsupported: true };
+      }
+      const target = paneTarget(session, container);
+      const result = await channel.call('send', {
+        container: container || null,
+        session: target,
+        text: text == null ? '' : String(text),
+      }, { timeout: opts.timeout ?? 15000 });
+      return mapCmdResult(host, result);
+    },
+    fail: (e) => mapCmdError(host, e),
+  });
 }
 
 // sendKey() over the companion channel: runs `send-keys -t <target> <key>` for a
@@ -1174,25 +1214,23 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
 // JS-side, identical to the default sendKey path). Mirrors send's shape + stale-
 // binary degradation.
 export async function sendKey(host, { container, session, key } = {}, cfg = {}, opts = {}, deps = {}) {
-  if (host === LOCAL) {
-    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
-  }
-  try {
-    const channel = await getChannel(host, cfg, deps);
-    const methods = await channelMethods(channel, opts);
-    if (!methods.includes('sendKeys')) {
-      return { host, unsupported: true };
-    }
-    const target = paneTarget(session, container);
-    const result = await channel.call('sendKeys', {
-      container: container || null,
-      session: target,
-      key,
-    }, { timeout: opts.timeout ?? 15000 });
-    return mapCmdResult(host, result);
-  } catch (e) {
-    return mapCmdError(host, e);
-  }
+  return companionOp(host, cfg, deps, {
+    refuse: () => mapCmdLocalRefusal(host),
+    run: async (channel) => {
+      const methods = await channelMethods(channel, opts);
+      if (!methods.includes('sendKeys')) {
+        return { host, unsupported: true };
+      }
+      const target = paneTarget(session, container);
+      const result = await channel.call('sendKeys', {
+        container: container || null,
+        session: target,
+        key,
+      }, { timeout: opts.timeout ?? 15000 });
+      return mapCmdResult(host, result);
+    },
+    fail: (e) => mapCmdError(host, e),
+  });
 }
 
 // ------------------------------- subscribePanes --------------------------------
