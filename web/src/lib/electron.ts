@@ -46,32 +46,70 @@ export function hasWindowBridge(): boolean {
   return typeof bridge() !== 'undefined';
 }
 
+// ---------------------------------------------------------------------------
+// The six window-state preference accessors (WARDEN-1250). They once each
+// hand-copied the same guard envelope; the envelope now lives once, below, and
+// each call site supplies only what genuinely differs: the bridge method, the
+// argument, and the fallback.
+// ---------------------------------------------------------------------------
+
+// The six bridge methods the shared envelope serves. An explicit union, NOT
+// `keyof WardenWindowBridge`: `openExternal` must stay out — its fallback
+// story (browser window.open path, false on failure) is deliberately a
+// different envelope; see openExternalUrl below.
+type WindowPrefMethod =
+  | 'getRememberWindowBounds'
+  | 'setRememberWindowBounds'
+  | 'getLaunchAtLogin'
+  | 'setLaunchAtLogin'
+  | 'getCloseToTray'
+  | 'setCloseToTray';
+
+// THE guard envelope the six window-state preference accessors share. The
+// deliberate contract it encodes, in full — these calls NEVER reject:
+//   - bridge absent (browser / `npm run dev` / smoke) → resolve to `fallback`;
+//   - the bridge method throws → warn and resolve to `fallback`;
+//   - otherwise → resolve to what the bridge reported.
+// `fallback` is a REQUIRED argument with NO default in this helper, by design:
+// the getters' fallbacks are deliberately NOT uniform (remember-bounds degrades
+// to ON; the two consent-gated prefs degrade to OFF — the divergence pinned by
+// an explicit electron.test.mjs assertion), and a setter's fallback is the
+// value it was passed, so the interface stays optimistic when main never
+// answers. Baking a default in here is exactly the unification that pin
+// exists to catch.
+async function windowStatePref(
+  method: WindowPrefMethod,
+  arg: boolean | undefined,
+  fallback: boolean,
+): Promise<boolean> {
+  const b = bridge();
+  if (!b) return fallback;
+  try {
+    // Getters and setters are distinct signatures on the bridge interface;
+    // this envelope treats them uniformly (a getter's `arg` is undefined). One
+    // local cast keeps the six call sites cast-free, and arity is preserved —
+    // a getter is invoked with no argument, exactly as the hand-written
+    // envelopes did.
+    const call = b[method] as (v?: boolean) => Promise<boolean>;
+    return arg === undefined ? await call() : await call(arg);
+  } catch (e) {
+    console.warn(`[warden:electron] ${method} failed`, e);
+    return fallback;
+  }
+}
+
 // Read the persisted "remember window position and size" flag from main. Resolves
 // to `true` when the bridge is absent: the pref defaults to ON, and in a browser
 // there is no OS window state to remember anyway. Never rejects.
-export async function getRememberWindowBounds(): Promise<boolean> {
-  const b = bridge();
-  if (!b) return true;
-  try {
-    return await b.getRememberWindowBounds();
-  } catch (e) {
-    console.warn('[warden:electron] getRememberWindowBounds failed', e);
-    return true;
-  }
+export function getRememberWindowBounds(): Promise<boolean> {
+  return windowStatePref('getRememberWindowBounds', undefined, true);
 }
 
 // Write the flag through to main (which persists it to window-state.json). A
 // clean no-op when the bridge is absent: resolves to the value passed in so the
 // caller's optimistic UI still feels responsive in a browser. Never rejects.
-export async function setRememberWindowBounds(remember: boolean): Promise<boolean> {
-  const b = bridge();
-  if (!b) return remember;
-  try {
-    return await b.setRememberWindowBounds(remember);
-  } catch (e) {
-    console.warn('[warden:electron] setRememberWindowBounds failed', e);
-    return remember;
-  }
+export function setRememberWindowBounds(remember: boolean): Promise<boolean> {
+  return windowStatePref('setRememberWindowBounds', remember, remember);
 }
 
 // "Launch Warden at login" — main reads/writes the OS login items via
@@ -83,30 +121,16 @@ export async function setRememberWindowBounds(remember: boolean): Promise<boolea
 // (NOT `true`) when the bridge is absent. In a browser there is no OS to
 // register with regardless. Never rejects; a rejecting platform (Linux) degrades
 // to false (off) on the main side too.
-export async function getLaunchAtLogin(): Promise<boolean> {
-  const b = bridge();
-  if (!b) return false;
-  try {
-    return await b.getLaunchAtLogin();
-  } catch (e) {
-    console.warn('[warden:electron] getLaunchAtLogin failed', e);
-    return false;
-  }
+export function getLaunchAtLogin(): Promise<boolean> {
+  return windowStatePref('getLaunchAtLogin', undefined, false);
 }
 
 // Write the launch-at-login flag through to main (which writes the OS login
 // items). Resolves to the OS-reported value when the bridge is present and to
 // the value passed in (so the caller's optimistic UI stays responsive) when the
 // bridge is absent. Never rejects.
-export async function setLaunchAtLogin(openAtLogin: boolean): Promise<boolean> {
-  const b = bridge();
-  if (!b) return openAtLogin;
-  try {
-    return await b.setLaunchAtLogin(openAtLogin);
-  } catch (e) {
-    console.warn('[warden:electron] setLaunchAtLogin failed', e);
-    return openAtLogin;
-  }
+export function setLaunchAtLogin(openAtLogin: boolean): Promise<boolean> {
+  return windowStatePref('setLaunchAtLogin', openAtLogin, openAtLogin);
 }
 
 // "Close to tray" — main persists this to window-state.json and attaches/
@@ -118,26 +142,12 @@ export async function setLaunchAtLogin(openAtLogin: boolean): Promise<boolean> {
 // anyway), so the accessors resolve to `false` when the bridge is absent. The
 // setter creates/destroys the tray on the main side; it resolves to the
 // persisted value (the value passed in when the bridge is absent). Never rejects.
-export async function getCloseToTray(): Promise<boolean> {
-  const b = bridge();
-  if (!b) return false;
-  try {
-    return await b.getCloseToTray();
-  } catch (e) {
-    console.warn('[warden:electron] getCloseToTray failed', e);
-    return false;
-  }
+export function getCloseToTray(): Promise<boolean> {
+  return windowStatePref('getCloseToTray', undefined, false);
 }
 
-export async function setCloseToTray(on: boolean): Promise<boolean> {
-  const b = bridge();
-  if (!b) return on;
-  try {
-    return await b.setCloseToTray(on);
-  } catch (e) {
-    console.warn('[warden:electron] setCloseToTray failed', e);
-    return on;
-  }
+export function setCloseToTray(on: boolean): Promise<boolean> {
+  return windowStatePref('setCloseToTray', on, on);
 }
 
 // WARDEN-1256 — open an http(s) URL in the user's SYSTEM browser. The terminal's
