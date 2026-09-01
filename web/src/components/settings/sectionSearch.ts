@@ -227,6 +227,7 @@ export const SETTINGS_SECTIONS = [
       // rule 4 in this file's header and OPTION_DATA_MODULES in the test).
       'Anonymous errors, crashes & freezes',
       'Chat & session names',
+      'Operational metrics',
       'Receiver endpoint',
       'Receiver auth token (optional)',
       // Synonyms

@@ -44,6 +44,8 @@ const {
 // capstone wiring that turns the off-by-default modules into a functioning path:
 //   source signal → record() → resolveTier → redact (CJS mirror) → validate → send
 const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
+// WARDEN-1258 — the server-child metrics-window → schema-event builder.
+const { buildOperationalMetricsEvent } = require('./telemetry-metrics-event.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
@@ -204,6 +206,31 @@ const telemetryPipeline = createTelemetryPipeline({
 // baseConsent on (off by default), so this binding alone captures nothing until
 // app.whenReady() reads the persisted consent.
 telemetry.setRecord(telemetryPipeline.record);
+
+// WARDEN-1258 — turn a server-child metrics window (the 'telemetry-metrics' IPC
+// message) into an `operational-metrics` schema event and record it through the
+// standard pipeline. The per-category consent gate lives HERE at the producer
+// (mirroring how the incidents source gates at build time): the server child
+// already refuses to record while the category is off and drops the window at
+// flush time, and this receipt-side re-check closes the mid-flip gap for a
+// window that was in flight when the user revoked. The snapshot is AGGREGATES
+// ONLY by construction of its producer, and the pipeline's own redact →
+// validate stages remain the wire's last line of defense — a malformed or
+// hostile snapshot is dropped pre-send, never trusted because it came from our
+// child.
+function recordOperationalMetricsWindow(snapshot) {
+  if (resolveTelemetryConsent(telemetryPrefs)['operational-metrics'] !== true) return;
+  const event = buildOperationalMetricsEvent({
+    snapshot,
+    schemaVersion: SCHEMA_VERSION,
+    // The same non-identifying labels the incident builders attach (read from
+    // the same seams: the Electron app's release label, process.platform).
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    now: Date.now,
+  });
+  if (event) telemetryPipeline.record(event);
+}
 
 // Apply the current telemetry prefs to the source + pipeline. Called at boot
 // (prefs read from the persisted config) and on every live Settings change
@@ -862,6 +889,16 @@ app.whenReady().then(async () => {
   // source/pipeline so a consent/endpoint toggle starts/stops capture
   // immediately — the success criterion that a runtime change needs no restart.
   serverProcess.on('message', (msg) => {
+    // WARDEN-1258 — the server child's file-exists probe metrics window. The
+    // server aggregates (counts / ok-fail / latency histograms, aggregates
+    // only — never a path or hostname) and forwards the closed window here,
+    // because the consent-gated pipeline + transport live in MAIN. Building
+    // the schema event and recording it routes through the SAME gates every
+    // other event passes: consent → redact → validate → send. A malformed
+    // snapshot is dropped pre-send by the pipeline's validator (never sent).
+    if (msg && msg.type === 'telemetry-metrics') {
+      recordOperationalMetricsWindow(msg.snapshot);
+    }
     if (msg && msg.type === 'telemetry-config') {
       // The server forwards the already-sanitized per-category consent under
       // `categories` ({ incidents: bool, names: bool }); map it back onto the

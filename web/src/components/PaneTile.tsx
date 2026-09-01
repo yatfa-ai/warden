@@ -255,6 +255,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // chat's cwd (the `id` resolves to this pane's chat on the backend).
   const existsCacheRef = useRef<Map<string, boolean>>(new Map());
   const existsPendingRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  // WARDEN-1258 — cache-hit telemetry: how many candidates since this pane's
+  // last probe were served from the cache above (a hit never fetches, so the
+  // count is piggybacked on the NEXT probe request as `cacheHits` and reset).
+  // An aggregate NUMBER only — no path ever travels with it.
+  const existsCacheHitsRef = useRef(0);
   const tooltipElRef = useRef<HTMLDivElement | null>(null);
   // The link token currently hovered (a file path OR a URL — WARDEN-1256 made
   // the tooltip guard kind-agnostic). Guards the path side's slow-probe race:
@@ -444,6 +449,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // means a different cwd, so prior results must not carry over.
     existsCacheRef.current.clear();
     existsPendingRef.current.clear();
+    // WARDEN-1258 — the hit delta belongs to THIS pane's cache; a new chat
+    // means a new cache, so the un-reported delta dies with the old pane.
+    existsCacheHitsRef.current = 0;
 
     // Confirm a candidate path resolves to a real file under THIS pane's chat cwd
     // (id resolves to this pane's chat on the backend). Cached per path so the same
@@ -451,14 +459,23 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     const checkExists = (path: string): Promise<boolean> => {
       const cache = existsCacheRef.current;
       const pending = existsPendingRef.current;
-      if (cache.has(path)) return Promise.resolve(cache.get(path) === true);
+      if (cache.has(path)) {
+        // WARDEN-1258 — a cache hit means no fetch happens; count it so the
+        // next real probe can report the delta (aggregate number only).
+        existsCacheHitsRef.current += 1;
+        return Promise.resolve(cache.get(path) === true);
+      }
       if (pending.has(path)) return pending.get(path)!;
+      // WARDEN-1258 — drain the cache-hit delta INTO this request (read-then-
+      // reset BEFORE the fetch, so two concurrent misses never double-report).
+      const cacheHits = existsCacheHitsRef.current;
+      existsCacheHitsRef.current = 0;
       const p = (async () => {
         try {
           const res = await fetch('/api/file-exists', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, path }),
+            body: JSON.stringify({ id, path, cacheHits }),
           });
           if (!res.ok) { cache.set(path, false); return false; }
           const data = await res.json();

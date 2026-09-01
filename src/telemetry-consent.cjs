@@ -49,6 +49,19 @@ const TELEMETRY_CATEGORIES = Object.freeze([
     eventTypes: Object.freeze([]),
     gatedFields: Object.freeze(['chatname', 'sessionname', 'chattitle', 'sessiontitle']),
   }),
+  // WARDEN-1258 — first usage category with a live producer; aggregates only.
+  // Mirrors the canonical entry in web/src/lib/telemetry/consent.ts verbatim.
+  Object.freeze({
+    id: 'operational-metrics',
+    configKey: 'telemetryOperationalMetricsEnabled',
+    legacy: Object.freeze({}),
+    role: 'collecting',
+    label: 'Operational metrics',
+    summary:
+      'Aggregate counts, success rates, and latency histograms of app operations (currently: the terminal file-link existence probes) — no file paths, no hostnames, no chat content, no credentials, just numbers.',
+    eventTypes: Object.freeze(['operational-metrics']),
+    gatedFields: Object.freeze([]),
+  }),
 ]);
 
 const TELEMETRY_CATEGORY_IDS = Object.freeze(TELEMETRY_CATEGORIES.map((c) => c.id));
@@ -82,6 +95,9 @@ function resolveConsent(prefs) {
       out[cat.id] = p[cat.configKey] === true;
       continue;
     }
+    // A category younger than the WARDEN-1116 migration carries an EMPTY legacy
+    // source: p[undefined] is never === true, so it resolves off — exactly the
+    // off-by-default posture for a config written before the category existed.
     out[cat.id] =
       p[cat.legacy.key] === true &&
       (cat.legacy.requires === undefined || p[cat.legacy.requires] === true);

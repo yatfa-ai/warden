@@ -81,6 +81,7 @@ const GET_TOP_LEVEL_KEYS = [
   'watchPatterns',
   'telemetryIncidentsEnabled',
   'telemetryNamesEnabled',
+  'telemetryOperationalMetricsEnabled',
 ];
 
 // The EXACT nested llm key order GET emits today.
@@ -314,7 +315,7 @@ describe('/api/config PUT post-save side-effects — the four afterSave steps (W
     const forward = sent.find((m) => m && m.type === 'telemetry-config');
     assert.ok(forward, 'process.send was called with a telemetry-config message');
     // WARDEN-1116 — consent travels as a per-CATEGORY map, not named booleans.
-    assert.deepStrictEqual(forward.categories, { incidents: false, names: false },
+    assert.deepStrictEqual(forward.categories, { incidents: false, names: false, 'operational-metrics': false },
       'forwarded the per-category consent map');
     assert.strictEqual(forward.endpoint, 'https://recv.example/ingest', 'forwarded endpoint');
     assert.strictEqual(forward.authToken, TELEMETRY_SECRET,

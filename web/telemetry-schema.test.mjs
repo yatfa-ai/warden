@@ -79,13 +79,13 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 4 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 5 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 4);
+  assert.equal(SCHEMA_VERSION, 5);
 });
 
-test('BASE_EVENT_TYPES is exactly the three anonymous base-tier kinds', () => {
-  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall']);
+test('BASE_EVENT_TYPES is exactly the four anonymous base-tier kinds', () => {
+  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics']);
 });
 
 test('RUNTIME is exactly { main, renderer }', () => {
@@ -252,3 +252,88 @@ test('validateEvent still rejects a malformed base event even with good extended
 });
 
 console.log(`\n✓ TELEMETRY-SCHEMA TESTS PASS (${passed})`);
+
+// ==========================================================================
+// (e) operational-metrics (WARDEN-1258) — the aggregate event shape
+// ==========================================================================
+
+const metricsFixture = {
+  schemaVersion: SCHEMA_VERSION,
+  type: 'operational-metrics',
+  runtime: 'main',
+  timestamp: 1735689600000,
+  appVersion: '0.1.50',
+  platform: 'linux',
+  windowStartedAt: 1735689300000,
+  windowEndedAt: 1735689600000,
+  boundaries: [50, 100, 250, 500, 1000, 2500, 5000, 10000],
+  operations: [
+    {
+      operation: 'file-exists-local',
+      count: 12,
+      okCount: 9,
+      failCount: 3,
+      min: 0.2,
+      avg: 1.4,
+      max: 6.1,
+      buckets: [12, 0, 0, 0, 0, 0, 0, 0, 0],
+    },
+    {
+      operation: 'file-exists-remote',
+      count: 5,
+      okCount: 5,
+      failCount: 0,
+      min: 210,
+      avg: 480,
+      max: 900,
+      buckets: [0, 0, 2, 2, 1, 0, 0, 0, 0],
+    },
+  ],
+  rejected: 0,
+};
+
+test('validateBaseEvent accepts the operational-metrics fixture', () => {
+  assert.equal(validateBaseEvent(metricsFixture), true, 'metrics fixture validates');
+  assert.equal(validateEvent(metricsFixture), true, 'validateEvent accepts it too');
+});
+
+test('operational-metrics rejects a non-kebab operation name (hard exclusion is structural)', () => {
+  // A path, a hostname, or any free text riding the aggregate key must fail the
+  // SHAPE check itself — the name is the only string this event type carries.
+  for (const bad of ['/etc/passwd', 'ops host.internal', 'file_exists', 'A-B', '', 'x'.repeat(65)]) {
+    const clone = JSON.parse(JSON.stringify(metricsFixture));
+    clone.operations[0].operation = bad;
+    assert.equal(validateBaseEvent(clone), false, `operation name ${JSON.stringify(bad)} must be rejected`);
+  }
+});
+
+test('operational-metrics rejects malformed windows / boundaries / histograms', () => {
+  for (const mutate of [
+    (e) => { delete e.windowStartedAt; },
+    (e) => { e.windowEndedAt = 'soon'; },
+    (e) => { e.boundaries = []; },
+    (e) => { e.boundaries = [100, 50]; }, // non-ascending — the aggregator emits strictly ascending
+    (e) => { e.boundaries[0] = -1; },
+    (e) => { e.operations[0].buckets = [1, 2, 3]; }, // wrong bucket count
+    (e) => { e.operations[0].count = 1.5; }, // non-integer count
+    (e) => { e.operations[0].min = -2; },
+    (e) => { e.rejected = -1; },
+    (e) => { e.operations = 'nope'; },
+  ]) {
+    const clone = JSON.parse(JSON.stringify(metricsFixture));
+    mutate(clone);
+    assert.equal(validateBaseEvent(clone), false, `mutation must invalidate: ${mutate.toString().slice(0, 60)}`);
+  }
+});
+
+test('operational-metrics rejects more operations than the aggregator footprint bound', () => {
+  const clone = JSON.parse(JSON.stringify(metricsFixture));
+  clone.operations = Array.from({ length: 130 }, (_, i) => ({
+    operation: `op-${i}`,
+    count: 1, okCount: 1, failCount: 0,
+    min: 1, avg: 1, max: 1,
+    buckets: [1, ...clone.boundaries.map(() => 0)],
+  }));
+  assert.equal(clone.operations[0].buckets.length, clone.boundaries.length + 1, 'fixture sanity');
+  assert.equal(validateBaseEvent(clone), false, '130 operations exceed the 129 cap');
+});

@@ -134,7 +134,7 @@ describe('telemetry-config IPC forward (WARDEN-524/1116) — server fork → par
     await putConfig({ telemetryIncidentsEnabled: true, telemetryEndpoint: endpoint });
     const msg = await done;
     assert.strictEqual(msg.type, 'telemetry-config');
-    assert.deepStrictEqual(msg.categories, { incidents: true, names: false },
+    assert.deepStrictEqual(msg.categories, { incidents: true, names: false, 'operational-metrics': false },
       'incidents forwarded on; names stays off — enabling one category never enables another');
     assert.strictEqual(msg.endpoint, endpoint, 'endpoint forwarded');
     // Fresh config (no token on disk, no prior PUT) → auth token is empty. This
@@ -147,7 +147,7 @@ describe('telemetry-config IPC forward (WARDEN-524/1116) — server fork → par
     const done = nextTelemetryConfig();
     await putConfig({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true });
     const msg = await done;
-    assert.deepStrictEqual(msg.categories, { incidents: true, names: true });
+    assert.deepStrictEqual(msg.categories, { incidents: true, names: true, 'operational-metrics': false });
   });
 
   it('forwards names ON with incidents OFF — no clamp between categories (WARDEN-1116)', async () => {
@@ -160,7 +160,7 @@ describe('telemetry-config IPC forward (WARDEN-524/1116) — server fork → par
     const done = nextTelemetryConfig();
     await putConfig({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: true });
     const msg = await done;
-    assert.deepStrictEqual(msg.categories, { incidents: false, names: true },
+    assert.deepStrictEqual(msg.categories, { incidents: false, names: true, 'operational-metrics': false },
       'names must NOT be clamped off just because incidents is off');
   });
 
@@ -168,17 +168,17 @@ describe('telemetry-config IPC forward (WARDEN-524/1116) — server fork → par
     // Precondition: both on (staged by the previous PUT is not assumed — stage it).
     let done = nextTelemetryConfig();
     await putConfig({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true });
-    assert.deepStrictEqual((await done).categories, { incidents: true, names: true },
+    assert.deepStrictEqual((await done).categories, { incidents: true, names: true, 'operational-metrics': false },
       'precondition: both categories on');
     // Revoke ONLY names.
     done = nextTelemetryConfig();
     await putConfig({ telemetryNamesEnabled: false });
-    assert.deepStrictEqual((await done).categories, { incidents: true, names: false },
+    assert.deepStrictEqual((await done).categories, { incidents: true, names: false, 'operational-metrics': false },
       'revoking names left incidents untouched');
     // Revoke ONLY incidents — capture stops on the next signal.
     done = nextTelemetryConfig();
     await putConfig({ telemetryIncidentsEnabled: false });
-    assert.deepStrictEqual((await done).categories, { incidents: false, names: false },
+    assert.deepStrictEqual((await done).categories, { incidents: false, names: false, 'operational-metrics': false },
       'revoking incidents forwarded — capture stops on next signal');
   });
 
@@ -186,7 +186,7 @@ describe('telemetry-config IPC forward (WARDEN-524/1116) — server fork → par
     const done = nextTelemetryConfig();
     await putConfig({ telemetryIncidentsEnabled: 'yes', telemetryNamesEnabled: 1 });
     const msg = await done;
-    assert.deepStrictEqual(msg.categories, { incidents: false, names: false },
+    assert.deepStrictEqual(msg.categories, { incidents: false, names: false, 'operational-metrics': false },
       'a non-boolean body value never reaches main as enabled');
   });
 

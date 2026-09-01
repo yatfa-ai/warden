@@ -98,9 +98,18 @@ test('every category declares the full descriptor the derived surfaces need', ()
   for (const c of TELEMETRY_CATEGORIES) {
     assert.equal(typeof c.id, 'string');
     assert.ok(c.id.length > 0, 'a category has a stable id');
-    assert.equal(c.configKey, `telemetry${c.id[0].toUpperCase()}${c.id.slice(1)}Enabled`,
+    // WARDEN-1258: ids may hyphenate ('operational-metrics'), and the key
+    // convention camelCases each segment — telemetry + PascalCased id + Enabled.
+    const pascal = c.id.split('-').map((s) => s[0].toUpperCase() + s.slice(1)).join('');
+    assert.equal(c.configKey, `telemetry${pascal}Enabled`,
       `${c.id}'s config key follows the derivable convention`);
-    assert.equal(typeof c.legacy.key, 'string', `${c.id} declares where to migrate from`);
+    // A category older than the WARDEN-1116 migration declares where to fold
+    // forward from; a younger one (WARDEN-1258's) legitimately has NO legacy
+    // source — an empty legacy object, never a corrupt half-entry.
+    assert.ok(
+      c.legacy && typeof c.legacy === 'object' && (c.legacy.key === undefined || typeof c.legacy.key === 'string'),
+      `${c.id} declares a well-formed legacy source`,
+    );
     assert.ok(c.role === 'collecting' || c.role === 'decorating', `${c.id} declares a role`);
     assert.ok(c.label.length > 0, `${c.id} has a Settings label`);
     assert.ok(c.summary.length > 0, `${c.id} has an honest user-facing summary`);
@@ -282,7 +291,11 @@ console.log('\npersisted representation — config keys round-trip');
 
 test('consentToPrefs projects onto the persisted config keys', () => {
   const prefs = consentToPrefs(normalizeConsent({ incidents: true }));
-  assert.deepEqual(prefs, { telemetryIncidentsEnabled: true, telemetryNamesEnabled: false });
+  assert.deepEqual(prefs, {
+    telemetryIncidentsEnabled: true,
+    telemetryNamesEnabled: false,
+    telemetryOperationalMetricsEnabled: false,
+  });
 });
 
 test('consentToPrefs → resolveConsent is a lossless round trip', () => {
@@ -296,15 +309,15 @@ console.log('\nMIGRATION — a pre-WARDEN-1116 config carries forward with no be
 
 test('the legacy pair maps to the equivalent categories', () => {
   assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }) },
-    { incidents: true, names: true });
+    { incidents: true, names: true, 'operational-metrics': false });
   assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true, telemetryExtendedEnabled: false }) },
-    { incidents: true, names: false });
+    { incidents: true, names: false, 'operational-metrics': false });
   assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: false, telemetryExtendedEnabled: false }) },
     ALL_OFF);
 });
 
 test('a base-only legacy config does NOT silently enable names', () => {
-  assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true }) }, { incidents: true, names: false });
+  assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true }) }, { incidents: true, names: false, 'operational-metrics': false });
 });
 
 test('a stale extended-WITHOUT-base legacy pair migrates to nothing enabled', () => {

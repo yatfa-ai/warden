@@ -46,13 +46,14 @@ function withConfig(contents, fn) {
   }
 }
 
-const ALL_OFF = { incidents: false, names: false };
+const ALL_OFF = { incidents: false, names: false, 'operational-metrics': false };
 /** The full prefs shape readTelemetryPrefs returns when nothing is configured. */
 const SAFE_DEFAULTS = {
   telemetryEndpoint: '',
   telemetryAuthToken: '',
   telemetryIncidentsEnabled: false,
   telemetryNamesEnabled: false,
+  telemetryOperationalMetricsEnabled: false,
 };
 
 console.log('\nresolveTelemetryConsent — independent per-category resolution');
@@ -67,14 +68,14 @@ test('everything off → nothing enabled (the off-by-default posture)', () => {
 test('incidents on, names off → only incidents', () => {
   assert.deepEqual(
     { ...resolveTelemetryConsent({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: false }) },
-    { incidents: true, names: false },
+    { incidents: true, names: false, 'operational-metrics': false },
   );
 });
 
 test('both on → both', () => {
   assert.deepEqual(
     { ...resolveTelemetryConsent({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true }) },
-    { incidents: true, names: true },
+    { incidents: true, names: true, 'operational-metrics': false },
   );
 });
 
@@ -87,23 +88,23 @@ test('names on with incidents OFF resolves to names ON (no extended-requires-bas
   // with nothing collecting (web/telemetry-source.test.mjs), not from a clamp here.
   assert.deepEqual(
     { ...resolveTelemetryConsent({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: true }) },
-    { incidents: false, names: true },
+    { incidents: false, names: true, 'operational-metrics': false },
   );
 });
 
 test('revoking incidents leaves names exactly as the user set it', () => {
   const prefs = { telemetryIncidentsEnabled: true, telemetryNamesEnabled: true };
-  assert.deepEqual({ ...resolveTelemetryConsent(prefs) }, { incidents: true, names: true });
+  assert.deepEqual({ ...resolveTelemetryConsent(prefs) }, { incidents: true, names: true, 'operational-metrics': false });
   prefs.telemetryIncidentsEnabled = false; // user revokes incidents
-  assert.deepEqual({ ...resolveTelemetryConsent(prefs) }, { incidents: false, names: true },
+  assert.deepEqual({ ...resolveTelemetryConsent(prefs) }, { incidents: false, names: true, 'operational-metrics': false },
     'names is NOT demoted with incidents — it was never subordinate');
 });
 
 test('a missing category key is just "not enabled", never an implication', () => {
   assert.deepEqual({ ...resolveTelemetryConsent({ telemetryIncidentsEnabled: true }) },
-    { incidents: true, names: false });
+    { incidents: true, names: false, 'operational-metrics': false });
   assert.deepEqual({ ...resolveTelemetryConsent({ telemetryNamesEnabled: true }) },
-    { incidents: false, names: true });
+    { incidents: false, names: true, 'operational-metrics': false });
 });
 
 console.log('\nmissing / malformed prefs → nothing enabled (never accidentally retains identifiers)');
@@ -135,14 +136,14 @@ console.log('\nMIGRATION — a config written by a pre-WARDEN-1116 build carries
 test('the legacy base+extended pair maps to incidents+names', () => {
   assert.deepEqual(
     { ...resolveTelemetryConsent({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }) },
-    { incidents: true, names: true },
+    { incidents: true, names: true, 'operational-metrics': false },
   );
 });
 
 test('legacy base-only maps to incidents only — nothing new is silently enabled', () => {
   assert.deepEqual(
     { ...resolveTelemetryConsent({ telemetryBaseEnabled: true }) },
-    { incidents: true, names: false },
+    { incidents: true, names: false, 'operational-metrics': false },
   );
 });
 
@@ -199,6 +200,7 @@ test('reads the telemetry prefs verbatim from the config file', () => {
       telemetryAuthToken: 'shared-secret-token',
       telemetryIncidentsEnabled: true,
       telemetryNamesEnabled: false,
+      telemetryOperationalMetricsEnabled: false,
     });
   });
 });

@@ -56,10 +56,16 @@ describe('isBinaryFile', () => {
 
 // Run the generated remote script under a real bash in a temp cwd and return
 // { ok, stdout }. Mirrors what `run(host, script)` would execute over SSH.
-function runScript(cwd, filePath) {
+function runScript(cwd, filePath, env) {
   const script = buildReadFileScript(cwd, filePath);
-  // Run through `bash -lc` exactly like ssh.js does for remote hosts.
-  const r = spawnSync('bash', ['-lc', script], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+  // Run through `bash -lc` exactly like ssh.js does for remote hosts. `env`
+  // (optional) REPLACES the child environment — the WARDEN-1258 tilde tests
+  // drive a controlled $HOME so the remote expansion is observable.
+  const r = spawnSync('bash', ['-lc', script], {
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+    ...(env ? { env } : {}),
+  });
   return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
@@ -135,6 +141,43 @@ describe('buildReadFileScript (remote SSH script)', () => {
     const r = runScript(tmp, 'pic.png');
     assert.equal(r.ok, false);
     assert.match(r.stdout, /ERROR cannot read binary files/);
+  });
+
+  // --- WARDEN-1258 — the OPEN path must resolve absolute/`~` candidates
+  // exactly like the PROBE path (buildFileExistsScript), or a link whose
+  // existence probe succeeded would 404 on the modifier-click that opens it.
+  // Both builders share TILDE_PREFIX_CASE, so these pin the read-side twin.
+  describe('absolute and ~ paths (WARDEN-1258)', () => {
+    let home;
+    let ops;
+    let env;
+    beforeEach(() => {
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rf-home1258-'));
+      ops = path.join(home, 'ops');
+      fs.mkdirSync(path.join(ops, 'infra'), { recursive: true });
+      fs.writeFileSync(path.join(ops, 'infra', 'configmap.yaml'), 'apiVersion: v1\n');
+      fs.writeFileSync(path.join(home, 'secret-key.pem'), 'TOPSECRET\n');
+      env = { ...process.env, HOME: home };
+    });
+
+    it('reads a ~/… file inside cwd (expansion to the remote $HOME)', () => {
+      const r = runScript(ops, '~/ops/infra/configmap.yaml', env);
+      assert.equal(r.ok, true, `expected ok, stdout=${r.stdout} stderr=${r.stderr}`);
+      assert.match(r.stdout, /apiVersion: v1/);
+    });
+
+    it('reads an absolute path inside cwd', () => {
+      const r = runScript(ops, path.join(ops, 'infra', 'configmap.yaml'), env);
+      assert.equal(r.ok, true);
+      assert.match(r.stdout, /apiVersion: v1/);
+    });
+
+    it('refuses a ~ path leading outside cwd (containment after expansion)', () => {
+      const r = runScript(ops, '~/secret-key.pem', env);
+      assert.equal(r.ok, false);
+      assert.match(r.stdout, /ERROR path must be within working directory/);
+      assert.equal(r.stdout.includes('TOPSECRET'), false, 'must not move file bytes');
+    });
   });
 });
 
