@@ -559,9 +559,18 @@ function App() {
     };
     checkActivitySinceClose();
 
-    // Store close timestamp on unmount
+    // Store close timestamp on unmount. try/warn per the WARDEN-89 persistence
+    // convention (storage.ts:18-20): a quota/SecurityError here must never
+    // escape — this function is BOTH the beforeunload listener (page teardown)
+    // and the last statement of the effect cleanup (React does not isolate
+    // destroy-function exceptions). watchCatchup.ts:31 asserts this write
+    // "console.warn[s] on quota, never throws" — keep that true.
     const handleBeforeUnload = () => {
-      localStorage.setItem('warden:lastClose', String(Date.now()));
+      try {
+        localStorage.setItem('warden:lastClose', String(Date.now()));
+      } catch (e) {
+        console.warn('[warden:app] saveLastClose failed', e);
+      }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
 
