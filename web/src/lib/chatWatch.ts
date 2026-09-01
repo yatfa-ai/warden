@@ -3,18 +3,22 @@
 // (WARDEN-259). The human marks a SPECIFIC chat "watch"; this module decides WHEN
 // that chat newly needs them, so a targeted, reason-specific ping can fire.
 //
-// Sibling of observer.js's diffAlerts (src/observer.js:383-418): the same
-// change-into-state-only, never-twice, first-observation-is-baseline transition
-// semantics, lifted to the per-chat watch path. The signal comes from the
-// /api/agent-states rows (classifyPane, no LLM — WARDEN-344), NOT the Observer.
+// Semantics: change-into-state-only, never-twice, first-observation-is-baseline
+// transitions, evaluated on the /api/agent-states rows (classifyPane, no LLM —
+// WARDEN-344), not on Observer reads.
 //
-// One deliberate delta from diffAlerts' ALERTABLE_STATES (src/observer.js:371): the
-// watch ALSO fires on newly-entering 'waiting' — the primary use case ("ping me
-// when a chat needs my input"). The fleet Observer excludes waiting (too noisy
-// fleet-wide); a per-chat opt-in is precise enough to include it. 'completed' is
-// derived exactly as detectCompleted's transcript-less fallback (src/observer.js:366):
-// a working state → idle transition. Bare idle (a non-working → idle flip, e.g.
-// capture recovery) does NOT fire — it is not a "needs you" signal.
+// Provenance: the transition semantics and the sets below were lifted here by
+// WARDEN-378 from the Observer's fleet-wide alert diffing. That alert tooling —
+// functions and sets alike — was retired in WARDEN-509, so this module has been
+// the canonical home of these definitions ever since; there is no upstream to
+// keep them in step with, and none is needed.
+//
+// The watch fires on newly-entering 'waiting' — the primary use case ("ping me
+// when a chat needs my input"). The fleet-wide alerting this was lifted from
+// judged waiting too noisy at fleet scope and did not alert on it; a per-chat
+// opt-in is precise enough to include it. 'completed' is derived as a working
+// state → idle transition. Bare idle (a non-working → idle flip, e.g. capture
+// recovery) does NOT fire — it is not a "needs you" signal.
 //
 // Pure + dependency-free (only `import type`, erased at transpile) so the unit
 // test loads it standalone via Vite's OXC transform, mirroring attentionRollup.ts
@@ -47,23 +51,32 @@ export interface WatchAlert {
   toState: string;
 }
 
-// States that directly warrant a watch ping when newly entered. Mirrors observer.js's
-// ALERTABLE_STATES (src/observer.js:371) PLUS 'waiting' — the per-chat opt-in is
-// precise enough to surface "waiting for your input", the watch's primary case.
-// 'idle' is intentionally NOT here: bare idle is not a "needs you" signal. A
-// working→idle flip fires 'completed' instead (detectWatchCompleted below).
+// States that directly warrant a watch ping when newly entered. Canonical here:
+// lifted by WARDEN-378 from the fleet-wide alerting's alertable set
+// {idle, erroring, stuck}, which WARDEN-509 later deleted with the rest of that
+// tooling. Diverged at the lift by SUBSTITUTING 'waiting' for 'idle' (not by
+// adding a member): the per-chat opt-in is precise enough to surface "waiting for
+// your input", the watch's primary case, while bare idle is not a "needs you"
+// signal. A working→idle flip fires 'completed' instead (detectWatchCompleted
+// below).
 const WATCH_DIRECT_STATES = new Set(['waiting', 'erroring', 'stuck']);
 
 // "Working" states — a transition from one of these to 'idle' means the agent just
-// finished a task ('completed'). Mirrored verbatim from observer.js's detectCompleted
-// (src/observer.js:361). The /api/agent-states endpoint carries no transcript phase,
-// so only detectCompleted's fallback branch applies here (src/observer.js:366).
+// finished a task ('completed'). Canonical here: lifted verbatim by WARDEN-378
+// from the fleet-wide alerting's working-state set and unchanged since (the
+// upstream was deleted with that tooling in WARDEN-509). That upstream completion
+// detector also had a transcript-phase branch (mid-turn → awaiting-input), but the
+// /api/agent-states endpoint carries no transcript phase, so only the working→idle
+// rule was ever applicable on this path.
 const WORKING_STATES = new Set(['active', 'stuck', 'erroring', 'blocked', 'waiting']);
 
-// Urgency precedence for sorting multiple alerts in one diff (mirrors observer.js's
-// ALERT_PRIORITY, src/observer.js:372): an error is more actionable than "it
-// finished", which beats a bare waiting. Determines only the ORDER alerts fire in,
-// never whether they fire.
+// Urgency precedence for sorting multiple alerts in one diff: an error is more
+// actionable than "it finished", which beats a bare waiting. Canonical here:
+// lifted by WARDEN-378 from the fleet-wide alerting's precedence map (deleted
+// with that tooling in WARDEN-509) — the erroring < stuck < completed tiers are
+// original, the tail tier now belongs to 'waiting' (the fleet version's 'idle'
+// slot), and the watch-only 'custom'/'blocked' reasons were added later.
+// Determines only the ORDER alerts fire in, never whether they fire.
 const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
   // `blocked` (4) is unreachable on the ping path — diffWatchAlerts never emits it
   // (blocked is not a transition the ping fires on, only a persistent current-state
@@ -93,11 +106,12 @@ const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
 export const WATCH_PING_COOLDOWN_MS = 5 * 60 * 1000;
 
 /**
- * Did a watched agent just complete a task? The transcript-less fallback of
- * detectCompleted (src/observer.js:366): a working state → idle flip. The
- * /api/agent-states rows carry no transcript phase, so detectCompleted's phase-based
- * branch (mid-turn → awaiting-input) is unreachable here — only the working→idle
- * fallback applies. Pure — exercised directly in the unit test.
+ * Did a watched agent just complete a task? A working state → idle flip. Canonical
+ * here: lifted by WARDEN-378 as the transcript-less branch of the fleet-wide
+ * alerting's completion detector (retired in WARDEN-509). The /api/agent-states
+ * rows carry no transcript phase, so the detector's phase-based branch (mid-turn →
+ * awaiting-input) was never applicable on this path — only the working→idle rule
+ * was lifted. Pure — exercised directly in the unit test.
  */
 export function detectWatchCompleted(priorState: string | null, curState: string): boolean {
   return !!priorState && WORKING_STATES.has(priorState) && curState === 'idle';
@@ -106,13 +120,13 @@ export function detectWatchCompleted(priorState: string | null, curState: string
 /**
  * Pure: diff a prior per-key state snapshot against a freshly observed one and
  * surface ONLY watched chats that newly entered a needs-you state (waiting /
- * erroring / stuck / completed) since the last observation. Sibling of
- * observer.js's diffAlerts (src/observer.js:383-418).
+ * erroring / stuck / completed) since the last observation. Canonical here:
+ * lifted by WARDEN-378 from the fleet-wide alerting's per-agent diff, which
+ * WARDEN-509 later retired along with the rest of that tooling.
  *
  *  - Fires on change-into-state ONLY: a chat already in the state produces no
  *    alert, and a chat with no prior baseline (first observation) produces none
- *    either — the near-zero-false-signal bar (matches diffAlerts'
- *    `if (!p) continue`).
+ *    either — the near-zero-false-signal bar (`if (!p) continue` below).
  *  - Never twice: the same persistent state never re-fires (priorState === curState
  *    is never newlyEntered; a working→idle 'completed' needs the prior to be a
  *    DIFFERENT working state, so idle→idle never fires).
@@ -140,7 +154,7 @@ export function diffWatchAlerts(
     const c = cur[key];
     if (!c) continue; // not observed this poll → keep prior, no diff
     const p = prev[key];
-    if (!p) continue; // first observation → baseline, no fire (diffAlerts: `if (!p) continue`)
+    if (!p) continue; // first observation → baseline, no fire
     const curState = c.state;
     const priorState = p.state;
     // WARDEN-540: a user-authored pattern newly matched this poll. The matcher runs

@@ -3,9 +3,10 @@
 // The deterministic, non-LLM, per-chat, opt-in complement to the fleet-wide
 // Attention desktop alert. The human marks a SPECIFIC chat "watch"; diffWatchAlerts
 // decides WHEN that chat newly needs them (waiting / erroring / stuck / completed),
-// firing on change-into-state ONLY — the near-zero-false-signal bar. Sibling of
-// observer.js's diffAlerts (src/observer.js:383-418), lifted to the /api/agent-states
-// row path.
+// firing on change-into-state ONLY — the near-zero-false-signal bar. The detector
+// is canonical in src/lib/chatWatch.ts (lifted by WARDEN-378 from fleet-wide
+// alerting that WARDEN-509 has since retired); exercised here on the
+// /api/agent-states row path.
 //
 // No front-end test runner in this repo, so (like desktopAlerts.test.mjs) this loads
 // the REAL src/lib/chatWatch.ts (transpiled TS -> ESM via Vite's OXC transform) and
@@ -45,7 +46,7 @@ const test = (name, fn) => {
 // detector reads for the decision; `name` + `signal` ride along for the formatter.
 const row = (key, state, extra = {}) => ({ id: key, key, name: key, state, ...extra });
 
-console.log('\nfirst observation is a baseline — no fire (matches diffAlerts `if (!p) continue`)');
+console.log('\nfirst observation is a baseline — no fire (diffWatchAlerts: `if (!p) continue`)');
 test('no prior for a watched key → no alert', () => {
   assert.equal(diffWatchAlerts({}, { a: row('a', 'waiting') }, ['a']).length, 0);
 });
@@ -73,7 +74,7 @@ test('blocked → waiting fires (newly waiting, regardless of prior)', () => {
   const [a] = diffWatchAlerts({ a: row('a', 'blocked') }, { a: row('a', 'waiting') }, ['a']);
   assert.equal(a.reason, 'waiting');
 });
-test('active → idle fires completed (working→idle = detectCompleted fallback)', () => {
+test('active → idle fires completed (working→idle flip)', () => {
   const [a] = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'idle') }, ['a']);
   assert.equal(a.reason, 'completed');
 });
@@ -117,8 +118,8 @@ test('erroring → active does NOT fire (recovery)', () => {
   assert.equal(diffWatchAlerts({ a: row('a', 'erroring') }, { a: row('a', 'active') }, ['a']).length, 0);
 });
 test('stuck → idle fires completed (stuck is a working state → working→idle)', () => {
-  // A stuck agent going idle resolved its loop — detectCompleted treats stuck as
-  // working, so this fires 'completed', not bare idle. Documents the behavior.
+  // A stuck agent going idle resolved its loop — stuck counts as a working state,
+  // so this fires 'completed', not bare idle. Documents the behavior.
   const [a] = diffWatchAlerts({ a: row('a', 'stuck') }, { a: row('a', 'idle') }, ['a']);
   assert.equal(a.reason, 'completed');
 });
@@ -177,7 +178,7 @@ test('alert carries name + signal + from/to', () => {
   assert.equal(a.toState, 'waiting');
 });
 
-console.log('\ndetectWatchCompleted: the detectCompleted fallback (src/observer.js:366)');
+console.log('\ndetectWatchCompleted: the working→idle completion rule');
 test('active → idle is completed', () => {
   assert.equal(detectWatchCompleted('active', 'idle'), true);
 });
