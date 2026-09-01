@@ -52,6 +52,14 @@
 // family: with it on the channel, no remote op pays a per-op handshake, unblocking
 // the sole-transport / default-on destination. All six legs are reported below.
 //
+// WARDEN-1261 adds the GIT-DOMAIN leg: runGit + runInContext (src/gitRoutes.js —
+// 15 /api/git-* routes + cross-agent-diff + the search-files remote leg) each
+// paid a raw UN-POOLED per-op ssh spawn per probe (run() directly — this domain
+// never even rode ControlMaster pooling), and the Fleet Health git-status fan
+// fires ~8 probes PER AGENT PER VIEW. The generic `exec` RPC serves the whole
+// domain over the persistent channel — zero ssh spawns per probe after bootstrap.
+// All seven legs are reported below.
+//
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
@@ -84,6 +92,8 @@ import {
   projectSpawnModel,
 } from '../src/companion.js';
 import { DISCOVER_SCRIPT, buildCaptureScript } from '../src/chats.js';
+// WARDEN-1261: the git-domain leg drives the REAL runGit routing (both sides).
+import { runGit } from '../src/gitRoutes.js';
 
 // --------------------------------- args -------------------------------------
 
@@ -330,6 +340,44 @@ function printSendProjection(hosts, ticks) {
   console.log('This is the roadmap\'s "write path" success-metric leg — the LAST un-migrated');
   console.log('op family. With it on the channel, NO remote op pays a per-op SSH handshake,');
   console.log('the sole-transport / default-on destination is unblocked.');
+  console.log();
+}
+
+// WARDEN-1261: the git-domain leg. Unlike every earlier leg, runGit's remote
+// branches call ssh.js run() DIRECTLY — un-pooled, no ControlMaster — so EVERY
+// probe already pays a full handshake on EVERY platform (not just the
+// ControlMaster-disabled / Windows path). And the git-status route FANS: ~8
+// probes per agent per Fleet Health view (branch, status, ahead/behind,
+// upstream, head-date, stash, diffstat, outgoing). The companion's generic
+// `exec` RPC serves the whole fan over the persistent channel: 0 handshakes per
+// probe after bootstrap. This projection sizes the fan at the ticket's ~8
+// probes/agent/view; multiply by the fleet's agent count for the real number.
+const GIT_PROBES_PER_AGENT = 8;
+function printGitProjection(hosts, ticks) {
+  // ticks = Fleet Health views (each fans the full probe set per agent).
+  const perView = hosts * GIT_PROBES_PER_AGENT; // 1 agent/host — the conservative floor
+  const before = perView * ticks;
+  console.log('━'.repeat(72));
+  console.log(`Part 1.g — git domain (runGit/runInContext): handshake projection  (${hosts} host(s), 1 agent/host, ${ticks} view(s))`);
+  console.log('━'.repeat(72));
+  console.log('The git/file domain is the largest unserved one: runGit + runInContext');
+  console.log('call run() DIRECTLY — un-pooled, no ControlMaster — so every probe pays a');
+  console.log('full TCP+key-exchange+auth handshake on EVERY platform, and the Fleet');
+  console.log(`Health git-status fan fires ~${GIT_PROBES_PER_AGENT} probes per agent per view:`);
+  console.log();
+  console.log('  DEFAULT path (run(), no companion):');
+  console.log(`    ${GIT_PROBES_PER_AGENT} handshakes / agent / view  →  ${hosts} × ${GIT_PROBES_PER_AGENT} × ${ticks} = ${before} handshakes`);
+  console.log('  COMPANION path:');
+  console.log(`    reuses slice 1's bootstrapped channel — 0 handshakes/probe`);
+  console.log(`    total = 0 handshakes for the whole fan (bootstrap was paid by discover)`);
+  console.log();
+  console.log(`  ▶ handshakes saved over ${ticks} view(s): ${before} → 0  (−${before})`);
+  console.log(`  ▶ multiply by the fleet's agents/host: a ${hosts}-host fleet with 4 agents/host`);
+  console.log(`    saves ${before * 4} handshakes per Fleet Health view.`);
+  console.log();
+  console.log('DONE criterion (ticket AC #1): under companionTransportEnabled, every');
+  console.log('REMOTE leg of the 15 git routes + cross-agent-diff + search-files issues');
+  console.log('ZERO per-op ssh spawns.');
   console.log();
 }
 
@@ -861,6 +909,109 @@ async function liveSendBenchmark(host, ticks) {
   console.log();
 }
 
+// WARDEN-1261: the git-domain live leg. Unlike the earlier legs (which hand-build
+// the default-side command), this one drives the REAL exported runGit() through
+// its deps seam on BOTH sides, so the measured thing IS the shipping routing:
+//   default side   — flag OFF, deps.run counted: every probe = 1 un-pooled ssh
+//                    spawn (run() never sets a ControlPath, so this is the
+//                    ControlMaster-disabled-equivalent path by construction);
+//   companion side — flag ON (env override), the real routing → execInContext →
+//                    getChannel (bootstrap legs counted via deps.spawn/deps.run),
+//                    then the whole fan rides the one channel.
+// The probe set is the git-status route's actual fan (branch/status/ahead-behind/
+// upstream/head-date/stash/diffstat/outgoing) against cwd /tmp — probes may fail
+// benignly there (non-repo); the HANDSHAKE is what's measured, and a probe's
+// command cost is identical on both sides.
+const GIT_STATUS_PROBE_SET = [
+  ['rev-parse', '--abbrev-ref', 'HEAD'],
+  ['status', '--porcelain'],
+  ['rev-list', '--left-right', '--count', '@{u}...HEAD'],
+  ['rev-parse', '--abbrev-ref', '@{u}'],
+  ['log', '-1', '--format=%cI', 'HEAD'],
+  ['stash', 'list'],
+  ['diff', 'HEAD', '--shortstat'],
+  ['diff', '--name-only', '@{u}..HEAD'],
+];
+async function liveGitBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.g — git domain (runGit): LIVE un-pooled replay  (host: ${host}, ${ticks} view(s) × ${GIT_STATUS_PROBE_SET.length} probes)`);
+  console.log('━'.repeat(72));
+  console.log('Default side: the REAL runGit routing, flag OFF — every probe spawns its own');
+  console.log('un-pooled ssh (run() direct, no ControlMaster).');
+  console.log('Companion side: the REAL runGit routing, flag ON — the exec RPC over the');
+  console.log('persistent channel (bootstrap once, then the whole fan rides it).');
+  console.log();
+
+  const chat = { host, container: null, cwd: '/tmp' }; // manual-remote chat; /tmp always exists
+  const origEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+
+  // ---- DEFAULT: flag OFF, N views × the full probe fan, counted via deps.run ----
+  console.log(`▶ default path: ${ticks} view(s) × ${GIT_STATUS_PROBE_SET.length} probes, one ssh spawn each …`);
+  delete process.env.WARDEN_COMPANION_TRANSPORT;
+  const defaultSpawns = { val: 0 };
+  const countingDefaultRun = (...a) => { defaultSpawns.val++; return sshRun(...a); };
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const t0 = process.hrtime.bigint();
+    await Promise.allSettled(GIT_STATUS_PROBE_SET.map((args) =>
+      runGit(chat, args, chat.cwd, { run: countingDefaultRun })));
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    defaultSamples.push({ ms, ok: true });
+    process.stdout.write(`   view ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (${GIT_STATUS_PROBE_SET.length} ssh spawns)\n`);
+  }
+
+  // ---- COMPANION: flag ON, bootstrap once, then N views over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} view(s) over the channel …`);
+  process.env.WARDEN_COMPANION_TRANSPORT = '1';
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+  const companionDeps = { spawn: countingSpawn, run: countingRun };
+  _resetChannelCacheForTests();
+  const bootT0 = process.hrtime.bigint();
+  // The first probe bootstraps (probe + upload + channel + reap, WARDEN-904) AND
+  // runs; the remaining probes of this view ride the channel for free.
+  await Promise.allSettled(GIT_STATUS_PROBE_SET.map((args) =>
+    runGit(chat, args, chat.cwd, companionDeps)));
+  const bootMs = Number(process.hrtime.bigint() - bootT0) / 1e6;
+  console.log(`   bootstrap + 1st view: ${bootMs.toFixed(0).padStart(6)} ms  (${GIT_STATUS_PROBE_SET.length} probes)`);
+  const companionSamples = [{ ms: bootMs, ok: true }];
+  for (let i = 1; i < ticks; i++) {
+    const t0 = process.hrtime.bigint();
+    await Promise.allSettled(GIT_STATUS_PROBE_SET.map((args) =>
+      runGit(chat, args, chat.cwd, companionDeps)));
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    companionSamples.push({ ms, ok: true });
+    process.stdout.write(`   view ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (${GIT_STATUS_PROBE_SET.length} probes, 0 ssh spawns)\n`);
+  }
+  _resetChannelCacheForTests();
+  if (origEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+  else process.env.WARDEN_COMPANION_TRANSPORT = origEnv;
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+  const probes = ticks * GIT_STATUS_PROBE_SET.length;
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────────');
+  console.log(`  spawns (ssh processes started) over ${probes} probe(s):`);
+  console.log(`     default   : ${defaultSpawns.val}  (1 un-pooled handshake PER PROBE)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; the whole fan rides the channel)`);
+  console.log(`  per-view wall-clock (the full ${GIT_STATUS_PROBE_SET.length}-probe fan, concurrent):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady view(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per view: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────────');
+  console.log('Note: the default git fan is the one surface that NEVER rode pooling —');
+  console.log('run() spawns per probe on every platform. This leg is the ticket\'s AC #1:');
+  console.log('under the toggle, the REMOTE git fan issues ZERO per-op ssh spawns.');
+  console.log();
+}
+
 // Parse the default discover script's stdout into chat objects capturePanes can
 // consume (key/container/session). The discover TSV is name \t status \t cwd \t
 // active; only name (the container) is needed to target a capture. yatfa chats
@@ -900,6 +1051,7 @@ async function main() {
   printLifecycleProjection(args.hosts, args.ticks);
   printControlPlaneProjection(args.hosts, args.ticks);
   printSendProjection(args.hosts, args.ticks);
+  printGitProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -916,6 +1068,7 @@ async function main() {
     await liveLifecycleBenchmark(args.host, args.ticks);
     await liveControlPlaneBenchmark(args.host, args.ticks);
     await liveSendBenchmark(args.host, args.ticks);
+    await liveGitBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');

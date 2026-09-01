@@ -1233,6 +1233,80 @@ export async function sendKey(host, { container, session, key } = {}, cfg = {}, 
   });
 }
 
+// --------------------------------- exec ---------------------------------------
+// WARDEN-1261 (the git/file domain slice of roadmap WARDEN-270). The chat-scoped
+// script domain — runGit + runInContext in src/gitRoutes.js, i.e. the entire git
+// surface (15 /api/git-* routes + /api/cross-agent-diff) plus the search-files
+// remote leg — still paid a raw, UN-POOLED per-op ssh connection per probe. This
+// ONE generic client op serves that whole domain over the persistent channel:
+// the CALLER keeps assembling the script (quoting, `2>/dev/null` suffixes,
+// WARDEN-1234 containment fragments all live JS-side, preserved verbatim), and
+// the host side merely executes it (companion `exec` RPC).
+//
+// Returns the SAME raw {host, ok, code, stdout, stderr} shape resize/send/
+// sendKey produce, so runGit/runInContext callers read `.stdout`/`.ok` exactly
+// as they read run()'s result today — ZERO parser changes. Companion-or-fail:
+// NEVER falls back to raw SSH (opt out via WARDEN_COMPANION_TRANSPORT).
+//
+// Unlike send/sendKey there is NO stale-binary graceful degradation: the git
+// surface is a polled FAN (8 probes/agent per Fleet Health view), and a silent
+// per-op fallback would quietly re-pay every handshake this slice removes while
+// the toggle reads "on". A live channel whose binary predates `exec` therefore
+// gets the ACTIONABLE too-old error (the WARDEN-933 discipline: the message
+// tells the user how to recover), riding stderr like every other raw-shape
+// failure. (The bootstrap's version check already replaces a stale cached
+// binary in the normal case; this gate covers a live channel whose advertised
+// methods lag.)
+
+// The margin added to timeoutMs for the JS-side channel.call deadline. The
+// HOST-side kill (exec.CommandContext, armed at timeoutMs by the Go exec RPC) is
+// the PRIMARY deadline — it terminates the host process and returns a proper
+// cmdResult. The channel.call timeout is only the lost-response backstop, so it
+// is armed strictly later: with equal deadlines the two would race and a lost
+// race would surface a transport "timed out" envelope instead of the probe's
+// real partial output, and the host process would be orphaned — the exact trap
+// this slice's host-side timeout exists to close.
+const EXEC_CALL_TIMEOUT_MARGIN_MS = 5000;
+
+// execInContext() over the companion channel: runs one JS-assembled script
+// host-side. `opts.container` selects the docker-exec delivery shape (the
+// runInContext container branch: `docker exec <c> bash -lc <script>` rebuilt
+// host-side with byte-identical quoting); unset delivers the script straight to
+// `bash -lc` (run()'s delivery shape). `opts.timeout` (ms, default 8000 — the
+// same default runGit/runInContext pass run() today) is forwarded as `timeoutMs`
+// so the HOST side kills a too-slow probe.
+export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}) {
+  return companionOp(host, cfg, deps, {
+    // Raw-shape family: the refusal rides stderr (the run() envelope), NOT an
+    // `error` field.
+    refuse: () => mapCmdLocalRefusal(host),
+    run: async (channel) => {
+      const methods = await channelMethods(channel, opts);
+      if (!methods.includes('exec')) {
+        // Stale binary (channel alive, binary predates the exec RPC): surface the
+        // actionable too-old error — companion-or-fail, never a silent raw-SSH
+        // fallback (see the block comment for why this op does not degrade).
+        const ver = deps.manifest?.version ?? loadManifest().version;
+        return {
+          host,
+          ok: false,
+          code: -1,
+          stdout: '',
+          stderr: `companion binary on ${host} is too old: it does not advertise the 'exec' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.`,
+        };
+      }
+      const timeoutMs = opts.timeout ?? 8000;
+      const result = await channel.call('exec', {
+        script,
+        container: opts.container || null,
+        timeoutMs,
+      }, { timeout: timeoutMs + EXEC_CALL_TIMEOUT_MARGIN_MS });
+      return mapCmdResult(host, result);
+    },
+    fail: (e) => mapCmdError(host, e),
+  });
+}
+
 // ------------------------------- subscribePanes --------------------------------
 // WARDEN-413 (problem #3 of roadmap WARDEN-270). capture-pane is polled every 2s
 // monitor tick + every observer poll even when nothing changed; for an idle fleet
