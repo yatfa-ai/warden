@@ -21,8 +21,10 @@
 // fake clock.
 //
 // It fails if the fit is ever un-coalesced (N observer callbacks in a frame →
-// N fits), if the container guard is dropped (a 0x0 container fits to 2x1), or
-// if the PTY is told anything other than the settled size exactly once.
+// N fits), if the container guard is dropped (a 0x0 container fits to 2x1), if
+// the settle path's degenerate-geometry guard is dropped (a zero-column resize
+// ships to the PTY), or if the PTY is told anything other than the settled size
+// exactly once.
 //
 // Run: node paneFit.test.mjs   (or: npm test, from web/)
 import { transformWithOxc } from 'vite';
@@ -381,6 +383,32 @@ test('a pane that never resized is never nudged', () => {
   for (let i = 0; i < 5; i += 1) { scheduler.request(); clock.frame(); clock.advance(16); }
   clock.advance(FIT_SETTLE_MS + REPAINT_NUDGE_MS);
   assert.deepEqual(state.announced, ['100x25'], 'no size change, no settle, no repaint traffic');
+});
+
+test('a settle onto a degenerate geometry announces nothing — the PTY never hears a zero-column resize', () => {
+  const clock = makeEnv();
+  const { state, scheduler } = makePane(clock);
+  // Steady state first, so the PTY already knows a real geometry: the degenerate
+  // settle below is then a CHANGE from what it was last told, and only the
+  // settle callback's degenerate guard stands between it and the wire.
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame();
+  clock.advance(FIT_SETTLE_MS * 2);
+  assert.deepEqual(state.announced, ['100x25']);
+
+  // Park the pane on a degenerate geometry before the settle window elapses.
+  // The fake fit can never produce this itself (its faithful FitAddon clamp
+  // floors cols at 2), so it is set directly — the guard under test is the
+  // scheduler's own last line of defence and must hold whatever upstream hands
+  // it. Without the guard the settle falls through to the repaint nudge and
+  // announces repaintNudgeSize({cols:0,…}) — a zero-column resize.
+  state.size = { cols: 0, rows: 24 };
+  scheduler.noteResize();   // onResize fired → settle armed
+  // Advance far enough that BOTH halves of a (wrongly armed) nudge would fire.
+  clock.advance(FIT_SETTLE_MS * 2 + REPAINT_NUDGE_MS * 2);
+  assert.deepEqual(state.announced, ['100x25'],
+    'nothing worth painting: no announce, and neither half of a repaint nudge');
+  assert.equal(clock.pendingTimers(), 0, 'the settle fired and armed nothing behind it');
 });
 
 // === Readiness retry: the case a ResizeObserver can never re-fire for ========
