@@ -17,8 +17,9 @@
 // catalog automatically — it is read from the registry, not enumerated here.
 //
 // PURE. Its runtime imports are `./redact` (the shipped redactor + its field-name
-// sets) and `./consent` (the single consent authority). See
-// web/telemetry-transparency.test.mjs, which transforms all three files into the
+// sets), `./consent` (the single consent authority) and `./schema` (the CANONICAL
+// base-event contract — consumed, not restated; WARDEN-1254). See
+// web/telemetry-transparency.test.mjs, which transforms all four files into the
 // same tmpDir so the relative specifiers resolve.
 //
 // NOT a Settings UI (slice 1, WARDEN-457, owns that surface) and NOT transport
@@ -34,28 +35,21 @@ import {
   normalizeConsent,
 } from './consent';
 import { redact, CONTENT_FIELDS } from './redact';
+// The base-event contract — schema version, event-type list, runtime values —
+// is CONSUMED from the canonical neighbour `./schema` (WARDEN-1254). It used to
+// be restated here with a "reconcile with slice 1's canonical schema when it
+// lands" note, but slice 1 (WARDEN-457) had already landed when that note was
+// written, so nothing pinned the pair together and the copy could drift
+// unnoticed. Decision B still holds — do NOT import electron/telemetry-source
+// .cjs (a main-process CommonJS module unreachable from a renderer/TS module
+// and from the standalone OXC test); `./schema` is the importable canonical
+// source. Both names stay re-exported from here (the transparency panel and the
+// test import them via this module) — a redirection, not a restatement, so the
+// two can no longer silently disagree during a future schema change.
+import { BASE_EVENT_TYPES, SCHEMA_VERSION, isBaseEventType, isRuntime } from './schema';
+export { BASE_EVENT_TYPES, SCHEMA_VERSION };
 
 // ---------------------------------------------------------------------------
-// LOCAL base-event contract (decision B — do NOT import electron/telemetry-source
-// .cjs; it is a main-process CommonJS module unreachable from a renderer/TS
-// module and from the standalone OXC test). This is the same "carry a local
-// contract copy, to be reconciled with slice 1's canonical schema when it
-// lands" pattern slice 4 (telemetry-source.cjs:32-41) itself uses. The contract
-// is inlined here verbatim from telemetry-source.cjs:37-41 + :153-197 + :212-265.
-// ---------------------------------------------------------------------------
-
-/** Shared cross-repo schema version (client + receiver agree on a version). */
-export const SCHEMA_VERSION = 4 as const;
-
-/** The three anonymous base-event types a consent-gated client may emit. */
-export const BASE_EVENT_TYPES: ReadonlyArray<string> = Object.freeze([
-  'error',
-  'crash',
-  'performance-stall',
-]);
-
-const RUNTIME_VALUES: ReadonlySet<string> = new Set(['main', 'renderer']);
-
 /**
  * The anonymous structural fields each base-event type carries (verbatim from
  * the builders in telemetry-source.cjs:153-197 + the appVersion attach at
@@ -122,13 +116,20 @@ function containsPath(text: unknown): boolean {
  * message / structured frame fields carry no leaked identifier (the hard-
  * exclusion proof). Exported so a caller (and the test) can re-run the exact
  * proof the pipeline's consent gate relies on.
+ *
+ * WARDEN-1254 boundary: the CONTRACT values it checks against (SCHEMA_VERSION,
+ * the event-type list, the runtime values) now come from canonical `./schema`,
+ * but this validator itself is deliberately NOT collapsed onto schema.ts's
+ * `validateBaseEvent` — the local one is a strict SUPERSET that adds the hard
+ * identifier/path exclusion after the shape check. Merging them would silently
+ * drop that guarantee.
  */
 export function isValidBaseEvent(event: unknown): boolean {
   if (!event || typeof event !== 'object') return false;
   const e = event as Record<string, unknown>;
   if (e.schemaVersion !== SCHEMA_VERSION) return false;
-  if (typeof e.type !== 'string' || !BASE_EVENT_TYPES.includes(e.type)) return false;
-  if (!RUNTIME_VALUES.has(e.runtime as string)) return false;
+  if (!isBaseEventType(e.type)) return false;
+  if (!isRuntime(e.runtime)) return false;
   if (typeof e.timestamp !== 'number' || !Number.isFinite(e.timestamp)) return false;
   if (e.type === 'error') {
     if (typeof e.message !== 'string') return false;
