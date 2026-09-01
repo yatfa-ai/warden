@@ -12,13 +12,16 @@
 // via Vite's OXC transform) and exercises the PURE functions with plain objects.
 //
 // HARNESS WRINKLE (decision A): transparency.ts has REAL runtime imports —
-// './redact' and './consent'. A lone transformed transparency.mjs would fail to
-// resolve them, so this harness transforms consent.ts, redact.ts AND
-// transparency.ts into the SAME tmpDir and rewrites the relative specifiers to
-// the .mjs paths Node resolves.
+// './redact', './consent' and (since WARDEN-1254) './schema', the canonical
+// base-event contract the module now consumes instead of restating. A lone
+// transformed transparency.mjs would fail to resolve them, so this harness
+// transforms consent.ts, redact.ts, schema.ts AND transparency.ts into the
+// SAME tmpDir and rewrites the relative specifiers to the .mjs paths Node
+// resolves.
 //
-// Belt-and-suspenders (decision B): the module carries a LOCAL base-event
-// contract copy; the TEST additionally cross-checks `valid` against the REAL
+// Belt-and-suspenders (decision B): the module's base-event contract is
+// consumed from canonical schema.ts (WARDEN-1254 — it used to carry a LOCAL
+// copy); the TEST additionally cross-checks `valid` against the REAL
 // `validateBaseEvent` (and re-uses the REAL `containsIdentifier` for the
 // identifier-leak proof) via `createRequire`, the pattern
 // web/telemetry-source.test.mjs uses.
@@ -41,7 +44,7 @@ const require = createRequire(import.meta.url);
 // --- OXC transform Vite bundles), into the SAME tmpDir so the relative import --
 // --- resolves. ---------------------------------------------------------------
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-transparency-test-'));
-for (const name of ['consent', 'redact', 'transparency']) {
+for (const name of ['consent', 'redact', 'schema', 'transparency']) {
   const modPath = resolve(__dirname, `src/lib/telemetry/${name}.ts`);
   const src = readFileSync(modPath, 'utf8');
   let { code } = await transformWithOxc(src, modPath, {});
@@ -50,7 +53,8 @@ for (const name of ['consent', 'redact', 'transparency']) {
   // Vite at build time). Patch ONLY the emitted test artifacts.
   code = code
     .replace(/from\s+(["'])\.\/redact\1/g, 'from "./redact.mjs"')
-    .replace(/from\s+(["'])\.\/consent\1/g, 'from "./consent.mjs"');
+    .replace(/from\s+(["'])\.\/consent\1/g, 'from "./consent.mjs"')
+    .replace(/from\s+(["'])\.\/schema\1/g, 'from "./schema.mjs"');
   writeFileSync(join(tmpDir, `${name}.mjs`), code);
 }
 const { describeCollection, previewPayload, isValidBaseEvent, SCHEMA_VERSION } = await import(
