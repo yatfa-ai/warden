@@ -3744,6 +3744,36 @@ function realBinaryTransport() {
       assert.ok(Date.now() - t0 < 5000, `host-side kill must fire fast (took ${Date.now() - t0}ms)`);
       assert.strictEqual(slow.ok, false);
       assert.strictEqual(slow.code, -1);
+
+      // WARDEN-1261 QA rework: the REAL script shapes must die too — and must
+      // not stall the serial dispatch loop. `sleep 30` alone passes even
+      // without a process-group kill (bash exec-optimizes it into the direct
+      // child); the multi-command runGit manual-remote shape, the pipeline
+      // (search-files family), and a background fork all fork instead, so a
+      // direct-child-only kill orphaned the forks, produced NO response (the
+      // orphans held the stdout pipe, blocking the host-side Wait), and froze
+      // every subsequent op on the channel until the orphans exited.
+      const qaShapes = [
+        ["cd '/tmp' && sleep 30 2>/dev/null", 'runGit manual-remote shape'],
+        ['sleep 30 | head -5', 'pipeline (search-files family)'],
+        ['sleep 30 & wait', 'background fork'],
+      ];
+      for (const [script, label] of qaShapes) {
+        const ts = Date.now();
+        const killed = await ch.call('exec', { script, timeoutMs: 250 }, { timeout: 8000 });
+        assert.ok(Date.now() - ts < 5000,
+          `${label}: host-side group kill must fire fast, not stall on the pipe (took ${Date.now() - ts}ms)`);
+        assert.strictEqual(killed.ok, false, `${label}: kill shape`);
+        assert.strictEqual(killed.code, -1, `${label}: signal kill reports code -1`);
+        // The serial dispatch loop must stay live: the very next op answers
+        // immediately — a follow-up ping blocked for seconds is the
+        // channel-wide-freeze half of the QA defect.
+        const tp = Date.now();
+        const pong = await ch.call('ping', {}, { timeout: 4000 });
+        assert.ok(pong.version, `${label}: follow-up ping answered`);
+        assert.ok(Date.now() - tp < 2000,
+          `${label}: dispatch loop stalled behind the killed probe (ping took ${Date.now() - tp}ms)`);
+      }
     } finally {
       ch.kill();
     }

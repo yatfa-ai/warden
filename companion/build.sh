@@ -29,8 +29,11 @@ if ! command -v "$GO_BIN" >/dev/null 2>&1; then
   fi
 fi
 
-# Version = short hash of the companion source. Changes when main.go/go.mod do.
-VER=$(cat main.go go.mod | sha256sum | cut -c1-12)
+# Version = short hash of the companion source. Changes when any Go source or
+# go.mod does — the platform-specific process-group files (procgroup_*.go) are
+# part of the shipped behavior (WARDEN-1261 QA rework), so they MUST move the
+# hash too, or a host would keep a cached binary built from stale kill logic.
+VER=$(cat main.go procgroup_unix.go procgroup_windows.go go.mod | sha256sum | cut -c1-12)
 
 DIST="dist"
 mkdir -p "$DIST"

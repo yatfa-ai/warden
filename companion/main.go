@@ -943,12 +943,25 @@ func killSession(params json.RawMessage) error {
 
 // runScriptCtx is the shared run-a-script-locally core: `bash -lc <script>` with
 // both streams captured, settling into the raw {ok, code, stdout, stderr}
-// cmdResult. The ctx carries the deadline (exec.CommandContext kills the host-side
-// process when it fires — WARDEN-1261: a timed-out probe must die HOST-side, or
-// the JS-side channel timeout alone would orphan it). runTmuxRaw (no deadline) and
-// execScript (the caller's timeoutMs) are the two faces of this one core.
+// cmdResult. The ctx carries the deadline; on timeout the WHOLE child process
+// group is SIGKILLed host-side (WARDEN-1261: a timed-out probe must die
+// HOST-side — the JS-side channel timeout alone would orphan it — and it must
+// die COMPLETELY: bash forks work processes for the multi-command/pipeline
+// shapes this domain actually delivers, so killing only the direct bash child
+// orphaned the forks and stalled the serial dispatch loop until they exited).
+// runTmuxRaw (no deadline) and execScript (the caller's timeoutMs) are the two
+// faces of this one core.
 func runScriptCtx(ctx context.Context, script string) cmdResult {
 	cmd := exec.CommandContext(ctx, "bash", "-lc", script)
+	// Own process group + kill(-pgid) on ctx cancel — see procgroup_unix.go.
+	armProcessGroupKill(cmd)
+	// Backstop for the rare pipe holder OUTSIDE the killed group (a script that
+	// double-forks away, e.g. via setsid): Wait() must never block past the
+	// deadline waiting for the stdout/stderr pipes to close. After 2s Go
+	// force-closes them and returns (a non-ExitError → code -1, the kill shape),
+	// keeping the serial dispatch loop alive instead of hanging the host's
+	// whole companion channel on one pathological probe.
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1178,11 +1191,14 @@ func sendKeys(params json.RawMessage) cmdResult {
 // benign failures included) is DATA the routes already handle, exactly as they
 // handle run()'s non-zero exits today.
 //
-// timeoutMs is enforced HOST-SIDE (exec.CommandContext kills the process when it
-// fires): the JS-side channel.call timeout alone would orphan the host process,
-// leaving a timed-out probe running against the repo. A timeout kill surfaces as
-// {ok:false, code:-1, stdout-so-far, stderr-so-far} — the same envelope run()
-// produces when its JS-side timer SIGKILLs the ssh child.
+// timeoutMs is enforced HOST-SIDE and kills the child's WHOLE process group
+// (runScriptCtx: Setpgid + kill(-pgid) on ctx cancel — WARDEN-1261 QA rework;
+// the JS-side channel.call timeout alone would orphan the host process, and
+// killing only the direct bash child orphaned the forked work processes under
+// the multi-command/pipeline shapes, stalling the serial dispatch loop). A
+// timeout kill surfaces as {ok:false, code:-1, stdout-so-far, stderr-so-far} —
+// the same envelope run() produces when its JS-side timer SIGKILLs the ssh
+// child.
 
 // execParams is the exec RPC params (WARDEN-1261). Script is the ALREADY-ASSEMBLED
 // script (the Go side executes it, never rebuilds it); Container selects the

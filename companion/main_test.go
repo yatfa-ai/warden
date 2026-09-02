@@ -2,8 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -732,6 +737,91 @@ func TestExecScript(t *testing.T) {
 		}
 		if res.Code != -1 {
 			t.Fatalf("a signal-killed script reports code -1 (mirrors runTmux/run's kill shape); got %d", res.Code)
+		}
+	})
+
+	// WARDEN-1261 QA rework: the four subtests below pin the REAL script shapes
+	// this domain delivers. The lone-simple-command shape above passes even
+	// without a process-group kill, because bash exec-optimizes it into the
+	// direct child — the QA failure showed every actual shape (multi-command
+	// with `&&` + redirect, pipelines, background forks) forks instead, so a
+	// direct-child-only kill orphaned the forks, produced NO response (the
+	// orphans kept the stdout pipe open, blocking cmd.Wait), and stalled the
+	// serial dispatch loop for the orphans' full lifetime. The fix: own process
+	// group + kill(-pgid) (procgroup_unix.go) + a WaitDelay backstop.
+	t.Run("timeoutMs kills the runGit manual-remote shape (cd && cmd + redirect, QA repro #1)", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"script": "cd '/tmp' && sleep 30 2>/dev/null", "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		elapsed := time.Since(t0)
+		if elapsed > 3*time.Second {
+			t.Fatalf("multi-command kill must return promptly (a stalled Wait is the QA defect); elapsed %s", elapsed)
+		}
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape {ok:false, code:-1}; got ok=%v code=%d", res.OK, res.Code)
+		}
+	})
+
+	t.Run("timeoutMs kills the pipeline shape (search-files script family, QA repro #2)", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"script": "sleep 30 | head -5", "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		elapsed := time.Since(t0)
+		if elapsed > 3*time.Second {
+			t.Fatalf("pipeline kill must return promptly (a stalled Wait is the QA defect); elapsed %s", elapsed)
+		}
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape {ok:false, code:-1}; got ok=%v code=%d", res.OK, res.Code)
+		}
+	})
+
+	t.Run("timeoutMs kills the background-fork shape — and leaves NO orphan host-side", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("process-group kill + signal-0 liveness probe are Unix facilities")
+		}
+		// The script backgrounds a child that (a) outlives the deadline and
+		// (b) reports its own pid to a file — `sh -c 'echo $$ > f; sleep 30'`
+		// exec-optimizes sleep into the sh process, so the pid in the file IS
+		// the sleeper's. Bash then blocks on `wait`, giving the guaranteed
+		// grandchild shape. After the group kill, signaling that pid with 0
+		// must fail with ESRCH — the orphan-prevention contract, proven.
+		pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+		script := "sh -c 'echo $$ > " + pidFile + "; sleep 30' & wait"
+		params, _ := json.Marshal(map[string]any{"script": script, "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		if elapsed := time.Since(t0); elapsed > 3*time.Second {
+			t.Fatalf("background-fork kill must return promptly; elapsed %s", elapsed)
+		}
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape {ok:false, code:-1}; got ok=%v code=%d", res.OK, res.Code)
+		}
+		pidBytes, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Fatalf("grandchild never reported its pid: %v", err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if err != nil {
+			t.Fatalf("unparseable pid %q: %v", pidBytes, err)
+		}
+		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+			// Best-effort cleanup in the failure case, so a broken kill leaves
+			// nothing behind in CI.
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("the timed-out probe's work process (pid %d) survived the group kill: %v — the exact orphan WARDEN-1261 forbids", pid, err)
+		}
+	})
+
+	t.Run("a killed probe's partial stdout survives in the kill envelope", func(t *testing.T) {
+		// The promised run()-parity shape: {ok:false, code:-1, stdout-so-far} —
+		// the JS backstop must never be the thing that answers a host-side kill.
+		params, _ := json.Marshal(map[string]any{"script": "printf partial-before-kill; sleep 30 | cat", "timeoutMs": 250})
+		res := execScript(params)
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape; got ok=%v code=%d", res.OK, res.Code)
+		}
+		if res.Stdout != "partial-before-kill" {
+			t.Fatalf("partial stdout must survive the kill; got %q", res.Stdout)
 		}
 	})
 
