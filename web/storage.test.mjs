@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, presetNameErrorMessage, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, snippetNameErrorMessage, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, patternNameErrorMessage, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, presetNameErrorMessage, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, snippetNameErrorMessage, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, patternNameErrorMessage, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, resetObsPrefDefaults, resetObsPrefsPreservingWorkspace } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1154,6 +1154,126 @@ test('all three tabs\' filters are independent (same-named agent/host across tab
   assert.equal(obs.directiveFilters.agent, 'worker-1');
   assert.equal(obs.attentionFilters.agent, 'worker-3');
   assert.equal(obs.attentionFilters.host, 'host-c');
+});
+
+console.log('\n"Reset appearance & UI preferences" reaches warden:observer:v1 — WARDEN-981');
+// WARDEN-981: the Observer panel's view prefs (viewMode + the 3 per-tab filter
+// shapes = 7 Select values) live in a SECOND storage namespace — ObsUi behind
+// warden:observer:v1 — that the UiState-derived ResettableKey reset structurally
+// cannot reach (it resets every UiState view pref but is blind to a different
+// interface). These pin the storage half of the fix: the reset helper defaults
+// the 4 preference fields while openIds/activeId (which observer sessions are
+// open = workspace state, per the shipped ResetSection copy "your open tabs,
+// panes, focus, and panel layout are preserved") ride through, and the payload
+// survives saveObs so the disk is correct after a reset.
+test('resetObsPrefsPreservingWorkspace defaults the 4 view prefs and keeps openIds/activeId', () => {
+  reset();
+  saveObs({
+    openIds: ['s1', 's2'], activeId: 's2', viewMode: 'directives',
+    activityFilters: { type: 'killed', agent: 'worker-1', host: 'prod-box' },
+    directiveFilters: { agent: 'reviewer-1', host: 'ci-host' },
+    attentionFilters: { agent: 'worker-3', host: 'gpu-box' },
+  });
+  const obs = resetObsPrefsPreservingWorkspace(loadObs());
+  // The 2 workspace fields ride through untouched.
+  assert.deepEqual(obs.openIds, ['s1', 's2']);
+  assert.equal(obs.activeId, 's2');
+  // The 4 preference fields snap to defaults (tab + all 7 filters).
+  assert.equal(obs.viewMode, 'sessions');
+  assert.deepEqual(obs.activityFilters, { type: 'all', agent: 'all', host: 'all' });
+  assert.deepEqual(obs.directiveFilters, { agent: 'all', host: 'all' });
+  assert.deepEqual(obs.attentionFilters, { agent: 'all', host: 'all' });
+});
+test('the reset payload round-trips: warden:observer:v1 on disk shows the defaults after the reset', () => {
+  reset();
+  saveObs({
+    openIds: ['s1'], activeId: 's1', viewMode: 'attention',
+    activityFilters: { type: 'error', agent: 'worker-1', host: 'prod-box' },
+    directiveFilters: { agent: 'reviewer-1', host: 'ci-host' },
+    attentionFilters: { agent: 'worker-3', host: 'gpu-box' },
+  });
+  // What App's reset callback does: saveObs(resetObsPrefsPreservingWorkspace(loadObs())).
+  saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
+  const obs = loadObs();
+  assert.equal(obs.viewMode, 'sessions');
+  assert.deepEqual(obs.activityFilters, { type: 'all', agent: 'all', host: 'all' });
+  assert.deepEqual(obs.directiveFilters, { agent: 'all', host: 'all' });
+  assert.deepEqual(obs.attentionFilters, { agent: 'all', host: 'all' });
+  assert.deepEqual(obs.openIds, ['s1']);
+  assert.equal(obs.activeId, 's1');
+});
+test('the reset helper never mutates the input payload (fresh filter objects from the defaults factory)', () => {
+  reset();
+  const before = {
+    openIds: ['s1'], activeId: 's1', viewMode: 'activity',
+    activityFilters: { type: 'error', agent: 'a1', host: 'h1' },
+    directiveFilters: { agent: 'a2', host: 'h2' },
+    attentionFilters: { agent: 'a3', host: 'h3' },
+  };
+  saveObs(before);
+  const obs = resetObsPrefsPreservingWorkspace(loadObs());
+  assert.equal(obs.activityFilters.agent, 'all');
+  assert.equal(before.activityFilters.agent, 'a1'); // unused-by-reset workspace payload still intact
+});
+
+// The ObsUi twin of the WARDEN-934 partition guard below: every ObsUi key is
+// EITHER preserved (openIds/activeId — workspace) OR reset (viewMode + the
+// three filter shapes — prefs), nothing may fall between. The runtime source
+// of the FULL ObsUi key set is loadObs()'s return: it names every field, so a
+// key added to ObsUi but unread by loadObs() fails here too (it would never
+// load back). storage.ts separately compile-locks the partition
+// (OBS_PRESERVED_KEYS satisfies keyof ObsUi; OBS_RESET_KEYS satisfies
+// Exclude<keyof ObsUi, preserved>; ObsUnclassifiedKeys asserts the union is
+// exhaustive), and ObserverTabs keys its live setter map by ObsResetKey — this
+// test is the runtime half that makes a TS-blind drift visible in CI.
+// attentionFilters reaching ObsUi while WARDEN-981 sat in draft is exactly the
+// recurrence this guard exists to catch.
+test('observer reset classification partitions every ObsUi key: OBS_RESET_KEYS ⊎ OBS_PRESERVED_KEYS == loadObs() key set (WARDEN-981)', () => {
+  const obsKeys = Object.keys(loadObs());
+  const preserved = [...OBS_PRESERVED_KEYS];
+  const resetKeys = Object.keys(resetObsPrefDefaults());
+  const sortedUnique = (arr) => JSON.stringify([...new Set(arr)].sort());
+
+  // loadObs() names every ObsUi field — pin the current six so a key that
+  // silently stops loading fails loudly here, not as a mystery default.
+  assert.deepEqual([...obsKeys].sort(),
+    ['activeId', 'activityFilters', 'attentionFilters', 'directiveFilters', 'openIds', 'viewMode'],
+    'loadObs() returns every ObsUi field');
+
+  // Neither list may repeat a key, and the two must not overlap: a field cannot
+  // be preserved AND reset.
+  assert.equal(preserved.length, new Set(preserved).size, 'OBS_PRESERVED_KEYS has no duplicates');
+  assert.equal(resetKeys.length, new Set(resetKeys).size, 'resetObsPrefDefaults() has no duplicate keys');
+  assert.deepEqual(preserved.filter((k) => resetKeys.includes(k)), [],
+    'no ObsUi key is both preserved and reset');
+
+  // Union == every ObsUi key: a pref added to ObsUi (and loadObs) but
+  // classified in neither list fails here.
+  assert.equal(sortedUnique([...preserved, ...resetKeys]), sortedUnique(obsKeys),
+    'OBS_PRESERVED_KEYS ∪ resetObsPrefDefaults() keys == every ObsUi key');
+
+  // The constant and the defaults factory must agree — the constant feeds
+  // compile-time guards (ObsResetKey keys ObserverTabs' live setter map), the
+  // factory feeds runtime resets; drift between them would split the guard.
+  assert.equal(sortedUnique([...OBS_RESET_KEYS]), sortedUnique(resetKeys),
+    'OBS_RESET_KEYS == Object.keys(resetObsPrefDefaults())');
+
+  // The regression anchors: the 4 defect fields are classified RESET (not
+  // preserved), the 2 workspace fields are PRESERVED (not reset), and the
+  // reset defaults are the Sessions tab with all 7 filters at 'all'.
+  const d = resetObsPrefDefaults();
+  assert.equal(d.viewMode, 'sessions', 'viewMode resets to the Sessions tab');
+  assert.deepEqual(d.activityFilters, { type: 'all', agent: 'all', host: 'all' });
+  assert.deepEqual(d.directiveFilters, { agent: 'all', host: 'all' });
+  assert.deepEqual(d.attentionFilters, { agent: 'all', host: 'all' });
+  for (const k of ['viewMode', 'activityFilters', 'directiveFilters', 'attentionFilters']) {
+    assert.ok(resetKeys.includes(k), `${k} is reset by "Reset appearance & UI preferences"`);
+    assert.ok(!preserved.includes(k), `${k} is NOT preserved by the reset`);
+  }
+  for (const k of ['openIds', 'activeId']) {
+    assert.ok(preserved.includes(k), `${k} is preserved — which observer sessions are open is workspace state`);
+    assert.ok(!resetKeys.includes(k), `${k} is NOT reset`);
+  }
 });
 
 console.log('\ndefaultShell (the unified shell for new-chat shell preset + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');

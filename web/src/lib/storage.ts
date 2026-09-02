@@ -1575,3 +1575,79 @@ export function saveObs(s: ObsUi) {
   try { localStorage.setItem(OBS_KEY, JSON.stringify(s)); }
   catch (e) { console.warn('[warden:storage] saveObs failed', e); }
 }
+
+// WARDEN-981 — the ObsUi twin of the RESET_PRESERVED_KEYS/ResettableKey split
+// for Settings → Reset → "Reset appearance & UI preferences". That reset's key
+// source is derived ENTIRELY from UiState (ResettableKey = PERSISTED_PREF_KEYS ∪
+// restoreOnStartup − RESET_PRESERVED_KEYS), which is why it resets every UiState
+// view pref (agentFilter/agentSort, healthGroupBy, healthCollapsedHosts,
+// fileViewerViewMode) yet was structurally blind to this SECOND storage
+// namespace: ObsUi is a separate interface behind its own loadObs/saveObs, so
+// the compile error that protects every UiState pref can never fire for it.
+// These constants give warden:observer:v1 the same compile-enforced
+// reset-vs-preserve partition UiState already has.
+//
+// The split mirrors the UiState one exactly:
+//   PRESERVE openIds/activeId — WHICH observer sessions are open is workspace
+//     state, matching the reset's explicit "your open tabs, panes, focus, and
+//     panel layout are preserved" promise (the shipped ResetSection copy).
+//   RESET the 4 view-shaping preference fields — viewMode (which tab) and the
+//     three per-tab filter shapes (7 Select values total) made persistent by
+//     WARDEN-851/879 and WARDEN-971.
+export const OBS_PRESERVED_KEYS = [
+  'openIds', 'activeId',
+] as const satisfies readonly (keyof ObsUi)[];
+/** ObsUi workspace state the UI-prefs reset intentionally leaves alone. */
+export type ObsPreservedKey = (typeof OBS_PRESERVED_KEYS)[number];
+
+// The `satisfies` clause locks out preserved keys too (Exclude), so a field can
+// never be classified both ways.
+export const OBS_RESET_KEYS = [
+  'viewMode', 'activityFilters', 'directiveFilters', 'attentionFilters',
+] as const satisfies readonly Exclude<keyof ObsUi, ObsPreservedKey>[];
+/** An ObsUi pref the UI-prefs reset MUST restore. */
+export type ObsResetKey = (typeof OBS_RESET_KEYS)[number];
+
+// Compile-enforced exhaustiveness: every ObsUi key is classified as reset or
+// preserved. A field added to ObsUi but left off BOTH lists makes
+// Exclude<keyof ObsUi, …> non-never, which violates AssertNever's `extends
+// never` constraint — a BUILD ERROR, not a silent reset-escape. This is the
+// guard that makes the next ObsUi preference field fail the build rather than
+// escape the reset: attentionFilters reached ObsUi while WARDEN-981 sat in
+// draft, which is exactly the recurrence this exists to catch. (Exported so
+// noUnusedLocals keeps its hands off the guard itself.)
+type AssertNever<T extends never> = T;
+export type ObsUnclassifiedKeys = AssertNever<Exclude<keyof ObsUi, ObsResetKey | ObsPreservedKey>>;
+
+/** The default value for every resettable ObsUi pref — no optional (?) fields. */
+export type ObsUiPrefs = Required<Pick<ObsUi, ObsResetKey>>;
+
+/**
+ * The default value of every ObsUi pref the UI-prefs reset restores: the
+ * Sessions tab with all 7 filters at 'all'. A FACTORY, not a constant, so the
+ * filter objects are freshly built and can never be aliased/mutated (mirrors
+ * resetUiPrefDefaults, WARDEN-896). The return-type annotation is the compile
+ * enforcement: an OBS_RESET_KEYS entry missing here is a missing-property
+ * error. App's reset callback and ObserverTabs' live reset BOTH read these
+ * values from this one source.
+ */
+export function resetObsPrefDefaults(): ObsUiPrefs {
+  return {
+    viewMode: 'sessions',
+    activityFilters: { type: 'all', agent: 'all', host: 'all' },
+    directiveFilters: { agent: 'all', host: 'all' },
+    attentionFilters: { agent: 'all', host: 'all' },
+  };
+}
+
+/**
+ * The OBS_KEY payload after "Reset appearance & UI preferences": the 4 view
+ * prefs snap to defaults, openIds/activeId ride through from `current`
+ * (which observer sessions are open is workspace state, not a pref). Mirrors
+ * resetUiPrefsPreservingWorkspace for this namespace; App calls it with
+ * loadObs() so the on-disk payload is correct even in the window before
+ * ObserverTabs' saveObs effect re-persists the live state.
+ */
+export function resetObsPrefsPreservingWorkspace(current: ObsUi): ObsUi {
+  return { ...current, ...resetObsPrefDefaults() };
+}

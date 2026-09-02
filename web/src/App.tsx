@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
@@ -218,6 +218,19 @@ function App() {
   const [returnedAfterAbsence, setReturnedAfterAbsence] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention' | null>(null);
+  // WARDEN-981 — the Observer panel's half of "Reset appearance & UI
+  // preferences". The Observer's view prefs (viewMode + the 3 per-tab filter
+  // shapes) persist in a SECOND storage namespace (ObsUi / warden:observer:v1)
+  // that the UiState-derived ResettableKey reset below structurally cannot
+  // reach. The reset below does two things: rewrites the stored payload
+  // directly, and bumps this monotonically-increasing nonce so a STILL-MOUNTED
+  // panel snaps its live states to defaults with no remount. (The shipped
+  // reset fires from the full-page Settings view, which unmounts the dashboard
+  // — on return the panel re-seeds from the rewritten payload — but the nonce
+  // keeps the fix correct for any surface that resets while the dashboard is
+  // up, and for the same-value-bailout trap a repeated reset would otherwise
+  // hit: every bump is a distinct value.)
+  const [observerResetToken, setObserverResetToken] = useState(0);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   // The past-conversation whose read-only transcript is open from a global-search
   // result (WARDEN-719). Lifted to App level — NOT inside GlobalSearchDialog —
@@ -891,6 +904,27 @@ function App() {
     for (const key of Object.keys(defaults) as ResettableKey[]) {
       (resetSetters[key] as (value: unknown) => void)(defaults[key]);
     }
+
+    // WARDEN-981 — the Observer panel's prefs are the one resettable view state
+    // OUTSIDE UiState: ObsUi / warden:observer:v1, behind its own loadObs/
+    // saveObs. Two halves, deliberately separated:
+    //   1. DISK: rewrite the stored payload with the 4 pref fields defaulted
+    //      (resetObsPrefsPreservingWorkspace keeps openIds/activeId — which
+    //      observer sessions are open is workspace state, exactly like
+    //      workspaces/activeWorkspaceId above). This is the half the shipped
+    //      flow rides: the full-page Settings view unmounts the dashboard, and
+    //      ObserverTabs re-seeds its viewMode/filter useState from loadObs() on
+    //      remount — so the panel returns from Settings already reset.
+    //   2. LIVE: bump the nonce ObserverTabs watches, so a panel that IS
+    //      mounted when the reset fires snaps viewMode + the 7 filter states to
+    //      defaults in place (they are component-local useState seeded once at
+    //      mount; without the signal a mounted panel would keep rendering the
+    //      old tab/filters). Monotonic counter → back-to-back resets are always
+    //      distinct values, immune to the same-value bailout.
+    // setObserverResetToken is a useState setter (stable identity by React
+    // contract), so it joins clearWatchedChats outside the dep array.
+    saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
+    setObserverResetToken((t) => t + 1);
   }, [clearWatchedChats]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
@@ -2040,7 +2074,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, attentionDesktopAlerts, mutedAlertKeys, snoozedAlertKeys, onSetAlertMute: setAlertMute, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
+            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, attentionDesktopAlerts, mutedAlertKeys, snoozedAlertKeys, onSetAlertMute: setAlertMute, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
