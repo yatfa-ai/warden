@@ -24,6 +24,7 @@
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import type { HostConnectivity, HostConnectivityStatus } from '@/lib/healthUtils';
 import { normalizeCompanionStatus, shouldScheduleCheckingRetry } from '@/lib/healthUtils';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 
 const POLL_MS = 30_000; // fixed host-dot cadence (see WARDEN-609: option (a))
 const FRESH_MS = 5_000; // a response younger than this is reused as-is
@@ -32,6 +33,17 @@ const FRESH_MS = 5_000; // a response younger than this is reused as-is
 // `checking`. Rather than wait a full 30s cadence for its dot to fill in, a
 // response containing any `checking` host earns one short follow-up.
 const CHECKING_RETRY_MS = 1_200;
+// WARDEN-1144: bounded on the shared deadline, POLLER policy — no retries, and a
+// deadline shorter than the cadence. `retry: false` below is a REFETCH policy: it
+// decides whether a SETTLED failure is tried again, and can do nothing about a
+// request that never settles. The stall is worse here than in a plain poller,
+// because TanStack DEDUPES against the in-flight fetch for a key: an unsettled
+// one is never superseded by the next tick, so every host dot in the app freezes
+// on its last value permanently rather than for one cycle. The deadline is what
+// settles it; the next tick is the retry. Derived from the FIXED 30s cadence
+// (not the 1.2s checking follow-up, which is a one-off shortening of the same
+// poll, not a second cadence to size a deadline against).
+const FETCH_OPTS = pollerFetchOptions(POLL_MS);
 
 /** The ONE cache key for the /api/hosts/status fact (TanStack Query). */
 export const HOST_STATUSES_KEY = 'host-statuses' as const;
@@ -51,7 +63,7 @@ function normalizeStatus(raw: string | undefined): HostConnectivityStatus {
 
 /** Fetch + normalize one /api/hosts/status response (the old singleton's body). */
 export async function fetchHostStatuses(): Promise<HostStatusesData> {
-  const res = await fetch('/api/hosts/status');
+  const res = await fetchBounded('/api/hosts/status', FETCH_OPTS);
   if (!res.ok) throw new Error(`hosts/status ${res.status}`);
   const data = await res.json();
   const hosts = Array.isArray(data?.hosts) ? data.hosts : [];

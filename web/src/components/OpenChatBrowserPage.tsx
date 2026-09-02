@@ -23,6 +23,7 @@ import { formatTokens } from '@/lib/formatTokens';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
 import { readAllSessionsPage } from '@/lib/allSessionsApi';
+import { fetchBounded } from '@/lib/api';
 // Discovery-host selection persistence (localStorage). Extracted to @/lib so it
 // is unit-testable and its failure handling follows the app-wide warn
 // convention like every other local-storage writer. (WARDEN-1230.)
@@ -268,7 +269,8 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       // parses with the right tolerance per leg. It THROWS on failure, so a
       // backend failure can no longer arrive here disguised as an empty list.
       const { sessions, hasMore, unreachableHosts: down } = await readAllSessionsPage(
-        await fetch(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`),
+        // WARDEN-1144: bounded — gates `loadingAllSessions` (the page's skeleton).
+        await fetchBounded(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`),
       );
       // A genuinely empty result stays empty and still renders the existing
       // "Nothing runnable on the selected hosts yet" empty state — only a real
@@ -300,7 +302,8 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     setSessionsError(null);
     try {
       const { sessions: next, hasMore, unreachableHosts: down } = await readAllSessionsPage(
-        await fetch(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`),
+        // WARDEN-1144: bounded — gates `loadingMoreSessions` (the load-more button).
+        await fetchBounded(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`),
       );
       setHasMoreSessions(hasMore);
       // Also replaced rather than merged: the server re-reads the WHOLE fleet for
@@ -440,7 +443,9 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const r = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
+        // WARDEN-1144: bounded — gates `searchLoading`. The `cancelled` flag is a
+        // staleness guard for a SETTLED result; it cannot end an unsettled wait.
+        const r = await fetchBounded(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
         if (!r.ok) throw new Error(`session search HTTP ${r.status}`);
         const j = await r.json();
         if (!cancelled) setContentResults(Array.isArray(j.results) ? j.results : []);

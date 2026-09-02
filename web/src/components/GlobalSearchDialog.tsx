@@ -20,7 +20,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
-import { readErrorBody } from '@/lib/api';
+import { fetchBounded, readErrorBody } from '@/lib/api';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
@@ -220,7 +220,10 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
     setSearching(true);
     setError(null);
     try {
-      const res = await fetch(`/api/search-pane?query=${encodeURIComponent(q)}&panes=${openPanes.join(',')}`);
+      // WARDEN-1144: bounded — gates `searching`. `claimLatest` supersedes a
+      // STALE result; it cannot end an unsettled wait, so the newest search's own
+      // stall still held the spinner. One-shot (Enter) → the defaults.
+      const res = await fetchBounded(`/api/search-pane?query=${encodeURIComponent(q)}&panes=${openPanes.join(',')}`);
       // Parsed BEFORE the ok-gate BY DESIGN: /api/search-pane returns some
       // failures at HTTP 200 with an `error` field, so the gate below reads
       // `data.error` alongside `res.ok`. Leg gating lives in `readErrorBody`.
@@ -273,7 +276,8 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
     const t = setTimeout(async () => {
       setError(null); // fresh attempt — clear any prior banner (mirrors doSearch)
       try {
-        const res = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
+        // WARDEN-1144: bounded — gates `sessionSearching`.
+        const res = await fetchBounded(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
         // Parsed before the ok-gate, same soft-error-at-200 rationale as doSearch.
         const data = await readErrorBody(res);
         if (!res.ok || data.error) {

@@ -36,7 +36,7 @@ import {
   gitStatusQueryKey,
   toFleetSlice,
 } from '@/lib/gitStatusQuery';
-import { GIT_STATUS_QUERY_OPTIONS, useInvalidateAllGitStatus, useLogGitStatusErrors } from '@/lib/gitStatusHooks';
+import { GIT_STATUS_QUERY_OPTIONS, boundedGitStatusFetcher, useInvalidateAllGitStatus, useLogGitStatusErrors } from '@/lib/gitStatusHooks';
 
 export interface FleetGitStatusState extends FleetGitStatusResult {
   /** # of fanned agents with status.clean === false (the fleet "N dirty" count). */
@@ -79,7 +79,7 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
   const queries = useQueries({
     queries: keys.map((key) => ({
       queryKey: gitStatusQueryKey(key),
-      queryFn: () => fetchGitStatusPayload(key),
+      queryFn: () => fetchGitStatusPayload(key, boundedGitStatusFetcher),
       ...GIT_STATUS_QUERY_OPTIONS,
     })),
   });

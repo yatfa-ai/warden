@@ -17,6 +17,30 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { fetchGitStatusPayload, gitStatusQueryKey, GIT_STATUS_KEY } from '@/lib/gitStatusQuery';
+import { fetchBounded } from '@/lib/api';
+
+/**
+ * The fetcher every git-status query runs through: the shared BOUNDED deadline,
+ * not a raw `fetch` (WARDEN-1144).
+ *
+ * This fact gates two spinners. `useFleetGitStatus`'s `loading` is
+ * `queries.some((q) => q.isFetching)`, so ONE stalled agent held the whole Fleet
+ * Health repository-state panel; and the sidebar's focused-pane git section reads
+ * the same key. `retry: false` above is a REFETCH policy — it decides whether a
+ * SETTLED failure is tried again, and can do nothing about a request that never
+ * settles in the first place. The deadline is what settles it.
+ *
+ * There is no auto-poll on this key (mount / membership change / manual ↻ only),
+ * so it is the ONE-SHOT shape and takes the primitive's defaults.
+ *
+ * It lives HERE, in the React glue, rather than as the default parameter of
+ * `fetchGitStatusPayload`: gitStatusQuery.ts holds an explicit purity contract
+ * (no React, no query lib, driven by node --test through its injectable
+ * `fetcher` seam), and its harness transpiles exactly one named import. A new
+ * import there would break that seam; passing the fetcher in preserves it.
+ */
+export const boundedGitStatusFetcher: typeof fetch = (input, init) =>
+  fetchBounded(String(input), { init });
 
 /** Options every git-status query runs under — no auto-poll, no retry storms. */
 export const GIT_STATUS_QUERY_OPTIONS = {
@@ -46,7 +70,7 @@ export const GIT_STATUS_QUERY_OPTIONS = {
 export function useGitStatus(key: string | null | undefined): UseQueryResult<Record<string, unknown>, Error> {
   return useQuery({
     queryKey: gitStatusQueryKey(key ?? ''),
-    queryFn: () => fetchGitStatusPayload(key as string),
+    queryFn: () => fetchGitStatusPayload(key as string, boundedGitStatusFetcher),
     enabled: typeof key === 'string' && key.length > 0,
     ...GIT_STATUS_QUERY_OPTIONS,
   });

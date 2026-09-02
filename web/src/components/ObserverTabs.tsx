@@ -12,6 +12,7 @@ import { loadObs, saveObs, resetObsPrefDefaults } from '@/lib/storage';
 import type { ObsResetKey } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { fetchBounded } from '@/lib/api';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
 import { AttentionView } from './AttentionView';
 import type { AttentionListProps } from './AttentionList';
@@ -138,7 +139,12 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
     }, 10000);
 
     try {
-      const r = await fetch('/api/sessions');
+      // WARDEN-1144: bounded on the shared deadline. This surface already had a
+      // hand-rolled 10s `loadingTimeout` timer — but that only changes the COPY
+      // ("taking longer than expected"); it never ends the wait, so the spinner
+      // still ran forever. The deadline is what ends it; the timer is kept as the
+      // in-between affordance it always was. One-shot/manual → the defaults.
+      const r = await fetchBounded('/api/sessions');
       if (!r.ok) {
         throw new Error(`HTTP ${r.status}: ${r.statusText}`);
       }

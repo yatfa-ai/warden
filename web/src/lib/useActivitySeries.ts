@@ -11,6 +11,7 @@
 // ref-counted singleton like useHostStatuses is the natural next step.
 import { useState } from 'react';
 import type { ActivitySeries } from '@/lib/types';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 
 // Slow cadence: a 24h hourly aggregate doesn't move in seconds. ~60s keeps the
@@ -21,6 +22,10 @@ const POLL_MS = 60_000;
 // Default window mirrors the server's /api/activity/series default (last 24h),
 // so a bare mount needs no params and the per-row sparkline shows a full day.
 const WINDOW_MS = 24 * 60 * 60 * 1000;
+// WARDEN-1144: the read gates `loading`, so it is bounded by the shared deadline.
+// Poller policy (no retries, deadline < period) — see api.ts's pollerFetchOptions:
+// the next 60s tick IS the retry, so a stalled tick must not stack attempts.
+const FETCH_OPTS = pollerFetchOptions(POLL_MS);
 
 export interface ActivitySeriesState {
   series: ActivitySeries | null;
@@ -43,7 +48,7 @@ export function useActivitySeries(): ActivitySeriesState {
   const load = async () => {
     const after = new Date(Date.now() - WINDOW_MS).toISOString();
     try {
-      const res = await fetch(`/api/activity/series?after=${encodeURIComponent(after)}`);
+      const res = await fetchBounded(`/api/activity/series?after=${encodeURIComponent(after)}`, FETCH_OPTS);
       // A non-2xx (502/503 mid-restart, dev proxy down, a throw out of the
       // server's /api/activity/series handler) is a real failure, not a no-op:
       // record it so an observer can say so instead of claiming to be loading.

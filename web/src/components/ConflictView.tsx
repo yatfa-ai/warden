@@ -16,6 +16,7 @@
 // (classifyDiffLine would tag every line `context`; a computed ours-vs-theirs diff
 // is an optional enhancement, out of scope here).
 import { useState, useEffect } from 'react';
+import { fetchBounded } from '@/lib/api';
 import {
   Dialog,
   DialogContent,
@@ -70,7 +71,11 @@ export function ConflictView({ chatId, filePath, open, onOpenChange }: ConflictV
       setData(null);
       try {
         const url = `/api/git-conflict?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`;
-        const response = await fetch(url);
+        // WARDEN-1144: bounded on the shared deadline — this gates `loading`
+        // ("Loading conflict…"), and the `cancelled` flag it already carries is a
+        // CANCELLATION guard, not a deadline: an unsettled promise never reaches
+        // the finally that clears the flag. One-shot (fires on open), so defaults.
+        const response = await fetchBounded(url);
         if (!response.ok) {
           const j = await response.json().catch(() => ({}));
           if (!cancelled) setError(j.error || `Failed to load conflict: ${response.statusText}`);

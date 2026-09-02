@@ -43,6 +43,7 @@ import { showFanoutToast } from '@/lib/fanoutToast';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
@@ -52,6 +53,13 @@ import { formatTokens } from '@/lib/formatTokens';
 import { useHostLabels } from '@/lib/hostLabels';
 import { cn } from '@/lib/utils';
 import { Trash2 } from 'lucide-react';
+
+// The fleet-health poll cadence. WARDEN-1144 named it (it was an inline `10000`)
+// so the bounded-read deadline is DERIVED from the period rather than guessed
+// beside it — the poller policy is "deadline strictly shorter than the period",
+// and that invariant only holds if the two numbers cannot drift apart.
+const HEALTH_POLL_MS = 10_000;
+const HEALTH_FETCH_OPTS = pollerFetchOptions(HEALTH_POLL_MS);
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -763,7 +771,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/health');
+      // WARDEN-1144: this read gates `loading` (the ↻ spinner and the
+      // "Loading health data…" body), so it is bounded by the shared deadline on
+      // the POLLER policy — no retries, deadline < the 10s period. This is the
+      // case that set the bar for that policy: on the one-shot defaults a stalled
+      // tick would spend 3 x 8s ~= 24s of attempts inside a 10s window, stacking
+      // three ticks' worth of requests against an already-blocked event loop. The
+      // next tick IS the retry.
+      const res = await fetchBounded('/api/health', HEALTH_FETCH_OPTS);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
@@ -780,7 +795,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
   // tab never burns a fetch + render churn every tick — the same invariant every
   // other poller in the app applies. On regaining focus we poll immediately
   // because state may be stale while hidden. (WARDEN-661; consolidated WARDEN-753.)
-  useVisiblePoller(fetchHealth, 10000, []);
+  useVisiblePoller(fetchHealth, HEALTH_POLL_MS, []);
 
   // Bucket agents by host, order hosts degraded-first (offline → critical-heavy
   // → agent count), and order each host's agents healthy → critical. Pure inputs
@@ -1071,7 +1086,11 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
       await Promise.all(
         Array.from(hosts).map((h) =>
-          fetch(`/api/discover?host=${encodeURIComponent(h)}`).catch(() => {}),
+          // WARDEN-1144: this reconcile runs inside the KillDialog's `busy` gate
+          // (runKillFanout awaits onSettled), so an unbounded discover would hold
+          // the dialog's spinner with nothing left to clear it. One-shot shape →
+          // the primitive's defaults.
+          fetchBounded(`/api/discover?host=${encodeURIComponent(h)}`).catch(() => {}),
         ),
       );
       await fetchHealth();

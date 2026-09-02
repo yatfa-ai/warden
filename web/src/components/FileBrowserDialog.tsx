@@ -19,7 +19,7 @@ import {
 // src/lib so it is unit-testable without a DOM — the WARDEN-573 subdir-expansion
 // decision is asserted against the real function (see web/fileBrowser.test.mjs).
 import { type DirState, EMPTY_DIR, joinPath, applyToggle } from '@/lib/fileBrowserTree';
-import { readErrorBody } from '@/lib/api';
+import { fetchBounded, readErrorBody } from '@/lib/api';
 
 interface Props {
   chatId: string;
@@ -47,7 +47,9 @@ export function FileBrowserDialog({ chatId, cwd, open, onOpenChange, onSelectFil
   const fetchDir = useCallback(async (dir: string) => {
     setTree((t) => ({ ...t, [dir]: { ...(t[dir] || EMPTY_DIR), loading: true, error: null } }));
     try {
-      const res = await fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(dir)}`);
+      // WARDEN-1144: bounded — this gates the per-directory `loading: true` set
+      // just above, which nothing else clears. One-shot (open / expand a dir).
+      const res = await fetchBounded(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(dir)}`);
       // Parsed BEFORE the ok-gate BY DESIGN: /api/git-ls returns transport errors
       // at HTTP 200 with an `error` field (no-cwd / not-a-git-repo), mirroring
       // /api/git-status + /api/search-files — so the gate below reads

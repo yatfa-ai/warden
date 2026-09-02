@@ -14,7 +14,7 @@ import {
   type FleetRecentCommitsResult,
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
-import { readListBody, readListResponse } from '@/lib/api';
+import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
 import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile } from './sidebar/types';
@@ -170,7 +170,13 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
           // HERE, not inside buildFleetRecentCommitsUrl, so the pure URL builder
           // stays single-purpose.
           const base = buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT);
-          const [recentR, outgoingR] = await Promise.all([fetch(base), fetch(`${base}&range=outgoing`)]);
+          // WARDEN-1144: bounded on the shared deadline. This gates `loading`, and
+          // the fan makes a stall MAXIMALLY damaging: `setLoading(false)` runs once,
+          // after `Promise.allSettled` over EVERY eligible agent, so ONE stalled
+          // agent held the whole fleet panel's spinner. (The existing `cancelled`
+          // flag guards a stale WRITE — it cannot end an unsettled wait.) Manual /
+          // membership-change shape, no auto-poll → the primitive's defaults.
+          const [recentR, outgoingR] = await Promise.all([fetchBounded(base), fetchBounded(`${base}&range=outgoing`)]);
           // WARDEN-1216: the recent fetch is the reachability probe, and its read now
           // goes through the shared readListBody + readListResponse pair so BOTH
           // halves of git-log's failure convention throw and are counted as that
@@ -231,7 +237,9 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     if (showCache[cacheKey] || showLoading[cacheKey]) return;
     setShowLoading((p) => ({ ...p, [cacheKey]: true }));
     try {
-      const r = await fetch(`/api/git-show?id=${encodeURIComponent(key)}&hash=${encodeURIComponent(hash)}`);
+      // WARDEN-1144: bounded — gates this row's `showLoading` entry ("loading
+      // files…"), cleared only by the finally after this await.
+      const r = await fetchBounded(`/api/git-show?id=${encodeURIComponent(key)}&hash=${encodeURIComponent(hash)}`);
       const j = await r.json();
       setShowCache((p) => ({ ...p, [cacheKey]: { files: Array.isArray(j.files) ? j.files : [], message: typeof j.message === 'string' ? j.message : undefined, error: j.error } }));
     } catch {

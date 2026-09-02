@@ -49,6 +49,7 @@ import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDO
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadStateEnteredAt, saveStateEnteredAt, computeEnteredAt } from '@/lib/stateDuration';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
@@ -87,6 +88,18 @@ const AGENT_STATE_POLL_MS = 30_000;
 // HEALTHY forever. 90s sits in the ticket's 60–120s band and off the :00/:30 marks so it
 // never lands on the same tick as another poll.
 const FLEET_SWEEP_POLL_MS = 90_000;
+
+// WARDEN-1144: all three reads gate a flag (`loading` for health/stats,
+// `agentStatesLoaded`/`fleetSweepLoaded` for the other two), so each is bounded by
+// the shared deadline on the POLLER policy — no retries, deadline < the period.
+// The health poll is the sharpest case that motivated the policy: on the one-shot
+// defaults (3 attempts x 8s) a stalled tick would spend ~24s of attempts inside a
+// 10s window, so a slow server would stack three ticks' worth of in-flight
+// requests against the very event loop that is already blocked. The next tick IS
+// the retry (the poller core fires unconditionally — no in-flight guard).
+const HEALTH_FETCH_OPTS = pollerFetchOptions(HEALTH_POLL_MS);
+const AGENT_STATE_FETCH_OPTS = pollerFetchOptions(AGENT_STATE_POLL_MS);
+const FLEET_SWEEP_FETCH_OPTS = pollerFetchOptions(FLEET_SWEEP_POLL_MS);
 
 // A stable empty array default for `mutedAlertKeys` so the memoized Set and the
 // effect dep list stay reference-stable when no caller passes a mute set.
@@ -387,8 +400,8 @@ export function useAttentionRollup(
     // rollup, and must not crash the badge. A failed half degrades to null and the
     // last good data for the other half is preserved (state isn't cleared on failure).
     const [healthRes, statsRes] = await Promise.allSettled([
-      fetch('/api/health').then((r) => (r.ok ? (r.json() as Promise<HealthData>) : Promise.reject(new Error(`health ${r.status}`)))),
-      fetch(`/api/activity/stats?after=${encodeURIComponent(after)}`).then((r) => (r.ok ? (r.json() as Promise<ActivityStats>) : Promise.reject(new Error(`stats ${r.status}`)))),
+      fetchBounded('/api/health', HEALTH_FETCH_OPTS).then((r) => (r.ok ? (r.json() as Promise<HealthData>) : Promise.reject(new Error(`health ${r.status}`)))),
+      fetchBounded(`/api/activity/stats?after=${encodeURIComponent(after)}`, HEALTH_FETCH_OPTS).then((r) => (r.ok ? (r.json() as Promise<ActivityStats>) : Promise.reject(new Error(`stats ${r.status}`)))),
     ]);
     setHealth(healthRes.status === 'fulfilled' ? healthRes.value : null);
     setStats(statsRes.status === 'fulfilled' ? statsRes.value : null);
@@ -406,7 +419,7 @@ export function useAttentionRollup(
     const union = Array.from(new Set([...open, ...watched]));
     if (!union.length) { setAgentStates([]); setWatchedStates([]); setAgentStatesLoaded(true); return; }
     try {
-      const res = await fetch(`/api/agent-states?panes=${encodeURIComponent(union.join(','))}`);
+      const res = await fetchBounded(`/api/agent-states?panes=${encodeURIComponent(union.join(','))}`, AGENT_STATE_FETCH_OPTS);
       if (res.ok) {
         const data = (await res.json()) as AgentStatesData;
         const rows = Array.isArray(data?.agents) ? data.agents : [];
@@ -644,7 +657,7 @@ export function useAttentionRollup(
     // counts) a pane the faster poll owns.
     const exclude = Array.from(new Set([...open, ...watched]));
     try {
-      const res = await fetch(`/api/agent-states/fleet?exclude=${encodeURIComponent(exclude.join(','))}`);
+      const res = await fetchBounded(`/api/agent-states/fleet?exclude=${encodeURIComponent(exclude.join(','))}`, FLEET_SWEEP_FETCH_OPTS);
       if (res.ok) {
         const data = (await res.json()) as AgentStatesData;
         const rows = Array.isArray(data?.agents) ? data.agents : [];

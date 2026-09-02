@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
+import { fetchBounded } from '@/lib/api';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import {
@@ -140,7 +141,9 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
     (async () => {
       try {
-        const r = await fetch(`/api/claude-session?id=${encodeURIComponent(session.id)}&host=${encodeURIComponent(session.host)}`);
+        // WARDEN-1144: bounded — gates `status === 'loading'` (the transcript
+        // skeleton), which only leaves that state once this settles.
+        const r = await fetchBounded(`/api/claude-session?id=${encodeURIComponent(session.id)}&host=${encodeURIComponent(session.host)}`);
         const j = await r.json();
         if (cancelled) return;
         // Unreachable host → a graceful error body (never a hang), not an HTTP error.
@@ -177,7 +180,8 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
     setEarlierError('');
     setLoadingEarlier(true);
     try {
-      const r = await fetch(`/api/claude-session?id=${encodeURIComponent(session.id)}&host=${encodeURIComponent(session.host)}&before=${prevCursor}`);
+      // WARDEN-1144: bounded — gates `loadingEarlier` (the Load-earlier button).
+      const r = await fetchBounded(`/api/claude-session?id=${encodeURIComponent(session.id)}&host=${encodeURIComponent(session.host)}&before=${prevCursor}`);
       const j = await r.json();
       // Bail if the session changed/closed while the fetch was in flight.
       if (activeSessionIdRef.current !== session.id) return;

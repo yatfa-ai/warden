@@ -55,7 +55,7 @@ import type { SourceControlGitInfo } from './sidebar/SourceControlPanel';
 import { useGitStatus, useInvalidateGitStatus } from '@/lib/gitStatusHooks';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION } from '@/lib/sessionTags';
-import { readListBody, readListResponse, readResponse } from '@/lib/api';
+import { fetchBounded, readListBody, readListResponse, readResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -202,7 +202,12 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
     setLoading((p) => ({ ...p, [chatId]: true }));
     setError((p) => ({ ...p, [chatId]: null }));
     try {
-      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
+      // WARDEN-1144: bounded on the shared deadline. The flag and the fetch sit in
+      // different places here — `setLoading` is keyed PER CHAT in the component while
+      // the fetch lives in this shared helper — so a stall on one chat's expand would
+      // hold that chat's `loading` entry true with nothing left to clear it. One-shot
+      // shape (fires on expand, nothing ticks), so the primitive's defaults apply.
+      const r = await fetchBounded(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
       // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
       // catch instead of becoming an empty list with no error (WARDEN-1014 review).
       const j = await readListBody(r);
@@ -346,7 +351,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
     try {
-      const r = await fetch(`/api/claude-sessions?host=${encodeURIComponent(host)}`);
+      // WARDEN-1144: bounded — this gates `loadingHost`, whose only clear is the
+      // `setLoadingHost(null)` after this await. A stall held the host's rescan
+      // spinner forever. One-shot (a click), so the defaults apply.
+      const r = await fetchBounded(`/api/claude-sessions?host=${encodeURIComponent(host)}`);
       // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx body
       // that fails to parse is a real failure and must reach the catch below rather
       // than becoming a confident empty list (WARDEN-1014).
@@ -767,7 +775,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // Collections management
   const fetchCollections = async (): Promise<Collection[]> => {
     try {
-      const r = await fetch('/api/collections');
+      // WARDEN-1144: bounded. This read has no loading flag of its own, but it is
+      // awaited by CollectionsSection's refresh (which does), and its result gates
+      // the collection view's contents.
+      const r = await fetchBounded('/api/collections');
       const j = await r.json();
       const list = j.collections || [];
       setCollections(list);
