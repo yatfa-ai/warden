@@ -19,6 +19,7 @@ import { MarkdownBody } from './MarkdownBody';
 import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/timelinePacing';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 
 // Read-only history of every directive that reached an agent (full text + target
 // + time), sourced from the append-only directives.md via GET /api/directives.
@@ -28,6 +29,11 @@ import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/t
 // scrollable MarkdownBody block — the whole point of this tab (see WARDEN-359).
 
 const DIRECTIVE_POLL_MS = POLL_INTERVAL_MS; // directives change rarely, but a sent directive should appear live.
+// WARDEN-1144: the read gates `loading` (first fetch) and `refreshing` (every
+// background tick + the manual Refresh button), so it is bounded by the shared
+// deadline on the POLLER policy — no retries, deadline < the poll period. The
+// next tick IS the retry, so a stalled tick must not stack attempts.
+const FETCH_OPTS = pollerFetchOptions(DIRECTIVE_POLL_MS);
 
 export function DirectiveHistory({
   timestampFormat,
@@ -64,7 +70,7 @@ export function DirectiveHistory({
       const background = opts?.background === true;
       if (background) setRefreshing(true);
       try {
-        const res = await fetch(`/api/directives?limit=${limit}`);
+        const res = await fetchBounded(`/api/directives?limit=${limit}`, FETCH_OPTS);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const j = await res.json();
         setDirectives(Array.isArray(j.directives) ? j.directives : []);

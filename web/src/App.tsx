@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
-import { postJson } from '@/lib/api';
+import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
@@ -24,6 +24,16 @@ import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } 
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
+
+// WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
+// spinner), so they are bounded by the shared deadline. They ride an interval
+// poller whose period is the USER-TUNED `pollIntervalMs`, so the deadline is
+// derived from that pref's FLOOR rather than its current value: the floor is the
+// shortest period the pref can resolve to, so a deadline of half the floor is
+// strictly shorter than EVERY period the poller can run at — the poller rule
+// holds without threading a live cadence into a `useCallback([])`. The next tick
+// IS the retry, so `retries: 0` applies here too.
+const CATALOG_FETCH_OPTS = pollerFetchOptions(WEB_POLL_FLOOR_MS);
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
@@ -46,7 +56,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
-import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
+import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
 import { reconcileMainOwnedPref } from '@/lib/mainOwnedPref';
 import { toast } from 'sonner';
@@ -695,9 +705,9 @@ function App() {
     // dropped every host added by typing its name in Settings (WARDEN-940), so it
     // got no sidebar row and no Open Chat scope chip. mergeHostList unions them,
     // de-duplicated and with '(local)' filtered (consumers prepend THIS_MACHINE).
-    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(mergeHostList(j))).catch((error) => console.error('[ssh-hosts] Failed:', error));
+    fetchBounded('/api/ssh-hosts', CATALOG_FETCH_OPTS).then((r) => r.json()).then((j) => setSshHosts(mergeHostList(j))).catch((error) => console.error('[ssh-hosts] Failed:', error));
     try {
-      const cr = await fetch('/api/chats');
+      const cr = await fetchBounded('/api/chats', CATALOG_FETCH_OPTS);
       const diskChats: Chat[] = (await cr.json()).chats || [];
       setChats((prev) => {
         const discovered = discoveredHostsRef.current;
@@ -932,7 +942,7 @@ function App() {
   const discoverHost = useCallback(async (host: string) => {
     discoveredHostsRef.current.add(host);
     try {
-      const r = await fetch(`/api/discover?host=${encodeURIComponent(host)}`);
+      const r = await fetchBounded(`/api/discover?host=${encodeURIComponent(host)}`, CATALOG_FETCH_OPTS);
       const j = await r.json();
       if (Array.isArray(j.chats)) {
         setChats((prev) => applyOptimisticGuard([...prev.filter((c) => c.host !== host), ...j.chats] as Chat[], killedChatIdsRef.current, pendingRenamesRef.current));

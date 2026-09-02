@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, modPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-fetch-json-'));
 const tmpFile = join(tmpDir, 'api.mjs');
 writeFileSync(tmpFile, code);
-const { fetchJson, postJson, putJson } = await import(tmpFile);
+const { fetchJson, fetchBounded, pollerFetchOptions, postJson, putJson } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 // --- Fake fetch + response builders ---------------------------------------
@@ -315,6 +315,248 @@ await test('postJson: a 4xx with a JSON error body still surfaces that error', a
   );
   assert.equal(r.ok, false);
   assert.equal(r.error, 'bad request');
+});
+
+
+// === fetchBounded — the RAW-Response shell over the same deadline (WARDEN-1144) ==
+//
+// Most of warden's UI-gating reads read their body through the house readers
+// (readListBody + readListResponse/readResponse/readErrorBody), whose contract
+// fetchJson cannot express: a 200 carrying `{error}` is a FAILURE. Routing those
+// sites through fetchJson would flatten that back into the WARDEN-89 false-empty
+// it exists to remove — so they get the DEADLINE without the body contract.
+
+await test('fetchBounded returns the raw Response, body untouched, on a 2xx', async () => {
+  const res = ok({ commits: [{ hash: 'abc' }] });
+  const fetchImpl = scriptableFetch([res]);
+  const r = await fetchBounded('/api/git-log', { fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r, res, 'the caller owns the Response — nothing is parsed for it');
+  assert.deepEqual(await r.json(), { commits: [{ hash: 'abc' }] }, 'the body stream is unread');
+});
+
+await test('fetchBounded hands back a 200-carrying-{error} UNTOUCHED (the house convention survives)', async () => {
+  // This is the whole reason the sibling exists: fetchJson reports ANY 2xx as
+  // ok:true, so this response would have read as a confident success. Here the
+  // caller's readListResponse still gets to call it a failure.
+  const fetchImpl = scriptableFetch([ok({ commits: [], error: 'no cwd' })]);
+  const r = await fetchBounded('/api/git-log', { fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.ok, true, 'the transport succeeded — the verdict is the caller\u2019s');
+  assert.deepEqual(await r.json(), { commits: [], error: 'no cwd' });
+});
+
+await test('fetchBounded does NOT retry a 5xx — an HTTP status is a settled answer', async () => {
+  // Deciding a 5xx is retryable requires reading the body, which would consume
+  // the stream the caller owns. So the retry policy here is transport-only.
+  const fetchImpl = scriptableFetch([jsonRes(503, { error: 'busy' })]);
+  const r = await fetchBounded('/api/git-log', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.equal(r.status, 503, 'the status is handed back for the caller to read');
+  assert.equal(fetchImpl.calls(), 1, 'an HTTP answer is settled, not retried');
+});
+
+await test('fetchBounded retries a transient TRANSPORT failure, then heals', async () => {
+  const fetchImpl = scriptableFetch([
+    () => Promise.reject(new Error('fetch failed')),
+    () => Promise.resolve(ok({ healed: true })),
+  ]);
+  const r = await fetchBounded('/api/git-log', { retries: 2, fetchImpl, sleepImpl: sleepZero });
+  assert.deepEqual(await r.json(), { healed: true });
+  assert.equal(fetchImpl.calls(), 2);
+});
+
+await test('fetchBounded THROWS on exhaustion — the call site\u2019s existing catch is the error path', async () => {
+  // Unlike fetchJson (which never throws), this replaces a raw `fetch` at sites
+  // that already wrap it in try/catch, so a failure must land in that catch.
+  const fetchImpl = scriptableFetch([
+    () => Promise.reject(new Error('down')),
+    () => Promise.reject(new Error('down')),
+  ]);
+  await assert.rejects(
+    () => fetchBounded('/api/git-log', { retries: 1, fetchImpl, sleepImpl: sleepZero }),
+    /down/,
+  );
+  assert.equal(fetchImpl.calls(), 2);
+});
+
+await test('fetchBounded aborts a STALLED backend rather than awaiting it forever', async () => {
+  // The core guarantee, for the shell the 20+ adopted surfaces actually use: a
+  // fake fetch that never resolves on its own settles ONLY because the deadline
+  // fires. Without it the caller's `finally` (which clears the spinner) is never
+  // reached — the forever-spinner this ticket closes.
+  const hangingFetch = (url, { signal }) =>
+    new Promise((_resolve, reject) => {
+      const onAbort = () => reject(new Error('The operation was aborted.'));
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  const start = Date.now();
+  await assert.rejects(
+    () => fetchBounded('/api/health', { retries: 1, timeoutMs: 30, fetchImpl: hangingFetch, sleepImpl: sleepZero }),
+    /abort/i,
+  );
+  assert.ok(Date.now() - start < 1000, 'the wait must be bounded, not infinite');
+});
+
+await test('fetchBounded passes `init` through so a READ expressed as a POST is bounded too', async () => {
+  // The boundary is "does it gate a UI surface", not "is it a GET":
+  // /api/read-file and /api/search-files are reads whose query rides the body.
+  let seen = null;
+  const fetchImpl = (url, opts) => { seen = opts; return Promise.resolve(ok({})); };
+  await fetchBounded('/api/read-file', {
+    fetchImpl,
+    sleepImpl: sleepZero,
+    init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"path":"x"}' },
+  });
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.body, '{"path":"x"}');
+  assert.ok(seen.signal, 'the deadline signal is still installed over the caller\u2019s init');
+});
+
+// === Cancellation composes with the deadline, it is not replaced by it ========
+//
+// FileViewer already holds a per-session AbortController (close / switch /
+// unmount). The ticket's boundary: that behaviour SURVIVES — a deadline composes
+// with a cancellation controller rather than replacing it.
+
+await test('a caller signal aborted MID-FLIGHT rejects with the caller\u2019s own reason', async () => {
+  const caller = new AbortController();
+  const hangingFetch = (url, { signal }) =>
+    new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('inner abort')), { once: true });
+    });
+  const p = fetchBounded('/api/read-file', {
+    retries: 3,
+    timeoutMs: 5_000,
+    fetchImpl: hangingFetch,
+    sleepImpl: sleepZero,
+    signal: caller.signal,
+  });
+  caller.abort();
+  const err = await p.then(() => null, (e) => e);
+  assert.ok(err, 'a cancelled read rejects');
+  assert.equal(err.name, 'AbortError',
+    'the caller\u2019s AbortError surfaces verbatim, so existing `err.name === "AbortError"` guards still fire');
+});
+
+await test('a caller cancellation is TERMINAL — it is never retried', async () => {
+  // A cancellation is not a transient failure: nobody is waiting for the result,
+  // so burning the retry budget on it would be pure waste against a live server.
+  const caller = new AbortController();
+  const fetchImpl = scriptableFetch([
+    () => { caller.abort(); return Promise.reject(new Error('aborted')); },
+    () => Promise.resolve(ok({ shouldNeverHappen: true })),
+  ]);
+  await assert.rejects(
+    () => fetchBounded('/api/read-file', { retries: 3, fetchImpl, sleepImpl: sleepZero, signal: caller.signal }),
+    (e) => e.name === 'AbortError',
+  );
+  assert.equal(fetchImpl.calls(), 1, 'no retry after a cancellation');
+});
+
+await test('an ALREADY-aborted caller signal never issues a request at all', async () => {
+  const caller = new AbortController();
+  caller.abort();
+  const fetchImpl = scriptableFetch([ok({})]);
+  await assert.rejects(
+    () => fetchBounded('/api/read-file', { fetchImpl, sleepImpl: sleepZero, signal: caller.signal }),
+    (e) => e.name === 'AbortError',
+  );
+  assert.equal(fetchImpl.calls(), 0);
+});
+
+await test('the DEADLINE still fires for a caller that supplied a signal (both are live)', async () => {
+  // The composition must not be one-or-the-other: a caller who passes a
+  // cancellation controller still gets the deadline, or FileViewer would be the
+  // one surface left unbounded.
+  const caller = new AbortController(); // never aborted
+  const hangingFetch = (url, { signal }) =>
+    new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('The operation was aborted.')), { once: true });
+    });
+  await assert.rejects(
+    () => fetchBounded('/api/read-file', {
+      retries: 0, timeoutMs: 30, fetchImpl: hangingFetch, sleepImpl: sleepZero, signal: caller.signal,
+    }),
+    /abort/i,
+  );
+});
+
+await test('fetchJson composes with a caller signal on the same terms', async () => {
+  const caller = new AbortController();
+  caller.abort();
+  const fetchImpl = scriptableFetch([ok({})]);
+  await assert.rejects(
+    () => fetchJson('/api/config', { fetchImpl, sleepImpl: sleepZero, signal: caller.signal }),
+    (e) => e.name === 'AbortError',
+  );
+  assert.equal(fetchImpl.calls(), 0);
+});
+
+// === pollerFetchOptions — the written-down poller policy ====================
+//
+// The one-shot defaults are WRONG for an interval poller and the policy is not
+// for each hook to re-derive: the poller core calls its fetch on every tick
+// unconditionally (no in-flight guard), so a stalled tick self-heals on the next
+// one — THE NEXT TICK IS THE RETRY. What a stall does instead is STACK requests
+// against a server that can block. The fix is a shorter leash, not a longer one.
+
+await test('a poller never retries — the next tick is the retry', async () => {
+  assert.equal(pollerFetchOptions(10_000).retries, 0);
+  assert.equal(pollerFetchOptions(120_000).retries, 0);
+});
+
+await test('the deadline is STRICTLY shorter than the poll period, at every cadence', async () => {
+  // The invariant the whole policy rests on: one tick's attempts can never
+  // outlive the window they were issued in, so ticks cannot stack.
+  for (const period of [10_000, 15_000, 30_000, 60_000, 90_000, 120_000]) {
+    const { timeoutMs } = pollerFetchOptions(period);
+    assert.ok(timeoutMs < period, `deadline ${timeoutMs}ms must be < period ${period}ms`);
+  }
+});
+
+await test('half the period is the ceiling (the sharpest case: the 10s health poll)', async () => {
+  // On the one-shot defaults this poll would spend 3 attempts x 8s ~= 24s of
+  // attempts inside a 10s window — three ticks' worth of overlap from ONE tick.
+  // That case is what set the bar for the policy.
+  const { retries, timeoutMs } = pollerFetchOptions(10_000);
+  assert.equal(timeoutMs, 5_000, 'half of 10s');
+  assert.equal(retries, 0);
+  const worstCase = timeoutMs * (retries + 1);
+  assert.ok(worstCase < 10_000, `one tick must not outlive its window (${worstCase}ms)`);
+});
+
+await test('a SLOW cadence is capped at the one-shot default, not given a huge leash', async () => {
+  // Half of a 120s budget poll would be a 60s deadline — bounded, but useless as
+  // a deadline. The cap keeps a slow poller's leash sane.
+  assert.equal(pollerFetchOptions(120_000).timeoutMs, 8_000);
+  assert.equal(pollerFetchOptions(90_000).timeoutMs, 8_000);
+});
+
+await test('a FAST cadence still tolerates a real round-trip (the floor)', async () => {
+  // Half of a 1s period is 500ms, which would fail a healthy SSH-backed request
+  // on every tick and report a permanently-broken surface. The floor prevents a
+  // deadline so tight it manufactures failures.
+  assert.equal(pollerFetchOptions(1_000).timeoutMs, 1_000);
+  assert.equal(pollerFetchOptions(500).timeoutMs, 1_000);
+});
+
+await test('the poller options actually BOUND a stalled tick when passed to fetchBounded', async () => {
+  // End-to-end: the policy is only worth anything if a hook that spreads it gets
+  // exactly one aborted attempt rather than a stacked retry storm.
+  let attempts = 0;
+  const hangingFetch = (url, { signal }) => {
+    attempts += 1;
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('The operation was aborted.')), { once: true });
+    });
+  };
+  const opts = pollerFetchOptions(10_000);
+  const start = Date.now();
+  await assert.rejects(
+    () => fetchBounded('/api/health', { ...opts, timeoutMs: 30, fetchImpl: hangingFetch, sleepImpl: sleepZero }),
+    /abort/i,
+  );
+  assert.equal(attempts, 1, 'retries:0 means exactly ONE in-flight request per tick');
+  assert.ok(Date.now() - start < 1000);
 });
 
 console.log(`\n# tests ${passed}`);

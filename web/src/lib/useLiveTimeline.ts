@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ActivityEvent } from '@/lib/types';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import {
   POLL_INTERVAL_MS,
   shouldPoll,
@@ -43,6 +44,14 @@ export interface UseLiveTimelineResult {
 const isDocumentHidden = () =>
   typeof document !== 'undefined' ? document.hidden : false;
 
+// WARDEN-1144: this read gates `loading` (first fetch) and `refreshing` (every
+// background tick), so it is bounded by the shared deadline on the POLLER policy
+// — no retries, deadline < the poll period. The next tick IS the retry; a stalled
+// one must not stack attempts against an already-blocked server. The mount fetch
+// and the manual Refresh share the same options deliberately: they run on a
+// surface that DOES tick again, so the shorter leash is right for them too.
+const FETCH_OPTS = pollerFetchOptions(POLL_INTERVAL_MS);
+
 export function useLiveTimeline(limit: number): UseLiveTimelineResult {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,7 +70,7 @@ export function useLiveTimeline(limit: number): UseLiveTimelineResult {
       const background = opts?.background === true;
       if (background) setRefreshing(true);
       try {
-        const res = await fetch(`/api/activity?limit=${limit}`);
+        const res = await fetchBounded(`/api/activity?limit=${limit}`, FETCH_OPTS);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const j = await res.json();
         setEvents(j.events || []);

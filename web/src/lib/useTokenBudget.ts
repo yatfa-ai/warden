@@ -34,11 +34,17 @@ import {
 } from '@/lib/tokenBudget';
 import { fireBudgetNotification } from '@/lib/desktopAlerts';
 import { formatTokens } from '@/lib/formatTokens';
+import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 
 // Match the backend accumulator's beat. The endpoint is a cheap cache read, so
 // this stays light; aligning to BUDGET_INTERVAL_MS means a poll lands soon after
 // each backend sweep rather than racing it.
 const BUDGET_POLL_MS = 120_000;
+// WARDEN-1144: the read gates `loading`, so it is bounded on the POLLER policy —
+// no retries, deadline < the period (capped at the one-shot default, so this slow
+// 120s cadence gets an 8s leash rather than a uselessly long 60s one). The next
+// tick is the retry.
+const FETCH_OPTS = pollerFetchOptions(BUDGET_POLL_MS);
 
 export interface UseTokenBudgetArgs {
   /** Master opt-in for OS desktop alerts (same toggle the attention alerts use). */
@@ -114,7 +120,7 @@ export function useTokenBudget(
 
   const fetchBudget = async () => {
     try {
-      const r = await fetch('/api/budget');
+      const r = await fetchBounded('/api/budget', FETCH_OPTS);
       if (!r.ok) return;
       const next = (await r.json()) as BudgetState;
       if (!next || typeof next !== 'object') return;

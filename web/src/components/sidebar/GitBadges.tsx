@@ -31,7 +31,7 @@ import { basename } from '@/lib/chatDisplay';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
-import { readListBody, readListResponse } from '@/lib/api';
+import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
 import { readFileDiff } from '@/lib/gitDiffApi';
 
 /**
@@ -263,7 +263,9 @@ function DiffInspectRow({ file, buildUrl, label, onOpenFile }: { file: GitFile; 
         // of warden's error convention (non-2xx, and the 200-with-{error} half the
         // `withGitRepo` no-cwd/catch-all paths use). It THROWS on failure, so the
         // failure can no longer arrive here disguised as an empty diff.
-        const text = await readFileDiff(await fetch(buildUrl()));
+        // WARDEN-1144: bounded — this gates the row's `loading` ("loading diff…"),
+        // whose only clear is the finally after this await. One-shot (an expand).
+        const text = await readFileDiff(await fetchBounded(buildUrl()));
         // A genuinely empty diff stays empty and still renders "no diff" — only a
         // real failure takes the catch below.
         setDiff(text || null);
@@ -663,7 +665,9 @@ function useGitListFetcher<T>({ chatId, route, responseKey, label, setList, setE
     setError(null);
     onBeforeFetch?.();
     try {
-      const r = await fetch(`${route}?id=${encodeURIComponent(chatId)}`);
+      // WARDEN-1144: bounded — gates this section's `loading` (stash / reflog /
+      // remote / branch panels), cleared only by the finally after this await.
+      const r = await fetchBounded(`${route}?id=${encodeURIComponent(chatId)}`);
       // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
       // catch instead of becoming an empty list with no error (WARDEN-1014 review).
       const j = await readListBody(r);
@@ -873,7 +877,10 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
         ranges.map(async (range): Promise<[string, GrepResult]> => {
           try {
             const url = `/api/git-log?id=${encodeURIComponent(chatId)}&grep=${encodeURIComponent(q)}` + (range ? `&range=${range}` : '');
-            const r = await fetch(url);
+            // WARDEN-1144: bounded — gates `searchLoading` (the grep popover's
+            // "searching…"), which only clears once every range in this
+            // Promise.all settles: ONE stalled range held the whole popover.
+            const r = await fetchBounded(url);
             // WARDEN-1216: the response read goes through the shared readListBody +
             // readListResponse pair (the reference use lives in useGitListFetcher
             // above), so a 200 whose body carries {error} — git-log's documented
@@ -939,7 +946,9 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
     if (showCache[hash] || showLoading[hash]) return;
     setShowLoading((p) => ({ ...p, [hash]: true }));
     try {
-      const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}`);
+      // WARDEN-1144: bounded — gates this hash's `showLoading` entry ("loading
+      // files…"), cleared only by the finally after this await.
+      const r = await fetchBounded(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}`);
       const j = await r.json();
       setShowCache((p) => ({ ...p, [hash]: { files: Array.isArray(j.files) ? j.files : [], message: typeof j.message === 'string' ? j.message : undefined, error: j.error } }));
     } catch {
@@ -1065,7 +1074,9 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
     if (stashShowCache[ref] || stashShowLoading[ref]) return;
     setStashShowLoading((p) => ({ ...p, [ref]: true }));
     try {
-      const r = await fetch(`/api/git-stash-show?id=${encodeURIComponent(chatId)}&ref=${encodeURIComponent(ref)}`);
+      // WARDEN-1144: bounded — gates this ref's `stashShowLoading` entry ("loading
+      // files…"), cleared only by the finally after this await.
+      const r = await fetchBounded(`/api/git-stash-show?id=${encodeURIComponent(chatId)}&ref=${encodeURIComponent(ref)}`);
       const j = await r.json();
       setStashShowCache((p) => ({ ...p, [ref]: { files: Array.isArray(j.files) ? j.files : [], error: j.error } }));
     } catch {

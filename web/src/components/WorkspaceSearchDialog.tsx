@@ -18,7 +18,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
-import { readErrorBody } from '@/lib/api';
+import { fetchBounded, readErrorBody } from '@/lib/api';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 interface SearchResult {
@@ -126,10 +126,17 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
     setSearching(true);
     setError(null);
     try {
-      const res = await fetch('/api/search-files', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: chatId, query: q }),
+      // WARDEN-1144: bounded — gates `searching`. This is a READ that happens to
+      // be a POST (the query rides the body), which is exactly why the boundary is
+      // drawn at "does it gate a UI surface" rather than at the HTTP method: it is
+      // NOT one of the writes api.ts deliberately leaves unbounded. `claimLatest`
+      // supersedes a stale result, but cannot end an unsettled wait.
+      const res = await fetchBounded('/api/search-files', {
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: chatId, query: q }),
+        },
       });
       // Parsed BEFORE the ok-gate BY DESIGN: /api/search-files returns some
       // errors at HTTP 200 with an `error` field (no-cwd, remote transport

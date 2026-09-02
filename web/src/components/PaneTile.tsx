@@ -22,7 +22,7 @@ import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
-import { postJson } from '@/lib/api';
+import { postJson, fetchBounded } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { CircleOffIcon, PowerIcon, RefreshCwIcon, SquareTerminalIcon, WifiOffIcon, XIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -472,10 +472,17 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       existsCacheHitsRef.current = 0;
       const p = (async () => {
         try {
-          const res = await fetch('/api/file-exists', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, path, cacheHits }),
+          // WARDEN-1144: bounded. A READ expressed as a POST, and one whose
+          // in-flight promise is PARKED in `existsPendingRef` — an unsettled probe
+          // is never evicted, so every later probe for the same path joins a
+          // promise that will never resolve and that path's linkification stays
+          // pending for the life of the pane. The deadline is what un-parks it.
+          const res = await fetchBounded('/api/file-exists', {
+            init: {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id, path, cacheHits }),
+            },
           });
           if (!res.ok) { cache.set(path, false); return false; }
           const data = await res.json();
@@ -830,7 +837,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     if (!chat || downloading) return;
     setDownloading(true);
     try {
-      const res = await fetch(`/api/pane-export?id=${encodeURIComponent(chat.id)}`);
+      // WARDEN-1144: bounded — gates `downloading` (the ⬇ button's '⋯' and its
+      // disabled state), cleared only by the finally after this await.
+      const res = await fetchBounded(`/api/pane-export?id=${encodeURIComponent(chat.id)}`);
       if (!res.ok) throw new Error('Failed to fetch pane content');
       const data = await res.json();
 

@@ -55,7 +55,7 @@ import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
-import { readListBody, readListResponse } from '@/lib/api';
+import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
 // The per-file git-diff READ seam (WARDEN-1187 / WARDEN-1194). BlameHash reads its
 // popover diff through the DETAIL reader — the sibling that also keeps the commit
 // body (`message`, WARDEN-388) off the same response — so this site honours both
@@ -151,7 +151,11 @@ function useGatedFetch<T>(opts: {
       onLoading(true);
       onError(null);
       try {
-        const r = await fetch(buildUrl());
+        // WARDEN-1144: bounded — this hook gates `blameLoading` / `historyLoading`
+        // via `onLoading`, cleared only by the finally after this await. The
+        // `cancelled` flag is a STALENESS guard for a settled result, not a
+        // deadline. One-shot (fires when the tab is opened) → the defaults.
+        const r = await fetchBounded(buildUrl());
         // Tolerant on !ok (the status carries the message), STRICT on 2xx — a body
         // that fails to parse on a 2xx is a real failure and must reach the catch
         // below rather than becoming a confident empty list (WARDEN-1014 review).
@@ -305,11 +309,21 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     if (!ac) return; // dialog closed / no active session
     if (!background) setLoading(true);
     try {
-      const response = await fetch('/api/read-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: chatId, path: filePath }),
+      // WARDEN-1144: bounded, COMPOSED with the session AbortController rather
+      // than replacing it — the two answer different questions and both must be
+      // answerable. `ac.signal` still cancels on close/switch/unmount (it is
+      // passed through as the helper's caller `signal`, and a caller abort is
+      // terminal: it rejects with `ac`'s own reason so every `ac.signal.aborted`
+      // guard below still fires and no retry runs). The DEADLINE is what ends a
+      // wait nobody cancelled — a stall on the foreground path held `loading`
+      // with nothing left to clear it. A READ that happens to be a POST.
+      const response = await fetchBounded('/api/read-file', {
         signal: ac.signal,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: chatId, path: filePath }),
+        },
       });
 
       if (!response.ok) {
@@ -365,7 +379,11 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     // loading flag (`${chatId}:${filePath}` !== changesFetchedKey) clears.
     const key = `${chatId}:${filePath}`;
     try {
-      const response = await fetch(`/api/git-diff?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`, {
+      // WARDEN-1144: bounded, composed with the session AbortController (same
+      // rationale as loadContent above). This gates the DERIVED changes-view
+      // loading flag, which clears only when `changesFetchedKey` is written —
+      // and every write to it sits after this await.
+      const response = await fetchBounded(`/api/git-diff?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`, {
         signal: ac.signal,
       });
       if (!response.ok) {
@@ -539,7 +557,8 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       let content: string | null = null;
       let error: string | null = null;
       try {
-        const r = await fetch(`/api/git-cat-file?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(viewAtCommit.hash)}&path=${encodeURIComponent(filePath)}`);
+        // WARDEN-1144: bounded — gates `blobLoading`, cleared only after this await.
+        const r = await fetchBounded(`/api/git-cat-file?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(viewAtCommit.hash)}&path=${encodeURIComponent(filePath)}`);
         // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx
         // body that fails to parse is a real failure and must reach the catch below
         // rather than becoming empty content with no error at all (WARDEN-1014).
@@ -1229,8 +1248,11 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
       // the popover's confident "no diff for this file at this commit".
       // The DETAIL reader, not `readFileDiff`, because this popover renders a second
       // field off the same response: the commit body (WARDEN-388), below.
+      // WARDEN-1144: the fetch below is bounded (fetchBounded) — it gates this
+      // popover's `loading`, which the finally after this await is the only thing
+      // that clears. One-shot (fires once per open) → the primitive's defaults.
       const { diff: text, message: body } = await readFileDiffDetail(
-        await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`),
+        await fetchBounded(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`),
       );
       // A genuinely empty diff stays empty and still renders "no diff for this file
       // at this commit" — only a real failure takes the catch below.
@@ -1850,7 +1872,9 @@ function DirListing({ chatId, dir, onPick }: {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(curDir)}`)
+    // WARDEN-1144: bounded — gates this listing's `loading`, cleared only by the
+    // .finally below, which a promise that never settles never reaches.
+    fetchBounded(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(curDir)}`)
       .then(async (r) => {
         // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx
         // body that fails to parse must reach the .catch below rather than becoming

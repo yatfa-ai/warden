@@ -19,7 +19,7 @@ import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon, ChevronUp, ChevronD
 import { classifyDiffLine, DIFF_LINE_CLASS, collectChangeRegions } from '@/lib/diff';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
-import { readErrorBody } from '@/lib/api';
+import { fetchBounded, readErrorBody } from '@/lib/api';
 import { DiffStatChip } from '@/components/sidebar/DiffStatChip';
 import type { DiffStat } from '@/components/sidebar/types';
 
@@ -79,7 +79,9 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
         const url = isRange
           ? `/api/git-range-diff?id=${encodeURIComponent(chatId)}&range=${range}`
           : `/api/git-diff?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}${staged ? '&staged=1' : ''}`;
-        const response = await fetch(url);
+        // WARDEN-1144: bounded — gates `loading` ("Loading diff..."); the existing
+        // `cancelled` flag cancels a STALE result, it cannot end an unsettled wait.
+        const response = await fetchBounded(url);
 
         if (!response.ok) {
           // Leg gating lives in `readErrorBody` — inside this !ok branch it is

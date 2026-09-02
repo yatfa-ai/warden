@@ -385,7 +385,14 @@ function asyncBodies(text) {
 }
 
 const WRITES_RESULTS = /\bset[A-Za-z]*Results\s*\(/;
-const AWAITS_FETCH = /\bawait\s+fetch\s*\(/;
+// WARDEN-1144: the bounded helpers count as a fetch. Every UI-gating read is now
+// issued through `fetchBounded` / `fetchJson` (the shared deadline in lib/api.ts),
+// so a matcher pinned to the bare `fetch(` spelling stops seeing the search legs
+// entirely — and this scan's failure mode is a SILENT one: with zero legs found,
+// the invariant above passes by checking nothing. (The `is actually scanning
+// legs` guard below is what caught exactly that.) The negative controls at the
+// bottom of this suite deliberately keep the bare spelling, which still matches.
+const AWAITS_FETCH = /\bawait\s+fetch(?:Bounded|Json)?\s*\(/;
 // The sequencing spellings this repo actually uses: the effect-scoped `cancelled`
 // flag of the debounced legs, the generation gate of the manual legs, and an
 // AbortController (accepted by WARDEN-1049, unused today) — any is sufficient.

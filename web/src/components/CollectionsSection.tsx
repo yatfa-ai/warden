@@ -17,6 +17,7 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { countAgentsInCollection } from '@/lib/collections';
 import { readCollectionsList } from '@/lib/collectionsApi';
+import { fetchBounded } from '@/lib/api';
 import type { Collection, Chat } from '@/lib/types';
 
 interface Props {
@@ -51,7 +52,9 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
   const fetchCollections = async () => {
     setLoading(true);
     try {
-      setCollections(await readCollectionsList(await fetch('/api/collections')));
+      // WARDEN-1144: bounded — gates `loading` (the ↻ button's disabled '…'),
+      // cleared only after this await. Manual-refresh shape → the defaults.
+      setCollections(await readCollectionsList(await fetchBounded('/api/collections')));
     } catch (e) {
       // Deliberately DO NOT blank the list: replacing real data with [] on a
       // transient refresh failure is the same false-empty in miniature. Surface

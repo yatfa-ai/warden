@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { postJson } from '@/lib/api';
+import { postJson, fetchBounded } from '@/lib/api';
 import { loadUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
 import { groupByHost, summarizeHostLoad, resourceTone, type HostLoadSummary } from '@/lib/healthUtils';
@@ -123,7 +123,11 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
 
   useEffect(() => {
     if (!open) return;
-    fetch('/api/ssh-hosts')
+    // WARDEN-1144: bounded. These three popover-open reads seat the form the
+    // `busy` submit gate acts on — an unbounded one leaves the host picker and
+    // its load suffixes permanently unpopulated with no failure shown. One-shot
+    // (fires on open, nothing ticks) → the primitive's defaults.
+    fetchBounded('/api/ssh-hosts')
       .then((r) => r.json())
       .then((j) => {
         // WARDEN-1202: union ~/.ssh/config aliases (`hosts`) with the real
@@ -153,7 +157,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         });
       })
       .catch((error) => console.error('[ssh-hosts] Failed:', error));
-    fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
+    fetchBounded('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
   }, [open, cwdFor, presetFor]);
 
   // Companion fetch (WARDEN-361): pull the cache-derived /api/health (zero SSH) and
@@ -163,7 +167,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   // Fleet Health dashboard polls, so a stats-less host here is stats-less there too.
   useEffect(() => {
     if (!open) return;
-    fetch('/api/health')
+    fetchBounded('/api/health')
       .then((r) => r.json())
       .then((j) => {
         const agents: Chat[] = Array.isArray(j?.agents) ? j.agents : [];
