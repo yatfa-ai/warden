@@ -6,7 +6,15 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { copyWithToast } from '@/lib/clipboardToast';
 import {
   Loader2Icon,
   ChevronRightIcon,
@@ -171,38 +179,66 @@ function DirChildren({
           const expanded = !!tree[childPath]?.expanded;
           return (
             <Fragment key={childPath}>
-              <button
-                type="button"
-                onClick={() => onToggle(childPath)}
-                className="flex items-center gap-1 w-full text-left py-1 pr-2 rounded hover:bg-accent transition-colors text-sm"
-                style={{ paddingLeft: indent }}
-                aria-expanded={expanded}
-              >
-                {expanded
-                  ? <ChevronDownIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-                  : <ChevronRightIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />}
-                {expanded
-                  ? <FolderOpenIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-                  : <FolderIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />}
-                <span className="truncate">{e.name}</span>
-              </button>
+              {/* WARDEN-1268: `asChild` composes the context-menu handler onto
+                  the EXISTING native <button> — left-click, Enter/Space and
+                  aria-expanded are untouched. The row renders only the
+                  truncated basename, so `childPath` (the full repo-relative
+                  joinPath value) is otherwise uncopyable. */}
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => onToggle(childPath)}
+                    className="flex items-center gap-1 w-full text-left py-1 pr-2 rounded hover:bg-accent transition-colors text-sm"
+                    style={{ paddingLeft: indent }}
+                    aria-expanded={expanded}
+                  >
+                    {expanded
+                      ? <ChevronDownIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                      : <ChevronRightIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />}
+                    {expanded
+                      ? <FolderOpenIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                      : <FolderIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />}
+                    <span className="truncate">{e.name}</span>
+                  </button>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => onToggle(childPath)}>
+                    {expanded ? 'Collapse' : 'Expand'}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => copyWithToast(childPath)}>Copy file path</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(e.name)}>Copy filename</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
               <DirChildren dir={childPath} depth={depth + 1} tree={tree} onToggle={onToggle} onSelectFile={onSelectFile} />
             </Fragment>
           );
         }
         return (
-          <button
-            key={childPath}
-            type="button"
-            onClick={() => onSelectFile(childPath)}
-            className="flex items-center gap-1 w-full text-left py-1 pr-2 rounded hover:bg-accent transition-colors text-sm"
-            // Indent files one chevron-width past their sibling dirs so the file
-            // name aligns under the folder NAME (not the chevron).
-            style={{ paddingLeft: indent + 18 }}
-          >
-            <FileIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">{e.name}</span>
-          </button>
+          <ContextMenu key={childPath}>
+            <ContextMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onSelectFile(childPath)}
+                className="flex items-center gap-1 w-full text-left py-1 pr-2 rounded hover:bg-accent transition-colors text-sm"
+                // Indent files one chevron-width past their sibling dirs so the file
+                // name aligns under the folder NAME (not the chevron).
+                style={{ paddingLeft: indent + 18 }}
+              >
+                <FileIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{e.name}</span>
+              </button>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              {/* Same prop the left-click handler calls (the parent's
+                  handleSelect): opens the FileViewer AND closes the dialog. */}
+              <ContextMenuItem onSelect={() => onSelectFile(childPath)}>Open</ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem onSelect={() => copyWithToast(childPath)}>Copy file path</ContextMenuItem>
+              <ContextMenuItem onSelect={() => copyWithToast(e.name)}>Copy filename</ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         );
       })}
     </>
