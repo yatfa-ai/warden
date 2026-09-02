@@ -2,8 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -640,6 +645,208 @@ func TestSendLiveTmux(t *testing.T) {
 		res := sendKeys(params)
 		if !res.OK {
 			t.Fatalf("sendKeys failed against a live session: code=%d stderr=%q", res.Code, res.Stderr)
+		}
+	})
+}
+
+// ------------------------------ exec (WARDEN-1261) ----------------------------
+
+// TestBuildExecScript locks the byte-exact host-side command the generic exec RPC
+// assembles. The two delivery shapes mirror what ssh.js run() delivers on the
+// default path TODAY, so the companion and default paths agree by construction:
+//   container set → `docker exec <c> bash -lc <script>` — the exact command string
+//                   runInContext's container branch hands run()
+//   container ""  → the script verbatim (runScriptCtx adds `bash -lc`, the same
+//                   interpreter level run()'s `bash -lc ${shellQuote(cmd)}` adds)
+// The container and script are shellQuoted with ssh.js's byte-identical quoting.
+func TestBuildExecScript(t *testing.T) {
+	t.Run("container set → the runInContext docker-exec delivery shape, byte-exact", func(t *testing.T) {
+		got := buildExecScript("p-worker", "cd /work && git 'status' '--porcelain' 2>/dev/null")
+		want := "docker exec 'p-worker' bash -lc 'cd /work && git '\\''status'\\'' '\\''--porcelain'\\'' 2>/dev/null'"
+		if got != want {
+			t.Fatalf("buildExecScript mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("container empty → the bare run() delivery shape (script verbatim, no rebuild)", func(t *testing.T) {
+		script := "cd '/work' && git 'status' '--porcelain' 2>/dev/null"
+		if got := buildExecScript("", script); got != script {
+			t.Fatalf("empty container must return the script verbatim; got: %s", got)
+		}
+	})
+
+	t.Run("container with an apostrophe is shellQuoted", func(t *testing.T) {
+		got := buildExecScript("c'x", "true")
+		if !strings.Contains(got, "docker exec 'c'\\''x' bash -lc") {
+			t.Fatalf("expected shellQuoted container; got: %s", got)
+		}
+	})
+}
+
+// TestExecScript runs the real execScript end-to-end through bash: stdout capture,
+// non-zero exit codes preserved as data (never an RPC error), the `2>/dev/null`
+// suffix surviving intact inside the JS-built script, and the host-side timeoutMs
+// deadline actually killing a too-slow probe (the WARDEN-1261 orphan-prevention
+// contract: a timed-out probe must die host-side, not just time out JS-side).
+func TestExecScript(t *testing.T) {
+	t.Run("captures stdout and ok:true for an exiting-0 script", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"script": "printf '## main..origin/main'; exit 0"})
+		res := execScript(params)
+		if !res.OK || res.Code != 0 {
+			t.Fatalf("expected ok:true code:0; got ok=%v code=%d stderr=%q", res.OK, res.Code, res.Stderr)
+		}
+		if res.Stdout != "## main..origin/main" {
+			t.Fatalf("stdout mismatch; got %q", res.Stdout)
+		}
+	})
+
+	t.Run("a non-zero exit is DATA ({ok:false, code:N}), never an RPC error", func(t *testing.T) {
+		// A benign non-repo probe — the exact shape runGit's `2>/dev/null`
+		// branches produce: exit code 128 from git, empty stdout/stderr.
+		params, _ := json.Marshal(map[string]any{"script": "cd /definitely-not-a-repo-warden-test && git 'rev-parse' '--git-dir' 2>/dev/null; exit $?"})
+		res := execScript(params)
+		if res.OK {
+			t.Fatalf("a non-repo probe must be ok:false")
+		}
+		if res.Code == 0 {
+			t.Fatalf("exit code must be preserved; got %d", res.Code)
+		}
+	})
+
+	t.Run("the 2>/dev/null suffix inside the JS-built script survives verbatim", func(t *testing.T) {
+		// A failing command with `2>/dev/null` — the exact real-world shape:
+		// its stderr is swallowed INSIDE the script, so the result's stderr stays
+		// empty exactly as it does on the default run() path.
+		params, _ := json.Marshal(map[string]any{"script": "ls /nonexistent-warden-test 2>/dev/null; echo out"})
+		res := execScript(params)
+		if !res.OK || res.Stdout != "out\n" || res.Stderr != "" {
+			t.Fatalf("redirect must survive verbatim; got %+v", res)
+		}
+	})
+
+	t.Run("timeoutMs kills the host-side process (a slow probe dies, fast)", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"script": "echo partial; sleep 30", "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		elapsed := time.Since(t0)
+		if res.OK {
+			t.Fatalf("a timed-out probe must be ok:false")
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("host-side kill did not fire; elapsed %s", elapsed)
+		}
+		if res.Code != -1 {
+			t.Fatalf("a signal-killed script reports code -1 (mirrors runTmux/run's kill shape); got %d", res.Code)
+		}
+	})
+
+	// WARDEN-1261 QA rework: the four subtests below pin the REAL script shapes
+	// this domain delivers. The lone-simple-command shape above passes even
+	// without a process-group kill, because bash exec-optimizes it into the
+	// direct child — the QA failure showed every actual shape (multi-command
+	// with `&&` + redirect, pipelines, background forks) forks instead, so a
+	// direct-child-only kill orphaned the forks, produced NO response (the
+	// orphans kept the stdout pipe open, blocking cmd.Wait), and stalled the
+	// serial dispatch loop for the orphans' full lifetime. The fix: own process
+	// group + kill(-pgid) (procgroup_unix.go) + a WaitDelay backstop.
+	t.Run("timeoutMs kills the runGit manual-remote shape (cd && cmd + redirect, QA repro #1)", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"script": "cd '/tmp' && sleep 30 2>/dev/null", "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		elapsed := time.Since(t0)
+		if elapsed > 3*time.Second {
+			t.Fatalf("multi-command kill must return promptly (a stalled Wait is the QA defect); elapsed %s", elapsed)
+		}
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape {ok:false, code:-1}; got ok=%v code=%d", res.OK, res.Code)
+		}
+	})
+
+	t.Run("timeoutMs kills the pipeline shape (search-files script family, QA repro #2)", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"script": "sleep 30 | head -5", "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		elapsed := time.Since(t0)
+		if elapsed > 3*time.Second {
+			t.Fatalf("pipeline kill must return promptly (a stalled Wait is the QA defect); elapsed %s", elapsed)
+		}
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape {ok:false, code:-1}; got ok=%v code=%d", res.OK, res.Code)
+		}
+	})
+
+	t.Run("timeoutMs kills the background-fork shape — and leaves NO orphan host-side", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("process-group kill + signal-0 liveness probe are Unix facilities")
+		}
+		// The script backgrounds a child that (a) outlives the deadline and
+		// (b) reports its own pid to a file — `sh -c 'echo $$ > f; sleep 30'`
+		// exec-optimizes sleep into the sh process, so the pid in the file IS
+		// the sleeper's. Bash then blocks on `wait`, giving the guaranteed
+		// grandchild shape. After the group kill, signaling that pid with 0
+		// must fail with ESRCH — the orphan-prevention contract, proven.
+		pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+		script := "sh -c 'echo $$ > " + pidFile + "; sleep 30' & wait"
+		params, _ := json.Marshal(map[string]any{"script": script, "timeoutMs": 250})
+		t0 := time.Now()
+		res := execScript(params)
+		if elapsed := time.Since(t0); elapsed > 3*time.Second {
+			t.Fatalf("background-fork kill must return promptly; elapsed %s", elapsed)
+		}
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape {ok:false, code:-1}; got ok=%v code=%d", res.OK, res.Code)
+		}
+		pidBytes, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Fatalf("grandchild never reported its pid: %v", err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if err != nil {
+			t.Fatalf("unparseable pid %q: %v", pidBytes, err)
+		}
+		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+			// Best-effort cleanup in the failure case, so a broken kill leaves
+			// nothing behind in CI.
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("the timed-out probe's work process (pid %d) survived the group kill: %v — the exact orphan WARDEN-1261 forbids", pid, err)
+		}
+	})
+
+	t.Run("a killed probe's partial stdout survives in the kill envelope", func(t *testing.T) {
+		// The promised run()-parity shape: {ok:false, code:-1, stdout-so-far} —
+		// the JS backstop must never be the thing that answers a host-side kill.
+		params, _ := json.Marshal(map[string]any{"script": "printf partial-before-kill; sleep 30 | cat", "timeoutMs": 250})
+		res := execScript(params)
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape; got ok=%v code=%d", res.OK, res.Code)
+		}
+		if res.Stdout != "partial-before-kill" {
+			t.Fatalf("partial stdout must survive the kill; got %q", res.Stdout)
+		}
+	})
+
+	t.Run("container delivery runs the script via docker exec (stubbed docker)", func(t *testing.T) {
+		// Stub docker as a shell function so `docker exec <c> bash -lc <script>`
+		// is observable without a real daemon: it echoes its argv AFTER 'exec' —
+		// proving the container + script arrived with ssh.js-identical quoting.
+		const stub = "docker() { if [ \"$1\" = exec ]; then shift; printf 'ARGV:%s\\n' \"$*\"; fi; }\n"
+		// Run the stub + the assembled script through bash directly, mirroring
+		// what execScript's runScriptCtx does with buildExecScript's output.
+		script := stub + buildExecScript("p-worker", "git 'status' '--porcelain' 2>/dev/null")
+		out, err := exec.Command("bash", "-lc", script).Output()
+		if err != nil {
+			t.Fatalf("bash run failed: %v; output: %s", err, out)
+		}
+		want := "ARGV:p-worker bash -lc git 'status' '--porcelain' 2>/dev/null\n"
+		if string(out) != want {
+			t.Fatalf("docker exec argv mismatch:\ngot:  %q\nwant: %q", string(out), want)
+		}
+	})
+
+	t.Run("absent params → benign empty-script no-op (ok:true)", func(t *testing.T) {
+		res := execScript(nil)
+		if !res.OK {
+			t.Fatalf("empty params must be a benign no-op; got %+v", res)
 		}
 	})
 }

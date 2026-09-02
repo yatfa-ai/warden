@@ -26,6 +26,10 @@ import { spawn } from 'node:child_process';
 import express from 'express';
 import { run, shellQuote } from './ssh.js';
 import { captureAndSettle } from './childCapture.js';
+// WARDEN-1261: the companion-transport routing for the chat-scoped script domain.
+// companion.js is a leaf sibling (it imports ssh.js/chatMeta.js/loop-monitor.js,
+// never this module), so the dependency stays one-directional — no cycle.
+import { isCompanionTransportEnabled, execInContext as execInContextViaCompanion } from './companion.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, isValidGitHash, parseGitBlame, buildGitBlameScript, buildCwdReachableScript, parseGitLsEntries } from './git.js';
 
@@ -139,20 +143,70 @@ export function gitCwd(chat) {
 // cwd + each arg (the same WARDEN-122 discipline as git-log/show). `2>/dev/null`
 // on the remote branches swallows non-git / detached noise so a non-repo reads
 // as empty, mirroring runLocalGit's non-zero-exit tolerance.
-export async function runGit(chat, args, cwd) {
+//
+// WARDEN-1261 (companion transport): the REMOTE branches now route through the
+// persistent companion channel (execInContext) under the
+// `companionTransportEnabled` toggle — collapsing the raw, UN-POOLED per-op ssh
+// handshake each probe paid (unlike the tmux ops, this domain never even rode
+// ControlMaster pooling). PARITY CONTRACT: the script string is built ONCE,
+// byte-for-byte as before, and delivered by EITHER transport — the companion
+// path hands the very same string to the host-side `exec` RPC (which runs it via
+// the same `bash -lc` interpreter level run() delivers), so the command executed
+// host-side is identical on both paths. Companion-or-fail: a channel/bootstrap
+// failure surfaces through the routes' existing error handling ({ok:false, …})
+// — never a silent raw-SSH fallback. LOCAL branches are untouched.
+//
+// `deps` is a test seam for the routing guard (the wiring that decides default
+// vs companion is otherwise untested): isCompanionTransportEnabled /
+// execInContext / run are injectable so a test can assert delegation, the
+// delivered-script parity, and non-fallthrough to the default path without real
+// ssh (mirrors the deps seams in chats.js discover / tmux.js send).
+export async function runGit(chat, args, cwd, deps = {}) {
   if (chat.container) {
     if (chat.host === LOCAL) {
       const argv = buildDockerGitArgv(chat.container, cwd, args);
       return runLocalCapture(argv[0], argv.slice(1));
     }
+    // REMOTE container chat. The full script (docker-exec prefix included, the
+    // `2>/dev/null` suffix preserved) is assembled once and delivered by either
+    // transport — the companion runs it via `bash -lc <script>`, byte-for-byte
+    // what run() delivers, so no parser or quoting changes anywhere.
     const a = args.map(shellQuote).join(' ');
-    return run(chat.host, `docker exec ${shellQuote(chat.container)} git -C ${shellQuote(cwd)} ${a} 2>/dev/null`, { timeout: 8000 });
+    const script = `docker exec ${shellQuote(chat.container)} git -C ${shellQuote(cwd)} ${a} 2>/dev/null`;
+    return deliverRemoteScript(chat.host, script, { timeout: 8000 }, deps);
   }
   if (chat.host === LOCAL) {
     return runLocalGit(args, cwd);
   }
+  // REMOTE manual chat — same single-assembly parity contract.
   const a = args.map(shellQuote).join(' ');
-  return run(chat.host, `cd ${shellQuote(cwd)} && git ${a} 2>/dev/null`, { timeout: 8000 });
+  const script = `cd ${shellQuote(cwd)} && git ${a} 2>/dev/null`;
+  return deliverRemoteScript(chat.host, script, { timeout: 8000 }, deps);
+}
+
+
+// Deliver an ALREADY-ASSEMBLED script to a REMOTE host, choosing the transport
+// (WARDEN-1261): under the `companionTransportEnabled` toggle the script rides
+// the persistent companion channel (execInContext — zero per-op ssh handshakes,
+// companion-or-fail); otherwise it takes the default raw `run()` path, byte-for-
+// byte unchanged. `opts.innerScript` (+ `opts.container`) is the runInContext
+// container-branch shape: the companion receives the INNER script and the
+// container, and the host side re-assembles `docker exec <c> bash -lc <script>`
+// from them with byte-identical quoting (Go's shellQuote == ssh.js's) — the very
+// string `fullScript` already is, so both transports deliver the same command by
+// construction. Callers without a container pass no innerScript and the full
+// script rides as-is (run()'s `bash -lc ${shellQuote(cmd)}` delivery shape).
+//
+// Only REMOTE callers reach this helper — every LOCAL branch is handled before
+// it — so there is deliberately no `(local)` check here (the companion client
+// still refuses LOCAL defensively; unreachable from these call sites).
+async function deliverRemoteScript(host, fullScript, { innerScript, container = '', timeout = 8000 } = {}, deps = {}) {
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (isEnabled()) {
+    return (deps.execInContext ?? execInContextViaCompanion)(host, innerScript ?? fullScript, { container, timeout }, {}, deps);
+  }
+  const runFn = deps.run ?? run;
+  return runFn(host, fullScript, { timeout });
 }
 
 
@@ -214,14 +268,37 @@ async function classifyGitFailure(chat, cwd) {
 // implementation (the marker files and realpath are reachable on this machine).
 // Exported because server.js's non-git /api/search-files route reuses it for its
 // in-context rg/grep probe — the same chat-scoped transport the git routes use.
-export async function runInContext(chat, script, { timeout = 8000 } = {}) {
+//
+// WARDEN-1261 (companion transport): the REMOTE branches route through the
+// persistent companion channel (execInContext) under the
+// `companionTransportEnabled` toggle. PARITY CONTRACT, both branches:
+//   - the container branch passes the INNER script + the container, and the
+//     host side re-assembles `docker exec <c> bash -lc <script>` with byte-
+//     identical quoting (Go's shellQuote == ssh.js's) — the same command string
+//     run() receives on the default path, so the delivered command is unchanged;
+//   - the manual branch passes the script itself, which the host side runs via
+//     `bash -lc <script>` — exactly what run()'s `bash -lc ${shellQuote(cmd)}`
+//     delivers.
+// Companion-or-fail: a channel/bootstrap failure surfaces as {ok:false, …}
+// through the routes' existing error handling — never a silent raw-SSH fallback.
+// LOCAL branches (and the manual-LOCAL exclusion) are untouched.
+//
+// `deps` is the same test seam runGit carries (isCompanionTransportEnabled /
+// execInContext / run injectable).
+export async function runInContext(chat, script, { timeout = 8000 } = {}, deps = {}) {
   if (chat.container) {
     if (chat.host === LOCAL) {
       return runLocalCapture('docker', ['exec', chat.container, 'bash', '-lc', script]);
     }
-    return run(chat.host, `docker exec ${shellQuote(chat.container)} bash -lc ${shellQuote(script)}`, { timeout });
+    // REMOTE container chat: the default path assembles `docker exec <c> bash -lc
+    // <script>` (byte-for-byte unchanged below); the companion receives the INNER
+    // script + container and the host side re-assembles the identical string
+    // (buildExecScript — Go's shellQuote is ssh.js's byte-identical twin).
+    const full = `docker exec ${shellQuote(chat.container)} bash -lc ${shellQuote(script)}`;
+    return deliverRemoteScript(chat.host, full, { innerScript: script, container: chat.container, timeout }, deps);
   }
-  return run(chat.host, script, { timeout });
+  // REMOTE manual chat (manual-LOCAL never reaches runInContext — see above).
+  return deliverRemoteScript(chat.host, script, { timeout }, deps);
 }
 
 

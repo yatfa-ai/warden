@@ -36,6 +36,7 @@ import {
   buildReapScript,
   resize as companionResize,
   send as companionSend, sendKey as companionSendKey,
+  execInContext as companionExec,
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
   applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
   subscribePanes, unsubscribePanes,
@@ -48,6 +49,10 @@ import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize, send 
 import { classifyProbe } from './sessionRecovery.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
+// WARDEN-1261: the git-domain routing lives in src/gitRoutes.js (runGit /
+// runInContext); driven here alongside the rest of the transport surface.
+import { runGit, runInContext } from './gitRoutes.js';
+import { shellQuote } from './ssh.js';
 
 // ------------------------------- pure seams ---------------------------------
 
@@ -3029,6 +3034,106 @@ describe('send() / sendKey() via companion (companion-or-fail + stale-binary deg
   });
 });
 
+// ------------------------- exec (WARDEN-1261) ---------------------------
+// The generic script RPC client — the chat-scoped git/file domain (runGit +
+// runInContext in src/gitRoutes.js: 15 /api/git-* routes + cross-agent-diff +
+// the search-files remote leg). Same raw {host, ok, code, stdout, stderr}
+// contract as resize/send/sendKey (so the git routes' parsers are unchanged,
+// ZERO parser changes) and companion-or-fail — but with NO stale-binary
+// graceful degradation: a live channel whose binary predates `exec` gets the
+// ACTIONABLE too-old error instead (the git surface is a polled fan; a silent
+// per-op fallback would quietly re-pay every handshake this slice removes).
+
+describe('execInContext() via companion (companion-or-fail, raw result shape)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('returns the raw {host, ok, code, stdout, stderr} shape on success', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) => {
+        if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'exec'] } };
+        if (req.method === 'exec') return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '## main...origin/main\n', stderr: '' } };
+        return { id: req.id, ok: false, error: 'unknown method' };
+      }),
+    });
+    const res = await companionExec('prod', 'cd /work && git status --porcelain 2>/dev/null', {}, {}, deps);
+    assert.strictEqual(res.host, 'prod');
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.code, 0);
+    assert.strictEqual(res.stdout, '## main...origin/main\n');
+    assert.strictEqual(res.stderr, '');
+  });
+
+  it('sends {script, container, timeoutMs}; container null when unset; timeoutMs from opts', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'exec'] } };
+      if (req.method === 'exec') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Bare script (the run() delivery shape): container null, timeoutMs default 8000.
+    await companionExec('prod', 'git status --porcelain 2>/dev/null', {}, {}, deps);
+    assert.deepStrictEqual(sent, { script: 'git status --porcelain 2>/dev/null', container: null, timeoutMs: 8000 });
+    // Container branch (the runInContext delivery shape) + explicit timeout.
+    await companionExec('prod', 'test -f MERGE_HEAD', { container: 'p-worker', timeout: 12000 }, {}, deps);
+    assert.deepStrictEqual(sent, { script: 'test -f MERGE_HEAD', container: 'p-worker', timeoutMs: 12000 });
+  });
+
+  it('bootstrap failure -> {ok:false, code:-1, actionable error}, NOT a raw-ssh fallback', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    const res = await companionExec('prod', 'git status 2>/dev/null', {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.strictEqual(res.stdout, '');
+    // The message rides stderr (the raw run() shape), not an `error` field.
+    assert.ok(res.stderr.includes('companion'), `error names the companion: ${res.stderr}`);
+    assert.ok(res.stderr.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.stderr}`);
+  });
+
+  it('RPC error ({ok:false}) propagates as {ok:false} without fallback', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'exec'] } }
+          : { id: req.id, ok: false, error: 'exec failed: bash not found' }),
+    });
+    const res = await companionExec('prod', 'true', {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.stderr.includes('exec failed'), res.stderr);
+  });
+
+  it('a STALE binary (no exec in methods) gets the actionable too-old error — NOT {unsupported:true}, no exec RPC issued', async () => {
+    const seen = [];
+    const stale = fakeTransport((req) => {
+      seen.push(req.method);
+      // A binary predating WARDEN-1261 advertises every op EXCEPT exec.
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'resize', 'send', 'sendKeys'] } };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    const res = await companionExec('prod', 'git status 2>/dev/null', {}, {}, deps);
+    assert.strictEqual(res.unsupported, undefined, 'exec does NOT degrade — companion-or-fail, no silent raw-SSH fallback');
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.strictEqual(res.stdout, '');
+    assert.ok(res.stderr.includes('too old'), `error names the stale binary: ${res.stderr}`);
+    assert.ok(res.stderr.includes("'exec'"), `error names the missing RPC: ${res.stderr}`);
+    assert.ok(res.stderr.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `error must tell the user how to opt out: ${res.stderr}`);
+    assert.ok(!seen.includes('exec'), 'never sent exec to a stale binary');
+  });
+
+  it('(local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await companionExec('(local)', 'git status', {});
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.ok(/local/.test(res.stderr));
+  });
+});
+
 // ---------------------- write-path routing over the companion ----------------
 // WARDEN-888: the routing change lives in src/tmux.js (send / sendKey), tested
 // here alongside the rest of the transport surface. Drives the REAL exported
@@ -3261,6 +3366,172 @@ describe('control-plane routing: the default path (flag off) is byte-for-byte un
   });
 });
 
+// ------------------- git-domain routing over the companion -------------------
+// WARDEN-1261: the routing change lives in src/gitRoutes.js (runGit /
+// runInContext — the transport seam behind the 15 /api/git-* routes,
+// cross-agent-diff, and the search-files remote leg). Drives the REAL exported
+// functions through deps seams (no real ssh) and asserts THE PARITY CONTRACT:
+// under the flag a REMOTE chat's script rides the companion channel and the
+// command delivered host-side is BYTE-FOR-BYTE the one run() delivers on the
+// default path — same quoting, same `2>/dev/null` suffix, same containment
+// fragments. LOCAL chats and the flag-off path are untouched; a companion
+// failure propagates (companion-or-fail — never a raw-SSH fallback).
+
+describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
+  const remoteManual = { host: 'prod-1', container: null };
+  const remoteContainer = { host: 'prod-1', container: 'p-worker' };
+  const localManual = { host: '(local)', container: null };
+  const localContainer = { host: '(local)', container: 'p-worker' };
+
+  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
+  afterEach(() => {
+    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
+  });
+
+  // THE LOAD-BEARING PARITY TEST (runGit): drive the SAME call twice — flag ON
+  // (capturing the script handed to the companion) and flag OFF (capturing the
+  // cmd handed to run()) — and assert the two strings are byte-identical. This
+  // is the whole ticket's parity contract in one assertion: whichever transport
+  // serves the probe, the host executes the same command.
+  const parityCase = async (name, chat, args, cwd) => {
+    it(`PARITY: the script reaching the companion is byte-identical to the string run() receives (${name})`, async () => {
+      let companionScript = null;
+      let runCmd = null;
+      await runGit(chat, args, cwd, {
+        execInContext: async (host, script) => { companionScript = script; return { host, ok: true, code: 0, stdout: '', stderr: '' }; },
+        run: async () => { throw new Error('flag ON must not touch run()'); },
+      });
+      process.env.WARDEN_COMPANION_TRANSPORT = '0';
+      await runGit(chat, args, cwd, {
+        execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
+        run: async (host, cmd) => { runCmd = cmd; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      });
+      process.env.WARDEN_COMPANION_TRANSPORT = '1';
+      assert.strictEqual(companionScript, runCmd,
+        `the delivered script must be byte-identical on both paths:\ncompanion: ${companionScript}\nrun():     ${runCmd}`);
+      // And the expected shape, pinned explicitly so a quoting drift in EITHER
+      // path fails with a readable diff (not just an identity mismatch):
+      //   - args are shellQuote'd, cwd is shellQuote'd
+      //   - the `2>/dev/null` suffix survives intact
+      const expected = chat.container
+        ? `docker exec ${shellQuote(chat.container)} git -C ${shellQuote(cwd)} ${args.map(shellQuote).join(' ')} 2>/dev/null`
+        : `cd ${shellQuote(cwd)} && git ${args.map(shellQuote).join(' ')} 2>/dev/null`;
+      assert.strictEqual(runCmd, expected);
+    });
+  };
+  parityCase('runGit, container chat', remoteContainer, ['status', '--porcelain'], '/work');
+  parityCase('runGit, manual chat', remoteManual, ['rev-parse', '--abbrev-ref', 'HEAD'], '/home/user/proj');
+
+  it('PARITY: runInContext (container chat) — the companion re-assembles the exact docker-exec delivery run() receives', async () => {
+    const script = 'cd /work && test -f .git/MERGE_HEAD && echo merge || true';
+    let companionPayload = null;
+    let runCmd = null;
+    await runInContext(remoteContainer, script, { timeout: 6000 }, {
+      execInContext: async (host, s, opts) => { companionPayload = { script: s, opts }; return { host, ok: true, code: 0, stdout: '', stderr: '' }; },
+      run: async () => { throw new Error('flag ON must not touch run()'); },
+    });
+    assert.strictEqual(companionPayload.script, script, 'the INNER script rides verbatim (never rebuilt JS-side)');
+    assert.strictEqual(companionPayload.opts.container, 'p-worker', 'the container selects the docker-exec delivery host-side');
+    assert.strictEqual(companionPayload.opts.timeout, 6000, 'the timeout rides through (the host-side kill deadline)');
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    await runInContext(remoteContainer, script, { timeout: 6000 }, {
+      execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
+      run: async (host, cmd) => { runCmd = cmd; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    });
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    // The host side (companion buildExecScript) assembles EXACTLY this from the
+    // payload above — Go's shellQuote is ssh.js's byte-identical twin — so the
+    // delivered command is byte-for-byte the default path's:
+    const hostSide = `docker exec ${shellQuote(companionPayload.opts.container)} bash -lc ${shellQuote(companionPayload.script)}`;
+    assert.strictEqual(hostSide, runCmd,
+      `the host-side assembly must equal run()'s delivery:\nhost-side: ${hostSide}\nrun():     ${runCmd}`);
+  });
+
+  it('PARITY: runInContext (manual chat) — the script itself is byte-identical to what run() receives', async () => {
+    const script = 'cd /home/user/proj && realpath --relative-to=. /home/user/proj/src 2>/dev/null';
+    let companionScript = null;
+    let runCmd = null;
+    await runInContext(remoteManual, script, {}, {
+      execInContext: async (host, s, opts) => { companionScript = s; assert.strictEqual(opts.container, '', 'manual chat -> no container (bare bash -lc delivery)'); return { host, ok: true, code: 0, stdout: '', stderr: '' }; },
+      run: async () => { throw new Error('flag ON must not touch run()'); },
+    });
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    await runInContext(remoteManual, script, {}, {
+      execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
+      run: async (host, cmd) => { runCmd = cmd; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    });
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    assert.strictEqual(companionScript, runCmd);
+    assert.strictEqual(companionScript, script, 'the containment script rides verbatim');
+  });
+
+  it('runGit under the flag routes REMOTE chats through the companion (ZERO run() spawns), result mapped through', async () => {
+    let companionCalls = 0;
+    let runCalls = 0;
+    const r = await runGit(remoteManual, ['status', '--porcelain'], '/work', {
+      execInContext: async (host, script, opts) => {
+        companionCalls++;
+        assert.strictEqual(host, 'prod-1');
+        assert.strictEqual(script, `cd ${shellQuote('/work')} && git 'status' '--porcelain' 2>/dev/null`);
+        assert.strictEqual(opts.timeout, 8000, 'runGit probes keep their 8000ms deadline');
+        return { host, ok: true, code: 0, stdout: ' M file.txt\n', stderr: '' };
+      },
+      run: async () => { runCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    });
+    assert.strictEqual(companionCalls, 1);
+    assert.strictEqual(runCalls, 0, 'the companion path issues ZERO per-op ssh spawns');
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.stdout, ' M file.txt\n', 'callers read .stdout exactly as they read run()\'s result');
+  });
+
+  it('runGit under the flag is companion-or-fail: a companion failure propagates, run() is NEVER consulted', async () => {
+    let runCalls = 0;
+    const r = await runGit(remoteManual, ['status', '--porcelain'], '/work', {
+      execInContext: async (host) => ({ host, ok: false, code: -1, stdout: '', stderr: 'companion transport error for prod-1: channel died. Set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.' }),
+      run: async () => { runCalls++; return { ok: true, code: 0, stdout: 'should not appear', stderr: '' }; },
+    });
+    assert.strictEqual(runCalls, 0, 'no silent raw-SSH fallback inside the experimental path');
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.stderr.includes('WARDEN_COMPANION_TRANSPORT=0'));
+  });
+
+  it('LOCAL chats never route through the companion, even under the flag (container + manual)', async () => {
+    let companionCalls = 0;
+    const deps = {
+      execInContext: async () => { companionCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    };
+    // container+LOCAL: runLocalCapture('docker', argv) — a local docker-exec, no
+    // ssh and no companion. docker may not exist in the sandbox, so tolerate the
+    // spawn-error leg; the ROUTING claim is "companion not consulted".
+    await runGit(localContainer, ['status', '--porcelain'], '/work', deps).catch(() => {});
+    await runInContext(localContainer, 'true', {}, deps).catch(() => {});
+    // manual+LOCAL: runLocalGit — same tolerance (git exists everywhere, but the
+    // catch keeps the test about routing, not about the local binary).
+    await runGit(localManual, ['status', '--porcelain'], '/work', deps).catch(() => {});
+    assert.strictEqual(companionCalls, 0, 'LOCAL never routes through the companion');
+  });
+
+  it('flag OFF -> runGit/runInContext use run() and the delivered command is unchanged', async () => {
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    let companionCalls = 0;
+    const calls = [];
+    const deps = {
+      execInContext: async () => { companionCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      run: async (host, cmd, opts) => { calls.push({ host, cmd, opts }); return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    };
+    await runGit(remoteContainer, ['stash', 'list'], '/work', deps);
+    await runGit(remoteManual, ['stash', 'list'], '/work', deps);
+    await runInContext(remoteManual, 'test -d .git', { timeout: 5000 }, deps);
+    assert.strictEqual(companionCalls, 0, 'flag OFF -> companion not consulted');
+    assert.deepStrictEqual(calls, [
+      { host: 'prod-1', cmd: `docker exec 'p-worker' git -C '/work' 'stash' 'list' 2>/dev/null`, opts: { timeout: 8000 } },
+      { host: 'prod-1', cmd: `cd '/work' && git 'stash' 'list' 2>/dev/null`, opts: { timeout: 8000 } },
+      { host: 'prod-1', cmd: 'test -d .git', opts: { timeout: 5000 } },
+    ], 'the default path delivers byte-for-byte the pre-WARDEN-1261 commands');
+  });
+});
+
 // ---------------------- probe routing over the companion ---------------------
 // WARDEN-382: the routing change lives in src/tmux.js (probeSession/hasSession),
 // but the whole transport surface is tested here. Drives the REAL exported
@@ -3424,6 +3695,7 @@ function realBinaryTransport() {
       assert.ok(res.methods.includes('resize'), 'ping advertises the resize RPC (WARDEN-409)');
       assert.ok(res.methods.includes('send'), 'ping advertises the send RPC (WARDEN-888)');
       assert.ok(res.methods.includes('sendKeys'), 'ping advertises the sendKeys RPC (WARDEN-888)');
+      assert.ok(res.methods.includes('exec'), 'ping advertises the exec RPC (WARDEN-1261)');
     } finally {
       ch.kill();
     }
@@ -3444,6 +3716,104 @@ function realBinaryTransport() {
       ch.kill();
     }
   });
+
+  it('exec runs a script host-side and returns the raw cmdResult (WARDEN-1261)', async () => {
+    const ch = new CompanionChannel('local-binary', realBinaryTransport());
+    try {
+      // The run() delivery shape: script verbatim under bash -lc, stdout
+      // captured, a redirect inside the script honored.
+      const ok = await ch.call('exec', {
+        script: "printf 'warden-exec-e2e'; ls /nonexistent-warden-e2e 2>/dev/null; exit 0",
+        timeoutMs: 4000,
+      }, { timeout: 8000 });
+      assert.strictEqual(ok.ok, true);
+      assert.strictEqual(ok.code, 0);
+      assert.strictEqual(ok.stdout, 'warden-exec-e2e');
+      assert.strictEqual(ok.stderr, '', '2>/dev/null inside the script suppressed the probe noise');
+
+      // A non-zero exit is DATA ({ok:false, code:N}), never an RPC error —
+      // the git routes read it exactly as they read run()'s non-zero exits.
+      const nz = await ch.call('exec', { script: 'exit 42', timeoutMs: 4000 }, { timeout: 8000 });
+      assert.strictEqual(nz.ok, false);
+      assert.strictEqual(nz.code, 42);
+
+      // timeoutMs kills the host-side process: a 30s sleep returns in well
+      // under a second with the kill shape {ok:false, code:-1}.
+      const t0 = Date.now();
+      const slow = await ch.call('exec', { script: 'sleep 30', timeoutMs: 250 }, { timeout: 8000 });
+      assert.ok(Date.now() - t0 < 5000, `host-side kill must fire fast (took ${Date.now() - t0}ms)`);
+      assert.strictEqual(slow.ok, false);
+      assert.strictEqual(slow.code, -1);
+
+      // WARDEN-1261 QA rework: the REAL script shapes must die too — and must
+      // not stall the serial dispatch loop. `sleep 30` alone passes even
+      // without a process-group kill (bash exec-optimizes it into the direct
+      // child); the multi-command runGit manual-remote shape, the pipeline
+      // (search-files family), and a background fork all fork instead, so a
+      // direct-child-only kill orphaned the forks, produced NO response (the
+      // orphans held the stdout pipe, blocking the host-side Wait), and froze
+      // every subsequent op on the channel until the orphans exited.
+      const qaShapes = [
+        ["cd '/tmp' && sleep 30 2>/dev/null", 'runGit manual-remote shape'],
+        ['sleep 30 | head -5', 'pipeline (search-files family)'],
+        ['sleep 30 & wait', 'background fork'],
+      ];
+      for (const [script, label] of qaShapes) {
+        const ts = Date.now();
+        const killed = await ch.call('exec', { script, timeoutMs: 250 }, { timeout: 8000 });
+        assert.ok(Date.now() - ts < 5000,
+          `${label}: host-side group kill must fire fast, not stall on the pipe (took ${Date.now() - ts}ms)`);
+        assert.strictEqual(killed.ok, false, `${label}: kill shape`);
+        assert.strictEqual(killed.code, -1, `${label}: signal kill reports code -1`);
+        // The serial dispatch loop must stay live: the very next op answers
+        // immediately — a follow-up ping blocked for seconds is the
+        // channel-wide-freeze half of the QA defect.
+        const tp = Date.now();
+        const pong = await ch.call('ping', {}, { timeout: 4000 });
+        assert.ok(pong.version, `${label}: follow-up ping answered`);
+        assert.ok(Date.now() - tp < 2000,
+          `${label}: dispatch loop stalled behind the killed probe (ping took ${Date.now() - tp}ms)`);
+      }
+    } finally {
+      ch.kill();
+    }
+  });
+
+  it('execInContext through the FULL client stack against the real binary: the git-route script runs host-side (WARDEN-1261)', async () => {
+    _resetChannelCacheForTests();
+    // Bootstrapped like production (probe HAVE=1 -> no upload -> spawn -> ping),
+    // except the channel fronts the REAL binary — so the whole client stack
+    // (companionOp -> getChannel -> stale-binary gate -> channel.call) runs.
+    const deps = {
+      manifest: loadManifest(),
+      run: async () => ({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=1\n' }),
+      spawnChannel: () => realBinaryTransport(),
+    };
+    try {
+      // The runGit manual-remote script shape, verbatim (quoting + 2>/dev/null).
+      const res = await companionExec('prod', "cd '/tmp' && git 'status' '--porcelain' 2>/dev/null", { timeout: 4000 }, {}, deps);
+      assert.strictEqual(res.host, 'prod');
+      // /tmp is not a repo: the probe exits non-zero with EMPTY stdout AND EMPTY
+      // stderr (the `2>/dev/null` suffix swallows git's noise) — the exact benign
+      // non-repo shape the default run() path produces for the same script
+      // (WARDEN-326: a single git probe exits non-zero for "cwd isn't a repo";
+      // callers read that as data, not transport failure).
+      assert.strictEqual(res.ok, false);
+      assert.notStrictEqual(res.code, 0);
+      assert.strictEqual(res.stdout, '');
+      assert.strictEqual(res.stderr, '');
+
+      // The runInContext container delivery shape: an in-container bash -lc (no
+      // docker here, so expect the docker-failure envelope — still the raw
+      // cmdResult shape, never an RPC error).
+      const inContainer = await companionExec('prod', 'pwd', { container: 'no-such-warden-test', timeout: 4000 }, {}, deps);
+      assert.strictEqual(inContainer.ok, false);
+      assert.strictEqual(typeof inContainer.code, 'number');
+    } finally {
+      _resetChannelCacheForTests();
+    }
+  });
+
 
   (!dockerAvailable ? it : it.skip)('discover without docker -> actionable error, not a crash', async () => {
     const ch = new CompanionChannel('local-binary', realBinaryTransport());

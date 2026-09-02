@@ -31,6 +31,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -138,7 +139,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "send", "sendKeys", "subscribePanes", "unsubscribePanes"},
+				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "send", "sendKeys", "subscribePanes", "unsubscribePanes", "exec"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -198,6 +199,20 @@ func main() {
 			// against its ALLOWED_KEYS trust boundary. Returns the raw cmdResult,
 			// same shape as send/resize.
 			write(Response{ID: req.ID, OK: true, Result: sendKeys(req.Params)})
+		case "exec":
+			// exec is the GENERIC script RPC (WARDEN-1261): runs a script the JS
+			// side ALREADY assembled host-side via `bash -lc`, returning the raw
+			// cmdResult — never an RPC error for a host-side command failure (the
+			// git routes read {ok,code,stdout,stderr} exactly as they read run()'s
+			// result today; a non-zero probe exit is data, not an RPC failure).
+			// The Go side EXECUTES the script, never rebuilds it: quoting,
+			// `2>/dev/null` suffixes, and containment fragments live inside the
+			// script string built in JS and are preserved verbatim. A container
+			// param selects the docker-exec delivery shape (runInContext); its
+			// absence delivers the script straight to `bash -lc` (run()'s shape).
+			// timeoutMs is honored HOST-SIDE via exec.CommandContext so a timed-
+			// out probe dies on the host, not just in the JS caller.
+			write(Response{ID: req.ID, OK: true, Result: execScript(req.Params)})
 		case "subscribePanes":
 			// WARDEN-413: start (or replace) a background watcher that re-captures
 			// the pane set on a short interval and pushes paneDelta events for ONLY
@@ -926,14 +941,27 @@ func killSession(params json.RawMessage) error {
 	return fmt.Errorf("killSession failed: %s", msg)
 }
 
-// runTmuxRaw runs a tmux command via `bash -lc` LOCALLY on the host (the per-op-
-// handshake win — no further ssh) and returns the raw {ok, code, stdout, stderr}
-// result. Unlike hasSession's `.Run()` (exit only), this captures BOTH streams so
-// the control-plane RPC can return stdout. `bash -lc` mirrors capturePanes / the
-// default runWithPool path so docker and tmux resolve on PATH exactly as they do
-// over SSH today.
-func runTmuxRaw(script string) cmdResult {
-	cmd := exec.Command("bash", "-lc", script)
+// runScriptCtx is the shared run-a-script-locally core: `bash -lc <script>` with
+// both streams captured, settling into the raw {ok, code, stdout, stderr}
+// cmdResult. The ctx carries the deadline; on timeout the WHOLE child process
+// group is SIGKILLed host-side (WARDEN-1261: a timed-out probe must die
+// HOST-side — the JS-side channel timeout alone would orphan it — and it must
+// die COMPLETELY: bash forks work processes for the multi-command/pipeline
+// shapes this domain actually delivers, so killing only the direct bash child
+// orphaned the forks and stalled the serial dispatch loop until they exited).
+// runTmuxRaw (no deadline) and execScript (the caller's timeoutMs) are the two
+// faces of this one core.
+func runScriptCtx(ctx context.Context, script string) cmdResult {
+	cmd := exec.CommandContext(ctx, "bash", "-lc", script)
+	// Own process group + kill(-pgid) on ctx cancel — see procgroup_unix.go.
+	armProcessGroupKill(cmd)
+	// Backstop for the rare pipe holder OUTSIDE the killed group (a script that
+	// double-forks away, e.g. via setsid): Wait() must never block past the
+	// deadline waiting for the stdout/stderr pipes to close. After 2s Go
+	// force-closes them and returns (a non-ExitError → code -1, the kill shape),
+	// keeping the serial dispatch loop alive instead of hanging the host's
+	// whole companion channel on one pathological probe.
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -947,6 +975,16 @@ func runTmuxRaw(script string) cmdResult {
 		}
 	}
 	return cmdResult{OK: err == nil, Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
+}
+
+// runTmuxRaw runs a tmux command via `bash -lc` LOCALLY on the host (the per-op-
+// handshake win — no further ssh) and returns the raw {ok, code, stdout, stderr}
+// result. Unlike hasSession's `.Run()` (exit only), this captures BOTH streams so
+// the control-plane RPC can return stdout. `bash -lc` mirrors capturePanes / the
+// default runWithPool path so docker and tmux resolve on PATH exactly as they do
+// over SSH today. No deadline — the control-plane tmux ops are one-liners.
+func runTmuxRaw(script string) cmdResult {
+	return runScriptCtx(context.Background(), script)
 }
 
 // resizeParams is the resize RPC params (WARDEN-409). Container is the docker
@@ -1124,4 +1162,83 @@ func sendKeys(params json.RawMessage) cmdResult {
 	}
 	target := resolveSession(p.Session, p.Container)
 	return runTmuxRaw(buildSendKeysScript(p.Container, target, p.Key))
+}
+
+// --------------------------------- exec --------------------------------------
+// WARDEN-1261 (the git/file domain slice of roadmap WARDEN-270). The chat-scoped
+// script domain — runGit + runInContext in src/gitRoutes.js, i.e. the entire git
+// surface (15 /api/git-* routes + /api/cross-agent-diff) plus the search-files
+// remote leg — still paid a raw, UN-POOLED per-op ssh connection per probe
+// (unlike the tmux ops it never even rode ControlMaster pooling). This ONE
+// generic RPC serves that whole domain over the persistent channel: the JS side
+// keeps assembling the script (quoting, `2>/dev/null` suffixes, WARDEN-1234
+// containment fragments all live JS-side and are preserved verbatim), and the
+// host side merely executes it.
+//
+// Delivery shapes, selected by `container`:
+//   container set → `docker exec <container> bash -lc <script>`  (the runInContext
+//                   delivery shape — the script's `cd <cwd>` runs IN the container)
+//   container ""  → `bash -lc <script>` directly (the ssh.js run() delivery shape
+//                   — run() delivers `bash -lc <shellQuote(cmd)>`, the same
+//                   interpreter level runScriptCtx uses, so script parity is by
+//                   construction).
+// The container and script are shellQuoted with the SAME byte-for-byte quoting
+// ssh.js uses, so the assembled host-side command is identical to the one run()
+// delivers on the default path — the WARDEN-1261 parity contract.
+//
+// Returns the raw cmdResult (ok/code/stdout/stderr) — NEVER an RPC error for a
+// host-side command failure. A git probe exiting non-zero (`2>/dev/null`-style
+// benign failures included) is DATA the routes already handle, exactly as they
+// handle run()'s non-zero exits today.
+//
+// timeoutMs is enforced HOST-SIDE and kills the child's WHOLE process group
+// (runScriptCtx: Setpgid + kill(-pgid) on ctx cancel — WARDEN-1261 QA rework;
+// the JS-side channel.call timeout alone would orphan the host process, and
+// killing only the direct bash child orphaned the forked work processes under
+// the multi-command/pipeline shapes, stalling the serial dispatch loop). A
+// timeout kill surfaces as {ok:false, code:-1, stdout-so-far, stderr-so-far} —
+// the same envelope run() produces when its JS-side timer SIGKILLs the ssh
+// child.
+
+// execParams is the exec RPC params (WARDEN-1261). Script is the ALREADY-ASSEMBLED
+// script (the Go side executes it, never rebuilds it); Container selects the
+// docker-exec delivery shape when set ("" / null for the bare bash -lc shape);
+// TimeoutMs is the host-side kill deadline. All are JSON-serialized RPC params,
+// never persisted fields.
+type execParams struct {
+	Script    string `json:"script"`
+	Container string `json:"container"`
+	TimeoutMs int    `json:"timeoutMs"`
+}
+
+// buildExecScript assembles the host-side command the exec RPC runs: the
+// docker-exec delivery shape when a container is set (byte-identical to the
+// command string runInContext's remote branch hands run() today), else the bare
+// script (byte-identical to what run() receives — runScriptCtx adds the same
+// `bash -lc` level run() adds). Exposed + tested directly, mirroring
+// buildResizeScript / buildCaptureScript.
+func buildExecScript(container, script string) string {
+	if container != "" {
+		return "docker exec " + shellQuote(container) + " bash -lc " + shellQuote(script)
+	}
+	return script
+}
+
+// execScript runs one JS-assembled script host-side. Bad/absent params fall
+// through to an empty script (bash -lc '' exits 0 — a benign no-op, the same
+// tolerance the sibling RPCs' `_ = json.Unmarshal` lines carry); a non-positive
+// timeoutMs defaults to 8000ms, matching the { timeout: 8000 } both runGit
+// remote branches and runInContext's default pass run() today.
+func execScript(params json.RawMessage) cmdResult {
+	var p execParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
+	}
+	timeoutMs := p.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 8000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+	return runScriptCtx(ctx, buildExecScript(p.Container, p.Script))
 }
