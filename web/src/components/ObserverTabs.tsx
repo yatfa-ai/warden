@@ -8,7 +8,8 @@ import { DirectiveHistory } from './DirectiveHistory';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EmptyState } from './EmptyState';
-import { loadObs, saveObs } from '@/lib/storage';
+import { loadObs, saveObs, resetObsPrefDefaults } from '@/lib/storage';
+import type { ObsResetKey } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
@@ -30,6 +31,18 @@ interface Props {
   // effect's `externalViewMode &&` guard short-circuits). Optional so the
   // component degrades gracefully without it (no deep-link consumption).
   onExternalViewModeConsumed?: () => void;
+  // WARDEN-981 — resetToken is the Observer panel's half of Settings → Reset →
+  // "Reset appearance & UI preferences": a ONE-SHOT, monotonically-increasing
+  // nonce App bumps once per reset. Deliberately NOT carried on
+  // externalViewMode: that prop only sets viewMode (the 7 filters need their own
+  // signal) and its ref-compare has a same-value bailout that a reset targeting
+  // an already-'sessions' tab would trip. A counter sidesteps both — every bump
+  // is a new value, so back-to-back resets always fire. Applying the defaults
+  // here re-renders the live panel with no reload, and the saveObs effect above
+  // persists the result (openIds/activeId states are untouched, so the open
+  // observer sessions ride through). Optional (undefined = never fires) so the
+  // component degrades gracefully unwired, like externalViewMode.
+  resetToken?: number;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
   focusedChat?: Chat | null;
@@ -61,7 +74,7 @@ interface Props {
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
@@ -273,6 +286,45 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, foc
     }
     lastExternalViewModeRef.current = externalViewMode;
   }, [externalViewMode, onExternalViewModeConsumed]);
+
+  // WARDEN-981 — apply Settings → Reset → "Reset appearance & UI preferences"
+  // to the LIVE panel. The Observer's prefs live in a second storage namespace
+  // (ObsUi / warden:observer:v1) the UiState-derived reset cannot see, so App
+  // signals this component through the resetToken nonce (see Props). The
+  // ref-compare fires only on a token CHANGE — never on mount, never on any
+  // other re-render — and a monotonic counter means two resets in a row are two
+  // distinct values, so the second always fires too. The setters snap the live
+  // states to resetObsPrefDefaults(); the saveObs effect above then persists
+  // them, with openIds/activeId riding through untouched (workspace state the
+  // reset's copy promises to keep).
+  //
+  // The setter map is keyed by ObsResetKey — the live-panel twin of App's
+  // resetSetters guard — so a future ObsUi pref added to OBS_RESET_KEYS but not
+  // wired to live state HERE is a missing-property compile error, not a panel
+  // that silently ignores the reset until reload.
+  const lastResetTokenRef = useRef(resetToken);
+  useEffect(() => {
+    if (resetToken === undefined || resetToken === lastResetTokenRef.current) return;
+    lastResetTokenRef.current = resetToken;
+    const d = resetObsPrefDefaults();
+    const obsResetSetters: { [K in ObsResetKey]: () => void } = {
+      viewMode: () => setViewMode(d.viewMode),
+      activityFilters: () => {
+        setActTypeFilter(d.activityFilters.type);
+        setActAgentFilter(d.activityFilters.agent);
+        setActHostFilter(d.activityFilters.host);
+      },
+      directiveFilters: () => {
+        setDirAgentFilter(d.directiveFilters.agent);
+        setDirHostFilter(d.directiveFilters.host);
+      },
+      attentionFilters: () => {
+        setAttnAgentFilter(d.attentionFilters.agent);
+        setAttnHostFilter(d.attentionFilters.host);
+      },
+    };
+    for (const apply of Object.values(obsResetSetters)) apply();
+  }, [resetToken]);
 
   // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
   // When observerAutoStart is on and a chat becomes focused, spawn+open a bound
