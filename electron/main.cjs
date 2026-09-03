@@ -3,6 +3,7 @@
 const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu, shell } = require('electron');
 const { fork, execSync } = require('child_process');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const fs = require('fs');
 const os = require('os');
 const http = require('http');
@@ -333,6 +334,19 @@ function wardenDataDir() {
   return path.join(os.homedir(), '.yatfa-warden');
 }
 
+// Resolve an ESM module under src/ to a specifier `import()` accepts on EVERY
+// platform. A bare `path.join(...)` result is NOT such a specifier: on win32 it
+// is a drive-letter path (`C:\...\src\stall-log.js`) whose leading `C:` Node's
+// ESM loader parses as a URL SCHEME and rejects before touching the filesystem
+// (`ERR_UNSUPPORTED_ESM_URL_SCHEME: ... Received protocol 'c:'`). Electron's main
+// process uses Node's own ESM loader, so this is Node's documented behavior, not
+// an Electron quirk. POSIX absolute paths happen to URL-resolve, which is exactly
+// why the bug is invisible on macOS/Linux — and warden ships a Windows NSIS
+// installer. `pathToFileURL().href` is the standard fix.
+function srcModuleUrl(...segments) {
+  return pathToFileURL(path.join(__dirname, '..', 'src', ...segments)).href;
+}
+
 // Push a main→renderer message defensively. Copied from
 // broadcastTelemetryRuntimeStatus's discipline: a missing/destroyed window or a
 // throwing webContents is swallowed, because a menu click must never crash the
@@ -356,13 +370,29 @@ function sendToRenderer(channel, payload) {
 // description. Deliberately NO website/credits/authors: package.json carries no
 // repository/homepage/bugs/author fields, and an About box that invents a
 // destination is exactly what this ticket removes.
+//
+// The description is READ from package.json rather than transcribed, so an edit
+// to the manifest cannot silently drift out of the About box (app.getVersion()
+// already reads that same manifest for the version). package.json is JSON, so
+// require() crosses no ESM boundary, and it ships inside the asar (build.files).
+// A read failure falls back to the product name alone rather than throwing.
+function appDescription() {
+  try {
+    const desc = require('../package.json').description;
+    if (typeof desc === 'string' && desc.trim()) return desc.trim();
+  } catch (e) {
+    console.warn('[warden:menu] package description unreadable', e);
+  }
+  return 'Yatfa Warden';
+}
+
 function showAboutDialog() {
   try {
     dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
       type: 'info',
       title: 'About Yatfa Warden',
       message: 'Yatfa Warden',
-      detail: `Version ${app.getVersion()}\nYatfa Warden — dashboard for AI agent chats`,
+      detail: `Version ${app.getVersion()}\n${appDescription()}`,
       buttons: ['OK'],
       noLink: true,
     });
@@ -402,7 +432,7 @@ async function showStallDiagnostics() {
   const journal = path.join(wardenDataDir(), 'stalls.jsonl');
   let summaryText;
   try {
-    const stallLog = await import(path.join(__dirname, '..', 'src', 'stall-log.js'));
+    const stallLog = await import(srcModuleUrl('stall-log.js'));
     const stalls = await stallLog.readStalls({ limit: 500 });
     summaryText = formatStallSummary(summarizeStalls(stalls), { logFile: journal });
   } catch (e) {
@@ -1095,7 +1125,7 @@ app.whenReady().then(async () => {
   // — and nothing reaches the transport until baseConsent is applied below, so
   // the ordering is safe. WARDEN-524.
   try {
-    const transport = await import(path.join(__dirname, '..', 'src', 'telemetry-send.js'));
+    const transport = await import(srcModuleUrl('telemetry-send.js'));
     telemetryPipeline.setSend(transport.send);
   } catch (e) {
     console.warn('[warden:telemetry] transport module failed to load; telemetry stays inert', e);
