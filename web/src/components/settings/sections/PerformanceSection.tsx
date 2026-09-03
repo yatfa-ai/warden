@@ -5,6 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type ConfigData, type SetConfig } from '../types';
 
 export function PerformanceSection({ config, setConfig, hidden }: { config: ConfigData; setConfig: SetConfig; hidden: boolean }) {
@@ -23,6 +24,12 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
         >
           Companion transport <Badge variant="secondary">experimental</Badge>
         </Label>
+        {/* The env override makes the toggle inert, so a restore would write a
+            draft value nothing honors — hide the affordance in that state, the
+            same discrimination the disabled Switch above already makes. */}
+        {!config.companionTransportOverridden && (
+          <ConfigResetToDefaultButton label="Companion transport" path="companionTransportEnabled" config={config} setConfig={setConfig} />
+        )}
       </div>
       <p className="text-xs text-muted-foreground">
         Route remote tmux ops (discover, capture, spawn, kill, liveness, resize) through a

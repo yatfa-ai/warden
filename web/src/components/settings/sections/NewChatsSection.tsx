@@ -24,6 +24,7 @@ import {
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { PresetRow } from '../rows/PresetRow';
 import { SettingsSection } from '../SettingsSection';
+import { ClientPrefResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type NewChatsPrefs } from '../types';
 
 export type NewChatsSectionProps = NewChatsPrefs & { availableHosts: string[]; hidden: boolean };
@@ -201,7 +202,10 @@ export function NewChatsSection(props: NewChatsSectionProps) {
     <>
     <SettingsSection title="New Chats" className={hidden ? 'hidden' : undefined}>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="defaultNewChatPreset">Default agent type</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="defaultNewChatPreset">Default agent type</Label>
+          <ClientPrefResetToDefaultButton label="Default agent type" prefKey="defaultNewChatPreset" value={defaultNewChatPreset} setter={setDefaultNewChatPreset} />
+        </div>
         <Select
           value={defaultNewChatPreset}
           onValueChange={(v) => setDefaultNewChatPreset(v)}
@@ -295,7 +299,10 @@ export function NewChatsSection(props: NewChatsSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="defaultNewChatHost">Default host</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="defaultNewChatHost">Default host</Label>
+          <ClientPrefResetToDefaultButton label="Default host" prefKey="defaultNewChatHost" value={defaultNewChatHost} setter={setDefaultNewChatHost} />
+        </div>
         <Select value={defaultNewChatHost} onValueChange={(v) => setDefaultNewChatHost(v)}>
           <SelectTrigger id="defaultNewChatHost" className="w-full">
             <SelectValue placeholder="this machine (local)" />
@@ -333,7 +340,10 @@ export function NewChatsSection(props: NewChatsSectionProps) {
           shell" (folded in on load) and the hardcoded 'bash' the new-chat
           shell preset used to force-feed. */}
       <div className="flex flex-col gap-2">
-        <Label htmlFor="defaultShell">Default shell (fallback for any host without its own)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="defaultShell">Default shell (fallback for any host without its own)</Label>
+          <ClientPrefResetToDefaultButton label="Default shell (fallback for any host without its own)" prefKey="defaultShell" value={defaultShell} setter={setDefaultShell} />
+        </div>
         <Input
           id="defaultShell"
           value={defaultShell}
@@ -381,7 +391,10 @@ export function NewChatsSection(props: NewChatsSectionProps) {
           editable per-spawn in the form. WARDEN-336 adds per-host
           overrides below — a host with its own value wins over this. */}
       <div className="flex flex-col gap-2">
-        <Label htmlFor="defaultNewChatCwd">Default working directory (fallback for any host without its own)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="defaultNewChatCwd">Default working directory (fallback for any host without its own)</Label>
+          <ClientPrefResetToDefaultButton label="Default working directory (fallback for any host without its own)" prefKey="defaultNewChatCwd" value={defaultNewChatCwd} setter={setDefaultNewChatCwd} />
+        </div>
         <Input
           id="defaultNewChatCwd"
           value={defaultNewChatCwd}

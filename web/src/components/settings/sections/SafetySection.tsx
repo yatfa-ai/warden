@@ -3,6 +3,7 @@
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type ConfigData, type SetConfig } from '../types';
 
 export function SafetySection({ config, setConfig, hidden }: { config: ConfigData; setConfig: SetConfig; hidden: boolean }) {
@@ -18,6 +19,7 @@ export function SafetySection({ config, setConfig, hidden }: { config: ConfigDat
           <Label htmlFor="confirmDestructiveActions" className="cursor-pointer">
             Confirm before destructive actions (force-kill, kill chat)
           </Label>
+          <ConfigResetToDefaultButton label="Confirm before destructive actions" path="confirmDestructiveActions" config={config} setConfig={setConfig} />
         </div>
         <p className="text-xs text-muted-foreground">
           When on, force-killing a session and killing a chat ask for confirmation. Turn off for less friction.

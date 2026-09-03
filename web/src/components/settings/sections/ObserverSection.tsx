@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type ConfigData, type SetConfig } from '../types';
 
 export interface ObserverSectionProps {
@@ -55,7 +56,10 @@ export function ObserverSection({
     <>
     <SettingsSection title="Observer Preferences" className={hidden ? 'hidden' : undefined}>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="observerConfirmMode">Directive Confirmation</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="observerConfirmMode">Directive Confirmation</Label>
+          <ConfigResetToDefaultButton label="Directive Confirmation" path="observerConfirmMode" config={config} setConfig={setConfig} />
+        </div>
         <Select
           value={config.observerConfirmMode}
           onValueChange={(v) =>
@@ -86,10 +90,14 @@ export function ObserverSection({
         <Label htmlFor="observerAutoStart" className="cursor-pointer">
           Auto-start Observer
         </Label>
+        <ConfigResetToDefaultButton label="Auto-start Observer" path="observerAutoStart" config={config} setConfig={setConfig} />
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="observerSessionTimeout">Session Auto-stop (minutes)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="observerSessionTimeout">Session Auto-stop (minutes)</Label>
+          <ConfigResetToDefaultButton label="Session Auto-stop (minutes)" path="observerSessionTimeout" config={config} setConfig={setConfig} />
+        </div>
         <Input
           id="observerSessionTimeout"
           type="number"
@@ -138,7 +146,10 @@ export function ObserverSection({
       <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
         <div className="text-xs font-medium text-foreground">Observer model</div>
         <div className="flex flex-col gap-2">
-          <Label htmlFor="observerModel">Model</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="observerModel">Model</Label>
+            <ConfigResetToDefaultButton label="Observer model" path="llm.model" config={config} setConfig={setConfig} />
+          </div>
           <Input
             id="observerModel"
             value={config.llm.model}
@@ -150,7 +161,10 @@ export function ObserverSection({
           </p>
         </div>
         <div className="flex flex-col gap-2">
-          <Label htmlFor="observerBaseUrl">Base URL</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="observerBaseUrl">Base URL</Label>
+            <ConfigResetToDefaultButton label="Observer base URL" path="llm.baseUrl" config={config} setConfig={setConfig} />
+          </div>
           <Input
             id="observerBaseUrl"
             value={config.llm.baseUrl}
@@ -213,7 +227,10 @@ export function ObserverSection({
           )}
         </div>
         <div className="flex flex-col gap-2">
-          <Label htmlFor="observerMaxTokens">Max output tokens</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="observerMaxTokens">Max output tokens</Label>
+            <ConfigResetToDefaultButton label="Observer max output tokens" path="llm.maxTokens" config={config} setConfig={setConfig} />
+          </div>
           <Input
             id="observerMaxTokens"
             type="number"
