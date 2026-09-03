@@ -122,8 +122,15 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategoryDescriptor[] = Obje
     role: 'collecting' as const,
     label: 'Anonymous errors, crashes & freezes',
     summary:
-      'Anonymous error, crash, and event-loop-freeze reports — no chat content, no file paths, no hostnames, no credentials.',
-    eventTypes: Object.freeze(['error', 'crash', 'performance-stall']),
+      'Anonymous error, crash, and event-loop-freeze reports — from the app AND its backend process — no chat content, no file paths, no hostnames, no credentials.',
+    // WARDEN-1278 — `server-stall` is the BACKEND child's freezes, folded into
+    // one bounded aggregate per 5-minute window (counts, durations, a lag
+    // histogram, and closed-set culprit keys). It rides `incidents` because a
+    // freeze IS an incident, which is why no new category was added for it; it
+    // is listed HERE because the transparency panel's contract is to disclose
+    // every event type a category produces, and a silently-added type would be
+    // exactly the lie of omission that surface exists to prevent.
+    eventTypes: Object.freeze(['error', 'crash', 'performance-stall', 'server-stall']),
     gatedFields: Object.freeze([]),
   }),
   Object.freeze({

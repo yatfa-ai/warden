@@ -77,6 +77,10 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   // constant kebab-case operation literal; there is no free text and no
   // identifier anywhere in the shape (the validator enforces the name pattern).
   'operational-metrics': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'boundaries', 'operations', 'rejected'],
+  // WARDEN-1278 — the backend child's folded stall window. Every field is a
+  // number or a closed-set kebab-case culprit key; there is no free text and no
+  // identifier anywhere in the shape (the validator enforces the key pattern).
+  'server-stall': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'count', 'totalMs', 'maxMs', 'boundaries', 'buckets', 'culprits'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the
@@ -146,6 +150,41 @@ function isValidOperationalMetricsShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// WARDEN-1278 — the server-stall shape check (a local mirror of the canonical
+// schema's isServerStallShape, kept local for the same reason isValidBaseEvent
+// itself is: this validator is the transparency panel's OWN proof, a strict
+// superset of the wire shape check).
+const CULPRIT_NAME_RE = OPERATION_NAME_RE;
+const MAX_STALL_CULPRITS = 65;
+
+function isValidServerStallShape(e: Record<string, unknown>): boolean {
+  const finiteNonNegative = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (e.runtime !== 'server') return false;
+  if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
+  if (!Number.isInteger(e.count) || (e.count as number) < 0) return false;
+  if (!finiteNonNegative(e.totalMs) || !finiteNonNegative(e.maxMs)) return false;
+  if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
+  for (let i = 0; i < e.boundaries.length; i += 1) {
+    const b = e.boundaries[i];
+    if (!finiteNonNegative(b) || b === 0) return false;
+    if (i > 0 && b <= (e.boundaries as number[])[i - 1]) return false;
+  }
+  if (!Array.isArray(e.buckets) || e.buckets.length !== e.boundaries.length + 1) return false;
+  for (const b of e.buckets) {
+    if (!Number.isInteger(b) || (b as number) < 0) return false;
+  }
+  if (!Array.isArray(e.culprits) || e.culprits.length > MAX_STALL_CULPRITS) return false;
+  for (const c of e.culprits) {
+    if (!c || typeof c !== 'object') return false;
+    const o = c as Record<string, unknown>;
+    if (typeof o.culprit !== 'string' || !CULPRIT_NAME_RE.test(o.culprit)) return false;
+    if (!Number.isInteger(o.count) || (o.count as number) < 0) return false;
+    if (!finiteNonNegative(o.totalOverlapMs)) return false;
+  }
+  return true;
+}
+
 /**
  * Base-event schema conformance — a LOCAL copy mirroring the
  * `validateBaseEvent` proof shape from telemetry-source.cjs:212-244. Returns
@@ -185,6 +224,16 @@ export function isValidBaseEvent(event: unknown): boolean {
     if (!isValidOperationalMetricsShape(e)) return false;
     for (const op of e.operations as unknown[]) {
       if (containsIdentifier(String((op as Record<string, unknown>).operation))) return false;
+    }
+  } else if (e.type === 'server-stall') {
+    // WARDEN-1278 — the backend child's folded stall window: shape-check per the
+    // canonical schema PLUS this module's hard-exclusion proof extended to the
+    // ONLY string the type carries — the culprit keys must be kebab-case
+    // literals, so a route path, an agent name or a hostname can never ride the
+    // attribution axis.
+    if (!isValidServerStallShape(e)) return false;
+    for (const c of e.culprits as unknown[]) {
+      if (containsIdentifier(String((c as Record<string, unknown>).culprit))) return false;
     }
   }
   // Hard-exclusion proof: the redacted message must be free of any identifier;

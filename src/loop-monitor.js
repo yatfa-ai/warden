@@ -493,6 +493,17 @@ export function createLoopMonitor(opts = {}) {
     _spans() { return spanRing.filter(Boolean); },
     // Test seam: the current (not yet ticked) per-label sync aggregate.
     _syncTotals() { return summarizeSyncTotals(syncAgg); },
+    // Test seam: deliver a PRE-BUILT record straight to the registered sink, so
+    // a caller's setOnStall wiring can be exercised end-to-end without waiting
+    // for a real multi-second freeze or driving the heartbeat with a fake clock.
+    // Delivery-side only: it does not touch the stall ring or the stats, because
+    // those belong to real detection and a test that fabricated them would be
+    // asserting its own fixture. Same never-throw-through contract as tick().
+    _deliverStall(record) {
+      if (!onStall) return null;
+      try { onStall(record); } catch { /* sink failures are not the server's problem */ }
+      return record;
+    },
   };
 }
 

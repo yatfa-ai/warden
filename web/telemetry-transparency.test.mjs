@@ -207,10 +207,15 @@ test('every category is listed, in registry order, with its enabled state', () =
   assert.deepEqual([...c.enabled], ['incidents']);
 });
 
-test('incidents-only collects the three anonymous event types and NO identifier fields', () => {
+test('incidents-only collects the four anonymous event types and NO identifier fields', () => {
   const c = cat(INCIDENTS_ONLY);
   assert.equal(c.collectsAnything, true);
-  assert.deepEqual(c.eventTypes.map((e) => e.type), ['error', 'crash', 'performance-stall']);
+  // WARDEN-1278 — `server-stall` joined this category: a freeze in the BACKEND
+  // child is an incident, so it rides `incidents` rather than earning a new
+  // checkbox. It is disclosed HERE because the panel's contract is to list every
+  // event type a category produces — a silently-added type would be exactly the
+  // lie of omission this surface exists to prevent.
+  assert.deepEqual(c.eventTypes.map((e) => e.type), ['error', 'crash', 'performance-stall', 'server-stall']);
   assert.deepEqual(c.retainedFields, [], 'no chat/session-name fields are retained');
   // No identifier field name may appear among the anonymous event fields. (An
   // error event's `name` is the Error CLASS name, not a chat/session identifier.)
@@ -228,7 +233,7 @@ test('incidents + names ADDITIONALLY retains the chat/session-name fields', () =
   assert.equal(c.collectsAnything, true);
   assert.ok(c.retainedFields.includes('chatname'), 'chat name advertised');
   assert.ok(c.retainedFields.includes('sessionname'), 'session name advertised');
-  assert.equal(c.eventTypes.length, 3, 'the same three anonymous types');
+  assert.equal(c.eventTypes.length, 4, 'the same four anonymous types');
   assert.equal(catOf(BOTH, 'names').inert, false, 'names is live when something collects');
 });
 
@@ -275,7 +280,7 @@ test('describeCollection DISCLOSES the optional appVersion? field on every event
   for (const c of [INCIDENTS_ONLY, BOTH]) {
     const label = JSON.stringify(c);
     const out = cat(c);
-    assert.equal(out.eventTypes.length, 3, `three event types for ${label}`);
+    assert.equal(out.eventTypes.length, 4, `four event types for ${label}`);
     for (const et of out.eventTypes) {
       assert.ok(et.fields.includes('appVersion?'), `${et.type} discloses optional appVersion? for ${label}`);
     }
@@ -292,7 +297,7 @@ test('describeCollection DISCLOSES the optional platform? field on every event t
   for (const c of [INCIDENTS_ONLY, BOTH]) {
     const label = JSON.stringify(c);
     const out = cat(c);
-    assert.equal(out.eventTypes.length, 3, `three event types for ${label}`);
+    assert.equal(out.eventTypes.length, 4, `four event types for ${label}`);
     for (const et of out.eventTypes) {
       assert.ok(et.fields.includes('platform?'), `${et.type} discloses optional platform? for ${label}`);
     }
@@ -713,6 +718,78 @@ test(':149 — a malformed frame ELEMENT (non-object) is REJECTED', () => {
     false,
     'malformed element after a good one rejected',
   );
+});
+
+// ==========================================================================
+// server-stall (WARDEN-1278) — disclosed by the `incidents` category, and its
+// attribution key proven closed-set on BOTH validators.
+// ==========================================================================
+
+const serverStallEvent = (overrides = {}) => ({
+  schemaVersion: SCHEMA_VERSION,
+  type: 'server-stall',
+  runtime: 'server',
+  timestamp: 1735689600000,
+  windowStartedAt: 1735689300000,
+  windowEndedAt: 1735689600000,
+  count: 2,
+  totalMs: 4200,
+  maxMs: 3000,
+  boundaries: [1000, 2000, 5000, 10000, 30000],
+  buckets: [0, 1, 1, 0, 0, 0],
+  culprits: [{ culprit: 'get-api-claude-sessions', count: 2, totalOverlapMs: 4000 }],
+  ...overrides,
+});
+
+test('the incidents category DISCLOSES server-stall and its aggregate fields (WARDEN-1278)', () => {
+  const et = cat(INCIDENTS_ONLY).eventTypes.find((e) => e.type === 'server-stall');
+  assert.ok(et, 'server-stall is catalogued under incidents');
+  for (const f of ['windowStartedAt', 'windowEndedAt', 'count', 'totalMs', 'maxMs', 'boundaries', 'buckets', 'culprits']) {
+    assert.ok(et.fields.includes(f), `server-stall discloses ${f}`);
+  }
+  // No free-text field is disclosed, because none exists in the shape.
+  for (const f of et.fields) {
+    assert.ok(!/message|reason|name$|label/i.test(f), `server-stall carries no free-text field: ${f}`);
+  }
+});
+
+test('a well-formed server-stall window is VALID on both validators', () => {
+  const event = serverStallEvent();
+  assert.equal(isValidBaseEvent(event), true, 'local transparency validator accepts it');
+  assert.equal(validateBaseEvent(event), true, 'the CJS main-process validator agrees');
+});
+
+test('a server-stall culprit key carrying user data is REJECTED on both validators', () => {
+  // The producer projects every span label onto a closed set before it can
+  // become a key; this is the INDEPENDENT second layer. A request label built
+  // from an agent name (`GET /api/chats/myproject-researcher`) reaches the wire
+  // only if BOTH layers fail, and the shape check alone is enough to stop it.
+  for (const bad of [
+    '/api/sessions/abc', 'GET /api/chats', 'myproject.internal',
+    '~/warden/config.json', 'user@host', 'Refactor auth',
+  ]) {
+    const event = serverStallEvent({ culprits: [{ culprit: bad, count: 1, totalOverlapMs: 1 }] });
+    assert.equal(isValidBaseEvent(event), false, `local validator rejects ${JSON.stringify(bad)}`);
+    assert.equal(validateBaseEvent(event), false, `CJS validator rejects ${JSON.stringify(bad)}`);
+  }
+});
+
+test('a server-stall previews with NOTHING redacted — there is nothing in it to redact', () => {
+  // The strongest statement of the type's trust posture: run the REAL redaction
+  // engine over a real window and the output is byte-equal to the input, because
+  // every value is a number or a closed-set key. An event that needed redacting
+  // would mean a leak channel had opened.
+  const event = serverStallEvent();
+  const { payload, valid, transmitted, changes } = previewPayload(event, INCIDENTS_ONLY);
+  assert.deepEqual(payload, event, 'redaction is a no-op on a server-stall window');
+  assert.equal(valid, true);
+  assert.equal(transmitted, true, 'incidents is on, so it would be sent');
+  assert.deepEqual(changes, [], 'no field was dropped and no substitution was made');
+});
+
+test('a server-stall is NOT transmitted with incidents off (it rides that category)', () => {
+  const { transmitted } = previewPayload(serverStallEvent(), NAMES_ONLY);
+  assert.equal(transmitted, false, 'names-only collects nothing, so nothing is sent');
 });
 
 console.log(`\n✓ TELEMETRY TRANSPARENCY TESTS PASS (${passed})`);
