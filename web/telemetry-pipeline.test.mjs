@@ -148,8 +148,8 @@ test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 5);
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics']);
+  assert.equal(SCHEMA_VERSION, 6);
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall']);
 });
 
 test('effectiveConsent normalizes through the ONE authority — garbage resolves to nothing', () => {

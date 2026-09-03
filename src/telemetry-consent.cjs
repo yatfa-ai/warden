@@ -34,8 +34,9 @@ const TELEMETRY_CATEGORIES = Object.freeze([
     role: 'collecting',
     label: 'Anonymous errors, crashes & freezes',
     summary:
-      'Anonymous error, crash, and event-loop-freeze reports — no chat content, no file paths, no hostnames, no credentials.',
-    eventTypes: Object.freeze(['error', 'crash', 'performance-stall']),
+      'Anonymous error, crash, and event-loop-freeze reports — from the app AND its backend process — no chat content, no file paths, no hostnames, no credentials.',
+    // WARDEN-1278 — see the canonical entry in web/src/lib/telemetry/consent.ts.
+    eventTypes: Object.freeze(['error', 'crash', 'performance-stall', 'server-stall']),
     gatedFields: Object.freeze([]),
   }),
   Object.freeze({
