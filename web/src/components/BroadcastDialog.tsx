@@ -36,24 +36,29 @@ import { TargetAgentList } from '@/components/TargetAgentList';
 import { useAsyncConfirm } from '@/lib/useAsyncConfirm';
 import type { Chat } from '@/lib/types';
 import type { BroadcastSummary } from '@/lib/broadcast';
-import type { Snippet } from '@/lib/storage';
+import { useSnippets } from '@/lib/uiStore';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Resolved selected chats, in display order. Empty list disables Send. */
   targets: Chat[];
-  /** Saved instruction snippets (WARDEN-323). Insert-only here: picking one
-   *  fills the textarea via setMsg; it does NOT auto-send. The confirm gate
-   *  below still governs every send (WARDEN-292). */
-  snippets: Snippet[];
   /** Fan out `text` to every selected agent. Resolves with the per-agent summary
    *  (the parent toasts it + clears the selection). Never rejects — partial
    *  failure is encoded in the summary, not thrown. */
   onSend: (text: string) => Promise<BroadcastSummary>;
 }
 
-export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend }: Props) {
+export function BroadcastDialog({ open, onOpenChange, targets, onSend }: Props) {
+  // Saved instruction snippets (WARDEN-323). Insert-only here: picking one fills
+  // the textarea via setMsg; it does NOT auto-send — the confirm gate below still
+  // governs every send (WARDEN-292).
+  //
+  // WARDEN-1271: subscribed straight from the shared client-state store rather
+  // than threaded down from App through ChatSidebar (which called this "threaded
+  // straight through" in its own prop comment). Same list, same render — the
+  // pass-through hop is what went away.
+  const snippets = useSnippets();
   const [msg, setMsg] = useState('');
   // The shared async-confirm machine (WARDEN-1017): `sending`, the reset-on-open
   // for it, the guarded try/finally confirm, and the mid-flight dismissal guard.

@@ -31,7 +31,7 @@ import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
+import { RECENTLY_CLOSED_PREVIEW, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { parseLoadedPins, nextPins } from '@/lib/pinSync';
@@ -109,11 +109,6 @@ interface Props {
   // same resolved value PaneGrid's FileViewer receives, so Follow honors the
   // dashboard cadence regardless of which surface opened the file.
   pollIntervalMs: number;
-  // Saved instruction snippets (WARDEN-323): threaded straight through to the
-  // BroadcastDialog as an insert-only picker. Pure client-side localStorage pref;
-  // owned by App (persisted by its saveUi effect), so this is a read-only prop
-  // here — ChatSidebar never mutates it.
-  snippets: Snippet[];
   // WARDEN-378: per-chat "watch" set (pane keys) + the toggle handler. Owned by App
   // (persisted via its saveUi effect); read-only here except for the toggle, which
   // delegates to App. Threaded to every chat row so the watch affordance + its
@@ -226,7 +221,7 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -955,7 +950,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         open={broadcastOpen}
         onOpenChange={setBroadcastOpen}
         targets={selectedChats}
-        snippets={snippets}
         onSend={handleBroadcastSend}
       />
       <KillDialog

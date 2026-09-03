@@ -8,9 +8,16 @@
 //                       seam. Owned INSIDE SettingsPage (never threaded from App).
 //
 //   - CLIENT prefs    → the `*Prefs` groups (AppearancePrefs, NewChatsPrefs,
-//                       SnippetsPrefs, DesktopAlertPrefs). Pure localStorage
-//                       prefs owned by App and persisted by App's saveUi effect.
-//                       Threaded into SettingsPage as grouped props.
+//                       DesktopAlertPrefs). Pure localStorage prefs owned by App
+//                       and persisted by App's saveUi effect. Threaded into
+//                       SettingsPage as grouped props.
+//
+//                       A client pref shared with surfaces OUTSIDE Settings is
+//                       increasingly not threaded at all: it lives in the shared
+//                       client-state store (lib/uiStore.ts) and each surface
+//                       subscribes (WARDEN-1271 — see the note where
+//                       SnippetsPrefs used to be). Its persistence sink is
+//                       unchanged; only the SHARING channel differs.
 //
 // A client pref must NEVER appear in `ConfigData` — that is the 10×-commented
 // "wrong persistence sink" footgun (mixing the two inside one component made it
@@ -132,7 +139,6 @@ import type {
   TerminalCursorStyle,
   OnExitBehavior,
   CustomPreset,
-  Snippet,
 } from '@/lib/storage';
 import type { HostLabels } from '@/lib/chatDisplay';
 
@@ -203,11 +209,15 @@ export interface NewChatsPrefs {
   setDefaultShellByHost: (v: Record<string, string>) => void;
 }
 
-/** Instruction snippets (WARDEN-323) — pure client localStorage. */
-export interface SnippetsPrefs {
-  snippets: Snippet[];
-  setSnippets: (v: Snippet[]) => void;
-}
+// NOTE (WARDEN-1271): there is no `SnippetsPrefs` group here any more. The
+// instruction-snippet library (WARDEN-323) was the first fact migrated onto the
+// shared client-state store (lib/uiStore.ts), so SnippetsSection SUBSCRIBES to
+// it and calls the store's setter directly instead of receiving a
+// {snippets, setSnippets} pair threaded App → SettingsPage → section. Its
+// persistence is unchanged: App still holds the value (via the same store) in
+// its PersistedPrefSnapshot, and the ONE compile-locked saveUi effect remains
+// the single writer. A pref that is read by exactly one section still belongs
+// in a *Prefs group below; this one is read by five surfaces.
 
 /**
  * Desktop-alert client prefs for the Notifications section (the OS-notification

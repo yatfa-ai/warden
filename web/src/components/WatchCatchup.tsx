@@ -18,7 +18,6 @@ import { Button } from '@/components/ui/button';
 import { QuickReply } from '@/components/QuickReply';
 import { formatCatchupSummary, formatWatchMiss, type WatchMiss } from '@/lib/watchCatchup';
 import { canReply } from '@/lib/quickReply';
-import type { Snippet } from '@/lib/storage';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -28,8 +27,6 @@ interface Props {
   onOpenMiss: (miss: WatchMiss) => void;
   /** Dismiss the whole catch-up (ack all). */
   onDismiss: () => void;
-  /** WARDEN-770 — saved instruction snippets for the reply control's one-click fills. */
-  snippets?: Snippet[];
   /** WARDEN-770 — surface the reply send outcome so App can toast it. */
   onReplyResult?: (ok: boolean, error?: string) => void;
 }
@@ -48,7 +45,7 @@ interface Props {
  * Uses the library <Button> (WARDEN-68 Rule 1: no raw <button>) and conveys state
  * with text + a glyph, not color alone (WCAG 1.4.1).
  */
-export function WatchCatchup({ misses, onOpenMiss, onDismiss, snippets, onReplyResult }: Props) {
+export function WatchCatchup({ misses, onOpenMiss, onDismiss, onReplyResult }: Props) {
   // WARDEN-770: which miss's inline reply panel is open (at most one — opening another
   // closes the first so the banner never stacks several textareas).
   const [replyKey, setReplyKey] = useState<string | null>(null);
@@ -98,7 +95,6 @@ export function WatchCatchup({ misses, onOpenMiss, onDismiss, snippets, onReplyR
                   <QuickReply
                     targetId={m.key}
                     targetLabel={m.name}
-                    snippets={snippets ?? []}
                     onReplyResult={onReplyResult}
                     onDismiss={() => setReplyKey(null)}
                   />

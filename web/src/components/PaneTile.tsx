@@ -14,6 +14,7 @@ import { handleOsc52 } from '@/lib/clipboard';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
+import { useSnippets } from '@/lib/uiStore';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
@@ -184,12 +185,6 @@ interface Props {
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
   onSpawned: (chat: Chat) => void;
-  // Saved instruction snippets (WARDEN-323): the focused-pane context menu
-  // renders a "Snippets" submenu whose items one-click SEND to THIS pane's agent
-  // via the existing /api/send path (no confirm step — the action targets exactly
-  // one visible agent). Read-only here; App owns the persisted list. The submenu
-  // is hidden when the list is empty.
-  snippets: Snippet[];
   // "Timestamp format" pref (WARDEN-422): pure pass-through to this pane's
   // FileViewer — App owns the persisted pref; the blame view formats author-dates
   // per the pref, mirroring every other timestamp surface.
@@ -202,10 +197,19 @@ interface Props {
   pollIntervalMs: number;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
+  // Saved instruction snippets (WARDEN-323): the focused-pane context menu below
+  // renders a "Snippets" submenu whose items one-click SEND to THIS pane's agent
+  // via the existing /api/send path (no confirm step — the action targets exactly
+  // one visible agent). The submenu is hidden when the list is empty.
+  //
+  // WARDEN-1271: subscribed straight from the shared client-state store rather
+  // than threaded App → PaneGrid → here (PaneGrid's own prop comment called that
+  // hop a "pure pass-through"). Read-only — Settings owns the CRUD.
+  const snippets = useSnippets();
   // WARDEN-920: there is deliberately NO `fitRef` here any more. The FitAddon is
   // reachable only through the scheduler below, so no call site can reach around
   // the coalescer and call fit() directly — which is exactly how the un-debounced
