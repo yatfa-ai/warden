@@ -25,6 +25,14 @@ import { Bell, BellOff, Clock, Reply } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
+import {
   rankAttention,
   pickCalloutTop,
   attentionReason,
@@ -501,6 +509,17 @@ function AgentRow({
   return (
     <div className="flex flex-col">
       <div className="flex items-stretch gap-0.5 pr-1">
+      {/*
+        WARDEN-1269 — themed right-click menu on the rundown row. The attention
+        rundown is the triage front door, and its most copy-worthy payload (the
+        truncated triggering signal) was uncopyable: the whole row is one click
+        target, so drag-select is awkward and right-click fell through to the empty
+        native webview menu. `ContextMenuTrigger asChild` composes onContextMenu onto
+        the existing row Button, so the left-click deep-link, Enter/Space activation,
+        and the SIBLING reply/mute controls below are untouched.
+      */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
       <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground', suppressed && 'opacity-60')}>
         <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dot)} aria-hidden />
         <span className="min-w-0 flex-1">
@@ -530,6 +549,31 @@ function AgentRow({
           </span>
         ) : null}
       </Button>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          {/* Open mirrors the row click and the Enter/Space keyboard open. */}
+          <ContextMenuItem onSelect={onClick}>Open</ContextMenuItem>
+          <ContextMenuSeparator />
+          {/* The visible name is `truncate` (and struck through while suppressed) —
+              copy the RAW label, since the styling is irrelevant to the payload. */}
+          <ContextMenuItem onSelect={() => copyWithToast(label)}>Copy agent name</ContextMenuItem>
+          {/* The headline payload: the triggering signal (repeating terminal line /
+              matched watch-pattern prompt) rendered truncated under the name. Mirrors
+              the row's `{detail ? … : null}` render condition. */}
+          {detail && (
+            <ContextMenuItem onSelect={() => copyWithToast(detail)}>Copy signal</ContextMenuItem>
+          )}
+          {/* Mirrors the row's `{agent.role && …}` blue badge. */}
+          {agent.role && (
+            <ContextMenuItem onSelect={() => copyWithToast(agent.role!)}>Copy role</ContextMenuItem>
+          )}
+          {/* Mirrors the row's `{agent.host && agent.host !== '(local)' && …}` badge —
+              the raw SSH / docker-exec identifier, not the '(local)' placeholder. */}
+          {agent.host && agent.host !== '(local)' && (
+            <ContextMenuItem onSelect={() => copyWithToast(agent.host!)}>Copy host</ContextMenuItem>
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
       {/*
         WARDEN-770 — the inline reply toggle (waiting/blocked rows only). A distinct
         affordance from the row's onClick deep-link (which still opens the pane): this
@@ -689,6 +733,10 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
   // agents carry no signal of their own). Shared across every surface that presents
   // the ranked answer so the phrasing is identical.
   const reason = attentionReason(top);
+  // The copyable pane name. `AttentionItem.name` is optional, so fall back to the id
+  // (the pane identifier) rather than copying an empty string — the same
+  // name-else-identifier shape AgentRow's `label` uses.
+  const paneName = top.name || top.id;
   // WARDEN-587: show the same live duration the section rows do, so the promoted
   // "you're needed HERE" answer carries the languishing-vs-just-flipped signal too
   // ("stuck 2h 14m"). Absent for health-group tops (no enteredAt) → no suffix.
@@ -698,6 +746,13 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
   const durationTone = languishingTone(top.enteredAt, now);
   const durationLabel = durationVerbose ? `for ${durationVerbose}` : '';
   return (
+    /*
+      WARDEN-1269 — themed right-click menu on the directed callout, matching the
+      rundown rows above. `asChild` composes onContextMenu onto the existing deep-link
+      Button; left-click still opens the pane.
+    */
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
     <Button variant="ghost" onClick={onClick} className={cn(rowClass(), 'rounded-md border border-border bg-muted/40 py-2')}>
       <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dotForState(top.state))} aria-hidden />
       <span className="min-w-0 flex-1">
@@ -722,6 +777,18 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
       ) : null}
       <span className="text-xs text-muted-foreground shrink-0">open →</span>
     </Button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        {/* Open mirrors the callout's click deep-link. */}
+        <ContextMenuItem onSelect={onClick}>Open</ContextMenuItem>
+        <ContextMenuSeparator />
+        {/* The pane name shown in "You're needed in {name}". */}
+        <ContextMenuItem onSelect={() => copyWithToast(paneName)}>Copy pane name</ContextMenuItem>
+        {/* The "because X" line — rendered `truncate` in the callout, fully copyable
+            here. Same shared attentionReason helper the row detail comes from. */}
+        <ContextMenuItem onSelect={() => copyWithToast(reason)}>Copy reason</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
