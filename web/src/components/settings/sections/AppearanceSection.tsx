@@ -21,6 +21,8 @@ import { DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { hasWindowBridge } from '@/lib/electron';
 import { TERMINAL_FONT_OPTIONS, CUSTOM_FONT_VALUE } from '../fontOptions';
 import { SettingsSection } from '../SettingsSection';
+import { ClientPrefResetToDefaultButton, ResetToDefaultButton } from '../rows/ResetToDefaultButton';
+import { clientPrefDefault, clientPrefDiffersFromDefault } from '../prefDefaultDiff';
 import { type AppearancePrefs } from '../types';
 
 export type AppearanceSectionProps = AppearancePrefs & { hidden: boolean };
@@ -61,7 +63,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
   return (
     <SettingsSection title="Appearance" className={hidden ? 'hidden' : undefined}>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="terminalFontSize">Terminal font size</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="terminalFontSize">Terminal font size</Label>
+          <ClientPrefResetToDefaultButton label="Terminal font size" prefKey="terminalFontSize" value={terminalFontSize} setter={setTerminalFontSize} />
+        </div>
         <Input
           id="terminalFontSize"
           type="number"
@@ -81,7 +86,25 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="terminalFontFamily">Terminal font family</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="terminalFontFamily">Terminal font family</Label>
+          {/* Hand-wired rather than ClientPrefResetToDefaultButton: this row
+              carries local custom-mode state, so restoring the pref alone would
+              leave the Select stuck on "Custom…" showing a value the pref no
+              longer holds. The restore exits custom mode with it. The default
+              read here is resetUiPrefDefaults()' curated stack (NOT DEFAULT_UI's
+              `''` sentinel, which the Select has no option for) — see
+              prefDefaultDiff.ts. */}
+          <ResetToDefaultButton
+            label="Terminal font family"
+            differs={clientPrefDiffersFromDefault('terminalFontFamily', terminalFontFamily)}
+            onRestore={() => {
+              setCustomFontMode(false);
+              setCustomFontText('');
+              setTerminalFontFamily(clientPrefDefault('terminalFontFamily'));
+            }}
+          />
+        </div>
         <Select
           value={fontSelectValue}
           onValueChange={(v) => {
@@ -129,7 +152,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="terminalScrollback">Terminal scrollback (lines)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="terminalScrollback">Terminal scrollback (lines)</Label>
+          <ClientPrefResetToDefaultButton label="Terminal scrollback (lines)" prefKey="terminalScrollback" value={terminalScrollback} setter={setTerminalScrollback} />
+        </div>
         <Input
           id="terminalScrollback"
           type="number"
@@ -149,7 +175,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="theme">Theme</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="theme">Theme</Label>
+          <ClientPrefResetToDefaultButton label="Theme" prefKey="theme" value={theme} setter={setTheme} />
+        </div>
         <Select value={theme} onValueChange={(v) => setTheme(v as typeof theme)}>
           <SelectTrigger id="theme" className="w-full">
             <SelectValue />
@@ -176,7 +205,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="terminalColorScheme">Terminal color scheme</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="terminalColorScheme">Terminal color scheme</Label>
+          <ClientPrefResetToDefaultButton label="Terminal color scheme" prefKey="terminalColorScheme" value={terminalColorScheme} setter={setTerminalColorScheme} />
+        </div>
         <Select value={terminalColorScheme} onValueChange={(v) => setTerminalColorScheme(v as typeof terminalColorScheme)}>
           <SelectTrigger id="terminalColorScheme" className="w-full">
             <SelectValue />
@@ -193,7 +225,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="terminalCursorStyle">Terminal cursor style</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="terminalCursorStyle">Terminal cursor style</Label>
+          <ClientPrefResetToDefaultButton label="Terminal cursor style" prefKey="terminalCursorStyle" value={terminalCursorStyle} setter={setTerminalCursorStyle} />
+        </div>
         <Select value={terminalCursorStyle} onValueChange={(v) => setTerminalCursorStyle(v as typeof terminalCursorStyle)}>
           <SelectTrigger id="terminalCursorStyle" className="w-full">
             <SelectValue />
@@ -222,6 +257,7 @@ export function AppearanceSection(props: AppearanceSectionProps) {
           <Label htmlFor="copyOnSelect" className="cursor-pointer">
             Copy on select
           </Label>
+          <ClientPrefResetToDefaultButton label="Copy on select" prefKey="copyOnSelect" value={copyOnSelect} setter={setCopyOnSelect} />
         </div>
         <p className="text-xs text-muted-foreground">
           Copy agent output to the clipboard as soon as you select it (off by default). Mirrors select-to-copy in iTerm2/GNOME-Terminal/Windows Terminal — no Ctrl/Cmd+C needed. Applies live to all open panes.
@@ -229,7 +265,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="density">Density</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="density">Density</Label>
+          <ClientPrefResetToDefaultButton label="Density" prefKey="density" value={density} setter={setDensity} />
+        </div>
         <Select value={density} onValueChange={(v) => setDensity(v as typeof density)}>
           <SelectTrigger id="density" className="w-full">
             <SelectValue />
@@ -245,7 +284,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="timestampFormat">Timestamp format</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="timestampFormat">Timestamp format</Label>
+          <ClientPrefResetToDefaultButton label="Timestamp format" prefKey="timestampFormat" value={timestampFormat} setter={setTimestampFormat} />
+        </div>
         <Select value={timestampFormat} onValueChange={(v) => setTimestampFormat(v as typeof timestampFormat)}>
           <SelectTrigger id="timestampFormat" className="w-full">
             <SelectValue />
@@ -261,7 +303,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="paneLayout">Pane layout</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="paneLayout">Pane layout</Label>
+          <ClientPrefResetToDefaultButton label="Pane layout" prefKey="paneLayout" value={paneLayout} setter={setPaneLayout} />
+        </div>
         <Select value={paneLayout} onValueChange={(v) => setPaneLayout(v as typeof paneLayout)}>
           <SelectTrigger id="paneLayout" className="w-full">
             <SelectValue />
@@ -278,7 +323,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="onExitBehavior">When an agent exits</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="onExitBehavior">When an agent exits</Label>
+          <ClientPrefResetToDefaultButton label="When an agent exits" prefKey="onExitBehavior" value={onExitBehavior} setter={setOnExitBehavior} />
+        </div>
         <Select value={onExitBehavior} onValueChange={(v) => setOnExitBehavior(v as typeof onExitBehavior)}>
           <SelectTrigger id="onExitBehavior" className="w-full">
             <SelectValue />
@@ -304,6 +352,7 @@ export function AppearanceSection(props: AppearanceSectionProps) {
           <Label htmlFor="autoFocusNewPane" className="cursor-pointer">
             Auto-focus pane on open
           </Label>
+          <ClientPrefResetToDefaultButton label="Auto-focus pane on open" prefKey="autoFocusNewPane" value={autoFocusNewPane} setter={setAutoFocusNewPane} />
         </div>
         <p className="text-xs text-muted-foreground">
           When on, opening, resuming, or splitting a chat moves keyboard focus to the new pane. Turn off to keep typing where you are — click any pane to focus it instead. Applies globally and is remembered across reloads.
@@ -311,7 +360,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="restoreOnStartup">Restore workspace on startup</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="restoreOnStartup">Restore workspace on startup</Label>
+          <ClientPrefResetToDefaultButton label="Restore workspace on startup" prefKey="restoreOnStartup" value={restoreOnStartup} setter={setRestoreOnStartup} />
+        </div>
         <Select
           value={restoreOnStartup}
           onValueChange={(v) => setRestoreOnStartup(v as typeof restoreOnStartup)}

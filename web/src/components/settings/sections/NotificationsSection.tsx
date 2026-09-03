@@ -16,6 +16,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { cn } from '@/lib/utils';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type WebhookTestVerdict } from '@/lib/webhook/testAlert';
 import { type ConfigData, type SetConfig, type DesktopAlertPrefs } from '../types';
 
@@ -89,6 +90,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
             <Label htmlFor="notifyChatOps" className="cursor-pointer">
               Chat operations
             </Label>
+            <ConfigResetToDefaultButton label="Chat operations toasts" path="notifyChatOps" config={config} setConfig={setConfig} />
           </div>
           <p className="text-xs text-muted-foreground">
             Session kill, chat kill, resume, and rename notifications
@@ -105,6 +107,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
             <Label htmlFor="notifyErrors" className="cursor-pointer">
               Errors
             </Label>
+            <ConfigResetToDefaultButton label="Errors toasts" path="notifyErrors" config={config} setConfig={setConfig} />
           </div>
           <p className="text-xs text-muted-foreground">Error toast notifications</p>
         </div>
@@ -119,6 +122,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
             <Label htmlFor="notifySuccess" className="cursor-pointer">
               Success messages
             </Label>
+            <ConfigResetToDefaultButton label="Success messages toasts" path="notifySuccess" config={config} setConfig={setConfig} />
           </div>
           <p className="text-xs text-muted-foreground">Success toast notifications</p>
         </div>
@@ -133,6 +137,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
             <Label htmlFor="notifyObserver" className="cursor-pointer">
               Observer events
             </Label>
+            <ConfigResetToDefaultButton label="Observer events toasts" path="notifyObserver" config={config} setConfig={setConfig} />
           </div>
           <p className="text-xs text-muted-foreground">
             Observer connection timeout and gate prompt notifications
@@ -140,6 +145,15 @@ export function NotificationsSection(props: NotificationsSectionProps) {
         </div>
       </div>
 
+      {/* WARDEN-1276 note: Channel 2 (the client desktop-alert block below) and
+          the webhook "Attention" push row deliberately carry NO per-row reset
+          affordance. WARDEN-1274 is in flight against exactly those rows —
+          retiring alertCritical/Warning/Error/Directive, rewriting this block's
+          copy, and deleting webhookAlertAttention outright — and an affordance
+          wired to a row that is being deleted is a merge conflict that resolves
+          into a dangling reference. The two persistence paths are both already
+          exercised elsewhere in Settings; these rows can be picked up once
+          WARDEN-1274 lands. */}
       {/* Channel 2 of 3 — Desktop alerts (WARDEN-259). A DIFFERENT channel +
           persistence path than the toast toggles above. Those gate in-app
           toasts via the server-side `config` / PUT /api/config; this is a pure
@@ -266,10 +280,14 @@ export function NotificationsSection(props: NotificationsSectionProps) {
           <Label htmlFor="webhookEnabled" className="cursor-pointer">
             Enable webhook push
           </Label>
+          <ConfigResetToDefaultButton label="Enable webhook push" path="webhookEnabled" config={config} setConfig={setConfig} />
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label htmlFor="webhookUrl">Webhook URL</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="webhookUrl">Webhook URL</Label>
+            <ConfigResetToDefaultButton label="Webhook URL" path="webhookUrl" config={config} setConfig={setConfig} />
+          </div>
           <Input
             id="webhookUrl"
             value={config.webhookUrl}
@@ -365,6 +383,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
                 Token budget
                 <span className="block text-[10px] text-muted-foreground font-normal">fleet / per-session breach</span>
               </Label>
+              <ConfigResetToDefaultButton label="Token budget push alerts" path="webhookAlertBudget" config={config} setConfig={setConfig} />
             </div>
             {/* WARDEN-575: the POSITIVE "finished" push — a recently-working
                 agent going idle, or a container genuinely ending. Non-
@@ -379,6 +398,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
                 Finished
                 <span className="block text-[10px] text-muted-foreground font-normal">agent completed a task</span>
               </Label>
+              <ConfigResetToDefaultButton label="Finished push alerts" path="webhookAlertDone" config={config} setConfig={setConfig} />
             </div>
           </div>
           <p className="text-xs text-muted-foreground">

@@ -29,6 +29,7 @@ import {
   TelemetryRuntimeDeliveryFailingStatus,
 } from '../rows/TelemetryStatus';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type ConfigData, type SetConfig } from '../types';
 
 export interface TelemetrySectionProps {
@@ -115,6 +116,9 @@ export function TelemetrySection({
               <Label htmlFor={cat.configKey} className="cursor-pointer">
                 {cat.label}
               </Label>
+              {/* The consent categories are DERIVED from the registry, so the
+                  affordance is too — one entry there still lands everywhere. */}
+              <ConfigResetToDefaultButton label={cat.label} path={cat.configKey} config={config} setConfig={setConfig} />
             </div>
             <p className="text-xs text-muted-foreground">{cat.summary}</p>
             {inert && (
@@ -161,7 +165,10 @@ export function TelemetrySection({
       )}
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="telemetryEndpoint">Receiver endpoint</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="telemetryEndpoint">Receiver endpoint</Label>
+          <ConfigResetToDefaultButton label="Receiver endpoint" path="telemetryEndpoint" config={config} setConfig={setConfig} />
+        </div>
         <Input
           id="telemetryEndpoint"
           value={config.telemetryEndpoint}

@@ -95,6 +95,11 @@ const STUB_MODULE = `
 export function Input(props) { return { stub: 'Input', props }; }
 export function Label(props) { return { stub: 'Label', props }; }
 export function SettingsSection(props) { return { stub: 'SettingsSection', props }; }
+// WARDEN-1276 — the per-row reset-to-default affordance the section now renders
+// beside each threshold Label. Stubbed like the other UI atoms: it is pure
+// presentation over the same \`config\`/\`setConfig\` this suite already drives,
+// and the clamp behaviour under test never reads it.
+export function ConfigResetToDefaultButton(props) { return { stub: 'ConfigResetToDefaultButton', props }; }
 `;
 
 let src = readFileSync(sectionPath, 'utf8');
@@ -108,7 +113,9 @@ src = src.replace(/^import\s*\{\s*type\s[^}]*\}\s*from\s*['"][^'"]*['"];\s*$\n?/
 src = src
   .replace(/from\s+(['"])@\/components\/ui\/input\1/g, "from './ui-stubs.mjs'")
   .replace(/from\s+(['"])@\/components\/ui\/label\1/g, "from './ui-stubs.mjs'")
-  .replace(/from\s+(['"])\.\.\/SettingsSection\1/g, "from './ui-stubs.mjs'");
+  .replace(/from\s+(['"])\.\.\/SettingsSection\1/g, "from './ui-stubs.mjs'")
+  // WARDEN-1276 — the reset-to-default affordance (a real runtime import).
+  .replace(/from\s+(['"])\.\.\/rows\/ResetToDefaultButton\1/g, "from './ui-stubs.mjs'");
 
 const { code } = await transformWithOxc(src, sectionPath, {});
 

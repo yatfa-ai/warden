@@ -3,13 +3,17 @@
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type ConfigData, type SetConfig } from '../types';
 
 export function AttentionThresholdsSection({ config, setConfig, hidden }: { config: ConfigData; setConfig: SetConfig; hidden: boolean }) {
   return (
     <SettingsSection title="Attention thresholds" className={hidden ? 'hidden' : undefined}>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="healthWarningThresholdMin">Warning after (minutes)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="healthWarningThresholdMin">Warning after (minutes)</Label>
+          <ConfigResetToDefaultButton label="Warning after (minutes)" path="healthWarningThresholdMin" config={config} setConfig={setConfig} />
+        </div>
         <Input
           id="healthWarningThresholdMin"
           type="number"
@@ -65,7 +69,10 @@ export function AttentionThresholdsSection({ config, setConfig, hidden }: { conf
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="healthCriticalThresholdMin">Critical after (minutes)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="healthCriticalThresholdMin">Critical after (minutes)</Label>
+          <ConfigResetToDefaultButton label="Critical after (minutes)" path="healthCriticalThresholdMin" config={config} setConfig={setConfig} />
+        </div>
         <Input
           id="healthCriticalThresholdMin"
           type="number"
