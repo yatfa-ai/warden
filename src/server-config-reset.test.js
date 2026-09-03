@@ -113,7 +113,6 @@ describe('POST /api/config/reset — restores a configured backend to defaults',
     await putConfig({
       webhookUrl: 'https://hooks.example/notify',
       webhookEnabled: true,
-      webhookAlertAttention: false,
       webhookAlertBudget: false,
       webhookAlertDone: false,
       llm: { model: 'glm-5.2', baseUrl: 'https://api.x.example', maxTokens: 9000 },
@@ -130,8 +129,7 @@ describe('POST /api/config/reset — restores a configured backend to defaults',
     // Webhook reverted to off / unconfigured.
     assert.strictEqual(after.webhookUrl, '', 'webhookUrl cleared');
     assert.strictEqual(after.webhookEnabled, false, 'webhookEnabled back to off');
-    assert.strictEqual(after.webhookAlertAttention, true, 'routing toggle back to default true');
-    assert.strictEqual(after.webhookAlertBudget, true);
+    assert.strictEqual(after.webhookAlertBudget, true, 'routing toggle back to default true');
     assert.strictEqual(after.webhookAlertDone, true);
     // Observer LLM config reverted to empty (llm.js owns its own fallbacks).
     assert.strictEqual(after.llm.model, '', 'observer model cleared');

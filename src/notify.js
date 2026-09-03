@@ -4,10 +4,10 @@
 // an agent newly needs attention or a token budget breaches — even with the
 // Warden window closed to tray.
 //
-// Today every alert is delivered only as an in-app toast or an OS desktop
+// The other delivery channels are an in-app toast and an OS desktop
 // notification (web/src/lib/desktopAlerts.ts), both of which require Warden's
-// live window on a machine someone is sitting at. This is the missing channel
-// that reaches BEYOND the desktop. It reuses the outbound-POST transport shape
+// live window on a machine someone is sitting at. This is the channel that
+// reaches BEYOND the desktop. It reuses the outbound-POST transport shape
 // Warden already ships for telemetry (src/telemetry-send.js) — same bounded-
 // retry, jittered-backoff, fire-and-forget contract, same injectable fetch/sleep
 // for a deterministic test suite, and the same STRICT no-op gate.
@@ -20,9 +20,18 @@
 //   1. makeWebhookPayload — the pure wire-payload seam ({ headers, body }).
 //   2. sendWebhook        — the network transport (injectable fetch/sleep).
 //   3. dispatchWebhook    — the config-reading wrapper the server hooks call.
-// Plus the pure attention-transition diff the server-side sweep uses to decide
-// WHICH newly-needy agent to ping (diffAttentionTransitions), so the sweep logic
-// is testable without a server.
+// Plus the pure formatting helpers for the one POSITIVE signal that still
+// routes through it (doneSeverity / doneReason / doneEndedIdentity).
+//
+// WARDEN-1274: this module used to own two PANE-TEXT transition diffs as well —
+// diffAttentionTransitions (newly stuck/erroring/waiting/blocked) and
+// diffDoneTransitions (active→idle "finished"). Both were driven by the fixed
+// nine-regex pane classifier, so both GUESSED: "0 errors" in a passing test
+// summary read as an error, and a crash returning to a prompt read as a finish.
+// They are retired along with the 60s server-side sweep that called them. The
+// two webhook routings that remain — `agent_ended` (a container that genuinely
+// went away) and a token-budget breach (a counted number) — rest on observed
+// facts, not inferences, which is exactly why they survive.
 
 // Bounded-retry policy (cap, transient-status predicate, jittered backoff) and
 // the two injectable defaults live in the shared src/retry.js leaf — the same
@@ -37,19 +46,12 @@ import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog } from '
 // can distinguish "never tried" from "tried and gave up".
 const NOOP_RESULT = Object.freeze({ ok: false, dropped: false, attempts: 0, status: null });
 
-// The four attention-worthy pane states classifyPane (src/agentState.js) can
-// produce — the same four web/src/lib/attentionRollup.ts folds into the
-// "needs attention" badge. A transition INTO any of these (from a non-attention
-// state) is what the server-side sweep pings about. `active`/`idle`/
-// `capture_failed` are NOT alertable.
-export const ATTENTION_STATES = Object.freeze(new Set(['stuck', 'erroring', 'waiting', 'blocked']));
-
 // Build the webhook wire payload — the pure, network-free seam. Split out so the
 // body contract ({ app, event, severity, agent, reason, ts }) is unit-testable
 // in isolation, without a fetch mock. sendWebhook composes this.
 //
-//   event    — a machine-readable event id, e.g. 'attention-erroring',
-//              'budget-breached', 'test'.
+//   event    — a machine-readable event id, e.g. 'done', 'budget-breached',
+//              'test'.
 //   severity — 'critical' | 'warning' | 'info' (drives the receiver's tone if it
 //              cares; ntfy maps priority, Discord/Slack ignore it).
 //   agent    — a human-readable agent identity (name or key), or null for a
@@ -205,156 +207,15 @@ export function dispatchWebhook({
   });
 }
 
-// Pure: the NEWLY attention-worthy transitions to ping about. Given the server's
-// previous per-pane state map and the current /api/agent-states sweep result,
-// returns the agents that transitioned INTO an attention state (stuck/erroring/
-// waiting/blocked) from a NON-attention state (active/idle/absent/capture_failed)
-// since the last sweep.
+// ─── Positive "agent finished" signal (WARDEN-575) ───────────────────────────
 //
-// Baseline-primed: an empty/null prevStates (the very first sweep, or the first
-// sweep after the channel is enabled) returns [] — a pre-existing condition at
-// launch/enable does NOT fire (mirrors shouldFireAlert / shouldFireBudgetAlert's
-// priming discipline). The first sweep just seeds the baseline.
-//
-// One ping per NEW transition into attention — an agent MOVING between two
-// attention states (e.g. waiting → erroring) is already known-needy (its key is
-// in prevStates mapped to an attention state) and does NOT re-fire, mirroring
-// desktopAlerts.diffNewAttention's same-key suppression. Recovery (attention →
-// non-attention) silently re-arms the one-shot for the next breach; it never
-// fires (the ticket is read-only alert delivery, no "recovered" ping).
-//
-// `prevStates` — Map<key, state> (or null/empty for the priming case).
-// `agents`     — the pollAgentStates() result rows ({ key, state, signal, name,
-//                 host, ... }). Rows whose state is not a string or not in
-//                 ATTENTION_STATES (active/idle/capture_failed) are skipped.
-// The attention-baseline identity for an agent row (WARDEN-1223): the bare
-// `key` names two different agents when two hosts run a same-named session, so
-// the one-shot webhook baselines key on the HOST-QUALIFIED identity
-// (`${host}:${key}` — exactly the chat's host-qualified `id`). Rows without a
-// host degrade to the bare key, keeping single-host and legacy callers intact.
-export function attentionRowKey(a) {
-  return a && a.host ? `${a.host}:${a.key}` : (a ? a.key : undefined);
-}
-
-export function diffAttentionTransitions(prevStates, agents) {
-  if (!prevStates || prevStates.size === 0) return [];
-  if (!Array.isArray(agents)) return [];
-  const out = [];
-  for (const a of agents) {
-    if (!a || typeof a.state !== 'string') continue;
-    if (!ATTENTION_STATES.has(a.state)) continue;
-    const prev = prevStates.get(attentionRowKey(a));
-    // Fire only on a transition INTO attention from a NON-attention state (or a
-    // newly-seen key, whose prev is undefined → not in ATTENTION_STATES). An
-    // agent already in an attention state last sweep is not a NEW transition.
-    if (!ATTENTION_STATES.has(prev)) {
-      out.push({
-        key: a.key,
-        state: a.state,
-        signal: a.signal ?? null,
-        name: a.name,
-        host: a.host,
-      });
-    }
-  }
-  return out;
-}
-
-// Severity tone per attention state — mirrors desktopAlerts' red/amber split:
-// stuck + erroring are BROKEN (critical); waiting + blocked need a human but are
-// not broken (warning). Exported so the test pins the mapping.
-export function attentionSeverity(state) {
-  if (state === 'stuck' || state === 'erroring') return 'critical';
-  if (state === 'waiting' || state === 'blocked') return 'warning';
-  return 'info';
-}
-
-// ─── Positive "agent finished" transition (WARDEN-575) ───────────────────────
-//
-// The mirror of the problem-side diff above. The whole attention pipeline pings a
-// human the instant an agent is stuck/erroring/waiting/blocked — but never when an
-// agent FINISHES. A human who delegates a task and walks away must eyeball each
-// pane to learn it's done. This adds the missing positive half: a transition-level
-// "was genuinely working (active) → now idle" signal dispatched with a NON-ALARMING
-// severity through the SAME proven webhook transport (and surfaced frontend-side in
-// the AttentionBadge + desktop alert — see attentionRollup.ts / desktopAlerts.ts).
-//
-// Anti-noise crux — gate on GENUINE COMPLETION, not on idle. A dormant agent reading
-// `idle` sweep after sweep never fires; only an agent that was genuinely WORKING
-// (`active`) and just went idle does. This is the ticket's "sustained-active→idle"
-// primary completion signal: a recently-active agent returning to its prompt is
-// "finished a task," distinct from a pane that was always quiet.
-//
-// DELIBERATELY narrower than chatWatch's WORKING_STATES (web/src/lib/chatWatch.ts) /
-// detectWatchCompleted, which treat active/stuck/erroring/blocked/waiting → idle ALL
-// as "completed." The watch subsystem is per-chat OPT-IN, so its broader rule is
-// precise enough to keep. The fleet done ping is NOT per-chat opt-in — broadening the
-// same rule here would surface a "Finished a task" ping for an agent that ERRORED OUT
-// and returned to its prompt (erroring→idle) or was repeating output (stuck→idle): a
-// crash that reads as success is the worst-case false positive for this feature (the
-// human skips reviewing the failure). `waiting→idle` is usually human-driven (no ping
-// needed). So ONLY `active→idle` — the clean "was working → finished" — fires here.
-// The container-genuinely-ended case is the OTHER genuine signal, carried by the
-// lifecycle `agent_ended` bridge (see doneEndedIdentity + server.js), so BOTH genuine
-// signals in the ticket's success criteria stay fully covered. (WARDEN-575 review:
-// narrowed from the broader working set the first pass mirrored from chatWatch.)
-
-// The single genuine "was working" state — only `active→idle` reads as "finished"
-// here. See the anti-noise note above for why this is intentionally narrower than the
-// watch subsystem's WORKING_STATES. `idle`/`capture_failed` are excluded; an agent
-// that was never `active` going idle is a no-op (the anti-noise gate).
-const DONE_WORKING_STATES = Object.freeze(new Set(['active']));
-
-// Pure: the NEWLY-finished transitions to ping about (WARDEN-575). Given the
-// server's previous per-pane state map and the current /api/agent-states sweep
-// result, returns the agents that transitioned from `active` to `idle` since the
-// last sweep — i.e. "was genuinely working, just stopped = finished." (Only
-// `active→idle`, the genuine completion signal — see DONE_WORKING_STATES above.)
-//
-// Sibling of diffAttentionTransitions, sharing its discipline so the positive
-// signal is as trustworthy as the problem signal:
-//  - Baseline-primed: an empty/null prevStates (first sweep, or first sweep after
-//    the channel is enabled) returns [] — a pre-existing idle agent at launch does
-//    NOT fire. The first sweep just seeds the baseline.
-//  - One ping per NEW active→idle transition. An agent that stays idle (idle→idle)
-//    never fires; an agent that goes idle then active again re-arms (the next
-//    active→idle fires again). Recovery / no-change never fires.
-//  - Does NOT fire on ABSENCE: an agent missing from the current sweep (host blip,
-//    pane detach, capture_failed) is intentionally NOT treated as "finished" here —
-//    the attention sweep is not carry-forward-protected the way the lifecycle sweep
-//    is, so absence is SSH-noise-unsafe. A container GENUINELY ending is the
-//    lifecycle sweep's already-SSH-cleaned `agent_ended` event, which tickLifecycle
-//    bridges to this same done dispatch (see server.js) — that is the
-//    "container-genuinely-ended" signal, deliberately kept out of this diff.
-//
-// `prevStates` — Map<key, state> (or null/empty for the priming case). SAME baseline
-//                 diffAttentionTransitions advances, so the two diffs share one sweep
-//                 at zero extra capture cost.
-// `agents`     — the pollAgentStates() result rows ({ key, state, signal, name,
-//                 host, ... }).
-export function diffDoneTransitions(prevStates, agents) {
-  if (!prevStates || prevStates.size === 0) return [];
-  if (!Array.isArray(agents)) return [];
-  const out = [];
-  for (const a of agents) {
-    if (!a || a.state !== 'idle') continue; // fires ONLY on a present, idle row
-    const prev = prevStates.get(attentionRowKey(a));
-    // Fire only when the agent WAS active (genuinely working) last sweep and is idle
-    // now. An agent already idle (idle→idle), newly-seen (prev undefined → never
-    // active), or coming from a non-active state (erroring/stuck/waiting/blocked →
-    // idle — an error-out or stall, NOT a finish) never fires.
-    if (DONE_WORKING_STATES.has(prev)) {
-      out.push({
-        key: a.key,
-        state: 'done',
-        signal: a.signal ?? null,
-        name: a.name,
-        host: a.host,
-      });
-    }
-  }
-  return out;
-}
+// The formatting half of the positive ping. WARDEN-1274 retired the pane-text
+// half of it: the `active→idle` diff (diffDoneTransitions) inferred "finished"
+// from a pane going quiet, so an agent that CRASHED back to its prompt read as a
+// success — the worst-case false positive for this feature. What survives is the
+// signal that was never a guess: the lifecycle `agent_ended` event (a container
+// that genuinely went away, already SSH-noise-cleaned), bridged to this same
+// dispatch by server.js. These helpers format that one.
 
 // The NON-ALARMING severity for a "finished" transition (WARDEN-575). Positive
 // signal — deliberately NOT critical/warning (the red/amber problem tones). 'info'
@@ -371,7 +232,7 @@ export function doneSeverity() {
 // so the phone ping, the OS toast, and the in-app badge all speak with one voice on
 // the positive signal. Appends the triggering signal line when present (an idle row
 // usually carries none, but a real `signal` is surfaced when classifyPane attached
-// one). Sibling of attentionReason for the positive case.
+// one).
 export function doneReason(signal) {
   const label = 'Finished a task';
   const sig = typeof signal === 'string' && signal.trim() ? signal.trim() : '';
@@ -396,22 +257,5 @@ export function doneEndedIdentity(event) {
   return { agent, reason };
 }
 
-// The one-line human-readable "why" for an attention state — the SAME wording
-// desktopAlerts.INAPP_REASON uses (WARDEN-402) so the phone ping, the in-app
-// toast, and the desktop alert all speak with one voice. Appends the triggering
-// signal line when present (the classifier's `signal`) so the ping is specific,
-// not just a label.
-export function attentionReason(state, signal) {
-  const label = {
-    stuck: 'Stuck (repeating output)',
-    erroring: 'Erroring',
-    waiting: 'Waiting for your input',
-    blocked: 'Blocked on a dependency',
-  }[state];
-  if (!label) return state;
-  const sig = typeof signal === 'string' && signal.trim() ? signal.trim() : '';
-  return sig ? `${label}: ${sig}` : label;
-}
-
 // Exported for tests / introspection. Not part of the public dispatch contract.
-export const _INTERNALS = { MAX_ATTEMPTS, isTransientStatus, backoffMs, ATTENTION_STATES, DONE_WORKING_STATES };
+export const _INTERNALS = { MAX_ATTEMPTS, isTransientStatus, backoffMs };

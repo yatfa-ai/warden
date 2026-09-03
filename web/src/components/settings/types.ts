@@ -106,7 +106,10 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
   // input state and is sent on save only when non-empty.
   webhookUrl: string;
   webhookEnabled: boolean;
-  webhookAlertAttention: boolean;
+  // WARDEN-1274: `webhookAlertAttention` sat here too. It routed the 60s
+  // server-side sweep that POSTed a webhook on each regex-guessed pane
+  // transition; both are retired, so the field is gone from the backend schema
+  // and from this shape.
   webhookAlertBudget: boolean;
   webhookAlertDone: boolean;
   // User-authored output-pattern alerts (WARDEN-540). Persisted via /api/config
@@ -215,16 +218,14 @@ export interface SnippetsPrefs {
  * toggles, which live in `ConfigData`). Pure client localStorage.
  */
 export interface DesktopAlertPrefs {
+  // The master OS-notification opt-in. WARDEN-1274 retired the fleet attention
+  // alert it was named for; it now gates the surviving token-BUDGET notification
+  // and the hidden-tab poll relaxation the WATCH ping needs — so it still gates
+  // working channels and is NOT a no-op knob. Its four per-severity sub-toggles
+  // (alertCritical / alertWarning / alertDirective / alertError) routed the
+  // retired channel ONLY, and went with it.
   attentionDesktopAlerts: boolean;
   setAttentionDesktopAlerts: (v: boolean) => void;
-  alertCritical: boolean;
-  setAlertCritical: (v: boolean) => void;
-  alertWarning: boolean;
-  setAlertWarning: (v: boolean) => void;
-  alertDirective: boolean;
-  setAlertDirective: (v: boolean) => void;
-  alertError: boolean;
-  setAlertError: (v: boolean) => void;
   attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
   setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean }) => void;
 }

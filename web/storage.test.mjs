@@ -2168,8 +2168,6 @@ const overTunedLive = () => {
     terminalFontSize: 20,
     attentionDesktopAlerts: true,
     attentionStates: { stuck: false, erroring: false, waiting: false, blocked: false },
-    alertCritical: false, alertWarning: false, alertDirective: false, alertError: false,
-    mutedAlertKeys: ['mute-1'],
     watchedChats: ['watch-1'],
     terminalScrollback: 5000,
     terminalFontFamily: '"Hack Nerd Font", ui-monospace, monospace',
@@ -2227,8 +2225,6 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(live.customPresets, [{ name: 'codex', cmd: 'codex' }]);
   assert.equal(live.restoreOnStartup, 'empty');
   assert.equal(live.timestampFormat, 'absolute');
-  assert.equal(live.alertCritical, false);
-  assert.deepEqual(live.mutedAlertKeys, ['mute-1']);
   assert.deepEqual(live.snippets, [{ name: 'custom-snippet', text: 'do the thing' }]);
   assert.equal(live.defaultShell, 'zsh', 'guard: live default shell was non-default');
   assert.deepEqual(live.defaultShellByHost, { 'host-a': 'fish' }, 'guard: live per-host shell override was non-default');
@@ -2258,11 +2254,6 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   // Prefs added by tickets that landed after WARDEN-346 branched reset too.
   assert.equal(r.timestampFormat, 'relative');
   assert.deepEqual(r.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true, done: true });
-  assert.equal(r.alertCritical, true);
-  assert.equal(r.alertWarning, true);
-  assert.equal(r.alertDirective, true);
-  assert.equal(r.alertError, true);
-  assert.deepEqual(r.mutedAlertKeys, []);
   assert.deepEqual(r.watchedChats, []);
   assert.deepEqual(r.defaultNewChatPresetByHost, {});
   assert.deepEqual(r.defaultNewChatCwdByHost, {});
@@ -2330,7 +2321,6 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   // Prefs added after WARDEN-346 round-trip to their defaults through loadUi too.
   assert.equal(after.timestampFormat, 'relative');
   assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true, done: true });
-  assert.deepEqual(after.mutedAlertKeys, []);
   assert.deepEqual(after.watchedChats, []);
   assert.deepEqual(after.snippets, STARTER_SNIPPETS);
   // Workspace + layout survive the same reload — the core "reset is
@@ -2497,7 +2487,6 @@ test('resetUiPrefDefaults() returns fresh containers (no aliasing of DEFAULT_UI/
   assert.deepEqual(a.snippets, STARTER_SNIPPETS, 'but the seeded content is identical');
   assert.notEqual(a.attentionStates, b.attentionStates, 'attentionStates object is fresh per call');
   assert.notEqual(a.attentionStates, DEFAULT_UI.attentionStates, 'attentionStates does not alias DEFAULT_UI');
-  assert.notEqual(a.mutedAlertKeys, b.mutedAlertKeys, 'mutedAlertKeys array is fresh per call');
 
   // Mutating one call's containers cannot affect the next call's.
   a.snippets.push({ name: 'x', text: 'y' });
@@ -2507,182 +2496,14 @@ test('resetUiPrefDefaults() returns fresh containers (no aliasing of DEFAULT_UI/
   assert.equal(c.attentionStates.stuck, true, 'a mutated result does not leak into later calls');
 });
 
-console.log('\nsnoozedAlertKeys (chat key → expiry ms) is sanitized on load — WARDEN-551 / characterization for WARDEN-1027');
-// WARDEN-1027: parseSnoozedKeys was the ONLY one of the six object-map
-// sanitizers in storage.ts with no behavior-locking spec block, and it carries
-// the most divergent value predicate (finite, strictly-positive number) of the
-// six. These tests pin its CURRENT behavior against the pre-refactor code so
-// the extraction of the shared parseObjectMap skeleton cannot silently relax or
-// tighten it. They are characterization tests: they passed before the refactor
-// and must keep passing after, unchanged.
-test('defaults to {} when nothing is stored', () => {
-  reset();
-  assert.deepEqual(loadUi().snoozedAlertKeys, {});
-});
-test('a missing field loads as {}', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, {});
-});
-test('a valid key→expiry map round-trips', () => {
-  reset();
-  saveUi({ ...loadUi(), snoozedAlertKeys: { 'host/chat-a': 1893456000000, 'host/chat-b': 1 } });
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'host/chat-a': 1893456000000, 'host/chat-b': 1 });
-});
-test('a non-object coerces to {} (defensive, no throw)', () => {
-  reset();
-  // A string is not a plain map → {}.
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: 'bogus' }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, {});
-  // An array is an object but NOT a plain map → {}.
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: [['chat-a', 123]] }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, {});
-  // A number → {}.
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: 42 }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, {});
-  // null → {} (and, per the shared skeleton, silently — null/undefined are the
-  // "absent" case, not corruption worth warning about).
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: null }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, {});
-});
-test('entries with empty/whitespace keys are dropped', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { '': 123, '   ': 123, 'chat-a': 123 } }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 123 });
-});
-test('keys are trimmed (a padded key survives under its trimmed form)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { '  chat-a  ': 123 } }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 123 });
-});
-test('entries with non-number values are dropped (one corrupt entry never blanks the snooze set)', () => {
-  reset();
-  // A numeric STRING is NOT coerced — the predicate is strictly typeof 'number'.
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': '123', 'chat-b': 123, 'chat-c': true, 'chat-d': { x: 1 }, 'chat-e': [123] } }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-b': 123 });
-});
-test('non-finite values (NaN, Infinity) are dropped', () => {
-  reset();
-  // NaN/Infinity have no JSON literal, but an overflowing exponent parses to
-  // ±Infinity — exactly the hand-edited / legacy-corruption class this guard
-  // exists for. (JSON.parse('1e999999') === Infinity.)
-  mem.set('warden:ui:v3', '{"activeTabs":["x"],"snoozedAlertKeys":{"chat-a":1e999999,"chat-b":-1e999999,"chat-c":123}}');
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-c': 123 });
-});
-test('zero and negative expiries are dropped (the value must be strictly positive)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': 0, 'chat-b': -1, 'chat-c': -1893456000000, 'chat-d': 1 } }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-d': 1 });
-});
-test('a positive PAST-expiry value is KEPT (the sanitizer deliberately does not read the clock)', () => {
-  // THE load-bearing non-behavior (see parseSnoozedKeys in storage.ts). An already-expired snooze
-  // is harmless — activeSnoozedKeys excludes it and App's mount prune clears it —
-  // and dropping it here would require a clock read inside this pure loader.
-  // A refactor that "helpfully" filtered past expiries would break the documented
-  // contract and silently change what App's prune effect observes on mount.
-  reset();
-  const longPast = 1; // 1ms after the epoch — positive, finite, and very much in the past.
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': longPast, 'chat-b': 946684800000 } }));
-  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 1, 'chat-b': 946684800000 });
-});
-
-console.log('\nmutedAlertKeys (muted chat keys) is sanitized on load — WARDEN-364 / characterization for WARDEN-1091');
-// WARDEN-1091: parseMutedKeys is the ONLY one of the five array sanitizers in
-// storage.ts with no behavior-locking spec block, and it carries the most
-// divergent ENTRY rule of the five (a bare `typeof k !== 'string'` guard where
-// its four siblings guard `!entry || typeof entry !== 'object'`). These tests
-// pin its CURRENT behavior against the pre-refactor code so the extraction of
-// the shared parseEntryArray skeleton cannot silently relax or tighten it. They
-// are characterization tests: they passed before the refactor and must keep
-// passing after, unchanged. (Same discipline as the WARDEN-1027 block above.)
-test('defaults to [] when nothing is stored', () => {
-  reset();
-  assert.deepEqual(loadUi().mutedAlertKeys, []);
-});
-test('a missing field loads as []', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
-  assert.deepEqual(loadUi().mutedAlertKeys, []);
-});
-test('a valid key list round-trips', () => {
-  reset();
-  saveUi({ ...loadUi(), mutedAlertKeys: ['host/chat-a', 'host/chat-b'] });
-  assert.deepEqual(loadUi().mutedAlertKeys, ['host/chat-a', 'host/chat-b']);
-});
-test('a non-array coerces to [] (defensive, no throw)', () => {
-  reset();
-  // A string is not an array → [].
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: 'bogus' }));
-  assert.deepEqual(loadUi().mutedAlertKeys, []);
-  // A plain object → [].
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: { 'chat-a': true } }));
-  assert.deepEqual(loadUi().mutedAlertKeys, []);
-  // A number → [].
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: 42 }));
-  assert.deepEqual(loadUi().mutedAlertKeys, []);
-  // null → [] (the "absent" case, not corruption).
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: null }));
-  assert.deepEqual(loadUi().mutedAlertKeys, []);
-});
-test('a present-but-wrong-type value WARNS, while an absent one is silent', () => {
-  // The operator-facing corruption signal (WARDEN-89). Absence is normal and
-  // must stay quiet; a present-but-wrong-type payload is genuine corruption and
-  // must surface. This asymmetry is the whole point of the shared preamble.
-  const realWarn = console.warn;
-  const warnsFor = (payload) => {
-    const seen = [];
-    console.warn = (...args) => { seen.push(String(args[0])); };
-    try {
-      reset();
-      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
-      loadUi();
-    } finally {
-      console.warn = realWarn;
-    }
-    return seen.filter((m) => m.includes('mutedAlertKeys is not an array; ignoring'));
-  };
-  assert.equal(warnsFor({ mutedAlertKeys: 'bogus' }).length, 1, 'a string payload warns');
-  assert.equal(warnsFor({ mutedAlertKeys: 42 }).length, 1, 'a number payload warns');
-  assert.equal(warnsFor({ mutedAlertKeys: null }).length, 0, 'null is absent, not corrupt — silent');
-  assert.equal(warnsFor({}).length, 0, 'a missing field is absent, not corrupt — silent');
-  assert.equal(warnsFor({ mutedAlertKeys: ['host/chat-a'] }).length, 0, 'a valid array never warns');
-});
-test('non-string entries are dropped (one corrupt entry never blanks the mute set)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({
-    activeTabs: ['x'],
-    mutedAlertKeys: [1, true, null, { name: 'chat-a' }, ['chat-b'], 'chat-c'],
-  }));
-  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-c']);
-});
-test('entries are trimmed (a padded key survives under its trimmed form)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: ['  host/chat-a  '] }));
-  assert.deepEqual(loadUi().mutedAlertKeys, ['host/chat-a']);
-});
-test('blank and whitespace-only entries are dropped', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: ['', '   ', '\t\n', 'chat-a'] }));
-  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-a']);
-});
-test('duplicates are dropped on the TRIMMED value, first occurrence wins, order preserved', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({
-    activeTabs: ['x'],
-    mutedAlertKeys: ['chat-b', 'chat-a', '  chat-b  ', 'chat-c', 'chat-a'],
-  }));
-  // 'chat-b' and 'chat-a' keep their FIRST position; the padded repeat of
-  // 'chat-b' collides under its trimmed form and is dropped, not re-appended.
-  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-b', 'chat-a', 'chat-c']);
-});
-test('the mute set is NOT capped (every valid key survives)', () => {
-  // Unlike recentlyClosed/snippets, parseMutedKeys has no cap constant — a long
-  // mute list must round-trip whole. Pinned so the shared skeleton's optional
-  // cap is never wired up here by accident.
-  reset();
-  const many = Array.from({ length: 120 }, (_, i) => `host/chat-${i}`);
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: many }));
-  assert.deepEqual(loadUi().mutedAlertKeys, many);
-});
+// WARDEN-1274: two sanitizer spec blocks lived here — parseSnoozedKeys
+// (snoozedAlertKeys, the WARDEN-1027 characterization) and parseMutedKeys
+// (mutedAlertKeys, the WARDEN-1091 one). Both parsers are deleted with the
+// per-agent mute/snooze suppression they sanitized, which existed only to silence
+// the retired fleet attention alert. The shared skeletons those blocks also
+// exercised — parseObjectMap and parseEntryArray — keep their coverage through
+// their surviving callers (healthCollapsedHosts / hostLabels / defaultShellByHost
+// for the map; recentlyClosed / customPresets / snippets / workspaces for the
+// array), so neither skeleton is left unpinned.
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

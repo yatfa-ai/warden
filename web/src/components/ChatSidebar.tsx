@@ -20,7 +20,6 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { BroadcastDialog } from './BroadcastDialog';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
-import { SnoozeDialog } from './SnoozeDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
@@ -43,7 +42,6 @@ import {
 } from '@/lib/agentFilter';
 import { chatMatchesCriteria } from '@/lib/collections';
 import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
-import type { SnoozeDuration } from '@/lib/snooze';
 import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, ClaudeSession } from './sidebar/types';
@@ -129,14 +127,13 @@ interface Props {
   // fetch blip) → the row degrades to the neutral watch glyph (the safe default).
   watchedStates: Record<string, AgentStateRow>;
   onToggleWatch: (key: string) => void;
-  // WARDEN-581 — bulk attention controls for the multi-select action bar, the
-  // group twins of setAlertMute / toggleWatch. Snooze: time-box every selected
-  // key (no permanent-mute bulk path — out of scope). Watch: add/remove every
-  // selected key in one state write. Both owned by App (single writer of the
-  // `warden:ui` blob) and threaded down here as delegated handlers, mirroring
-  // onToggleWatch. The bar's Watch/Unwatch LABEL is computed here from
-  // watchedChats ∩ the selection (below), so these props stay pure callbacks.
-  onSnoozeMany: (keys: string[], mode: SnoozeDuration) => void;
+  // WARDEN-581 — bulk WATCH for the multi-select action bar, the group twin of
+  // toggleWatch: add/remove every selected key in one state write. Owned by App
+  // (single writer of the `warden:ui` blob) and threaded down here as a delegated
+  // handler, mirroring onToggleWatch. The bar's Watch/Unwatch LABEL is computed
+  // here from watchedChats ∩ the selection (below), so this stays a pure callback.
+  // (WARDEN-1274: its sibling, bulk SNOOZE, went with the alert channel it
+  // silenced — there is no longer anything for a snooze to suppress.)
   onToggleWatchMany: (keys: string[], on: boolean) => void;
   // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
   // WARDEN-91. Owned by App and persisted by its saveUi effect (these were
@@ -226,7 +223,7 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, snippets, watchedChats, watchedStates, onToggleWatch, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -332,8 +329,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [killOpen, setKillOpen] = useState(false);
   const [interruptOpen, setInterruptOpen] = useState(false);
-  // WARDEN-581 — bulk-snooze duration dialog (sibling of broadcast/kill/interrupt).
-  const [snoozeOpen, setSnoozeOpen] = useState(false);
 
   // WARDEN-1196: the response READ goes through the shared `readResponse`/`readListBody`
   // pair from lib/api.ts, so BOTH halves of warden's error convention are honoured — a
@@ -727,24 +722,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     return summary;
   };
 
-  // WARDEN-581 — bulk snooze for the multi-select action bar. Snooze is pure
-  // local state (UiState.snoozedAlertKeys) with no tmux fan-out and no per-agent
-  // failure, so — unlike broadcast/kill/interrupt — there is no fan-out summary:
-  // route the selected keys + the dialog's chosen duration to App's snoozeMany
-  // (one state write for the whole set), surface a single confirmation toast, and
-  // clear the selection. The toast is shown unconditionally: it is a bulk-action
-  // CONFIRMATION (not a chat-op result), and the per-row bell it echoes shows no
-  // toast of its own, so no notifyChatOps/notifySuccess pref cleanly applies.
-  const handleSnoozeSelected = (mode: SnoozeDuration) => {
-    const keys = Array.from(selectedIds);
-    if (keys.length === 0) return;
-    onSnoozeMany(keys, mode);
-    toast.success(`Snoozed ${keys.length} agent${keys.length === 1 ? '' : 's'} ${mode === '1h' ? 'for 1 hour' : 'until tomorrow'}`);
-    setSelectedIds(new Set());
-  };
-
-  // WARDEN-581 — bulk watch/unwatch for the multi-select action bar. Like snooze
-  // this is pure local state (watchedChats) with no fan-out: route the selected
+  // WARDEN-581 — bulk watch/unwatch for the multi-select action bar. This is pure
+  // local state (watchedChats) with no fan-out: route the selected
   // keys + the computed on/off to App's toggleWatchMany (one state write; the OS
   // permission request fires once inside it), surface a confirmation toast, and
   // clear the selection. The bar's label (watchMode below) decides on vs off.
@@ -941,8 +920,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     );
   };
 
-  // Shared fleet-action dialog group (broadcast / kill / key-send / snooze) for
-  // the collection, host and root returns (WARDEN-1231). The three copies were
+  // Shared fleet-action dialog group (broadcast / kill / key-send) for the
+  // collection, host and root returns (WARDEN-1231). The three copies were
   // byte-identical — every dialog reads the same multi-select state
   // (selectedChats) and the same handlers, so nothing needs parameterising; the
   // helper closes over all of it. Invoked in each view's own return because
@@ -969,12 +948,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         onOpenChange={setInterruptOpen}
         targets={selectedChats}
         onSend={handleInterruptSelected}
-      />
-      <SnoozeDialog
-        open={snoozeOpen}
-        onOpenChange={setSnoozeOpen}
-        targets={selectedChats}
-        onSnooze={handleSnoozeSelected}
       />
     </>
   );
@@ -1083,7 +1056,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
             onInterrupt={() => setInterruptOpen(true)}
-            onSnooze={() => setSnoozeOpen(true)}
             onWatch={handleWatchSelected}
             watchMode={watchMode}
             onKill={() => setKillOpen(true)}
@@ -1286,7 +1258,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
             onInterrupt={() => setInterruptOpen(true)}
-            onSnooze={() => setSnoozeOpen(true)}
             onWatch={handleWatchSelected}
             watchMode={watchMode}
             onKill={() => setKillOpen(true)}

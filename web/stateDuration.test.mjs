@@ -8,7 +8,7 @@
 //
 // Under test:
 //  - formatStateDuration: compact relative label ('' sub-minute / missing / future,
-//    'Nm' / 'Hh Mm' / 'Hh' / 'Nd Hh' / 'Nd') — the sibling of formatSnoozeRemaining,
+//    'Nm' / 'Hh Mm' / 'Hh' / 'Nd Hh' / 'Nd'),
 //    extended to days, with the sub-minute window suppressed (never "0s").
 //  - formatStateDurationVerbose: the screen-reader/tooltip form, same thresholds +
 //    exact singular/plural.
@@ -113,7 +113,7 @@ test('whole minutes under an hour', () => {
   assert.equal(formatStateDuration(NOW - 59 * MIN, NOW), '59m');
 });
 
-console.log('\nformatStateDuration: hours + minutes (sibling of formatSnoozeRemaining)');
+console.log('\nformatStateDuration: hours + minutes');
 test('a whole-hour duration drops the minutes term', () => {
   assert.equal(formatStateDuration(NOW - HOUR, NOW), '1h');
   assert.equal(formatStateDuration(NOW - 3 * HOUR, NOW), '3h');

@@ -316,12 +316,12 @@ const SHIPPED_LABELS = [
   ['notifications', 'Success messages'],
   ['notifications', 'Observer events'],
   ['notifications', 'Desktop alerts'],
-  ['notifications', 'Desktop alerts when agents need attention (while Warden is unfocused)'],
+  ['notifications', 'Desktop notifications while Warden is in the background'],
   ['notifications', 'Which alerts to push'],
-  ['notifications', 'Critical agents'],
-  ['notifications', 'Warning agents'],
-  ['notifications', 'Pending directives'],
-  ['notifications', 'Recent errors'],
+  // WARDEN-1274: the four per-severity sub-toggle rows ('Critical agents' /
+  // 'Warning agents' / 'Pending directives' / 'Recent errors') and the webhook
+  // 'Attention' routing row are gone with the attention alert channel they
+  // routed, so their shipped-label rows go too.
   ['notifications', 'Token budget'],
   ['notifications', 'Webhook push alerts'],
   ['notifications', 'Enable webhook push'],
@@ -655,7 +655,10 @@ test("the ticket's probe terms resolve to the sections that ship them", () => {
     ['copy', 'appearance'],
     ['layout', 'appearance'],
     ['grid', 'appearance'],
-    ['bell', 'notifications'],
+    // WARDEN-1274: 'bell' probed the per-agent mute affordance the section's copy
+    // pointed at; that bell is retired with the alert it silenced, so the probe
+    // is replaced by a term the section's SURVIVING copy actually ships.
+    ['watch', 'notifications'],
     ['poll', 'hosts'],
     ['interval', 'hosts'],
     ['refresh', 'hosts'],
