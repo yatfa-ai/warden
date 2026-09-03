@@ -11,6 +11,7 @@ import { openExternalUrl } from '@/lib/electron';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { handleOsc52 } from '@/lib/clipboard';
+import { readClipboardImage, deliverImagePaste } from '@/lib/pasteImage';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
@@ -97,7 +98,42 @@ function copySelectionToClipboard(term: Terminal, notifyErrors: boolean): void {
 // above is shared by Ctrl/Cmd+C, copy-on-select, and the Copy menu item.
 // navigator.clipboard fails silently in Electron, so the textarea +
 // document.execCommand('paste') fallback reads a real paste event instead.
-function pasteIntoTerm(term: Terminal): void {
+//
+// WARDEN-1282 — the IMAGE branch. Both entry branches below (the async
+// clipboard API and the Electron execCommand fallback) were text-only: an
+// image-only clipboard yields '' in each, and the `if (t)` guard dropped it in
+// SILENCE. So the image is tried FIRST, before either text read:
+//
+//   IMAGE WINS on an image+text clipboard. One deterministic rule, so the
+//   gesture never makes the owner think; documented in lib/pasteImage.ts with
+//   the reasoning. A text-only clipboard never enters this branch at all, so
+//   the WARDEN-254 contract below is not merely preserved — it is untouched.
+//
+//   The BYTES go beside the terminal (POST → the server writes the file into
+//   the agent's host/container over ssh + `docker exec -i` stdin) and only the
+//   returned MARKER LINE crosses the pty, through the SAME term.paste() call a
+//   text paste uses. So a companion-enabled or bracketed-paste session behaves
+//   identically to any other paste, and no image byte is ever in the stream.
+//
+//   A failure is LOUD and MARKER-LESS: the pane's standard error toast (the
+//   WARDEN-400 notifyErrors convention), and nothing pasted. A marker without a
+//   delivered file would point the agent at something that isn't there — worse
+//   than the silence this fixes.
+//
+// `id` is the pane's chat id; the server resolves host/container from it, so the
+// renderer never chooses where bytes land. Async, but fire-and-forget from both
+// call sites exactly as the text path already was.
+async function pasteIntoTerm(term: Terminal, id: string, notifyErrors: boolean): Promise<void> {
+  const image = await readClipboardImage();
+  if (image) {
+    const res = await deliverImagePaste(id, image);
+    if (!res.ok) {
+      if (notifyErrors) toast.error(res.error ? `Image paste failed — ${res.error}` : 'Image paste failed');
+      return;
+    }
+    term.paste(res.marker!);
+    return;
+  }
   navigator.clipboard?.readText().then((t) => { if (t) term.paste(t); }).catch(() => {
     // Electron fallback: read from a paste event
     const ta = document.createElement('textarea');
@@ -437,8 +473,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       }
       if (e.code === 'KeyV') {
         e.preventDefault();
-        // Shared with the themed Paste menu item — see pasteIntoTerm above. (WARDEN-254, WARDEN-380)
-        pasteIntoTerm(term);
+        // Shared with the themed Paste menu item — see pasteIntoTerm above.
+        // (WARDEN-254, WARDEN-380; WARDEN-1282 added the image branch.) Void'd:
+        // a key handler must return synchronously, and the paste's own failure
+        // toast is the whole error story — there is nothing here to await.
+        void pasteIntoTerm(term, id, notifyErrorsRef.current);
         return false;
       }
       return true;
@@ -1103,7 +1142,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
               only open by right-clicking this terminal surface, which exists only
               while the pane is mounted and its Terminal has been created. */}
           <ContextMenuItem onSelect={() => copySelectionToClipboard(termRef.current!, notifyErrorsRef.current)}>Copy</ContextMenuItem>
-          <ContextMenuItem onSelect={() => pasteIntoTerm(termRef.current!)}>Paste</ContextMenuItem>
+          <ContextMenuItem onSelect={() => void pasteIntoTerm(termRef.current!, id, notifyErrorsRef.current)}>Paste</ContextMenuItem>
           <ContextMenuItem onSelect={() => termRef.current?.clear()}>Clear</ContextMenuItem>
           <ContextMenuItem onSelect={() => setShowSearch(!showSearch)}>Search</ContextMenuItem>
         </ContextMenuContent>

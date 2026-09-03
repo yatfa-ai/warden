@@ -53,6 +53,10 @@ import {
   readLocalSessionTranscript, buildSessionReadScript, parseSessionReadOutput,
 } from './claudeSessions.js';
 import { classifyProbe } from './sessionRecovery.js';
+// WARDEN-1282 — deliver a pasted clipboard image to where the agent lives
+// (ssh + `docker exec -i` stdin, or a direct local write). Image bytes NEVER
+// enter the terminal stream; only the marker line this returns does.
+import { deliverPastedImage } from './pasteImage.js';
 import { Observer, readDirectives, rotateDirectives } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
@@ -806,6 +810,46 @@ app.post('/api/key', async (req, res) => {
   if (r.error) return res.status(404).json(r);
   try { await sendKey(r.chat, cfg, String(req.body?.key || '')); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// WARDEN-1282 — a clipboard IMAGE pasted into an agent pane. Modelled on
+// /api/send above: the renderer knows only the pane id, and the server resolves
+// the chat (and from it the host/container) — the renderer never learns, and
+// never gets to choose, where the bytes land.
+//
+// TWO body decisions, both deliberate:
+//
+// (1) RAW, not JSON. The global `express.json({ limit: '1mb' })` at the top of
+//     this file must NEVER be raised — it bounds every other route in the app,
+//     and widening it to fit a screenshot would widen the DoS surface of the
+//     entire API for one endpoint's sake. A route-specific `express.raw` mounted
+//     on THIS path only is the scoped alternative, and raw beats a base64 JSON
+//     field on its own merits too: no ~33% inflation, no parse of a multi-MB
+//     string on the single-threaded event loop this server's stall monitor
+//     exists to protect.
+//
+// (2) The id rides the QUERY STRING, because the body is now the image itself
+//     and cannot also carry a field. `type: () => true` accepts whatever
+//     content-type the clipboard's Blob declares (image/png, image/jpeg, …)
+//     rather than allow-listing MIME the client controls anyway — the FORMAT is
+//     decided by sniffing the actual header bytes in describeImage(), so a
+//     mislabeled type cannot make us name a PNG `.jpg`.
+//
+// The marker line is NOT sent from here. The renderer pastes it through the
+// same term.paste() text path a normal paste uses, so companion-enabled setups
+// and bracketed-paste apps behave identically to any other paste — and so no
+// marker can ever appear without the delivery this route reports having
+// succeeded.
+app.post('/api/paste-image', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
+  const r = await resolve(String(req.query?.id || ''));
+  if (r.error) return res.status(404).json(r);
+  const buf = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!buf || buf.length === 0) return res.status(400).json({ error: 'empty image body' });
+  try {
+    const out = await deliverPastedImage(r.chat, cfg, buf);
+    if (!out.ok) return res.status(500).json({ error: out.error });
+    res.json({ ok: true, path: out.path, marker: out.marker });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/sessions', async (_req, res) => res.json({ sessions: await listSessions() }));
