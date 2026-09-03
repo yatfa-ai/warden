@@ -22,7 +22,7 @@ import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { snoozeExpiry, pruneExpired, withoutSnoozeKey, snoozeManyKeys, type AlertMuteMode, type SnoozeDuration } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { useSnippets, useSetSnippets } from '@/lib/uiStore';
 
@@ -1641,6 +1641,16 @@ function App() {
   const hosts = [THIS_MACHINE, ...sshHosts];
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // WARDEN-1280 — the application menu's "Settings…" (CmdOrCtrl+,) item. Until
+  // now the gear button below was the SOLE way into Settings; the menu item is
+  // the second, and it is deliberately the SAME destination rather than a
+  // parallel one — main pushes 'menu:open-settings' on the click and this effect
+  // calls the exact setSettingsOpen(true) the gear calls. Runs once (the setter
+  // identity is stable), and outside the Electron app onOpenSettings finds no
+  // bridge and returns a no-op unsubscribe, so the `npm run dev` browser and
+  // `node web/smoke.cjs` are byte-unaffected — neither has an application menu
+  // to fire it.
+  useEffect(() => onOpenSettings(() => setSettingsOpen(true)), []);
   // Full-page "Open chat" browser view (WARDEN-216). Mirrors settingsOpen: an
   // App-level boolean toggled by the sidebar's "Open chat…" button; when true the
   // view-switch ternary below swaps the workspace for the browser page. Formerly a
