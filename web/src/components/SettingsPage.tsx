@@ -27,7 +27,6 @@ import { SettingsSection } from '@/components/settings/SettingsSection';
 import {
   type AppearancePrefs,
   type NewChatsPrefs,
-  type SnippetsPrefs,
   type DesktopAlertPrefs,
 } from '@/components/settings/types';
 
@@ -65,7 +64,8 @@ interface Props {
   // the "client pref never reaches PUT /api/config" invariant structural.
   appearance: AppearancePrefs;
   newChats: NewChatsPrefs;
-  snippets: SnippetsPrefs;
+  // WARDEN-1271: no `snippets` group — SnippetsSection subscribes to the shared
+  // client-state store (lib/uiStore.ts) directly.
   alerts: DesktopAlertPrefs;
   hostLabels: HostLabels;
   setHostLabels: (v: HostLabels) => void;
@@ -86,7 +86,6 @@ export function SettingsPage({
   onConfigChange,
   appearance,
   newChats,
-  snippets,
   alerts,
   hostLabels,
   setHostLabels,
@@ -266,7 +265,7 @@ export function SettingsPage({
                   hosts, so NewChats does not wait on it either. */}
               <AppearanceSection {...appearance} hidden={activeSection !== 'appearance'} />
               <NewChatsSection {...newChats} availableHosts={availableHosts} hidden={activeSection !== 'newchats'} />
-              <SnippetsSection {...snippets} hidden={activeSection !== 'snippets'} />
+              <SnippetsSection hidden={activeSection !== 'snippets'} />
 
               {/* Backend-config sections. Mounted only once a GET /api/config
                   has succeeded — before that their values are unknown, and

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
@@ -24,6 +24,7 @@ import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } 
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
+import { useSnippets, useSetSnippets } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -462,7 +463,26 @@ function App() {
   // spawn presets above: persisted by the saveUi effect below, never sent to the
   // backend as anything but the literal `text` over the existing /api/send path.
   // Seeded once with STARTER_SNIPPETS by loadUi when the field is absent.
-  const [snippets, setSnippets] = useState<Snippet[]>(() => uiState.snippets ?? []);
+  //
+  // WARDEN-1271 — the first fact migrated off App-owned useState + prop-drilling
+  // onto the shared client-state store (lib/uiStore.ts; the WARDEN-832 row-2
+  // instrument). The reading surfaces (pane context menu, broadcast picker,
+  // watch-catchup quick reply, Settings CRUD) now SUBSCRIBE to the store
+  // directly instead of receiving this list through their ancestors, so the
+  // pure pass-through hops between App and each of them are gone.
+  //
+  // App still subscribes, for exactly two reasons — both of them the
+  // single-writer persistence design, which this slice deliberately does NOT
+  // touch: (1) the value must appear in the PersistedPrefSnapshot below so the
+  // ONE compile-locked saveUi effect keeps writing it, and (2) the reset
+  // partition (resetSetters) must keep a setter for it. So the write path is
+  // unchanged end to end: store.setSnippets → this subscription re-renders App
+  // → the snapshot's `snippets` changes identity → useConfigPersistence's
+  // effect fires → persistUiState → localStorage. The store seeds itself from
+  // loadUi() at module load, which is the same persisted read the useState
+  // lazy initializer did.
+  const snippets = useSnippets();
+  const setSnippets = useSetSnippets();
   // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
   // button (WARDEN-429 — unifies the prior split-only defaultSplitShell, migrated
   // into defaultShell on load). Blank means "no explicit shell" → the host
@@ -856,8 +876,11 @@ function App() {
   //     defaults", consistent with customPresets → [].
   //
   // Identity is stable because every value it closes over is: the useState
-  // setters are stable by React contract, and clearWatchedChats is a
-  // useCallback(..., []) (useWatchState.ts).
+  // setters are stable by React contract, clearWatchedChats is a
+  // useCallback(..., []) (useWatchState.ts), and setSnippets is a zustand action
+  // created once with the store (lib/uiStore.ts) — so listing it in the dep
+  // array below costs nothing and keeps the lint rule satisfied honestly rather
+  // than by suppression.
   const resetUiPrefsToDefaults = useCallback(() => {
     const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
       // Appearance
@@ -935,7 +958,7 @@ function App() {
     // contract), so it joins clearWatchedChats outside the dep array.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
     setObserverResetToken((t) => t + 1);
-  }, [clearWatchedChats]);
+  }, [clearWatchedChats, setSnippets]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1836,7 +1859,6 @@ function App() {
                   <QuickReply
                     targetId={attentionTop.id}
                     targetLabel={attentionTop.name ?? attentionTop.id}
-                    snippets={snippets}
                     onReplyResult={handleReplyResult}
                     onDismiss={() => setBannerReplyOpen(false)}
                     autoFocus={false}
@@ -1885,7 +1907,6 @@ function App() {
         misses={watchCatchup.misses}
         onOpenMiss={watchCatchup.openMiss}
         onDismiss={watchCatchup.dismiss}
-        snippets={snippets}
         onReplyResult={handleReplyResult}
       />
       {settingsOpen ? (
@@ -1920,7 +1941,6 @@ function App() {
             defaultShell, setDefaultShell,
             defaultShellByHost, setDefaultShellByHost,
           }}
-          snippets={{ snippets, setSnippets }}
           alerts={{
             attentionDesktopAlerts, setAttentionDesktopAlerts,
             alertCritical, setAlertCritical,
@@ -2021,7 +2041,6 @@ function App() {
               fileViewerViewMode={fileViewerViewMode}
               onFileViewerViewModeChange={setFileViewerViewMode}
               pollIntervalMs={pollIntervalMs}
-              snippets={snippets}
               watchedChats={watchedChatSet}
               watchedStates={watchedStateByKey}
               onToggleWatch={toggleWatch}
@@ -2068,7 +2087,6 @@ function App() {
             copyOnSelect={copyOnSelect}
             onExitBehavior={onExitBehavior}
             showHostTags={displaySettings.showHostTags}
-            snippets={snippets}
             timestampFormat={timestampFormat}
             fileViewerViewMode={fileViewerViewMode}
             onFileViewerViewModeChange={setFileViewerViewMode}
