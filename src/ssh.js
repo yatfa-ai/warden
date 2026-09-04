@@ -604,10 +604,22 @@ export function attach(host, cmd, _opts = {}) {
   return new Promise((resolve) => child.on('exit', (c) => resolve(c ?? 0)));
 }
 
+// The remote command string the live web pane runs under a PTY. ONE builder, so
+// the default `ssh -tt` path and the companion attach path deliver a BYTE-FOR-BYTE
+// identical script — the WARDEN-1295 parity contract, provable by construction
+// rather than by two hand-kept-in-sync string literals.
+//
+// The LANG/LC_ALL export is what makes tmux render box-drawing/UTF-8 correctly
+// through the attach; the inner `bash -lc` is the login shell that resolves
+// docker/tmux on PATH. Both must survive verbatim onto the companion path.
+export function buildAttachRemoteScript(cmd) {
+  return `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; bash -lc ${shellQuote(cmd)}`;
+}
+
 // Live web pane (remote): ssh inside a real local PTY (node-pty) whose size we can
 // change → SIGWINCH → ssh → remote tmux. Returns a node-pty IPty.
 export function attachPty(host, cmd, { cols = 100, rows = 30 } = {}) {
-  const remote = `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; bash -lc ${shellQuote(cmd)}`;
+  const remote = buildAttachRemoteScript(cmd);
   const args = buildSshArgv(host, { tty: true, command: remote });
   return nodePty.spawn(SSH_BIN, args, { cols, rows, useConpty: true });
 }
@@ -727,11 +739,21 @@ export async function runTmux(chat, args, opts = {}) {
   }
 }
 
+// The tmux command string the live web pane attaches to, INCLUDING the
+// `docker exec -it <container> ` prefix for a yatfa chat (attach needs a tty, so
+// -it, unlike runTmux's bare `docker exec`). Extracted as ONE builder so the
+// default attachPty path and the companion attach path deliver the identical
+// command — the WARDEN-1295 parity contract. Composed with
+// buildAttachRemoteScript it yields the exact string `ssh -tt` carries today.
+export function buildAttachCommand(chat, args) {
+  const prefix = chat.container ? `docker exec -it ${shellQuote(chat.container)} ` : '';
+  return prefix + 'tmux ' + args.map(shellQuote).join(' ');
+}
+
 export function attachTmux(chat, args, { cols = 100, rows = 30 } = {}) {
   if (chat.host === '(local)') return attachLocalTmux(args, { cols, rows });
   // attach needs a tty: `docker exec -it` for yatfa containers.
-  const prefix = chat.container ? `docker exec -it ${shellQuote(chat.container)} ` : '';
-  return attachPty(chat.host, prefix + 'tmux ' + args.map(shellQuote).join(' '), { cols, rows });
+  return attachPty(chat.host, buildAttachCommand(chat, args), { cols, rows });
 }
 
 // Extensions Windows can actually LAUNCH — `.exe`/`.com` are executable images

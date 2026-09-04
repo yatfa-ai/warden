@@ -1,0 +1,3 @@
+# github.com/creack/pty v1.1.24
+## explicit; go 1.18
+github.com/creack/pty
