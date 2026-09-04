@@ -818,14 +818,45 @@ export async function detectClaude(host, deps = {}) {
   // `/`-prefixed hit — the same preference the serial short-circuit expressed.
   // Each probe is caught so a transport error on one candidate can't reject the
   // whole search; runWithPool already resolves (never throws) on failure, this is
-  // belt-and-suspenders.
+  // belt-and-suspenders — and it stays: execInContext resolves too, so the belt
+  // is harmless on the companion path as well.
   const cmds = [
     'zsh -lic "command -v claude" 2>/dev/null',
     'bash -lc "command -v claude" 2>/dev/null',
     'for p in ~/.local/bin/claude /opt/homebrew/bin/claude /usr/local/bin/claude ~/bin/claude ~/n/bin/claude; do [ -x "$p" ] && { echo "$p"; break; }; done',
   ];
+  // WARDEN-1284 (companion transport): the three probes deliver through the
+  // shared routing guard, so under the `companionTransportEnabled` toggle they
+  // ride the persistent companion channel. Unlike the other eight legs this one
+  // IS pooled today (the `run` above is runWithPool), but a cold pool still pays
+  // a real handshake per probe — and this fan is one half of
+  // `/api/claude-sessions` (the other being remoteClaudeSessionsDetail), so
+  // leaving it on raw SSH would keep that endpoint paying handshakes under the
+  // toggle. PARITY: the probe strings are unchanged and delivered byte-for-byte
+  // by either transport (no container → the companion runs them via `bash -lc`,
+  // run()'s exact delivery shape); the toggle-off path is still `run(...)`, i.e.
+  // runWithPool with its pooling and its transport-failure retry intact.
+  //
+  // ⚠️ WHY A LAZY import() AND NOT A STATIC ONE. companion.js imports THIS module
+  // (`run as defaultRun`, SSH_BIN, buildSshArgv, shellQuote), so a static import
+  // here would make ssh.js ⇄ companion.js a true cycle — ssh.js is the graph's
+  // bottom leaf and every other module in the repo depends on that staying true.
+  // ESM would tolerate the cycle (neither module touches the other at module-eval
+  // time), but "the leaf imports nothing of ours" is worth more than saving one
+  // cached await on a 3-probe fan that already costs ≤8s. The dynamic import is
+  // resolved ONCE by the module cache; `deps.deliverRemoteScript` skips it
+  // entirely for tests. The other eight WARDEN-1284 legs import it statically —
+  // they are not the leaf.
+  //
+  // The default-path transport rides `opts.run` (NOT `deps.run`): this leg's
+  // toggle-off path is `runWithPool`, while `deps.run` is the companion
+  // BOOTSTRAP transport — conflating the two would silently re-route the binary
+  // upload through the pool. The existing `deps.runWithPool` seam is unchanged.
+  const deliver = deps.deliverRemoteScript
+    ?? (await import('./companion.js')).deliverRemoteScript;
   const results = await Promise.all(cmds.map((cmd) =>
-    run(host, cmd, { timeout: 8000 }, {}).catch(() => ({ ok: false, code: -1, stdout: '', stderr: '' })),
+    deliver(host, cmd, { timeout: 8000, run }, {}, deps)
+      .catch(() => ({ ok: false, code: -1, stdout: '', stderr: '' })),
   ));
   for (const r of results) {
     const p = (r.stdout || '').trim().split(/\r?\n/).pop().trim();
