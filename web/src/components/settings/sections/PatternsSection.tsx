@@ -175,6 +175,7 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
             }}
             className="h-8"
             placeholder="name (e.g. Deploy failed)"
+            id="newPatternName"
             aria-label="New pattern name"
             maxLength={WATCH_PATTERN_NAME_MAX}
           />
@@ -187,6 +188,7 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
               }}
               className="h-8 flex-1"
               placeholder={newPatternMode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
+              id="newPatternExpression"
               aria-label="New pattern expression"
               maxLength={WATCH_PATTERN_EXPRESSION_MAX}
             />
@@ -194,7 +196,7 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
               value={newPatternMode}
               onValueChange={(v) => setNewPatternMode(v === 'regex' ? 'regex' : 'string')}
             >
-              <SelectTrigger className="h-8 w-[104px]" aria-label="New pattern match mode">
+              <SelectTrigger id="newPatternMode" className="h-8 w-[104px]" aria-label="New pattern match mode">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

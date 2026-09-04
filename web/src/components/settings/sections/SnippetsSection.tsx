@@ -151,6 +151,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
             }}
             className="h-8"
             placeholder="name (e.g. Run tests)"
+            id="newSnippetName"
             aria-label="New snippet name"
             maxLength={SNIPPET_NAME_MAX}
           />
@@ -165,6 +166,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
             }}
             className="min-h-[60px] text-sm"
             placeholder="instruction (e.g. run the test suite)"
+            id="newSnippetText"
             aria-label="New snippet instruction text"
             maxLength={SNIPPET_TEXT_MAX}
           />
