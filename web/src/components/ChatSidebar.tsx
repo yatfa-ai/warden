@@ -98,13 +98,6 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every sidebar time display through
   // the shared formatTimestamp helper. Pure client-side localStorage pref.
   timestampFormat: TimestampFormat;
-  // File Viewer markdown view mode (WARDEN-480): the per-file FileViewer opened
-  // from a sidebar row (Ctrl/Cmd-click on a `path:line` token) shares the same
-  // global App-owned 'rendered' | 'source' toggle as PaneGrid's FileViewer, so a
-  // human's preference is consistent regardless of which surface opened the file.
-  // Read-only here (App owns/persists it); forwarded straight to the FileViewer.
-  fileViewerViewMode: 'rendered' | 'source';
-  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Follow poll cadence (WARDEN-749): forwarded straight to the FileViewer, the
   // same resolved value PaneGrid's FileViewer receives, so Follow honors the
   // dashboard cadence regardless of which surface opened the file.
@@ -221,7 +214,7 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -1516,8 +1509,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         line={fileTarget?.line}
         open={!!fileTarget}
         timestampFormat={timestampFormat}
-        viewMode={fileViewerViewMode}
-        onViewModeChange={onFileViewerViewModeChange}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}

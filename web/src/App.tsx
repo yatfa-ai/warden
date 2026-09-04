@@ -24,7 +24,7 @@ import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } 
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
-import { useSnippets, useSetSnippets } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -410,13 +410,26 @@ function App() {
   // HealthDashboard except for the change handler. Pure client-side pref.
   const [healthGroupBy, setHealthGroupBy] = useState<GroupMode>(() => uiState.healthGroupBy ?? 'health');
   // File Viewer markdown view mode (WARDEN-480): 'rendered' (default = docs/
-  // README reading) or 'source' (raw markdown). Was a transient FileViewer-local
-  // useState that reset to 'rendered' on every open, so a human who prefers source
-  // had to re-toggle on every file. Now App-owned and persisted by its saveUi
-  // effect (the single writer), exactly like timestampFormat/agentFilter above —
-  // one global remembered choice surfaced only through the existing in-dialog
-  // toggle. Pure client-side pref; never sent to the backend.
-  const [fileViewerViewMode, setFileViewerViewMode] = useState<'rendered' | 'source'>(() => uiState.fileViewerViewMode ?? 'rendered');
+  // README reading) or 'source' (raw markdown). One global remembered choice,
+  // surfaced only through the existing in-dialog toggle. Pure client-side pref;
+  // never sent to the backend.
+  //
+  // WARDEN-1288 — the SECOND fact migrated off App-owned useState + prop-drilling
+  // onto the shared client-state store (lib/uiStore.ts), following `snippets`
+  // above. Its one reader and one writer are both FileViewer, which now
+  // SUBSCRIBES directly, so the four PURE pass-through carriers between App and
+  // it (ChatSidebar, PaneGrid, HealthDashboard, PaneTile) no longer carry it.
+  //
+  // App still subscribes for the same two single-writer reasons as `snippets`:
+  // (1) the value must appear in the PersistedPrefSnapshot below so the ONE
+  // compile-locked saveUi effect keeps writing it, and (2) the reset partition
+  // (resetSetters) must keep a setter for it. The write path is unchanged end to
+  // end: store.setFileViewerViewMode → this subscription re-renders App → the
+  // snapshot's `fileViewerViewMode` changes → useConfigPersistence's effect
+  // fires → persistUiState → localStorage. The store seeds itself from loadUi()
+  // at module load, the same persisted read the useState lazy initializer did.
+  const fileViewerViewMode = useFileViewerViewMode();
+  const setFileViewerViewMode = useSetFileViewerViewMode();
   // WARDEN-490 — per-host display labels (friendly names). A raw host string
   // ('(local)' / SSH host) → the human's label, which replaces the raw host in
   // every host-tag display surface via the HostLabelsContext provider below.
@@ -877,10 +890,10 @@ function App() {
   //
   // Identity is stable because every value it closes over is: the useState
   // setters are stable by React contract, clearWatchedChats is a
-  // useCallback(..., []) (useWatchState.ts), and setSnippets is a zustand action
-  // created once with the store (lib/uiStore.ts) — so listing it in the dep
-  // array below costs nothing and keeps the lint rule satisfied honestly rather
-  // than by suppression.
+  // useCallback(..., []) (useWatchState.ts), and setSnippets /
+  // setFileViewerViewMode are zustand actions created once with the store
+  // (lib/uiStore.ts) — so listing them in the dep array below costs nothing and
+  // keeps the lint rule satisfied honestly rather than by suppression.
   const resetUiPrefsToDefaults = useCallback(() => {
     const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
       // Appearance
@@ -958,7 +971,7 @@ function App() {
     // contract), so it joins clearWatchedChats outside the dep array.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
     setObserverResetToken((t) => t + 1);
-  }, [clearWatchedChats, setSnippets]);
+  }, [clearWatchedChats, setSnippets, setFileViewerViewMode]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -2038,8 +2051,6 @@ function App() {
               onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
               timestampFormat={timestampFormat}
-              fileViewerViewMode={fileViewerViewMode}
-              onFileViewerViewModeChange={setFileViewerViewMode}
               pollIntervalMs={pollIntervalMs}
               watchedChats={watchedChatSet}
               watchedStates={watchedStateByKey}
@@ -2088,8 +2099,6 @@ function App() {
             onExitBehavior={onExitBehavior}
             showHostTags={displaySettings.showHostTags}
             timestampFormat={timestampFormat}
-            fileViewerViewMode={fileViewerViewMode}
-            onFileViewerViewModeChange={setFileViewerViewMode}
             pollIntervalMs={pollIntervalMs}
             onReorderPanes={reorderPanes}
           />
@@ -2111,8 +2120,6 @@ function App() {
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}
             timestampFormat={timestampFormat}
-            fileViewerViewMode={fileViewerViewMode}
-            onFileViewerViewModeChange={setFileViewerViewMode}
             pollIntervalMs={pollIntervalMs}
             groupBy={healthGroupBy}
             onGroupByChange={setHealthGroupBy}
