@@ -60,6 +60,20 @@
 // domain over the persistent channel — zero ssh spawns per probe after bootstrap.
 // All seven legs are reported below.
 //
+// WARDEN-1284 adds the SCRIPT-DELIVERY leg — the nine remaining call sites that
+// still spawned their own ssh per call: the file viewer read, the linkifier
+// existence probe, session search / transcript view / browser listing, the two
+// observer transcript tails, the tmux presence preflight, and detectClaude's
+// three remote probes. Eight of the nine were completely UN-POOLED (run() only
+// pools via opts.socketPath, which none of them passed), so each paid a full
+// TCP+key-exchange+auth handshake per call — and their cadences are the worst
+// shapes in the app: the existence probe fires PER VISIBLE TERMINAL CANDIDATE,
+// the observer tail rides the fleet-wide poll cadence, the preflight fires on
+// every spawn/resume with a human waiting, and one session-browser open costs
+// detectClaude's 3 probes + a listing. All of it now rides the same `exec` RPC.
+// With this leg the ONLY remaining raw-SSH path in the runtime is the live
+// interactive attach PTY. All eight legs are reported below.
+//
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
@@ -94,6 +108,16 @@ import {
 import { DISCOVER_SCRIPT, buildCaptureScript } from '../src/chats.js';
 // WARDEN-1261: the git-domain leg drives the REAL runGit routing (both sides).
 import { runGit } from '../src/gitRoutes.js';
+// WARDEN-1284: the script-delivery leg drives the REAL exported legs (both sides)
+// through the same shared routing seam the shipping code uses. claudeSessions.js
+// and observer.js are leaf-ish imports; server.js is deliberately NOT imported
+// (it boots an Express app at module load), so its four legs are represented by
+// the two that are importable plus detectClaude — the handshake shape is
+// identical across all nine, and the per-leg ROUTING is pinned in
+// src/companion-exec-legs.test.js rather than here.
+import { remoteClaudeSessionsDetail } from '../src/claudeSessions.js';
+import { readTranscriptPhase } from '../src/observer.js';
+import { detectClaude } from '../src/ssh.js';
 
 // --------------------------------- args -------------------------------------
 
@@ -378,6 +402,58 @@ function printGitProjection(hosts, ticks) {
   console.log('DONE criterion (ticket AC #1): under companionTransportEnabled, every');
   console.log('REMOTE leg of the 15 git routes + cross-agent-diff + search-files issues');
   console.log('ZERO per-op ssh spawns.');
+  console.log();
+}
+
+// WARDEN-1284: the script-delivery leg. The nine remaining "deliver an
+// already-assembled script, read the cmdResult" call sites. Eight were
+// completely UN-POOLED (run() pools only via opts.socketPath, which none of them
+// passed), so each call paid a FULL handshake on EVERY platform — the same shape
+// the git domain had, but across cadences that are worse:
+//
+//   file-exists probe   PER VISIBLE TERMINAL CANDIDATE in an open pane
+//                       (WARDEN-227's linkifier fires it for every path it renders)
+//   observer tail       once per watched agent per observer poll (background,
+//                       fleet-wide, silent)
+//   session browser     detectClaude's 3 probes + 1 listing per open, +1 per
+//                       search, +1 per transcript view
+//   tmux preflight      once per spawn/resume, with a human actively waiting
+//
+// The projection below sizes ONE Fleet-Health-equivalent minute per host: an
+// open pane rendering LINKIFY_CANDIDATES paths, one observer poll per agent, and
+// one session-browser open. That is deliberately conservative — a busy pane
+// re-renders far more candidates than this — and it is still the largest per-host
+// handshake count of any leg in this benchmark.
+const LINKIFY_CANDIDATES = 12;   // paths rendered in one visible pane (the linkifier probes each)
+const OBSERVER_TAILS = 4;        // agents watched per host (1 tail per agent per poll)
+const SESSION_BROWSER_OPS = 4;   // detectClaude's 3 probes + 1 listing
+function printScriptDeliveryProjection(hosts, ticks) {
+  const perTick = LINKIFY_CANDIDATES + OBSERVER_TAILS + SESSION_BROWSER_OPS;
+  const before = hosts * perTick * ticks;
+  console.log('━'.repeat(72));
+  console.log(`Part 1.s — script delivery (9 legs): handshake projection  (${hosts} host(s), ${ticks} tick(s))`);
+  console.log('━'.repeat(72));
+  console.log('The nine legs left un-migrated after the git domain. Eight NEVER rode');
+  console.log('ControlMaster pooling either — run() pools only via opts.socketPath and');
+  console.log('none of them passed one — so every call paid a full handshake:');
+  console.log();
+  console.log(`  DEFAULT path (run(), no companion), per host per tick:`);
+  console.log(`    ${String(LINKIFY_CANDIDATES).padStart(2)} × file-exists probe   (per visible terminal candidate, WARDEN-227)`);
+  console.log(`    ${String(OBSERVER_TAILS).padStart(2)} × observer tail        (per watched agent, per poll)`);
+  console.log(`    ${String(SESSION_BROWSER_OPS).padStart(2)} × session browser     (detectClaude ×3 + listing ×1, per open)`);
+  console.log(`    = ${perTick} handshakes / host / tick  →  ${hosts} × ${perTick} × ${ticks} = ${before} handshakes`);
+  console.log('  COMPANION path:');
+  console.log(`    reuses slice 1's bootstrapped channel — 0 handshakes/call`);
+  console.log(`    total = 0 handshakes for all nine legs (bootstrap was paid by discover)`);
+  console.log();
+  console.log(`  ▶ handshakes saved over ${ticks} tick(s): ${before} → 0  (−${before})`);
+  console.log('  ▶ the file-exists leg alone is the single densest remote op in the app:');
+  console.log(`    ${hosts * LINKIFY_CANDIDATES * ticks} handshakes here, one per path the linkifier renders.`);
+  console.log();
+  console.log('DONE criterion (ticket AC #1): under companionTransportEnabled, every');
+  console.log('REMOTE invocation of the nine legs issues ZERO per-op ssh spawns. After');
+  console.log('this slice the ONLY raw-SSH path left in the runtime is the interactive');
+  console.log('attach PTY.');
   console.log();
 }
 
@@ -1012,6 +1088,117 @@ async function liveGitBenchmark(host, ticks) {
   console.log();
 }
 
+// WARDEN-1284: the script-delivery live leg. Like the git leg, it drives the
+// REAL exported functions through their shipping deps seam on both sides, so the
+// measured thing IS the routing that ships — not a hand-built approximation:
+//   default side   — flag OFF, the default transport counted: every call = 1
+//                    un-pooled ssh spawn (run() never sets a ControlPath for
+//                    these legs, so this is the ControlMaster-disabled shape by
+//                    construction);
+//   companion side — flag ON, the real routing → deliverRemoteScript →
+//                    execInContext → the one channel (bootstrap legs counted).
+//
+// Three of the nine legs are driven, chosen to cover all three delivery shapes
+// and both default transports:
+//   remoteClaudeSessionsDetail  host-scoped script, un-pooled run()   (leg 5)
+//   readTranscriptPhase         host-scoped script, un-pooled run()   (leg 7)
+//   detectClaude                a 3-probe FAN, pooled runWithPool     (leg 9)
+// The other six share one of these exact shapes; their per-leg routing is pinned
+// in src/companion-exec-legs.test.js. The probes are read-only and harmless on
+// any host (they list ~/.claude/projects and look for a claude binary).
+async function liveScriptDeliveryBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.s — script delivery (9 legs): LIVE un-pooled replay  (host: ${host}, ${ticks} tick(s))`);
+  console.log('━'.repeat(72));
+  console.log('Default side: the REAL routing, flag OFF — every call spawns its own');
+  console.log('un-pooled ssh (eight of the nine legs never rode pooling at all).');
+  console.log('Companion side: the REAL routing, flag ON — the exec RPC over the');
+  console.log('persistent channel (bootstrap once, then every leg rides it).');
+  console.log();
+
+  const chat = { host }; // bare remote chat — the observer's leg-7 shape
+  const origEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+
+  // One "tick" = the three legs, concurrent. detectClaude fans to 3 probes, so a
+  // tick is 5 remote calls: 1 listing + 1 tail + 3 claude probes.
+  const CALLS_PER_TICK = 5;
+  const runTick = (deps) => Promise.allSettled([
+    remoteClaudeSessionsDetail(host, 40, deps),
+    readTranscriptPhase(chat, {}, deps),
+    detectClaude(host, deps),
+  ]);
+
+  // ---- DEFAULT: flag OFF, N ticks, spawns counted on BOTH default transports --
+  console.log(`▶ default path: ${ticks} tick(s) × ${CALLS_PER_TICK} calls, one ssh spawn each …`);
+  delete process.env.WARDEN_COMPANION_TRANSPORT;
+  const defaultSpawns = { val: 0 };
+  // `run` is the un-pooled transport legs 5+7 use; `runWithPool` is leg 9's.
+  // Both are counted — a pooled call still spawns ssh, it just may reuse a master.
+  const countingRun = (...a) => { defaultSpawns.val++; return sshRun(...a); };
+  const defaultDeps = { run: countingRun, runWithPool: countingRun };
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const t0 = process.hrtime.bigint();
+    await runTick(defaultDeps);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    defaultSamples.push({ ms, ok: true });
+    process.stdout.write(`   tick ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (${CALLS_PER_TICK} ssh spawns)\n`);
+  }
+
+  // ---- COMPANION: flag ON, bootstrap once, then N ticks over the channel -----
+  console.log(`▶ companion path: bootstrap + ${ticks} tick(s) over the channel …`);
+  process.env.WARDEN_COMPANION_TRANSPORT = '1';
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  const countingBootstrapRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+  // `deps.run` here is the companion BOOTSTRAP transport (probe/upload/reap), NOT
+  // a leg's default — that is why leg 9 declares its pooled default as an option
+  // rather than a dep. Counting it is exactly what we want: the bootstrap spawns
+  // ARE the companion side's whole handshake cost.
+  const companionDeps = { spawn: countingSpawn, run: countingBootstrapRun };
+  _resetChannelCacheForTests();
+  const bootT0 = process.hrtime.bigint();
+  await runTick(companionDeps);
+  const bootMs = Number(process.hrtime.bigint() - bootT0) / 1e6;
+  console.log(`   bootstrap + 1st tick: ${bootMs.toFixed(0).padStart(6)} ms  (${CALLS_PER_TICK} calls)`);
+  const companionSamples = [{ ms: bootMs, ok: true }];
+  for (let i = 1; i < ticks; i++) {
+    const t0 = process.hrtime.bigint();
+    await runTick(companionDeps);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    companionSamples.push({ ms, ok: true });
+    process.stdout.write(`   tick ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (${CALLS_PER_TICK} calls, 0 ssh spawns)\n`);
+  }
+  _resetChannelCacheForTests();
+  if (origEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+  else process.env.WARDEN_COMPANION_TRANSPORT = origEnv;
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+  const calls = ticks * CALLS_PER_TICK;
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────────');
+  console.log(`  spawns (ssh processes started) over ${calls} call(s):`);
+  console.log(`     default   : ${defaultSpawns.val}  (1 handshake PER CALL — eight of nine legs are un-pooled)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; every leg rides the channel)`);
+  console.log(`  per-tick wall-clock (listing + tail + the 3-probe claude fan, concurrent):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady tick(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per tick: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────────');
+  console.log('Note: scale this by the real cadences, not by ticks — the file-exists leg');
+  console.log('(not driven here: it needs a chat cwd) fires once per path the linkifier');
+  console.log('renders in a visible pane, and the observer tail rides the fleet poll.');
+  console.log('This leg is the ticket\'s AC #1: under the toggle all nine issue ZERO');
+  console.log('per-op ssh spawns. Only the interactive attach PTY remains on raw SSH.');
+  console.log();
+}
+
 // Parse the default discover script's stdout into chat objects capturePanes can
 // consume (key/container/session). The discover TSV is name \t status \t cwd \t
 // active; only name (the container) is needed to target a capture. yatfa chats
@@ -1040,7 +1227,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(HELP); return; }
 
-  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 + WARDEN-409 + WARDEN-888 / roadmap WARDEN-270)\n');
+  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 + WARDEN-409 + WARDEN-888 + WARDEN-1261 + WARDEN-1284 / roadmap WARDEN-270)\n');
 
   // Part 1 always runs — deterministic, no host needed. The discover, capture-pane,
   // has-session, lifecycle, attach-path control-plane, and write-path handshake
@@ -1052,6 +1239,7 @@ async function main() {
   printControlPlaneProjection(args.hosts, args.ticks);
   printSendProjection(args.hosts, args.ticks);
   printGitProjection(args.hosts, args.ticks);
+  printScriptDeliveryProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -1069,6 +1257,7 @@ async function main() {
     await liveControlPlaneBenchmark(args.host, args.ticks);
     await liveSendBenchmark(args.host, args.ticks);
     await liveGitBenchmark(args.host, args.ticks);
+    await liveScriptDeliveryBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');

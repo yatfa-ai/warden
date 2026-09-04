@@ -1307,6 +1307,66 @@ export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}
   });
 }
 
+// --------------------------- deliverRemoteScript ------------------------------
+// THE ROUTING GUARD for the whole script-delivery domain — "I have an
+// already-assembled script and a REMOTE host; which transport carries it?"
+//
+// Introduced by WARDEN-1261 as a private helper in gitRoutes.js and lifted here
+// by WARDEN-1284, which routed the remaining NINE script-delivery legs (the file
+// viewer read, the linkifier existence probe, session search / transcript view /
+// browser listing, the observer transcript tails, the tmux preflight, and
+// detectClaude's remote probes) onto the same `exec` RPC. Four modules now share
+// this guard; a per-module copy would be four places for the companion-or-fail
+// discipline to drift, so it lives beside the client it guards.
+//
+// Under the `companionTransportEnabled` toggle the script rides the persistent
+// companion channel (execInContext — zero per-op ssh handshakes,
+// companion-or-fail); otherwise it takes the default raw `run()` path,
+// byte-for-byte unchanged.
+//
+// `opts.innerScript` (+ `opts.container`) is the runInContext container-branch
+// shape: the companion receives the INNER script and the container, and the host
+// side re-assembles `docker exec <c> bash -lc <script>` from them with
+// byte-identical quoting (Go's shellQuote == ssh.js's) — the very string
+// `fullScript` already is, so both transports deliver the same command by
+// construction. Callers without a container pass no innerScript and the full
+// script rides as-is (run()'s `bash -lc ${shellQuote(cmd)}` delivery shape).
+//
+// ⚠️ A caller whose DEFAULT path already delivers a `docker exec … sh -c <script>`
+// string (the observer's container transcript tail, WARDEN-1284 leg 6) must pass
+// that FULL string with NO container — routing it through `container` would have
+// the host side rebuild it as `docker exec … bash -lc <script>`, changing the
+// in-container interpreter and breaking parity.
+//
+// `cfg` is threaded to the companion client (bootstrap reads host config from
+// it); callers that have one (the observer) pass it, the rest pass {}.
+//
+// `opts.run` overrides the DEFAULT-PATH transport for a caller whose toggle-off
+// path is not plain `run()` — today only detectClaude, whose probes go through
+// `runWithPool` (pooling + the transport-failure retry). It is an OPTION rather
+// than a dep precisely so it does not leak into the companion client: `deps` is
+// forwarded to execInContext, where `deps.run` is the BOOTSTRAP transport, and
+// conflating "how this caller reaches the host by default" with "how the
+// companion binary gets uploaded" would silently re-route the bootstrap. For the
+// same reason it takes PRECEDENCE over `deps.run`: a caller that declares its
+// own default transport means it, and a bootstrap seam must not hijack it.
+//
+// Only REMOTE callers reach this helper — every LOCAL branch is handled before
+// it — so there is deliberately no `(local)` check here (the companion client
+// still refuses LOCAL defensively; unreachable from these call sites).
+//
+// `deps` is the shared test seam: isCompanionTransportEnabled / execInContext /
+// run are injectable so a test can assert delegation, the delivered-script
+// parity, and non-fallthrough to the default path without real ssh.
+export async function deliverRemoteScript(host, fullScript, { innerScript, container = '', timeout = 8000, run: defaultPathRun } = {}, cfg = {}, deps = {}) {
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (isEnabled()) {
+    return (deps.execInContext ?? execInContext)(host, innerScript ?? fullScript, { container, timeout }, cfg, deps);
+  }
+  const runFn = defaultPathRun ?? deps.run ?? defaultRun;
+  return runFn(host, fullScript, { timeout }, cfg);
+}
+
 // ------------------------------- subscribePanes --------------------------------
 // WARDEN-413 (problem #3 of roadmap WARDEN-270). capture-pane is polled every 2s
 // monitor tick + every observer poll even when nothing changed; for an idle fleet
