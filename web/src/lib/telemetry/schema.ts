@@ -52,6 +52,22 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v6 (WARDEN-1278): added the `server-stall` event type and the `server`
+// RUNTIME. The backend runs as a FORKED CHILD of the Electron main process, and
+// until now the wire had no runtime for it — so the heaviest worker in the app
+// (SSH, tmux, config, sweeps) could emit NO event under ANY consent, by
+// construction. Its event-loop stall machinery (WARDEN-977) already detects
+// multi-second freezes WITH attribution, but delivered them only to local
+// channels. This type folds a window of those stalls into ONE bounded
+// AGGREGATE — count / totalMs / maxMs / fixed-boundary lag histogram / a
+// per-CULPRIT map whose keys are constant kebab-case literals (validator-
+// enforced, exactly like `operational-metrics` operation names). There is no
+// free-text field, no path and no hostname anywhere in the shape: a request
+// span label is mapped to a ROUTE-PATTERN key or folded to a reserved overflow
+// key before it can ever become an aggregate key. It rides the EXISTING
+// `incidents` category (a stall is an incident) — no new category, no new
+// checkbox. Client + receiver bump together so the x-telemetry-schema handshake
+// (the receiver's ingest.mjs) does not 415.
 // v5 (WARDEN-1258): added the `operational-metrics` event type — the first
 // usage-category event (design-article authorization of 2026-08-19). It carries
 // AGGREGATES ONLY: a folded window of per-operation counts / ok-fail split /
@@ -70,18 +86,20 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
-export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics'] as const);
+export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall'] as const);
 export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
-// `renderer` = a web-contents (browser) process. Error events may be either;
-// crash events may be either (a render-process-gone is `renderer`; a main-process
-// hard kill detected on next launch by the crash sentinel (WARDEN-687) is `main`);
-// stalls may be either.
-export const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer' } as const);
+// `renderer` = a web-contents (browser) process; `server` = the FORKED BACKEND
+// CHILD (WARDEN-1278) — a third real OS process warden has always run and the
+// wire could not name, so nothing it observed could ever be reported. Error
+// events may be either; crash events may be either (a render-process-gone is
+// `renderer`; a main-process hard kill detected on next launch by the crash
+// sentinel (WARDEN-687) is `main`); stalls may be either.
+export const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer', SERVER: 'server' } as const);
 export type Runtime = (typeof RUNTIME)[keyof typeof RUNTIME];
 
 /** A structured stack frame. The directory (user/home/host) is dropped at the
@@ -214,8 +232,67 @@ export interface OperationalMetricsEvent {
   rejected: number;
 }
 
+// ---------------------------------------------------------------------------
+// Server stalls (WARDEN-1278) — the SERVER child's event-loop freezes, folded.
+//
+// The `performance-stall` type above is ONE ROW PER STALL, emitted by the main
+// process. This type is its AGGREGATE counterpart for the forked backend child,
+// and it is a different type for a reason that is not cosmetic: the owner's
+// local journal shows the server's freezes are REPEATED (hundreds of records),
+// so a per-stall row would be exactly the volume blowup the operational-metrics
+// slice already refused. One window, one event.
+//
+// It also carries what a bare duration cannot: ATTRIBUTION. `culprits` is a
+// bounded map from a CLOSED-SET key to the folded overlap of the work that was
+// running across the blocked windows. The key set is closed by CONSTRUCTION at
+// the producer: a request span label (`GET /api/sessions/<something>`) is mapped
+// to its ROUTE PATTERN (`get:api-sessions-id`) or folded into the reserved
+// overflow key BEFORE it becomes an aggregate key — so an agent name, a chat
+// name or a path can never ride one. The validator enforces the same kebab-case
+// pattern `operational-metrics` operation names use, which makes that a
+// STRUCTURAL guarantee rather than a caller promise. There is no free-text
+// field anywhere in this shape.
+// ---------------------------------------------------------------------------
+
+/** One folded culprit aggregate — how much of the blocked time this work spanned. */
+export interface ServerStallCulprit {
+  /** Closed-set kebab-case key (route pattern / sweep name / sync-io label / overflow). */
+  culprit: string;
+  /** Stalls in the window this culprit was attributed to. */
+  count: number;
+  /** Total overlap with the blocked windows, ms. */
+  totalOverlapMs: number;
+}
+
+/** A window of folded server-child event-loop stalls. */
+export interface ServerStallEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: 'server-stall';
+  /** Always `server` — the type exists precisely to report that runtime. */
+  runtime: Runtime;
+  timestamp: number;
+  appVersion?: string; // non-identifying release label; optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
+  /** When the window opened (epoch-ms, from the aggregator). */
+  windowStartedAt: number;
+  /** When the window closed (epoch-ms, from the aggregator). */
+  windowEndedAt: number;
+  /** How many stalls were folded into this window. */
+  count: number;
+  /** Summed lag of every folded stall, ms. */
+  totalMs: number;
+  /** The single worst lag in the window, ms — the headline freeze duration. */
+  maxMs: number;
+  /** Lag histogram bucket boundaries (ascending inclusive ms upper bounds). */
+  boundaries: number[];
+  /** Lag histogram: buckets.length === boundaries.length + 1 (last = overflow). */
+  buckets: number[];
+  /** Folded per-culprit attribution (bounded by the producer's key cap + overflow). */
+  culprits: ServerStallCulprit[];
+}
+
 /** Any base-tier event, discriminated by `type`. */
-export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent;
+export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent;
 
 // ---------------------------------------------------------------------------
 // Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
@@ -246,7 +323,7 @@ export type TelemetryEvent = ExtendedEvent;
 // ---------------------------------------------------------------------------
 
 export function isRuntime(value: unknown): value is Runtime {
-  return value === RUNTIME.MAIN || value === RUNTIME.RENDERER;
+  return value === RUNTIME.MAIN || value === RUNTIME.RENDERER || value === RUNTIME.SERVER;
 }
 
 export function isBaseEventType(value: unknown): value is BaseEventType {
@@ -261,6 +338,19 @@ const OPERATION_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // The aggregator's footprint bound: at most maxOperations distinct keys (64 by
 // default) + the one reserved overflow accumulator.
 const MAX_OPERATIONS_PER_EVENT = 129;
+
+/** True iff `value` is a non-empty, strictly-ascending, positive-finite
+ *  boundary list — exactly as the bounded aggregators produce them. Shared by
+ *  every histogram-bearing event type so the two cannot drift apart. */
+function isAscendingBoundaries(value: unknown): value is number[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const b = value[i];
+    if (typeof b !== 'number' || !Number.isFinite(b) || b <= 0) return false;
+    if (i > 0 && b <= (value as number[])[i - 1]) return false;
+  }
+  return true;
+}
 
 /** True iff `op` is a structurally valid OperationalMetricOperation. */
 function isOperationalMetricOperation(op: unknown): op is OperationalMetricOperation {
@@ -284,18 +374,56 @@ function isOperationalMetricsShape(e: Record<string, unknown>): boolean {
   if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
   if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
   if (typeof e.rejected !== 'number' || !Number.isInteger(e.rejected) || e.rejected < 0) return false;
-  if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
-  for (let i = 0; i < e.boundaries.length; i += 1) {
-    const b = e.boundaries[i];
-    if (typeof b !== 'number' || !Number.isFinite(b) || b <= 0) return false;
-    // Strictly ascending, exactly as the aggregator produces them.
-    if (i > 0 && b <= (e.boundaries as number[])[i - 1]) return false;
-  }
+  if (!isAscendingBoundaries(e.boundaries)) return false;
   if (!Array.isArray(e.operations) || e.operations.length > MAX_OPERATIONS_PER_EVENT) return false;
   for (const op of e.operations) {
     if (!isOperationalMetricOperation(op)) return false;
     // Every operation's histogram is keyed against the event's boundaries.
-    if ((op as OperationalMetricOperation).buckets.length !== e.boundaries.length + 1) return false;
+    if ((op as OperationalMetricOperation).buckets.length !== (e.boundaries as number[]).length + 1) return false;
+  }
+  return true;
+}
+
+// A `server-stall` culprit key: the SAME constant kebab-case shape an
+// `operational-metrics` operation name carries (WARDEN-1278). This is the
+// structural hard-exclusion proof for the attribution axis — no path (needs a
+// separator), no hostname (needs a dot), no chat/agent name (needs its own
+// characters) can match, so the culprit map cannot become a channel for user
+// data even if the producer's key mapping were bypassed.
+const CULPRIT_NAME_RE = OPERATION_NAME_RE;
+// The producer's footprint bound: at most maxCulprits distinct keys (32 by
+// default) + the one reserved overflow accumulator. Held generously above the
+// producer's default so a future cap raise does not need a schema bump.
+const MAX_CULPRITS_PER_EVENT = 65;
+
+/** True iff `c` is a structurally valid ServerStallCulprit. */
+function isServerStallCulprit(c: unknown): c is ServerStallCulprit {
+  if (!c || typeof c !== 'object') return false;
+  const o = c as Record<string, unknown>;
+  if (typeof o.culprit !== 'string' || !CULPRIT_NAME_RE.test(o.culprit)) return false;
+  if (typeof o.count !== 'number' || !Number.isInteger(o.count) || o.count < 0) return false;
+  if (typeof o.totalOverlapMs !== 'number' || !Number.isFinite(o.totalOverlapMs) || o.totalOverlapMs < 0) return false;
+  return true;
+}
+
+/** True iff `e` is a structurally valid ServerStallEvent. */
+function isServerStallShape(e: Record<string, unknown>): boolean {
+  if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
+  if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
+  for (const k of ['count', 'totalMs', 'maxMs'] as const) {
+    const v = e[k];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return false;
+  }
+  if (!Number.isInteger(e.count)) return false;
+  if (!isAscendingBoundaries(e.boundaries)) return false;
+  if (!Array.isArray(e.buckets)) return false;
+  if (e.buckets.length !== (e.boundaries as number[]).length + 1) return false;
+  for (const b of e.buckets) {
+    if (typeof b !== 'number' || !Number.isInteger(b) || b < 0) return false;
+  }
+  if (!Array.isArray(e.culprits) || e.culprits.length > MAX_CULPRITS_PER_EVENT) return false;
+  for (const c of e.culprits) {
+    if (!isServerStallCulprit(c)) return false;
   }
   return true;
 }
@@ -326,6 +454,12 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
         (e.source === 'event-loop' || e.source === 'unresponsive');
     case 'operational-metrics':
       return isOperationalMetricsShape(e);
+    case 'server-stall':
+      // WARDEN-1278 — the server child's folded stall window. `runtime` is
+      // already validated as a known Runtime above; this type is only ever
+      // emitted for the `server` runtime, and saying so structurally is what
+      // makes "the backend is the source" a wire fact rather than a convention.
+      return e.runtime === RUNTIME.SERVER && isServerStallShape(e);
     default:
       return false;
   }

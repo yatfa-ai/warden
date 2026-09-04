@@ -34,6 +34,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { postJson } from '@/lib/api';
 import { canSendReply, replySnippetPreview, sanitizeReplyText } from '@/lib/quickReply';
+import { useSnippets } from '@/lib/uiStore';
 import type { Snippet } from '@/lib/storage';
 
 interface Props {
@@ -43,8 +44,16 @@ interface Props {
   targetLabel: string;
   /** Saved instruction snippets (WARDEN-323). The first few are shown as one-click
    *  INSERT-ONLY fills (picking one fills the textarea; it does NOT auto-send — the
-   *  confirm gate still governs). Threaded from the same library BroadcastDialog uses. */
-  snippets: Snippet[];
+   *  confirm gate still governs).
+   *
+   *  WARDEN-1271 — the library is now read from the shared client-state store
+   *  (lib/uiStore), so this prop is NO LONGER how the fact normally arrives: every
+   *  surface that renders a QuickReply gets it from the store without threading it.
+   *  The prop survives ONLY as a TEMPORARY override for the attention-blob leg
+   *  (AttentionBadge / ObserverTabs → AttentionList → AgentRow), which this slice
+   *  deliberately defers; when that leg subscribes too, this prop is deleted.
+   *  Omitted ⇒ the store value, which is what every migrated surface passes. */
+  snippets?: Snippet[];
   /** Surface the send outcome so the parent can toast it under its own prefs gate
    *  (matching kill/rename/resume in App.tsx). Called once per attempted send. */
   onReplyResult?: (ok: boolean, error?: string) => void;
@@ -67,11 +76,17 @@ interface Props {
 export function QuickReply({
   targetId,
   targetLabel,
-  snippets,
+  snippets: snippetsProp,
   onReplyResult,
   onDismiss,
   autoFocus = true,
 }: Props) {
+  // WARDEN-1271: the store is the source of truth; the prop is the deferred
+  // attention-blob leg's temporary override (see Props above). Both resolve to
+  // the SAME list today — App feeds that leg the store value it subscribes to —
+  // so this is behavior-preserving, not a second source.
+  const storeSnippets = useSnippets();
+  const snippets = snippetsProp ?? storeSnippets;
   const [msg, setMsg] = useState('');
   const [sending, setSending] = useState(false);
   // Inline error from the last failed send (cleared on the next edit / successful send).

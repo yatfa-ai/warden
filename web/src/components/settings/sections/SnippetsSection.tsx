@@ -1,7 +1,17 @@
 // Instruction snippets section (WARDEN-323) — pure client localStorage prefs.
 // The snippet CRUD is relocated here verbatim from SettingsPage (WARDEN-664):
-// each handler operates only on `snippets`/`setSnippets` this section receives,
-// so behavior is unchanged.
+// each handler operates only on `snippets`/`setSnippets`, so behavior is
+// unchanged.
+//
+// WARDEN-1271: `snippets`/`setSnippets` now come from the shared client-state
+// store (lib/uiStore.ts) instead of a {snippets, setSnippets} pair threaded
+// App → SettingsPage → here. The handler bodies below are untouched — only where
+// the pair comes FROM changed. Persistence is likewise unchanged: a store write
+// re-renders App (which subscribes for its PersistedPrefSnapshot) and the ONE
+// compile-locked saveUi effect writes localStorage, exactly as before. That is
+// what makes this section's edits still appear instantly in the pane context
+// menu, the broadcast picker and the quick-reply fills — those surfaces now
+// subscribe to the same store rather than waiting on a prop from App.
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
@@ -17,12 +27,16 @@ import {
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { SnippetRow } from '../rows/SnippetRow';
 import { SettingsSection } from '../SettingsSection';
-import { type SnippetsPrefs } from '../types';
+import { useSnippets, useSetSnippets } from '@/lib/uiStore';
 
-export type SnippetsSectionProps = SnippetsPrefs & { hidden: boolean };
+export interface SnippetsSectionProps {
+  hidden: boolean;
+}
 
 export function SnippetsSection(props: SnippetsSectionProps) {
-  const { snippets, setSnippets, hidden } = props;
+  const { hidden } = props;
+  const snippets = useSnippets();
+  const setSnippets = useSetSnippets();
 
   // --- Instruction-snippet management (create / rename / edit-text / delete) --
   // All pure client-side: edits apply instantly via setSnippets and are

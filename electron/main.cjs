@@ -46,6 +46,7 @@ const {
 const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
 // WARDEN-1258 — the server-child metrics-window → schema-event builder.
 const { buildOperationalMetricsEvent } = require('./telemetry-metrics-event.cjs');
+const { buildServerStallEvent } = require('./telemetry-stall-event.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
@@ -225,6 +226,28 @@ function recordOperationalMetricsWindow(snapshot) {
     schemaVersion: SCHEMA_VERSION,
     // The same non-identifying labels the incident builders attach (read from
     // the same seams: the Electron app's release label, process.platform).
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    now: Date.now,
+  });
+  if (event) telemetryPipeline.record(event);
+}
+
+// WARDEN-1278 — turn a server-child STALL window (the 'telemetry-stalls' IPC
+// message) into a `server-stall` schema event and record it through the standard
+// pipeline. Same double gate as the metrics receipt above: the server child
+// already refuses to record while `incidents` is off and drops the window at
+// flush time, and this receipt-side re-check closes the mid-flip gap for a
+// window that was in flight when the user revoked.
+//
+// It rides `incidents` because a multi-second freeze IS an incident — the same
+// category the main process's own `performance-stall` already travels under. No
+// new category was added for it, and none should be.
+function recordServerStallWindow(snapshot) {
+  if (resolveTelemetryConsent(telemetryPrefs).incidents !== true) return;
+  const event = buildServerStallEvent({
+    snapshot,
+    schemaVersion: SCHEMA_VERSION,
     appVersion: app.getVersion(),
     platform: process.platform,
     now: Date.now,
@@ -898,6 +921,15 @@ app.whenReady().then(async () => {
     // snapshot is dropped pre-send by the pipeline's validator (never sent).
     if (msg && msg.type === 'telemetry-metrics') {
       recordOperationalMetricsWindow(msg.snapshot);
+    }
+    // WARDEN-1278 — the server child's event-loop STALL window. Same shape of
+    // channel as the metrics window above and the same gates; the difference is
+    // the event it builds carries `runtime: 'server'`, which the v6 schema
+    // introduced precisely so a freeze in the backend child can be reported as
+    // having happened THERE. The owner's local stall channels (stalls.jsonl,
+    // the stderr line, /api/diagnostics/stalls) are untouched by this path.
+    if (msg && msg.type === 'telemetry-stalls') {
+      recordServerStallWindow(msg.snapshot);
     }
     if (msg && msg.type === 'telemetry-config') {
       // The server forwards the already-sanitized per-category consent under

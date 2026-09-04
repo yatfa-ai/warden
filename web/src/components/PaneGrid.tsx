@@ -15,7 +15,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
-import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, Snippet } from '@/lib/storage';
+import type { PaneLayout, TerminalCursorStyle, OnExitBehavior } from '@/lib/storage';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -142,10 +142,6 @@ interface Props {
   // Settings toggle live-updates already-open pane headers, mirroring the
   // sidebar's live update.
   showHostTags?: boolean;
-  // Saved instruction snippets (WARDEN-323): pure pass-through to PaneTile —
-  // App owns the persisted list. PaneTile renders a "Snippets" submenu in each
-  // pane's context menu for one-click send to that pane's agent.
-  snippets: Snippet[];
   // "Timestamp format" pref (WARDEN-422): pure pass-through to PaneTile and to
   // this grid's own FileViewer — App owns the persisted pref; the FileViewer's
   // blame view formats author-dates per the pref, mirroring every other surface.
@@ -167,7 +163,7 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, onReorderPanes }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -813,7 +809,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     onExitBehavior={onExitBehavior}
                     showHostTags={showHostTags}
                     onSpawned={onSpawned}
-                    snippets={snippets}
                     timestampFormat={timestampFormat}
                     fileViewerViewMode={fileViewerViewMode}
                     onFileViewerViewModeChange={onFileViewerViewModeChange}

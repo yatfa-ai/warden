@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type ConfigData, type SetConfig } from '../types';
 
 export function TokenBudgetSection({ config, setConfig, hidden }: { config: ConfigData; setConfig: SetConfig; hidden: boolean }) {
@@ -32,6 +33,7 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
         <Label htmlFor="tokenBudgetEnabled" className="cursor-pointer">
           Enable token-spend budget alerts
         </Label>
+        <ConfigResetToDefaultButton label="Enable token-spend budget alerts" path="tokenBudgetEnabled" config={config} setConfig={setConfig} />
       </div>
       <p className="text-xs text-muted-foreground">
         Watch the fleet's token usage on a slow cadence and raise a desktop alert + in-app
@@ -41,7 +43,12 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
       </p>
       <div className="flex flex-col gap-4 pl-4 ml-1 border-l border-border/60">
         <div className="flex flex-col gap-2">
-          <Label htmlFor="tokenBudgetThresholdTokens" className={dim}>Fleet threshold (tokens)</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="tokenBudgetThresholdTokens" className={dim}>Fleet threshold (tokens)</Label>
+            {!gated && (
+              <ConfigResetToDefaultButton label="Fleet threshold (tokens)" path="tokenBudgetThresholdTokens" config={config} setConfig={setConfig} />
+            )}
+          </div>
           <Input
             id="tokenBudgetThresholdTokens"
             type="number"
@@ -81,7 +88,12 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label htmlFor="tokenBudgetWindowHours" className={dim}>Window (hours)</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="tokenBudgetWindowHours" className={dim}>Window (hours)</Label>
+            {!gated && (
+              <ConfigResetToDefaultButton label="Window (hours)" path="tokenBudgetWindowHours" config={config} setConfig={setConfig} />
+            )}
+          </div>
           <Input
             id="tokenBudgetWindowHours"
             type="number"
@@ -118,7 +130,12 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label htmlFor="tokenBudgetPerSessionThresholdTokens" className={dim}>Per-session threshold (tokens)</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="tokenBudgetPerSessionThresholdTokens" className={dim}>Per-session threshold (tokens)</Label>
+            {!gated && (
+              <ConfigResetToDefaultButton label="Per-session threshold (tokens)" path="tokenBudgetPerSessionThresholdTokens" config={config} setConfig={setConfig} />
+            )}
+          </div>
           <Input
             id="tokenBudgetPerSessionThresholdTokens"
             type="number"

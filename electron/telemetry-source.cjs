@@ -42,15 +42,18 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
+// v6 (WARDEN-1278): + 'server-stall' and the `server` RUNTIME — the forked
+// backend child's folded stall window (see the canonical
+// web/src/lib/telemetry/schema.ts for the full bump note).
 // v5 (WARDEN-1258): + 'operational-metrics' — the aggregate usage-category
 // event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
 // note). This inline copy stays byte-aligned with the canonical module; the
 // drift tests pin the pair.
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
-const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics']);
+const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall']);
 
-const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer' });
+const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer', SERVER: 'server' });
 
 // WARDEN-687 — the synthetic `reason` for a main-process hard kill detected on
 // the NEXT launch by the crash sentinel (electron/crash-sentinel.cjs). A hard
@@ -338,7 +341,7 @@ function validateBaseEvent(event) {
   if (!event || typeof event !== 'object') return false;
   if (event.schemaVersion !== SCHEMA_VERSION) return false;
   if (!BASE_EVENT_TYPES.includes(event.type)) return false;
-  if (event.runtime !== RUNTIME.MAIN && event.runtime !== RUNTIME.RENDERER) return false;
+  if (event.runtime !== RUNTIME.MAIN && event.runtime !== RUNTIME.RENDERER && event.runtime !== RUNTIME.SERVER) return false;
   if (typeof event.timestamp !== 'number' || !Number.isFinite(event.timestamp)) return false;
   if (event.type === 'error') {
     if (typeof event.message !== 'string') return false;
@@ -355,6 +358,15 @@ function validateBaseEvent(event) {
     // name pattern doubles as THIS module's hard-exclusion proof: the name is
     // the only string the type carries, and a path/hostname can never match it.
     if (!isValidOperationalMetrics(event)) return false;
+  } else if (event.type === 'server-stall') {
+    // WARDEN-1278 — the server child's folded stall window. Mirrors the
+    // canonical schema's shape checks; the kebab-case CULPRIT key pattern
+    // doubles as THIS module's hard-exclusion proof: the culprit key is the
+    // only string the type carries, and a path/hostname can never match it.
+    // The runtime is pinned: this type is only ever emitted for the backend
+    // child, and saying so structurally keeps "which process froze" honest.
+    if (event.runtime !== RUNTIME.SERVER) return false;
+    if (!isValidServerStall(event)) return false;
   }
   // Hard-exclusion proof: the built event must not leak an identifier.
   //   - The free-text MESSAGE is fully redacted at the collection boundary, so
@@ -413,6 +425,44 @@ function isValidOperationalMetrics(e) {
   for (const op of e.operations) {
     if (!isValidMetricOperation(op)) return false;
     if (op.buckets.length !== e.boundaries.length + 1) return false;
+  }
+  return true;
+}
+
+// WARDEN-1278 — a `server-stall` culprit key: the SAME constant kebab-case
+// shape an operational-metrics operation name carries, mirroring the canonical
+// schema's CULPRIT_NAME_RE. The producer maps every span label onto a closed
+// set before it can become a key; this is the structural backstop.
+const CULPRIT_NAME_RE = OP_NAME_RE;
+// The producer's footprint bound (maxCulprits + the reserved overflow key),
+// held generously above the default so a cap raise needs no schema bump.
+const MAX_STALL_CULPRITS = 65;
+
+function isValidStallCulprit(c) {
+  if (!c || typeof c !== 'object') return false;
+  if (typeof c.culprit !== 'string' || !CULPRIT_NAME_RE.test(c.culprit)) return false;
+  if (!Number.isInteger(c.count) || c.count < 0) return false;
+  if (!isFiniteNonNegative(c.totalOverlapMs)) return false;
+  return true;
+}
+
+function isValidServerStall(e) {
+  if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
+  if (!Number.isInteger(e.count) || e.count < 0) return false;
+  if (!isFiniteNonNegative(e.totalMs) || !isFiniteNonNegative(e.maxMs)) return false;
+  if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
+  for (let i = 0; i < e.boundaries.length; i += 1) {
+    const b = e.boundaries[i];
+    if (typeof b !== 'number' || !Number.isFinite(b) || b <= 0) return false;
+    if (i > 0 && b <= e.boundaries[i - 1]) return false; // strictly ascending
+  }
+  if (!Array.isArray(e.buckets) || e.buckets.length !== e.boundaries.length + 1) return false;
+  for (const b of e.buckets) {
+    if (!Number.isInteger(b) || b < 0) return false;
+  }
+  if (!Array.isArray(e.culprits) || e.culprits.length > MAX_STALL_CULPRITS) return false;
+  for (const c of e.culprits) {
+    if (!isValidStallCulprit(c)) return false;
   }
   return true;
 }

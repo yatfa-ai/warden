@@ -32,6 +32,7 @@ import { resolvePollIntervalMs } from '@/lib/pollInterval';
 import { validateNewHost } from '@/lib/hostInput';
 import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
 import { SettingsSection } from '../SettingsSection';
+import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import {
   POLL_INPUT_MAX_MS,
   POLL_INPUT_MIN_MS,
@@ -271,6 +272,13 @@ export function HostsSection({
       </div>
 
       <div className="flex flex-col gap-2">
+        {/* WARDEN-1276 deliberately gives this row NO reset-to-default
+            affordance. Its display is not its stored value: the field renders
+            `resolvePollIntervalMs(config.pollIntervalMs)`, and the schema
+            default (1500, the CLI watch cadence) resolves to a DISPLAYED 60000.
+            A restore would therefore write "the default" and show a third
+            number, which reads as a bug. The affordance is for rows where
+            displayed == stored; this one is intentionally out of scope. */}
         <Label htmlFor="pollIntervalMs">Dashboard Refresh Interval (ms)</Label>
         <Input
           id="pollIntervalMs"
@@ -313,7 +321,10 @@ export function HostsSection({
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="tmuxSession">Tmux Session Name</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="tmuxSession">Tmux Session Name</Label>
+          <ConfigResetToDefaultButton label="Tmux Session Name" path="tmuxSession" config={config} setConfig={setConfig} />
+        </div>
         <Input
           id="tmuxSession"
           value={config.tmuxSession}
@@ -322,7 +333,10 @@ export function HostsSection({
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="connectTimeout">Connect Timeout (seconds)</Label>
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="connectTimeout">Connect Timeout (seconds)</Label>
+          <ConfigResetToDefaultButton label="Connect Timeout (seconds)" path="connectTimeout" config={config} setConfig={setConfig} />
+        </div>
         <Input
           id="connectTimeout"
           type="number"

@@ -23,6 +23,7 @@ import { resolveConsent } from './telemetry-consent.cjs';
 // WARDEN-1258 — usage-telemetry producer for the linkifier's existence probe
 // (the operational-metrics consent category; see src/fileExistsTelemetry.js).
 import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
+import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 // NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
@@ -342,9 +343,16 @@ app.get('/api/health', (_req, res) => {
 //      already relays to its console as `[server] …`.
 //   3. GET /api/diagnostics/stalls — the same file, in a browser.
 //
-// Telemetry is deliberately NOT the channel: it is opt-in and off by default, so
-// it cannot deliver a signal the owner needs to read on demand.
-function startLoopMonitor() {
+// Telemetry is deliberately NOT the channel for the OWNER's on-demand read: it
+// is opt-in and off by default, so it cannot be the surface someone consults
+// when the app just froze. WARDEN-1278 adds it as a FOURTH, strictly ADDITIVE
+// channel for the MAINTAINER, with consent — the three above are byte-untouched
+// (same stderr line, same append, same route response) and run first.
+// Wire the stall SINK — the delivery half of startLoopMonitor, split out so a
+// test can arm the real callback WITHOUT also starting the heartbeat timer and
+// patching the fs / child_process builtins process-wide (see
+// __startLoopMonitorForTest at the bottom of this file).
+function wireStallSink() {
   loopMonitor.setOnStall((record) => {
     // stderr first (synchronous, always available, survives a failed write), then
     // the durable append. Both are on the stall path only — never on a request.
@@ -352,7 +360,20 @@ function startLoopMonitor() {
     appendStall(record).catch((e) => {
       console.warn(`[warden:stall] could not append to ${stallLogFile()}: ${e.message}`);
     });
+    // WARDEN-1278 — fold into the telemetry window (aggregate, bounded, closed-
+    // set culprit keys). Gated LIVE on the `incidents` category and a no-op
+    // while it is off; the window is only ever forwarded on the 5-minute flush,
+    // never per stall. LAST and WRAPPED, deliberately: the two local channels
+    // above must not be able to fail because of a telemetry producer — the
+    // ordering IS the guarantee that this slice cannot degrade the owner's read
+    // channels, and src/server-stall-telemetry.test.js drives a THROWING
+    // producer to prove it.
+    try { serverStallTelemetry.recordStall(record); } catch { /* never the server's problem */ }
   });
+}
+
+function startLoopMonitor() {
+  wireStallSink();
   loopMonitor.start();
   // Time the synchronous fs / child_process members so a stall can be attributed
   // to the actual blocking call, not just to the request or sweep it happened
@@ -1113,6 +1134,32 @@ const fileExistsTelemetry = createFileExistsTelemetry({
   },
 });
 fileExistsTelemetry.start();
+
+// WARDEN-1278 — the server-stall telemetry producer. Same three properties as
+// the metrics producer above: consent resolved LIVE through the one authority
+// (cfg is mutated in place by applyConfigPut, so a Settings flip gates the very
+// next record()), the windowed snapshot forwarded to the Electron main process
+// over the fork's IPC channel, and the same process.send guard for standalone
+// `node src/server` runs.
+//
+// It rides the EXISTING `incidents` category — a multi-second freeze IS an
+// incident, and it is the same category the main process's `performance-stall`
+// already travels under. No new category, no new checkbox.
+//
+// `knownSegments` is derived LIVE from the express router (every static segment
+// of the real route table) so the culprit-key mapping cannot drift from the
+// routes it maps. Passed as a THUNK because routes are registered across the
+// whole module and the table is only complete after the last one; the
+// aggregator resolves it on first use and memoizes.
+const serverStallTelemetry = createServerStallTelemetry({
+  consent: () => resolveConsent(cfg).incidents === true,
+  knownSegments: () => routeSegmentsOf(app),
+  send: (snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-stalls', snapshot });
+  },
+});
+serverStallTelemetry.start();
 
 // Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
@@ -3341,6 +3388,38 @@ export { app, tickLifecycle, tickBudget, server };
 // on in its pre-import config and asserts observations folded through the REAL
 // route wiring). Also lets an operator snapshot probe costs from a REPL.
 export { fileExistsTelemetry };
+
+// WARDEN-1278 — exported on the same reasoning as fileExistsTelemetry above: an
+// integration test drives a REAL stall record through the REAL setOnStall
+// callback and then closes the window with flushNow(), rather than reaching
+// into the producer's internals or waiting 5 minutes for a timer.
+export { serverStallTelemetry };
+
+// WARDEN-1278 — test seams for src/server-stall-telemetry.test.js, which drives
+// the REAL setOnStall callback to prove the owner's local channels (stalls.jsonl,
+// the stderr line, /api/diagnostics/stalls) are byte-untouched by the additive
+// telemetry fold.
+//
+// `__startLoopMonitorForTest` arms ONLY the callback: startLoopMonitor() also
+// starts the heartbeat timer and patches the fs / child_process builtins
+// PROCESS-WIDE, which a test must not do to the runner it shares. The callback
+// is the thing under test; the timer and the patch are WARDEN-977's and are
+// covered by src/loop-monitor.test.js.
+//
+// `cfg` is exported so the test can flip consent IN PLACE, exactly as
+// applyConfigPut does — which is what makes the LIVE consent resolution (rather
+// than a value captured at wire-up) the thing being asserted.
+export function __startLoopMonitorForTest() {
+  wireStallSink();
+}
+export { cfg };
+
+// The process-wide monitor, re-exported for the same test: test-fixtures/
+// stall-ipc-harness.mjs runs INSIDE a forked child and must reach the very same
+// module instance the sink was wired on — importing loop-monitor.js separately
+// would work today but would silently stop proving anything if the server ever
+// used a monitor of its own.
+export { loopMonitor as __loopMonitorForTest };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
