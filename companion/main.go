@@ -11,21 +11,29 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"send"|"sendKeys"|"subscribePanes"|"unsubscribePanes","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"send"|"sendKeys"|"subscribePanes"|"unsubscribePanes"|"attachStart"|"attachInput"|"attachResize"|"attachKill","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
-//	event   : {"event":"paneDelta","panes":{key:content,…}}   // UNSOLICITED — no id
+//	event   : {"event":"paneDelta","panes":{key:content,…}}       // UNSOLICITED — no id
+//	          {"event":"attachData","sid":"a1","data":"<base64>"} // UNSOLICITED — no id
+//	          {"event":"attachExit","sid":"a1","code":0}          // UNSOLICITED — no id
 //
 // `id` is echoed untouched so the caller (warden) can be a multiplexing client
 // with many requests in flight on the one stdio channel. stderr is for human
 // diagnostics only — warden never parses it.
 //
-// subscribePanes (WARDEN-413) is the one unsolicited-emitter: after it ACKs, the
+// subscribePanes (WARDEN-413) is the first unsolicited-emitter: after it ACKs, the
 // companion pushes paneDelta event lines for ONLY the panes that changed (an
 // empty-panes line is a liveness heartbeat) so warden can render idle panes from
 // the push instead of polling capturePanes every tick. Events carry NO id, so
 // warden's _onLine routes any line with an `event` field to a handler instead of
 // matching it against a pending request — a strictly additive protocol addition.
+//
+// attachStart (WARDEN-1295) is the second, and the only STREAM: it allocates a
+// host-side PTY, ACKs an {sid}, then pushes attachData (base64 PTY output) until
+// an attachExit. It is what lets warden's live web pane stop spawning a raw
+// `ssh -tt` child per open. Both emitters share the one writeLine mutex, and
+// warden fans the two event names apart by `event` on its single handler slot.
 package main
 
 import (
@@ -105,6 +113,33 @@ type hasSessionParams struct {
 	Session   string `json:"session"`
 }
 
+// baseMethods is the request/response op set every companion build serves. The
+// attach* family is appended by pingMethods ONLY where a host PTY can actually
+// be allocated (see below), so this stays the platform-independent floor.
+var baseMethods = []string{
+	"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession",
+	"resize", "send", "sendKeys", "subscribePanes", "unsubscribePanes", "exec",
+}
+
+// attachMethods is the streaming attach family (WARDEN-1295).
+var attachMethods = []string{"attachStart", "attachInput", "attachResize", "attachKill"}
+
+// pingMethods is what the ping RPC advertises. The attach* names are included
+// ONLY when this build can allocate a host PTY (hostPTYSupported — false on
+// windows, see pty_windows.go). That is the platform-honesty contract: warden
+// feature-detects off this list, so a companion that physically cannot serve an
+// attach never claims it, and the JS side refuses the attach up front with an
+// actionable message instead of opening a pane that could only die. It is the
+// SAME list the stale-binary gate reads (channelMethods, src/companion.js), so
+// an old cached binary and an unsupported platform surface through one mechanism.
+func pingMethods() []string {
+	methods := append([]string(nil), baseMethods...)
+	if hostPTYSupported {
+		methods = append(methods, attachMethods...)
+	}
+	return methods
+}
+
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	// A discover over many containers can produce a sizable line; raise the
@@ -139,7 +174,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "send", "sendKeys", "subscribePanes", "unsubscribePanes", "exec"},
+				"methods": pingMethods(),
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -228,12 +263,51 @@ func main() {
 		case "unsubscribePanes":
 			stopSubscription()
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{"unsubscribed": true}})
+		case "attachStart":
+			// WARDEN-1295: allocate a host-side PTY, run the delivered script
+			// under it, ACK {sid} IMMEDIATELY, and only THEN start the output
+			// pump — the subscribePanes ACK-then-stream contract, tightened so
+			// no attachData can reach the client before it knows the sid.
+			sid, launch, err := startAttach(req.Params, writeLine)
+			if err != nil {
+				// Platform without a PTY, or a spawn failure. Surfaced as an
+				// ordinary {ok:false} so warden maps it to its existing
+				// attach_error path — never a silent raw-SSH fallback.
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{"sid": sid}})
+				launch()
+			}
+		case "attachInput":
+			if err := attachInput(req.Params); err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
+			}
+		case "attachResize":
+			if err := attachResize(req.Params); err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
+			}
+		case "attachKill":
+			// Idempotent (an already-gone sid is a benign ok), mirroring
+			// killSession — a detach→attach race must never surface a spurious
+			// failure to warden's best-effort kill call site.
+			if err := attachKill(req.Params); err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
+			}
 		default:
 			write(Response{ID: req.ID, OK: false, Error: "unknown method: " + req.Method})
 		}
 	}
-	// Stop the watcher if the channel (stdin) closed so a reconnect starts clean.
+	// Stop the watcher if the channel (stdin) closed so a reconnect starts clean,
+	// and kill every live attach so a dead channel can never leave an orphaned
+	// host-side PTY (and its tmux client) running. (WARDEN-1295)
 	stopSubscription()
+	stopAllAttachSessions()
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "companion: stdin scanner error:", err)
 		os.Exit(1)
@@ -1225,7 +1299,7 @@ func buildExecScript(container, script string) string {
 }
 
 // execScript runs one JS-assembled script host-side. Bad/absent params fall
-// through to an empty script (bash -lc '' exits 0 — a benign no-op, the same
+// through to an empty script (bash -lc ” exits 0 — a benign no-op, the same
 // tolerance the sibling RPCs' `_ = json.Unmarshal` lines carry); a non-positive
 // timeoutMs defaults to 8000ms, matching the { timeout: 8000 } both runGit
 // remote branches and runInContext's default pass run() today.

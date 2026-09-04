@@ -359,6 +359,27 @@ export class CompanionChannel {
       reject(err);
     }
     this.pending.clear();
+    // WARDEN-1295: a live attach is a STREAM, not a pending request — it has no
+    // entry in `pending`, so the loop above cannot tell it the channel died and
+    // its pane would spin forever on a companion that is already gone. Dead
+    // handlers are how a stream learns; each one is best-effort so a throwing
+    // consumer can't stop the rest from being notified.
+    const handlers = this._deadHandlers || [];
+    this._deadHandlers = [];
+    for (const cb of handlers) {
+      try { cb(err); } catch { /* a dead-handler throw must not break teardown */ }
+    }
+  }
+
+  // Register a callback for channel death (WARDEN-1295). Fires immediately if the
+  // channel is ALREADY dead — a stream that registers late must still learn,
+  // otherwise it hangs on a death it merely missed. Handlers fire at most once.
+  onDead(cb) {
+    if (this.dead) {
+      try { cb(this._diedWith); } catch { /* noop */ }
+      return;
+    }
+    (this._deadHandlers ||= []).push(cb);
   }
 
   call(method, params, opts = {}) {
@@ -1307,6 +1328,321 @@ export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}
   });
 }
 
+// ------------------------------- attachSession -------------------------------
+// WARDEN-1295 (the streaming slice of roadmap WARDEN-270). The LIVE WEB PANE was
+// the last runtime path still spawning raw SSH: every open of a remote pane
+// spawned a fresh `ssh -tt` child inside a local node-pty (attachStream →
+// attachTmux → attachPty). Every other op family is request/response; this one is
+// a bidirectional byte stream with a terminal on the far end, which is why it was
+// deferred to last.
+//
+// The companion serves it over the SAME stdio channel with no second transport:
+// attachStart ACKs an {sid} and then pushes base64 attachData events until an
+// attachExit; attachInput/attachResize/attachKill drive it. This client wraps
+// that family in an object exposing EXACTLY the node-pty IPty surface server.js
+// consumes — onData / onExit / write / resize / kill — so the consumer seam
+// (server.js:2870-2918) is BYTE-FOR-BYTE unchanged.
+//
+// THE HANDLE IS CONSTRUCTED SYNCHRONOUSLY, and that is a hard requirement rather
+// than a style choice. server.js does `pty = attachStream(...)` — no await — and
+// immediately registers onData/onExit and stores the entry. Bootstrapping a
+// channel and awaiting the attachStart ACK are both async, so the handle owns
+// that startup internally: it is returned live, buffers output and queues
+// input/resize until the sid lands, and routes a startup FAILURE into the same
+// onExit the consumer already handles. Making attachStream async instead would
+// have forced a change to server.js, which the ticket forbids.
+//
+// Two contracts the wrapper must inherit, not merely approximate:
+//
+//  1. WARDEN-365 race discipline. node-pty's kill() is ASYNC: the prior PTY's
+//     onExit lands AFTER a fresh one has rebound the same pane id, and server.js
+//     gates its whole onData/onExit body on entry identity to suppress it. The
+//     wrapper must behave the SAME way — a late exit must still be DELIVERABLE
+//     (so the identity gate is what suppresses it, not the transport silently
+//     swallowing it and quietly moving which layer is load-bearing) while never
+//     being delivered TWICE. Hence: exactly one onExit per session, whatever
+//     ends it (natural exit, our kill, channel death, or a failed startup).
+//
+//  2. Byte exactness. PTY output is arbitrary binary — control sequences,
+//     partial UTF-8 across chunk boundaries, and \n itself. The wire is
+//     line-delimited JSON, so it is base64 on both sides; the wrapper decodes to
+//     a latin1 ('binary') string, a LOSSLESS byte↔char mapping. node-pty hands
+//     server.js utf8-decoded strings, but server.js only forwards them into a WS
+//     frame the browser feeds to xterm.js, so what matters is that the BYTES
+//     survive — a utf8 decode here would corrupt any multibyte glyph split across
+//     two attachData events, which a full-screen tmux repaint produces routinely.
+
+// Decode one base64 attachData payload to a byte-exact string. latin1 (Node's
+// 'binary') maps each byte to one code unit, so no multibyte sequence can be
+// mangled by a chunk boundary — see the note above.
+export function decodeAttachData(b64) {
+  return Buffer.from(b64 || '', 'base64').toString('binary');
+}
+
+// Encode outgoing input the same way. server.js hands the wrapper a string that
+// came off a WS frame; latin1 round-trips it to the exact bytes the terminal
+// should receive.
+export function encodeAttachInput(s) {
+  return Buffer.from(String(s ?? ''), 'binary').toString('base64');
+}
+
+// The actionable too-old / unsupported-platform message. ONE builder so the
+// stale-binary case and the no-host-PTY case (a windows companion omits attach*
+// from its ping methods — pty_windows.go) read identically: both are "this
+// companion does not advertise the attach RPCs", and both must tell the user how
+// to get back to the default SSH path. (WARDEN-933 discipline.)
+export function attachUnsupportedMessage(host, methods, version) {
+  return `companion binary on ${host} is too old or cannot serve an attach: it does not advertise the 'attachStart' RPC (ping methods: ${(methods || []).join(', ') || 'none'}). ` +
+    `If the binary is stale, remove ~/.warden/companion-${version} on the host and retry so the bootstrap re-uploads the current one. ` +
+    `If the host is Windows the companion cannot allocate a PTY there — set WARDEN_COMPANION_TRANSPORT=0 (or turn the Settings toggle off) to attach over the default SSH path.`;
+}
+
+// CompanionAttachSession is the IPty-compatible handle attachSession() returns.
+// It is deliberately NOT an EventEmitter and exposes NOTHING beyond the five
+// members server.js uses — a wider surface would invite a consumer to depend on
+// node-pty internals the companion path cannot honor.
+export class CompanionAttachSession {
+  // `startPromise` resolves to { channel, sid } once attachStart has ACKed, or
+  // rejects with the actionable error. The handle is usable immediately either
+  // way: output buffers until onData is registered, input/resize queue until the
+  // sid lands, and a rejection settles as an exit the consumer already handles.
+  constructor(host, startPromise, opts = {}) {
+    this.host = host;
+    this.sid = null;
+    this._channel = null;
+    this._dataCb = null;
+    this._exitCb = null;
+    this._exited = false;
+    this._exitCode = null;
+    this._exitError = null;
+    this._killed = false;
+    this._opts = opts;
+    this._offData = null;
+    this._offExit = null;
+    // Output that arrives BEFORE server.js registers onData. The handle is
+    // returned and the callbacks attached on the same tick, but the ACK and the
+    // first attachData are both later — buffering keeps a fast shell's opening
+    // prompt from being dropped.
+    this._pending = [];
+    // Input/resize issued before the sid exists (a user typing into a pane that
+    // is still connecting). Replayed in order once the session is live rather
+    // than silently discarded.
+    this._queued = [];
+
+    this._starting = startPromise
+      .then(({ channel, sid }) => this._bind(channel, sid))
+      .catch((e) => this._settleStartFailure(e));
+  }
+
+  // Wire the live session: subscribe to this sid's events, flush queued writes.
+  _bind(channel, sid) {
+    if (this._exited) {
+      // The consumer detached while we were still connecting. The session exists
+      // on the host now, so kill it rather than leaking a PTY (and a tmux client)
+      // there — the WARDEN-365 detach-during-connect shape.
+      channel.call('attachKill', { sid }, { timeout: this._opts.timeout ?? 15000 }).catch(() => {});
+      return;
+    }
+    this.sid = sid;
+    this._channel = channel;
+    this._offData = onChannelEvent(channel, 'attachData', (msg) => {
+      if (msg.sid !== sid) return; // another pane's stream on the shared channel
+      const chunk = decodeAttachData(msg.data);
+      if (this._dataCb) this._dataCb(chunk);
+      else this._pending.push(chunk);
+    });
+    this._offExit = onChannelEvent(channel, 'attachExit', (msg) => {
+      if (msg.sid !== sid) return;
+      this._settleExit(typeof msg.code === 'number' ? msg.code : -1);
+    });
+    // A dead channel ends every stream riding it. Without this the pane would
+    // spin forever on a host whose companion just died: no attachExit can arrive
+    // over a channel that is gone. -1 is the same "no exit status" code the host
+    // side reports for an abnormal end.
+    channel.onDead(() => this._settleExit(-1));
+    const queued = this._queued;
+    this._queued = [];
+    for (const send of queued) send();
+  }
+
+  // A startup failure (bootstrap failed, binary too old, host has no PTY) becomes
+  // an EXIT rather than an unhandled rejection: the handle was already returned
+  // to server.js, which has no other channel to learn on. `_exitError` carries
+  // the actionable text for the caller that wants to surface it as attach_error.
+  _settleStartFailure(err) {
+    this._exitError = err;
+    this._settleExit(-1);
+  }
+
+  // Deliver the session's single exit. `_exited` (not a listener check) is the
+  // guard, so a kill racing a natural exit racing a channel death still produces
+  // EXACTLY ONE onExit — the WARDEN-365 contract: server.js's identity gate is
+  // what decides whether a late exit is acted on, and it can only do that job if
+  // the transport delivers each end exactly once.
+  _settleExit(code) {
+    if (this._exited) return;
+    this._exited = true;
+    this._exitCode = code;
+    try { if (this._offData) this._offData(); } catch { /* noop */ }
+    try { if (this._offExit) this._offExit(); } catch { /* noop */ }
+    if (this._exitCb) this._exitCb({ exitCode: code, signal: undefined });
+  }
+
+  // node-pty: onData(cb). Flushes anything buffered before registration.
+  onData(cb) {
+    this._dataCb = cb;
+    if (this._pending.length) {
+      const buffered = this._pending;
+      this._pending = [];
+      for (const chunk of buffered) cb(chunk);
+    }
+  }
+
+  // node-pty: onExit(cb) receiving {exitCode, signal}. Registering AFTER the
+  // session already ended still fires — the exit is a fact, not an event the
+  // listener merely missed (node-pty's own late-onExit delivery is exactly the
+  // behavior WARDEN-365's identity gate was written against).
+  onExit(cb) {
+    this._exitCb = cb;
+    if (this._exited) cb({ exitCode: this._exitCode ?? -1, signal: undefined });
+  }
+
+  // node-pty: write(data). FIRE-AND-FORGET — node-pty's write is synchronous and
+  // returns void, so this must not hand a rejecting promise to a call site that
+  // never awaits it. A write to an already-exited session is a silent no-op,
+  // matching node-pty's write-after-exit; a write before the ACK is queued.
+  write(data) {
+    if (this._exited) return;
+    const payload = encodeAttachInput(data);
+    const send = () => {
+      if (this._exited || !this._channel) return;
+      this._channel
+        .call('attachInput', { sid: this.sid, data: payload }, { timeout: this._opts.timeout ?? 15000 })
+        .catch(() => { /* a dropped keystroke must never throw into the WS handler */ });
+    };
+    if (this._channel) send();
+    else this._queued.push(send);
+  }
+
+  // node-pty: resize(cols, rows) → TIOCSWINSZ → SIGWINCH on the host, the same
+  // signal the default path's local PTY produces through `ssh -tt`. Coalesces
+  // while connecting: only the LAST pre-ACK size matters, and replaying a burst
+  // of intermediate sizes would just churn SIGWINCH at the newly-live terminal.
+  resize(cols, rows) {
+    if (this._exited) return;
+    const send = () => {
+      if (this._exited || !this._channel) return;
+      this._channel
+        .call('attachResize', { sid: this.sid, cols, rows }, { timeout: this._opts.timeout ?? 15000 })
+        .catch(() => { /* best-effort, like node-pty's resize */ });
+    };
+    if (this._channel) { send(); return; }
+    this._queued = this._queued.filter((q) => !q._isResize);
+    send._isResize = true;
+    this._queued.push(send);
+  }
+
+  // node-pty: kill(). ASYNC on the far side, exactly like node-pty's: this
+  // returns immediately and the attachExit arrives later — precisely the race
+  // WARDEN-365's identity gate exists to survive. The late exit is still
+  // DELIVERED (the transport does not swallow it); server.js decides it is stale.
+  //
+  // Killing while still CONNECTING is handled in _bind: the session that lands
+  // after the kill is torn down there rather than leaked on the host.
+  kill() {
+    if (this._killed) return;
+    this._killed = true;
+    if (!this._channel) {
+      // No sid yet. Mark exited so nothing further is sent; _bind sees `_exited`
+      // and kills the session the ACK is about to deliver.
+      this._settleExit(-1);
+      return;
+    }
+    this._channel
+      .call('attachKill', { sid: this.sid }, { timeout: this._opts.timeout ?? 15000 })
+      .catch(() => { /* the session may already be gone — idempotent host-side */ });
+  }
+}
+
+// attachPreflight — the SYNCHRONOUS feature gate, and the reason a stale or
+// PTY-less companion surfaces as an `attach_error` frame rather than a bare
+// `ended`.
+//
+// server.js calls attachStream() without awaiting, inside a try/catch whose
+// catch emits attach_error (server.js:2870-2877). Only a SYNCHRONOUS throw can
+// reach that catch — an async failure necessarily arrives after the handle is
+// already bound, and can then only settle as an exit. So the check that CAN be
+// made synchronously is made here.
+//
+// It is not a lucky special case: server.js runs the bounded liveness probe
+// FIRST (probeSession, server.js:2856), and under the companion transport that
+// probe goes over the channel — so by the time attachStream runs, the host's
+// channel is bootstrapped and its ping `methods` are cached on it. The realistic
+// failure modes are therefore all decidable here:
+//   • host unreachable / bootstrap failed → the PROBE already returned
+//     host_unreachable and server.js never reached attachStream.
+//   • binary too old, or a windows host that cannot allocate a PTY (its
+//     pty_windows.go build omits attach* from the advertised methods) → caught
+//     here, synchronously, with the actionable message.
+// Anything not decidable yet (no cached channel, methods not yet known) simply
+// passes; the async path then settles it as an exit. Never guesses.
+export function attachPreflight(host, deps = {}) {
+  if (host === LOCAL) throw new Error(LOCAL_REFUSAL);
+  const cached = channelCache.get(host);
+  // Not a live channel (absent, a bootstrap promise, or dead) → nothing known
+  // yet; let the async path decide rather than inventing a verdict.
+  if (!cached || typeof cached.then === 'function' || cached.dead) return;
+  const methods = cached._methods;
+  if (!Array.isArray(methods)) return; // ping methods not cached — unknown, not absent
+  if (methods.includes('attachStart')) return;
+  const ver = deps.manifest?.version ?? loadManifest().version;
+  throw new Error(attachUnsupportedMessage(host, methods, ver));
+}
+
+// attachSession() over the companion channel — the streaming client. Returns an
+// IPty-compatible CompanionAttachSession SYNCHRONOUSLY (see the class note for
+// why that is required rather than preferred).
+//
+// It DOES throw synchronously for a failure attachPreflight can already see (a
+// stale binary, a host with no PTY, LOCAL) so server.js's catch turns it into an
+// actionable attach_error frame. A failure that only becomes knowable LATER
+// cannot reach that catch — the handle is already in server.js's hands by then —
+// so it settles as an immediate exit carrying the message on `_exitError`.
+// Companion-or-fail either way: never a silent raw-SSH fallback inside the
+// experimental path.
+//
+// `script` is the FULLY-ASSEMBLED host-side command (built JS-side by
+// buildAttachRemoteScript ∘ buildAttachCommand — the same builders the default
+// attachPty path uses), so parity is by construction rather than by two literals
+// kept in sync.
+export function attachSession(host, { script, cols = 100, rows = 30, term } = {}, cfg = {}, opts = {}, deps = {}) {
+  attachPreflight(host, deps); // may THROW → server.js emits attach_error
+  const start = (async () => {
+    const channel = await getChannel(host, cfg, deps);
+    const methods = await channelMethods(channel, opts);
+    if (!methods.includes('attachStart')) {
+      // NO graceful degradation, deliberately: a silent per-open raw-SSH fallback
+      // would re-pay the exact handshake this slice removes while the toggle
+      // reads "on", and would hide a Windows host's real limitation behind a
+      // working pane. Same call as exec's (WARDEN-1261).
+      const ver = deps.manifest?.version ?? loadManifest().version;
+      throw new Error(attachUnsupportedMessage(host, methods, ver));
+    }
+    const result = await channel.call('attachStart', {
+      script,
+      cols,
+      rows,
+      // What node-pty puts on the default path's child, which `ssh -tt`
+      // propagates to the host. Falls back to node-pty's own DEFAULT_NAME.
+      term: term || process.env.TERM || 'xterm',
+    }, { timeout: opts.timeout ?? 20000 });
+    const sid = result && result.sid;
+    if (!sid) throw new Error(`companion attachStart on ${host} returned no session id`);
+    return { channel, sid };
+  })();
+  return new CompanionAttachSession(host, start, opts);
+}
+
 // ------------------------------- subscribePanes --------------------------------
 // WARDEN-413 (problem #3 of roadmap WARDEN-270). capture-pane is polled every 2s
 // monitor tick + every observer poll even when nothing changed; for an idle fleet
@@ -1409,6 +1745,41 @@ export function readPaneDeltas(host, keys) {
 // getChannel (bootstraps if needed for subscribe; unsubscribe's RPC is skipped
 // when the channel is absent/dead via the methods check). (WARDEN-413)
 
+// ---------------------------- channel event fan-out --------------------------
+// The channel has a SINGLE event-handler slot (`_eventHandler`): a second
+// onEvent() call CLOBBERS the first. That was fine while paneDelta was the only
+// emitter, but the attach stream (WARDEN-1295) is a second one on the SAME
+// channel — registering it directly would silently kill pane deltas for the host
+// (or vice versa, depending on which registered last).
+//
+// So the single slot is owned ONCE, here, by a dispatcher that fans by event
+// NAME to a set of listeners. Both consumers register through onChannelEvent
+// instead of onEvent, and they coexist. Each listener is called defensively so
+// one throwing consumer cannot starve the other — the same discipline
+// CompanionChannel._onLine already applies to the slot itself.
+function ensureEventFanout(channel) {
+  if (channel._eventFanout) return channel._eventFanout;
+  const fanout = new Map(); // event name -> Set(handler)
+  channel._eventFanout = fanout;
+  channel.onEvent((msg) => {
+    const set = fanout.get(msg && msg.event);
+    if (!set) return;
+    for (const handler of [...set]) {
+      try { handler(msg); } catch { /* one consumer must not break the other */ }
+    }
+  });
+  return fanout;
+}
+
+// Subscribe to one event name on a channel. Returns an unsubscribe function.
+function onChannelEvent(channel, name, handler) {
+  const fanout = ensureEventFanout(channel);
+  let set = fanout.get(name);
+  if (!set) { set = new Set(); fanout.set(name, set); }
+  set.add(handler);
+  return () => { set.delete(handler); };
+}
+
 // Resolve the companion's advertised method list, caching it on the channel.
 // Bootstrapping already stashed it from the ping; if it didn't (e.g. an older
 // bootstrap path), fetch it with one ping. Never throws — returns [] on failure
@@ -1424,16 +1795,32 @@ async function channelMethods(channel, opts = {}) {
   }
 }
 
-// Wire the channel's event handler to feed the host's delta cache, once per
+// Wire the channel's paneDelta listener to feed the host's delta cache, once per
 // channel. Idempotent: re-installs the same handler shape if the channel was
-// re-bootstrapped (a fresh channel has _eventWired unset). (WARDEN-413)
+// re-bootstrapped (a fresh channel has _eventWired unset). Goes through the
+// fan-out (NOT onEvent) so the attach stream can share the slot. (WARDEN-413,
+// WARDEN-1295)
 function ensurePaneDeltaHandler(channel, host) {
   if (channel._eventWired) return;
   channel._eventWired = true;
-  channel.onEvent((msg) => {
-    if (msg.event !== 'paneDelta') return;
-    applyPaneDelta(host, msg);
-  });
+  onChannelEvent(channel, 'paneDelta', (msg) => applyPaneDelta(host, msg));
+}
+
+// Test seams for the attach slice (WARDEN-1295). Both exist because the two
+// contracts they serve are otherwise unreachable from a test:
+//   • _wirePaneDeltaForTests — proves paneDelta and the attach stream COEXIST on
+//     the channel's single event slot, which needs both consumers wired in an
+//     arbitrary order against one channel.
+//   • _primeChannelForTests — the stale-binary gate is SYNCHRONOUS and reads the
+//     channel cache (see attachPreflight), so asserting it needs a live channel
+//     in the cache without a real bootstrap. Mirrors _channelCacheHasForTests.
+// Not for production use.
+export function _wirePaneDeltaForTests(channel, host) {
+  ensurePaneDeltaHandler(channel, host);
+}
+
+export function _primeChannelForTests(host, channel) {
+  channelCache.set(host, channel);
 }
 
 // describePanes normalizes a chat list to the {key,container,session} shape the

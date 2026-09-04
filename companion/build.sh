@@ -30,10 +30,16 @@ if ! command -v "$GO_BIN" >/dev/null 2>&1; then
 fi
 
 # Version = short hash of the companion source. Changes when any Go source or
-# go.mod does — the platform-specific process-group files (procgroup_*.go) are
-# part of the shipped behavior (WARDEN-1261 QA rework), so they MUST move the
-# hash too, or a host would keep a cached binary built from stale kill logic.
-VER=$(cat main.go procgroup_unix.go procgroup_windows.go go.mod | sha256sum | cut -c1-12)
+# go.mod does — the platform-specific process-group files (procgroup_*.go) and
+# PTY files (pty_*.go) are part of the shipped behavior, so they MUST move the
+# hash too, or a host would keep a cached binary built from stale logic.
+#
+# The glob is deliberate rather than an explicit list: this used to enumerate
+# main.go + procgroup_*.go by hand, so ADDING a source file (attach.go, pty_*.go
+# — WARDEN-1295) silently left the hash unmoved and every host would have kept
+# serving a cached binary with none of the new behavior, while its ping still
+# reported the expected version. Sorted for a stable, platform-independent order.
+VER=$(cat $(ls *.go | grep -v '_test\.go$' | sort) go.mod go.sum | sha256sum | cut -c1-12)
 
 DIST="dist"
 mkdir -p "$DIST"
