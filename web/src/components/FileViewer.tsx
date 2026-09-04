@@ -61,6 +61,10 @@ import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
 // body (`message`, WARDEN-388) off the same response — so this site honours both
 // halves of warden's error convention instead of gating on `r.ok` alone.
 import { readFileDiffDetail } from '@/lib/gitDiffApi';
+// The shared client-state store (WARDEN-1271 / roadmap WARDEN-1204). The
+// Rendered ⇄ Source view mode is subscribed to here directly instead of being
+// prop-drilled through this viewer's four mount-site ancestors (WARDEN-1288).
+import { useFileViewerViewMode, useSetFileViewerViewMode } from '@/lib/uiStore';
 
 interface FileViewerProps {
   chatId: string;
@@ -72,19 +76,22 @@ interface FileViewerProps {
   // "Timestamp format" pref (WARDEN-422): honors the client-side relative vs
   // absolute pref on blame author-dates, mirroring every other timestamp surface.
   timestampFormat: TimestampFormat;
-  // Rendered ⇄ Source view mode for markdown (WARDEN-480): App owns this as a
-  // persisted pref so the choice survives across opens/reloads — one global
-  // remembered toggle. Controlled here (no local useState); the toggle handler
-  // calls onViewModeChange to write back up to App. Defaults to 'rendered' at the
-  // App layer; the CommitBlobView historical snapshot honors the same value.
-  viewMode: 'rendered' | 'source';
-  onViewModeChange: (mode: 'rendered' | 'source') => void;
+  // Rendered ⇄ Source view mode for markdown (WARDEN-480) is no longer a prop:
+  // it is a SHARED client-state fact this component subscribes to directly via
+  // useFileViewerViewMode()/useSetFileViewerViewMode() (WARDEN-1288, roadmap
+  // WARDEN-1204 slice 2). It has exactly one reader (here) and one writer (this
+  // toolbar), yet it used to be drilled through four pure pass-through carriers
+  // — those hops are gone. Persistence is unchanged and still SINGLE-WRITER:
+  // the store write re-renders App's subscription, whose PersistedPrefSnapshot
+  // drives the one compile-locked saveUi effect. The CommitBlobView historical
+  // snapshot honors the same value (passed internally below).
+  //
   // In-place file navigation (WARDEN-740): a breadcrumb ancestor crumb or a
   // sibling picked from its /api/git-ls listing calls this with the new cwd-
   // relative path. The parent owns `filePath` (controlled), so it updates its
   // own state and the new path flows back down — every effect (content, blame,
   // history, at-commit blob) re-fetches on `filePath` change for free, so this
-  // needs ZERO new fetch logic. Mirrors the App-owned `onViewModeChange` shape.
+  // needs ZERO new fetch logic.
   // Optional so a render site that only needs to display (never navigate)
   // degrades to the plain non-clickable path; all three current sites wire it.
   onNavigate?: (path: string) => void;
@@ -187,7 +194,11 @@ function useGatedFetch<T>(opts: {
   }, deps);
 }
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
+  // The Rendered ⇄ Source toggle (WARDEN-480), read and written straight off the
+  // shared client-state store (WARDEN-1288) rather than drilled down from App.
+  const viewMode = useFileViewerViewMode();
+  const onViewModeChange = useSetFileViewerViewMode();
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

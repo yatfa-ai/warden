@@ -189,15 +189,11 @@ interface Props {
   // FileViewer — App owns the persisted pref; the blame view formats author-dates
   // per the pref, mirroring every other timestamp surface.
   timestampFormat: TimestampFormat;
-  // File Viewer markdown view mode (WARDEN-480): pure pass-through to this pane's
-  // FileViewer — App owns the persisted pref (one global remembered choice).
-  fileViewerViewMode: 'rendered' | 'source';
-  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Follow poll cadence (WARDEN-749): pure pass-through to this pane's FileViewer.
   pollIntervalMs: number;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, timestampFormat, pollIntervalMs }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
@@ -1168,8 +1164,6 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           line={viewerLine}
           open={viewerOpen}
           timestampFormat={timestampFormat}
-          viewMode={fileViewerViewMode}
-          onViewModeChange={onFileViewerViewModeChange}
           onNavigate={(p) => { setViewerPath(p); setViewerLine(undefined); }}
           pollIntervalMs={pollIntervalMs}
           onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}
