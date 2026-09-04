@@ -273,6 +273,7 @@ export function NewChatsSection(props: NewChatsSectionProps) {
             }}
             className="h-8"
             placeholder="name (e.g. codex)"
+            id="newPresetName"
             aria-label="New preset name"
             maxLength={PRESET_NAME_MAX}
           />
@@ -287,6 +288,7 @@ export function NewChatsSection(props: NewChatsSectionProps) {
             }}
             className="h-8"
             placeholder="command (e.g. codex)"
+            id="newPresetCmd"
             aria-label="New preset command"
           />
           <Button variant="outline" size="sm" className="w-full" onClick={addPreset}>

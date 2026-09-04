@@ -637,6 +637,42 @@
 }
 
 /*
+ * Settings search — the matched ROW (WARDEN-1290).
+ *
+ * Search used to answer only which SECTION holds a setting; the user then
+ * scanned a 16-row section by eye for the row the search already knew it had
+ * matched. This is the visible half of the answer: while a query is active,
+ * every matching row in the ACTIVE section carries this class (applied from
+ * settings/rowHighlight.ts) and the first one is scrolled into view.
+ *
+ * Authored here rather than composed from Tailwind utilities at the call site
+ * because the class is added from JS — utilities named only in a JS string
+ * literal depend on those exact literals existing somewhere Tailwind scans,
+ * which breaks silently when the literal is refactored.
+ *
+ * Palette: the same `--primary` tint FileViewer's line-jump target uses
+ * (bg-primary/20 + ring-primary/40, WARDEN-227), so "the thing you searched
+ * for is here" reads identically across the app, and it inherits every theme's
+ * own primary rather than hard-coding a highlight color. The negative inset
+ * lets the tint breathe past the row box without moving anything: this is a
+ * paint-only rule — no margin, no padding, no layout property — so highlighting
+ * a row cannot reflow the section under the user's cursor.
+ *
+ * NO transition and NO animation, deliberately: the row appears highlighted
+ * already-arrived, matching the instant (`behavior: 'auto'`) scroll it pairs
+ * with. That sidesteps WCAG 2.3.3 rather than needing the reduced-motion
+ * override below to rescue it.
+ */
+.settings-row-match {
+  background-color: color-mix(in oklch, var(--primary) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 40%, transparent);
+  border-radius: var(--radius-sm);
+  /* Paint-only breathing room: outset the tint without occupying any space. */
+  padding: 0.25rem 0.5rem;
+  margin: -0.25rem -0.5rem;
+}
+
+/*
  * Respect prefers-reduced-motion (WCAG 2.3.3 "Animation from Interactions").
  *
  * When the OS / DevTools "reduce motion" preference is on (vestibular / motion
