@@ -84,7 +84,7 @@ async function loadTsModule(path) {
   }
 }
 
-const { SETTINGS_SECTIONS, searchSections, normalizeSearchText } = await loadTsModule(helperPath);
+const { SETTINGS_SECTIONS, searchSections, searchSectionsWithRows, normalizeSearchText } = await loadTsModule(helperPath);
 
 /** ids of matching sections, for terse assertions. */
 const ids = (query) => searchSections(query).map((s) => s.id);
@@ -510,6 +510,226 @@ test('every row the source renders resolves to its own section (omission guard)'
   assert.ok(checked > 100, `extractor found only ${checked} rows — it has stopped matching`);
 });
 
+// --- Guard 4 (corpus -> source): every ANCHOR points at a real control -------
+//
+// WARDEN-1290 made the corpus row-keyed: each row may carry the DOM `id` of the
+// control it renders, and SettingsPage highlights + scrolls to that element.
+// An anchor is therefore a SECOND thing that can drift, and its drift is
+// silent in the worst way — a stale id makes `getElementById` return null, the
+// effect skips it by design (a row genuinely may not be rendered yet), and the
+// row simply stops being highlighted with nothing anywhere going red. This
+// guard is what makes that loud: every anchor the corpus declares must resolve
+// to an id its section really renders.
+
+/**
+ * Ids a section renders as a LITERAL `id="…"` / `id={'…'}` attribute.
+ * Comments are stripped first for the same reason the row extractor strips
+ * them — a comment quoting `id="foo"` is not a rendered control.
+ */
+function literalIds(source) {
+  const found = new Set();
+  for (const m of source.matchAll(/\bid=(?:"([^"]+)"|\{'([^']+)'\})/g)) found.add(m[1] ?? m[2]);
+  return found;
+}
+
+// Ids a section mints at RUNTIME from a static key set. These are real,
+// stable, searchable rows — but their id never appears as a literal, so the
+// extractor above cannot see them. Each entry names BOTH halves of the
+// evidence: the template that builds the id (`requires`, checked against the
+// section source, so renaming the template goes red) and the static key list it
+// is built from (`keyPattern` over `keysFrom`, so removing a key goes red too).
+//
+// Per-HOST ids (`hostLabel-<host>`, `defaultShellByHost-<host>`) are absent on
+// purpose: their keys are the user's own configured hosts, not a static set, so
+// no corpus row anchors to them (those rows carry no anchorId at all).
+const DYNAMIC_ANCHOR_SOURCES = [
+  {
+    // NotificationsSection: `id={`attention-state-${k}`}` over the inline
+    // pane-state array (`{ k: 'erroring', label: 'Erroring', … }`).
+    section: 'notifications',
+    requires: /id=\{`attention-state-\$\{k\}`\}/,
+    keysFrom: 'section',
+    keyPattern: /\bk:\s*'([^']+)'/g,
+    idFor: (k) => `attention-state-${k}`,
+    minKeys: 5,
+  },
+  {
+    // TelemetrySection: `id={cat.configKey}` over the consent REGISTRY
+    // (lib/telemetry/consent.ts) — authoring shape (b) for ids, exactly as
+    // OPTION_DATA_MODULES covers it for labels.
+    section: 'telemetry',
+    requires: /id=\{cat\.configKey\}/,
+    keysFrom: resolve(__dirname, 'src/lib/telemetry/consent.ts'),
+    keyPattern: /\bconfigKey:\s*'([^']+)'/g,
+    idFor: (k) => k,
+    minKeys: 3,
+  },
+];
+
+/** Every id a section can actually render — literal plus runtime-minted. */
+function renderableIds(sectionId) {
+  const sectionSource = stripComments(readFileSync(join(sectionsDir, SECTION_FILES[sectionId]), 'utf8'));
+  const ids = literalIds(sectionSource);
+  for (const dyn of DYNAMIC_ANCHOR_SOURCES) {
+    if (dyn.section !== sectionId) continue;
+    assert.ok(
+      dyn.requires.test(sectionSource),
+      `${SECTION_FILES[sectionId]} no longer builds its ids with ${dyn.requires} — the corpus ` +
+        `anchors that depend on that template are now pointing at nothing.`,
+    );
+    const keySource =
+      dyn.keysFrom === 'section' ? sectionSource : stripComments(readFileSync(dyn.keysFrom, 'utf8'));
+    const keys = [...keySource.matchAll(dyn.keyPattern)].map((m) => m[1]);
+    assert.ok(
+      keys.length >= dyn.minKeys,
+      `${dyn.keysFrom} yielded only ${keys.length} keys (floor ${dyn.minKeys}) — the extraction ` +
+        `has stopped matching, or entries were removed without updating this floor`,
+    );
+    for (const k of keys) ids.add(dyn.idFor(k));
+  }
+  return ids;
+}
+
+test('every corpus anchor resolves to an id its section renders (anchor guard)', () => {
+  let anchored = 0;
+  for (const section of SETTINGS_SECTIONS) {
+    const available = renderableIds(section.id);
+    for (const row of section.rows) {
+      if (row.anchorId === undefined) continue;
+      anchored++;
+      assert.ok(
+        available.has(row.anchorId),
+        `section "${section.id}" anchors the row ${JSON.stringify(row.terms[0])} to id ` +
+          `"${row.anchorId}", but ${SECTION_FILES[section.id]} renders no such id. Searching ` +
+          `that row would silently fail to highlight or scroll to it — nothing else goes red. ` +
+          `Fix the anchor, or drop it if the row genuinely has no control of its own.`,
+      );
+    }
+  }
+  // A corpus that lost every anchor (or an extractor gone vacuous) would make
+  // this test pass while the whole feature was dead.
+  assert.ok(anchored > 60, `only ${anchored} rows carry an anchor — the corpus has lost them`);
+});
+
+test('an anchor-less corpus row is a deliberate exception, not the norm', () => {
+  // The legitimate anchor-less cases are group headings with no control of
+  // their own and rows whose id is minted per configured host. They exist, but
+  // they must stay rare: an anchor-less row is a row search cannot point at, so
+  // a drift toward "nothing carries an anchor" is a silent regression of the
+  // whole WARDEN-1290 feature.
+  const rows = SETTINGS_SECTIONS.flatMap((s) => s.rows);
+  const anchorless = rows.filter((r) => r.anchorId === undefined);
+  assert.ok(
+    anchorless.length <= rows.length / 4,
+    `${anchorless.length} of ${rows.length} corpus rows carry no anchor — search can point at ` +
+      `none of them. Anchor-less rows are the exception (group headings, per-host rows).`,
+  );
+});
+
+// --- searchSectionsWithRows: same sections, plus the rows (WARDEN-1290) ------
+
+test('searchSectionsWithRows returns exactly the sections searchSections does', () => {
+  // The rail is rendered from searchSections and the highlight from
+  // searchSectionsWithRows. If the two ever disagreed, a user could click a
+  // matched section and see nothing highlighted (or vice versa). Probed over
+  // every word and every full phrase in the whole corpus, plus every one- and
+  // two-letter query — the same exhaustive sweep that verified the row
+  // restructure changed no matching semantics.
+  const probes = new Set(['', '   ', '???', 'zzz']);
+  for (const s of SETTINGS_SECTIONS) {
+    for (const text of [s.label, s.description, ...s.rows.flatMap((r) => r.terms)]) {
+      probes.add(text);
+      for (const word of normalizeSearchText(text).split(' ')) if (word) probes.add(word);
+    }
+  }
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  for (const a of alphabet) {
+    probes.add(a);
+    for (const b of alphabet) probes.add(a + b);
+  }
+  for (const probe of probes) {
+    assert.deepEqual(
+      searchSectionsWithRows(probe).map((m) => m.section.id),
+      ids(probe),
+      `searchSectionsWithRows disagreed with searchSections for ${JSON.stringify(probe)}`,
+    );
+  }
+  assert.ok(probes.size > 500, `only ${probes.size} probes — the sweep has stopped generating`);
+});
+
+test('a row query reports the row that matched, not just its section', () => {
+  // The defect WARDEN-1290 fixes, stated as a test: before the restructure the
+  // search knew `tray` was in Appearance and structurally could not say which
+  // of its 17 rows it was.
+  const anchorsFor = (query, sectionId) =>
+    searchSectionsWithRows(query).find((m) => m.section.id === sectionId)?.matchedAnchors ?? [];
+
+  assert.deepEqual(anchorsFor('tray', 'appearance'), ['closeToTray']);
+  assert.deepEqual(anchorsFor('poll interval', 'hosts'), ['pollIntervalMs']);
+  assert.deepEqual(anchorsFor('scrollback', 'appearance'), ['terminalScrollback']);
+  assert.deepEqual(anchorsFor('Close to tray', 'appearance'), ['closeToTray']);
+  // A data-authored option name lands on the dropdown that renders it.
+  assert.deepEqual(anchorsFor('Dracula', 'appearance'), ['theme']);
+  assert.deepEqual(anchorsFor('JetBrains Mono', 'appearance'), ['terminalFontFamily']);
+  // A synonym lands on the row it is a synonym FOR.
+  assert.deepEqual(anchorsFor('system tray', 'appearance'), ['closeToTray']);
+  assert.deepEqual(anchorsFor('cwd', 'newchats'), ['defaultNewChatCwd']);
+});
+
+test('a broad query reports every matching row, in visual order', () => {
+  const appearance = searchSectionsWithRows('terminal').find((m) => m.section.id === 'appearance');
+  assert.deepEqual(appearance.matchedAnchors, [
+    'terminalFontSize',
+    'terminalFontFamily',
+    'customTerminalFontFamily',
+    'terminalScrollback',
+    'terminalColorScheme',
+    'terminalCursorStyle',
+  ]);
+  // Declared order is the rendered order, so the FIRST anchor — the one
+  // SettingsPage scrolls to — is the topmost matching row, not an arbitrary one.
+  const order = SETTINGS_SECTIONS.find((s) => s.id === 'appearance')
+    .rows.map((r) => r.anchorId)
+    .filter((a) => appearance.matchedAnchors.includes(a));
+  assert.deepEqual(appearance.matchedAnchors, [...new Set(order)]);
+});
+
+test('matched anchors are de-duplicated when rows share a control', () => {
+  // Several corpus rows legitimately point at one control (a group heading
+  // borrows the anchor of the first row it heads). A duplicated anchor would
+  // make the highlight effect apply the same class twice and, worse, make
+  // "the first match" ambiguous.
+  for (const probe of ['e', 'a', 'o', 'default', 'host', 'alert']) {
+    for (const { section, matchedAnchors } of searchSectionsWithRows(probe)) {
+      assert.equal(
+        new Set(matchedAnchors).size,
+        matchedAnchors.length,
+        `${section.id} reported duplicate anchors for ${JSON.stringify(probe)}: ` +
+          JSON.stringify(matchedAnchors),
+      );
+    }
+  }
+});
+
+test('an empty or punctuation-only query highlights nothing', () => {
+  // Criterion 3: clearing the box restores byte-today behavior. "Show
+  // everything" is not a match, so nothing may be pointed at.
+  for (const probe of ['', '   ', '???', '()']) {
+    const all = searchSectionsWithRows(probe);
+    assert.equal(all.length, SETTINGS_SECTIONS.length, JSON.stringify(probe));
+    for (const m of all) assert.deepEqual(m.matchedAnchors, [], `${m.section.id} @ ${JSON.stringify(probe)}`);
+  }
+});
+
+test('a section matched only by its own name reports no rows', () => {
+  // `Observer Preferences` is the section LABEL; no row carries that phrase.
+  // The section is a legitimate match, but there is nothing in its body to
+  // point at, so the pane must not scroll or highlight anything.
+  const m = searchSectionsWithRows('Observer Preferences').find((x) => x.section.id === 'observer');
+  assert.ok(m, 'the section label must still match its own section');
+  assert.deepEqual(m.matchedAnchors, []);
+});
+
 // --- Data-module guards (authoring shape b) ----------------------------------
 //
 // The option labels declared in plain data modules and rendered by .map() —
@@ -703,13 +923,17 @@ test('normalizeSearchText collapses to bare lowercase words', () => {
 
 // --- Structural drift guards ------------------------------------------------
 test('every section carries a non-empty keyword corpus', () => {
-  // A 14th section added with no `keywords` would otherwise be silently
+  // A 14th section added with no `rows` would otherwise be silently
   // unfindable by any of its rows.
   for (const s of SETTINGS_SECTIONS) {
-    assert.ok(Array.isArray(s.keywords), `${s.id} keywords must be an array`);
-    assert.ok(s.keywords.length > 0, `${s.id} has an empty keyword corpus`);
-    for (const k of s.keywords) {
-      assert.notEqual(normalizeSearchText(k), '', `${s.id} has a keyword that normalizes to nothing`);
+    assert.ok(Array.isArray(s.rows), `${s.id} rows must be an array`);
+    assert.ok(s.rows.length > 0, `${s.id} has an empty row corpus`);
+    for (const row of s.rows) {
+      assert.ok(Array.isArray(row.terms), `${s.id} has a row whose terms is not an array`);
+      assert.ok(row.terms.length > 0, `${s.id} has a row with no terms`);
+      for (const k of row.terms) {
+        assert.notEqual(normalizeSearchText(k), '', `${s.id} has a term that normalizes to nothing`);
+      }
     }
   }
 });
