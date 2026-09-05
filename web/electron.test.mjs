@@ -63,6 +63,7 @@ const {
   getTelemetryRuntimeStatus,
   onTelemetryRuntimeStatus,
   clearTelemetryRuntimeDrift,
+  onOpenSettings,
   setTelemetryContext,
   forwardRendererError,
 } = await import(file);
@@ -440,6 +441,70 @@ test('returns a no-op unsubscribe (never throws into the caller) when onRuntimeS
   telemetryBridge({ onRuntimeStatus: () => { throw new Error('subscribe broken'); } });
   let unsub;
   assert.doesNotThrow(() => { unsub = onTelemetryRuntimeStatus(() => {}); }, 'must not throw into the caller');
+  assert.equal(typeof unsub, 'function');
+  assert.doesNotThrow(() => unsub());
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nonOpenSettings — the application menu\'s Settings… push (WARDEN-1280)');
+// The menu lives in MAIN; the Settings page is renderer state, so the menu item
+// reaches it through a main→renderer push. This subscription is the renderer end.
+// Same never-throw / no-op-unsubscribe contract as onTelemetryRuntimeStatus
+// above, PLUS one that matters more here: the browser and smoke contexts have no
+// application menu at all, so an absent bridge must produce no subscription —
+// that is what keeps those two hosts byte-unaffected by this feature.
+// ---------------------------------------------------------------------------
+test('returns a no-op unsubscribe when the bridge is absent (browser/smoke have no menu)', () => {
+  noBridge();
+  const unsub = onOpenSettings(() => {});
+  assert.equal(typeof unsub, 'function');
+  assert.doesNotThrow(() => unsub(), 'the no-op unsubscribe must not throw');
+});
+test('subscribes nothing when the bridge is absent (the callback can never fire in a browser)', () => {
+  noBridge();
+  let fired = 0;
+  onOpenSettings(() => { fired += 1; });
+  assert.equal(fired, 0);
+});
+test('an OLDER preload without onOpenSettings degrades to a no-op (no crash on a stale bridge)', () => {
+  // A wardenWindow bridge that predates the menu carries the window-state
+  // methods but not this one — the same shape openExternal guards against.
+  windowBridge({ getRememberWindowBounds: async () => true });
+  const unsub = onOpenSettings(() => {});
+  assert.equal(typeof unsub, 'function');
+  assert.doesNotThrow(() => unsub());
+});
+test('forwards the callback to the bridge and returns its unsubscribe', () => {
+  let registered;
+  const bridgeUnsub = () => {};
+  windowBridge({ onOpenSettings: (cb) => { registered = cb; return bridgeUnsub; } });
+  const cb = () => {};
+  const unsub = onOpenSettings(cb);
+  assert.equal(registered, cb, 'the callback was forwarded to the bridge');
+  assert.equal(unsub, bridgeUnsub, 'the bridge unsubscribe was returned');
+});
+test('the forwarded callback is the one main invokes on the menu click', () => {
+  // Drive the whole seam: register, then fire as the preload listener would.
+  let listener;
+  windowBridge({ onOpenSettings: (cb) => { listener = cb; return () => {}; } });
+  let opened = 0;
+  onOpenSettings(() => { opened += 1; });
+  listener();
+  assert.equal(opened, 1, 'the menu click opened Settings exactly once');
+});
+test('coerces a bridge that returns null/undefined to a no-op unsubscribe', () => {
+  for (const ret of [null, undefined]) {
+    windowBridge({ onOpenSettings: () => ret });
+    const unsub = onOpenSettings(() => {});
+    assert.equal(typeof unsub, 'function');
+    assert.doesNotThrow(() => unsub());
+  }
+});
+test('returns a no-op unsubscribe (never throws into the caller) when onOpenSettings throws', () => {
+  silenceWarn();
+  windowBridge({ onOpenSettings: () => { throw new Error('subscribe broken'); } });
+  let unsub;
+  assert.doesNotThrow(() => { unsub = onOpenSettings(() => {}); }, 'must not throw into the caller');
   assert.equal(typeof unsub, 'function');
   assert.doesNotThrow(() => unsub());
 });

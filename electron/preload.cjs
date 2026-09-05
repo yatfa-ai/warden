@@ -39,6 +39,21 @@ contextBridge.exposeInMainWorld('wardenWindow', {
   // (true = handed to the OS). Same allowlisted-bridge contract as the rest of
   // wardenWindow: the renderer passes one string and gets one boolean.
   openExternal: (url) => ipcRenderer.invoke('window:open-external', url),
+  // WARDEN-1280 — the application menu's "Settings…" (CmdOrCtrl+,) item. The
+  // menu lives in MAIN; the Settings page is RENDERER state (App.tsx's
+  // settingsOpen), so opening it from the menu needs a main→renderer PUSH. This
+  // is that subscription: main sends 'menu:open-settings' on the click, the web
+  // bundle's one effect calls the same setSettingsOpen(true) the gear button
+  // calls. Mirrors wardenTelemetry.onRuntimeStatus below — returns an
+  // unsubscribe, and a throwing renderer callback can never crash main. Exposed
+  // on wardenWindow (the app/window domain) rather than wardenTelemetry.
+  onOpenSettings: (cb) => {
+    const listener = () => {
+      try { cb(); } catch { /* a renderer callback must never crash main */ }
+    };
+    ipcRenderer.on('menu:open-settings', listener);
+    return () => ipcRenderer.removeListener('menu:open-settings', listener);
+  },
 });
 
 // Telemetry runtime-status bridge (WARDEN-631). The drift flag lives in MAIN (the
