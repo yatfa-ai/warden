@@ -10,7 +10,7 @@ import { findUrlCandidates } from '@/lib/url-links';
 import { openExternalUrl } from '@/lib/electron';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
-import { handleOsc52 } from '@/lib/clipboard';
+import { handleOsc52, copyText } from '@/lib/clipboard';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
@@ -82,6 +82,26 @@ function copySelectionToClipboard(term: Terminal, notifyErrors: boolean): void {
   try { copied = document.execCommand('copy'); } catch { /* refused — copied stays false */ }
   document.body.removeChild(ta);
   if (!copied && notifyErrors) toast.error('Copy failed — clipboard still holds the old text');
+}
+
+// WARDEN-1293: copy a HIGHLIGHTED TOKEN (a URL or a file path) from the pane's
+// context menu to the system clipboard.
+//
+// Routed through the shared, Electron-safe `copyText` helper (lib/clipboard.ts)
+// rather than re-inlining the textarea dance: that helper already tries the
+// async Clipboard API first and falls back to execCommand — the fallback the
+// ticket requires "here as everywhere else" — and it already returns a success
+// boolean. The boolean is CONSULTED, on this surface's established convention
+// (copySelectionToClipboard above, WARDEN-1244): a failure raises the pane's
+// standard error toast gated on the notifyErrors pref, and SUCCESS IS SILENT.
+//
+// That silence is why this does NOT use `copyWithToast` (lib/clipboardToast.ts),
+// which the sidebar/FileViewer/search menus use: copyWithToast fires
+// `toast.success('Copied')`, and this product deliberately does not toast the
+// happy path in the terminal pane. Same mechanism, this surface's feedback.
+async function copyTokenToClipboard(text: string, notifyErrors: boolean): Promise<void> {
+  const ok = await copyText(text);
+  if (!ok && notifyErrors) toast.error('Copy failed — clipboard still holds the old text');
 }
 
 // Paste the system clipboard INTO the terminal via xterm's own paste path
@@ -269,6 +289,35 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // the tooltip guard kind-agnostic). Guards the path side's slow-probe race:
   // a tooltip only shows if the cursor is still over that exact token.
   const hoveredLinkRef = useRef<string | null>(null);
+  // WARDEN-1293: the hovered token WITH its kind. A second ref rather than a
+  // reshape of hoveredLinkRef, whose identity-compare guards above stay
+  // untouched; the kind is needed because the context menu's wording differs per
+  // kind ("Copy Link Address" vs "Copy File Path") and the tooltip never was.
+  //
+  // It tracks the token the user can actually SEE under the cursor, which is a
+  // strictly narrower thing than hoveredLinkRef: a URL is valid by construction
+  // so it lands here on hover, but a path candidate lands here only once its
+  // async existence probe confirms a real file — the same condition that flips
+  // its underline on. So a right-click on an UNDECORATED path candidate offers
+  // no copy item, matching what the pane shows (the menu never claims a token
+  // the highlighting did not).
+  const hoveredTokenRef = useRef<{ text: string; kind: 'url' | 'path' } | null>(null);
+  // WARDEN-1293: the token under the cursor AT THE MOMENT OF THE RIGHT-CLICK.
+  // This is state, not a ref-read at select time, and the distinction is the
+  // whole fix: opening the Radix menu moves focus off the terminal, xterm fires
+  // the link's `leave()`, and hoveredLinkRef is NULLED before any menu item can
+  // run. (Verified at runtime on a live pane: right-clicking a link logs
+  // `contextmenu → leave → select-time-hovered:null`.) So the token is latched
+  // in the contextmenu handler — which runs BEFORE the leave — and the menu
+  // items read the latch. State (not a ref) because the menu's CONTENT depends
+  // on it: a render must follow the latch or the items would be a frame stale.
+  const [menuToken, setMenuToken] = useState<{ text: string; kind: 'url' | 'path' } | null>(null);
+  // WARDEN-1293: whether the terminal had a selection at right-click time. Same
+  // latch-on-contextmenu reasoning as menuToken — `disabled` must be decided
+  // when the menu OPENS, so a "Copy" that would do nothing is never offered as
+  // an active item. Reading term.getSelection() during render would be both
+  // untracked (no re-render on selection change) and wrong-timed.
+  const [menuHasSelection, setMenuHasSelection] = useState(false);
   // Per-pane FileViewer bound to THIS pane's chat — a Ctrl/Cmd+clicked path opens
   // here, never assuming the focused pane (AC: correct id/cwd per pane).
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -578,11 +627,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           },
           hover(event: MouseEvent) {
             hoveredLinkRef.current = u.url;
+            // WARDEN-1293: a URL is decorated at construction time (no probe),
+            // so it is copyable from the instant it is hoverable.
+            hoveredTokenRef.current = { text: u.url, kind: 'url' };
             // Immediate — no probe to await, no cursor-left race to guard.
             showTooltip(event, isMac ? '⌘+Click to open link' : 'Ctrl+Click to open link');
           },
           leave() {
             if (hoveredLinkRef.current === u.url) hoveredLinkRef.current = null;
+            if (hoveredTokenRef.current?.text === u.url) hoveredTokenRef.current = null;
             hideTooltip();
           },
         }));
@@ -622,11 +675,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
                 // Only show the affordance+tooltip for confirmed files, and only if
                 // the cursor is still over this path (guard against a slow probe
                 // resolving after the cursor already left).
-                if (ok && hoveredLinkRef.current === c.path) showTooltip(event, isMac ? '⌘+Click to open file' : 'Ctrl+Click to open file');
+                if (ok && hoveredLinkRef.current === c.path) {
+                  // WARDEN-1293: latched under the SAME confirmed-file + still-
+                  // hovered condition as the tooltip, so the menu can only ever
+                  // offer to copy a path the pane actually highlighted.
+                  hoveredTokenRef.current = { text: c.path, kind: 'path' };
+                  showTooltip(event, isMac ? '⌘+Click to open file' : 'Ctrl+Click to open file');
+                }
               });
             },
             leave() {
               if (hoveredLinkRef.current === c.path) hoveredLinkRef.current = null;
+              if (hoveredTokenRef.current?.text === c.path) hoveredTokenRef.current = null;
               hideTooltip();
             },
           };
@@ -1048,7 +1108,20 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           (this element) makes it inherit to `.xterm` / `.xterm-viewport`. */}
       <ContextMenu>
         <ContextMenuTrigger asChild>
-      <div ref={wrapRef} style={{ '--terminal-background': terminalPalette.background } as React.CSSProperties} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onClick={() => termRef.current?.focus()}>
+      <div ref={wrapRef}
+        // WARDEN-1293: latch what the menu is about to be ABOUT, at the one
+        // moment the answer is still knowable. React's onContextMenu runs on the
+        // same native `contextmenu` event Radix opens the menu from, and it runs
+        // BEFORE xterm's link `leave()` nulls the hover state (verified at
+        // runtime — see the menuToken comment). Reading either value later, from
+        // an item's onSelect, reads it after the wipe: that is precisely the bug.
+        // preventDefault is NOT called here (Radix's own trigger handler owns
+        // that); this only observes.
+        onContextMenu={() => {
+          setMenuToken(hoveredTokenRef.current);
+          setMenuHasSelection(!!termRef.current?.getSelection());
+        }}
+        style={{ '--terminal-background': terminalPalette.background } as React.CSSProperties} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onClick={() => termRef.current?.focus()}>
         {phase === 'connecting' && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
@@ -1106,7 +1179,29 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
               loses NO capability. termRef.current is non-null here: the menu can
               only open by right-clicking this terminal surface, which exists only
               while the pane is mounted and its Terminal has been created. */}
-          <ContextMenuItem onSelect={() => copySelectionToClipboard(termRef.current!, notifyErrorsRef.current)}>Copy</ContextMenuItem>
+          {/* WARDEN-1293: token-scoped items, shown ONLY when the right-click
+              landed on a highlighted token. They come FIRST and are separated
+              from the generic items — the convention every browser and terminal
+              emulator uses, where a right-click on a link leads with the items
+              about that link. Wording is the established vocabulary ("Copy Link
+              Address" is Chrome/Firefox's; "Copy File Path" is what this app's
+              own FileViewer / diff-row / search-result menus already say), not
+              a new coinage. */}
+          {menuToken && (
+            <>
+              <ContextMenuItem onSelect={() => void copyTokenToClipboard(menuToken.text, notifyErrorsRef.current)}>
+                {menuToken.kind === 'url' ? 'Copy Link Address' : 'Copy File Path'}
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+            </>
+          )}
+          {/* WARDEN-1293: Copy is DISABLED when there is nothing to copy. It
+              copies the SELECTION, and with no selection it silently did
+              nothing — an active item that promises an action and skips it. The
+              latch (not a live getSelection() read) is what makes this correct:
+              the value is decided when the menu opens, which is when the user
+              sees it. Selection-copy behaviour itself is unchanged. */}
+          <ContextMenuItem disabled={!menuHasSelection} onSelect={() => copySelectionToClipboard(termRef.current!, notifyErrorsRef.current)}>Copy</ContextMenuItem>
           <ContextMenuItem onSelect={() => pasteIntoTerm(termRef.current!)}>Paste</ContextMenuItem>
           <ContextMenuItem onSelect={() => termRef.current?.clear()}>Clear</ContextMenuItem>
           <ContextMenuItem onSelect={() => setShowSearch(!showSearch)}>Search</ContextMenuItem>
