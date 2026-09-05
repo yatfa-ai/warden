@@ -35,7 +35,13 @@ import * as collections from './collections.js';
 // same trick the `saveCatalog` note above plays for the disk catalogue.
 import { capturePanes, resolveChatWithRefresh, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
-import { run, runLocalTmux, shellQuote, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
+// `run` is no longer imported: WARDEN-1284 routed the last four direct `run()`
+// call sites in this file (the file viewer read, the linkifier existence probe,
+// the session search + transcript reads, the tmux preflight) through
+// `deliverRemoteScript`, which owns the run()-vs-companion choice. Every
+// remaining remote script in this file goes through that guard or through
+// runInContext.
+import { runLocalTmux, shellQuote, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 // The single source of the working-directory containment rule (WARDEN-1234):
 // the JS clause for local resolution, and the bash fragment spliced into every
 // remote script that guards a path against its cwd.
@@ -69,7 +75,7 @@ import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion } from './companion.js';
+import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, deliverRemoteScript } from './companion.js';
 import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 import { loopMonitor, instrumentSyncIo, formatStallLine } from './loop-monitor.js';
@@ -211,14 +217,26 @@ async function resolve(id) {
 // Verify the local transport / remote tmux is available. Returns null or an error
 // string. On local Windows the native ConPTY transport needs no install at all
 // (WARDEN-922), so `-V` always succeeds there and this is a pass-through.
-async function preflightTmux(host) {
+//
+// WARDEN-1284 (companion transport): the REMOTE branch delivers its one-line
+// presence probe through `deliverRemoteScript`, so under the
+// `companionTransportEnabled` toggle it rides the persistent companion channel
+// instead of spawning its own un-pooled ssh per call. This gate fires on EVERY
+// spawn/resume of a remote agent — a user-initiated action where a human is
+// actively waiting on the handshake. PARITY: the probe string is assembled once
+// and delivered byte-for-byte by either transport (no container → the companion
+// runs it via `bash -lc`, run()'s exact delivery shape). The LOCAL branch and
+// the toggle-off default path are untouched. `deps` is the shared routing test
+// seam; exported so the routing is assertable without real ssh.
+export async function preflightTmux(host, deps = {}) {
   if (host === LOCAL) {
     // runLocalTmux is async (WARDEN-440) so this `tmux -V` probe never blocks the
     // event loop while serving the spawn/resume request that triggered preflight.
     const r = await runLocalTmux(['-V']);
     return r.ok ? null : 'tmux not found on this machine. Install it (Linux/macOS: tmux).';
   }
-  const r = await run(host, 'command -v tmux >/dev/null 2>&1 && echo OK || echo MISSING', { timeout: 8000 });
+  const script = 'command -v tmux >/dev/null 2>&1 && echo OK || echo MISSING';
+  const r = await deliverRemoteScript(host, script, { timeout: 8000 }, {}, deps);
   return r.stdout.includes('OK') ? null : `tmux is required on ${host}. install:  ssh ${host} 'sudo apt-get install -y tmux'  (or: brew install tmux)`;
 }
 
@@ -1508,9 +1526,16 @@ done`;
 // mtime} rows. Mirrors remoteClaudeSessions' ___S/___E state machine, adding the
 // ___SNIP line (the bounded matched line, cleaned server-side via snippetFromLine
 // so the snippet stays human-readable regardless of where grep matched).
-async function remoteSearchClaudeSessions(host, q) {
+//
+// WARDEN-1284 (companion transport): the search script is delivered through
+// `deliverRemoteScript`, so under the toggle it rides the persistent companion
+// channel instead of a fresh un-pooled ssh handshake per search. PARITY: the
+// script is still built ONCE by buildSessionSearchScript and delivered
+// byte-for-byte by either transport. `deps` is the shared routing test seam;
+// exported so the routing is assertable without real ssh.
+export async function remoteSearchClaudeSessions(host, q, deps = {}) {
   const needle = q.toLowerCase();
-  const res = await run(host, buildSessionSearchScript(q), { timeout: 15000 });
+  const res = await deliverRemoteScript(host, buildSessionSearchScript(q), { timeout: 15000 }, {}, deps);
   if (!res.ok) return [];
   const out = [];
   let cur = null;
@@ -1740,6 +1765,21 @@ app.get('/api/claude-sessions-search', async (req, res) => {
   res.json({ results: all.slice(0, SESSION_SEARCH_GLOBAL) });
 });
 
+// Deliver the session-transcript read script to a REMOTE host (leg 4 of
+// WARDEN-1284). Extracted from the /api/claude-session handler so the routing —
+// which transport carries the script — is assertable through the shared `deps`
+// seam without real ssh; the handler's own parse/response shaping is unchanged.
+//
+// Under the `companionTransportEnabled` toggle the script rides the persistent
+// companion channel instead of its own un-pooled ssh handshake. Opening a
+// session in the session browser is a user-initiated read where a human is
+// waiting. PARITY: buildSessionReadScript still assembles the script (its
+// `before` cursor arithmetic untouched) and it is delivered byte-for-byte by
+// either transport; parseSessionReadOutput reads the identical {ok, stdout}.
+export async function remoteReadSessionTranscript(host, id, { before } = {}, deps = {}) {
+  return deliverRemoteScript(host, buildSessionReadScript(id, { before }), { timeout: 15000 }, {}, deps);
+}
+
 // GET /api/claude-session?id=&host=&before= — read-only transcript of ONE past
 // session across any host, WITHOUT resuming it (no live `claude` process, no tmux
 // session, no catalog entry). Local host reads the JSONL from disk; a remote host
@@ -1757,7 +1797,8 @@ app.get('/api/claude-sessions-search', async (req, res) => {
 // next-older window and prepend it. `hasMore` drives the "Load earlier messages"
 // control (false at the true start of the transcript); `prevCursor` is the cursor
 // for the next page. An unreachable host degrades to { host, error: 'host
-// unreachable' } (run()'s default timeout means it never hangs) rather than failing.
+// unreachable' } (the remote read carries an explicit 15s deadline on either
+// transport, so it never hangs) rather than failing.
 app.get('/api/claude-session', async (req, res) => {
   const id = String(req.query.id || '');
   if (!/^[\w-]+$/.test(id)) return res.status(400).json({ error: 'invalid session id' });
@@ -1775,7 +1816,7 @@ app.get('/api/claude-session', async (req, res) => {
     if (host === LOCAL) {
       view = await readLocalSessionTranscript(id, { before });
     } else {
-      const rr = await run(host, buildSessionReadScript(id, { before }), { timeout: 15000 });
+      const rr = await remoteReadSessionTranscript(host, id, { before });
       if (!rr.ok) return res.json({ host, error: 'host unreachable' });
       view = parseSessionReadOutput(rr.stdout, { before });
     }
@@ -2234,7 +2275,7 @@ function mapReadScriptError(out) {
 // local text-extension file containing NUL bytes (both test binary by EXTENSION,
 // caught earlier by isBinaryFile), so adopting the stricter check is a pure
 // correctness improvement with zero spec regression.
-async function readChatFile(chat, filePath) {
+export async function readChatFile(chat, filePath, deps = {}) {
   const cwd = chat.cwd || '.';
   if (chat.host === LOCAL) {
     const resolved = resolveLocalFile(cwd, filePath);
@@ -2252,11 +2293,20 @@ async function readChatFile(chat, filePath) {
       return { ok: false, status: 500, error: 'read failed' };
     }
   }
-  // remote/yatfa: buildReadFileScript + run(host, script). The script's
+  // remote/yatfa: buildReadFileScript + deliverRemoteScript. The script's
   // diagnostics ("ERROR ...") land on stdout; pool/ssh failures land on stderr —
   // mapReadScriptError inspects both via the shared table.
+  //
+  // WARDEN-1284 (companion transport): under the `companionTransportEnabled`
+  // toggle the script rides the persistent companion channel instead of a fresh
+  // un-pooled ssh handshake per read. PARITY: buildReadFileScript still
+  // assembles the script (its realpath/containment/1MB/binary guards untouched)
+  // and it is delivered byte-for-byte by either transport — the `{ok, stdout,
+  // stderr}` shape mapReadScriptError reads is identical. `deps` is the shared
+  // routing test seam, threaded from readWorkingTreeFile so the A↔B compare
+  // exercises the same routing.
   const script = buildReadFileScript(cwd, filePath);
-  const result = await run(chat.host, script, { timeout: 10000 });
+  const result = await deliverRemoteScript(chat.host, script, { timeout: 10000 }, {}, deps);
   if (!result.ok) {
     const out = `${result.stdout || ''}${result.stderr || ''}`;
     return { ok: false, ...mapReadScriptError(out) };
@@ -2273,8 +2323,8 @@ async function readChatFile(chat, filePath) {
 // (the /api/cross-agent-diff route folds .error into its never-500
 // { diff, error } response, prefixing the failing side A/B). A deleted/missing
 // path (status 'D') fails here and surfaces as 'file not found'.
-async function readWorkingTreeFile(chat, filePath) {
-  const r = await readChatFile(chat, filePath);
+async function readWorkingTreeFile(chat, filePath, deps = {}) {
+  const r = await readChatFile(chat, filePath, deps);
   return r.ok ? { content: r.content } : { error: r.error };
 }
 
@@ -2299,15 +2349,37 @@ app.post('/api/read-file', async (req, res) => {
   return res.json({ content: result.content, path: filePath });
 });
 
+// Probe a path's existence on a REMOTE host (leg 2 of WARDEN-1284). Extracted
+// from the /api/file-exists handler so the routing — which transport carries the
+// script — is assertable through the shared `deps` seam without real ssh; the
+// handler keeps its telemetry and response shaping.
+//
+// WARDEN-1284 (companion transport): this is the probe that costs the user the
+// most. The linkifier fires it PER VISIBLE TERMINAL CANDIDATE (WARDEN-227) and
+// each one paid its own un-pooled ssh handshake; under the toggle they all share
+// the persistent companion channel. The WARDEN-1258 telemetry the caller records
+// around this call is its built-in observer — the remote-probe latency split
+// shows the collapse. PARITY: buildFileExistsScript still assembles the script
+// (the WARDEN-96 containment guard untouched) and it is delivered byte-for-byte
+// by either transport; the EXISTS-marker check reads the identical
+// {ok, stdout, stderr} shape, so a transport failure still collapses to false.
+export async function remoteFileExists(host, cwd, filePath, deps = {}) {
+  const result = await deliverRemoteScript(host, buildFileExistsScript(cwd, filePath), { timeout: 8000 }, {}, deps);
+  const out = `${result.stdout || ''}${result.stderr || ''}`;
+  return result.ok && out.includes('EXISTS');
+}
+
 // POST /api/file-exists — lightweight existence probe for the in-terminal file
 // linkifier (WARDEN-227). Body: { id, path }. Confirms `path` resolves to a real
 // file within the chat's cwd WITHOUT reading or transferring content, so it is
 // cheap enough to run per visible terminal candidate. Reuses the SAME resolution
 // discipline as /api/read-file (realpath + cwd-containment + is-file): local chats
-// go through the shared resolveLocalFile, remote chats run buildFileExistsScript
-// over SSH. Response: { exists: boolean } — any resolution failure (missing, outside
-// cwd, directory, ssh error) collapses to exists:false because the linkifier only
-// needs yes/no. Security: never weakens the cwd-containment guard.
+// go through the shared resolveLocalFile, remote chats deliver
+// buildFileExistsScript to the host (raw ssh by default, the companion channel
+// under the WARDEN-1284 toggle). Response: { exists: boolean } — any resolution
+// failure (missing, outside cwd, directory, transport error) collapses to
+// exists:false because the linkifier only needs yes/no. Security: never weakens
+// the cwd-containment guard.
 app.post('/api/file-exists', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));
   if (r.error) return res.json({ exists: false });
@@ -2339,9 +2411,7 @@ app.post('/api/file-exists', async (req, res) => {
   }
 
   // Remote: run the existence script; success + the EXISTS marker ⇒ real file.
-  const result = await run(chat.host, buildFileExistsScript(cwd, filePath), { timeout: 8000 });
-  const out = `${result.stdout || ''}${result.stderr || ''}`;
-  const exists = result.ok && out.includes('EXISTS');
+  const exists = await remoteFileExists(chat.host, cwd, filePath);
   finishProbe('remote', exists);
   return res.json({ exists });
 });

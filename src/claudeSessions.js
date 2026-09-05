@@ -7,9 +7,10 @@
 // src/git.js (the log/show/diff/blame parsers extracted for the same reason) and
 // the chats.js / gitStatus.js extractions.
 //
-// Side-effect-free at module load: the only project import is `run` from
-// ./ssh.js, which has no top-level statements, so importing this module boots
-// nothing. (WARDEN-606.)
+// Side-effect-free at module load: the only project imports are `run` from
+// ./ssh.js and the companion routing guard from ./companion.js, neither of which
+// has top-level statements, so importing this module boots nothing.
+// (WARDEN-606; the companion import added by WARDEN-1284.)
 //
 // NOTE: the full-content session-SEARCH helpers (searchLocalClaudeSessions,
 // buildSessionSearchScript, remoteSearchClaudeSessions + the SESSION_SEARCH_*
@@ -24,6 +25,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { run, isTransportFailure } from './ssh.js';
+// WARDEN-1284: the companion-transport routing guard for the session-listing
+// leg. companion.js imports ssh.js/chatMeta.js/loop-monitor.js and never this
+// module, so the dependency stays one-directional — no cycle.
+import { deliverRemoteScript } from './companion.js';
 
 // fs.promises alias — the local session enumeration/transcript reads are async
 // (WARDEN-828) so the single-threaded server answers /api/config mid-sweep
@@ -373,14 +378,24 @@ export function parseRemoteSessionOutput(stdout, limit = 40) {
 // `deps` is an optional test seam (production callers omit it), mirroring the
 // seams on `detectClaude`/`runWithPool`/`discover` — the repo is on Node 20
 // without `mock.module`, so without it this leg could not be driven without real
-// SSH.
+// SSH. Since WARDEN-1284 it is the SHARED routing seam
+// (isCompanionTransportEnabled / execInContext / run), so `deps.run` still
+// drives the default path exactly as before.
+//
+// WARDEN-1284 (companion transport): the listing script is delivered through
+// `deliverRemoteScript`, so under the `companionTransportEnabled` toggle it
+// rides the persistent companion channel instead of a fresh un-pooled ssh
+// handshake per listing. This leg is one half of the `/api/claude-sessions`
+// surface (the other being detectClaude's three probes), so migrating it keeps
+// that endpoint from paying raw handshakes under the toggle. PARITY: the script
+// is still built ONCE by buildRemoteSessionScript and delivered byte-for-byte by
+// either transport, and `isTransportFailure` reads the identical result shape.
 //
 // @returns `{ sessions, unreachable }`. `unreachable` is true ONLY for a transport
 //          failure; `sessions` is always an array (empty on any failure), so a
 //          caller that ignores the flag behaves exactly as before.
 export async function remoteClaudeSessionsDetail(host, limit = 40, deps = {}) {
-  const exec = deps.run ?? run;
-  const res = await exec(host, buildRemoteSessionScript(), { timeout: 15000 });
+  const res = await deliverRemoteScript(host, buildRemoteSessionScript(), { timeout: 15000 }, {}, deps);
   if (!res.ok) return { sessions: [], unreachable: isTransportFailure(res) };
   return { sessions: parseRemoteSessionOutput(res.stdout, limit), unreachable: false };
 }
