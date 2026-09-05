@@ -67,13 +67,6 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes the fleet last-activity + "Last
   // updated" times through the shared formatTimestamp helper. Pure client-side.
   timestampFormat: TimestampFormat;
-  // FileViewer rendered/source view mode (WARDEN-757): App owns this as a
-  // persisted pref (the SAME one ChatSidebar's FileViewer honors, WARDEN-480) so
-  // the choice is shared across both surfaces and survives opens/reloads.
-  // Read-only here except for the change handler — no new App state, just
-  // threading the existing setter.
-  fileViewerViewMode: 'rendered' | 'source';
-  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Follow live-update cadence for the fleet FileViewer (WARDEN-749). The SAME
   // already-resolved web-safe interval App owns for ChatSidebar's FileViewer
   // (resolvePollIntervalMs at the source) so Follow shares the dashboard's
@@ -697,7 +690,7 @@ function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1838,8 +1831,6 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         filePath={fileTarget?.path ?? ''}
         open={!!fileTarget}
         timestampFormat={timestampFormat}
-        viewMode={fileViewerViewMode}
-        onViewModeChange={onFileViewerViewModeChange}
         pollIntervalMs={pollIntervalMs}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
