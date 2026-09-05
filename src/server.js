@@ -549,7 +549,7 @@ export async function appendStateEvent(event) {
  *
  * ASYNC (WARDEN-947): the production `appendFn` (appendStateEvent) is async, so the
  * append is AWAITED here and the awaited chain is threaded all the way out to
- * pollAgentStates / tickAttention. Dropping the promise here would re-open the
+ * pollAgentStates. Dropping the promise here would re-open the
  * escaping-rejection crash and the write-after-teardown race. A synchronous test
  * appendFn still works unchanged (`await` on a non-promise is a no-op) — callers just
  * have to await the returned boolean.
@@ -605,9 +605,9 @@ export function __resetLastLoggedStateForTest() {
 }
 
 // The 6 identity keys every classified agent row carries, regardless of which
-// classifier produced it (pollAgentStates, tickAttention's sweep, or the
-// sweep_skipped rows pollFleetStates synthesizes without ever probing). Pure
-// projection of a chat — no I/O, no state.
+// classifier produced it (pollAgentStates, or the sweep_skipped rows
+// pollFleetStates synthesizes without ever probing). Pure projection of a chat —
+// no I/O, no state.
 function agentRowBase(c) {
   return {
     // WARDEN-1223: `id` is the HOST-QUALIFIED chat id, NOT the bare
@@ -623,11 +623,11 @@ function agentRowBase(c) {
 }
 
 // The shared classify→log loop (WARDEN-1010). Takes chats plus their ALREADY-captured
-// panes and returns the classified rows; it deliberately does NOT capture, because the
-// two callers' capture calls genuinely diverge (pollAgentStates reconciles first and
-// passes `deps`; tickAttention's 60s sweep skips the reconcile so it can't fight the
-// dashboard's subscription). Each caller keeps its own capture; only the loop body —
-// which drifted for a month and cost a fail_audit — is shared.
+// panes and returns the classified rows; it deliberately does NOT capture, so a caller
+// keeps ownership of its own capture policy (pollAgentStates reconciles the companion
+// subscription first and passes `deps`). Only the loop body — which drifted for a month
+// and cost a fail_audit — is shared. WARDEN-1274: the 60s server-side webhook sweep was
+// the second caller; it is retired, leaving pollAgentStates as the sole one.
 //
 // WARDEN-947: a sequential for-of (not `chats.map`) because logAgentState is AWAITED —
 // the state_changed write must land before the caller returns, so a concurrent
@@ -687,17 +687,20 @@ async function classifyCapturedPanes(chats, panes, cfg = {}) {
 // yet) — the graceful bootstrap. LOCAL + flag-off hosts are unchanged.
 // `deps` is a test seam (defaults to {} in production). (WARDEN-413)
 //
-// WARDEN-788: pollAgentStates is ONE of two call sites that persist `state_changed`
-// transitions into the activity log (via logStateTransition below) — the data
-// source for the Fleet state timeline. pollFleetStates delegates the companion-
-// eligible classification to THIS function (`pollAgentStates(...)` below), so the
-// 30s open∪watched poll AND the 90s hidden-fleet sweep both log here. tickAttention
-// (the 60s server-side webhook sweep) runs its OWN inline capture+classify (it
-// deliberately skips reconcilePaneSubscriptions so it can't fight the dashboard's
-// subscription), so it mirrors these two `logAgentState` calls at its inline site —
-// giving whole-fleet coverage from one shared dedup map + writer. The dedup map is
-// keyed by agent `key` (NOT per-poller) so a transition observed by one caller does
-// not re-log when a sibling caller sees the same state on its next tick.
+// WARDEN-788: pollAgentStates persists `state_changed` transitions into the activity
+// log (via logStateTransition below) — the data source for the Fleet state timeline.
+// pollFleetStates delegates the companion-eligible classification to THIS function
+// (`pollAgentStates(...)` below), so the 30s open∪watched poll AND the 90s hidden-fleet
+// sweep both log here. The dedup map is keyed by agent `key` (NOT per-poller) so a
+// transition observed by one caller does not re-log when a sibling caller sees the same
+// state on its next tick.
+//
+// WARDEN-1274: a THIRD call site used to exist — the 60s server-side attention webhook
+// sweep, the only classifier that kept running with the dashboard closed to tray. It is
+// retired with the alert machinery it fed, so state_changed logging is now CLIENT-driven
+// only: nothing is recorded while the window is closed. That loss is an accepted
+// consequence of the retirement (the state-history family is a later slice) — do NOT
+// re-introduce a backend sweep to paper over it.
 export async function pollAgentStates(chats, cfg = {}, deps = {}) {
   await reconcilePaneSubscriptions(chats, cfg, {}, deps);
   // `deps.capturePanes` is a test seam (defaults to the real capturePanes) so the
@@ -707,8 +710,7 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
   // earns its zero-RPC steady state because the real fn is what the gate tests).
   const capture = deps.capturePanes ?? capturePanes;
   const panes = await capture(chats, cfg, deps);
-  // WARDEN-1010: the classify→log loop lives in classifyCapturedPanes above, shared
-  // with tickAttention's 60s sweep. The row shape produced here is unchanged.
+  // WARDEN-1010: the classify→log loop lives in classifyCapturedPanes above.
   return classifyCapturedPanes(chats, panes, cfg);
 }
 
@@ -1064,9 +1066,9 @@ app.get('/api/config', (_req, res) => res.json(
 // invariants (health warning<=critical ordering + telemetry extended-requires-
 // base). The four post-save side-effects run through afterSave (Correction 2):
 // the IPC telemetry forward incl. cleartext authToken (WARDEN-524/569), the live
-// companion toggle (WARDEN-439), and the budget/attention poll restarts
-// (WARDEN-415/555) — declared as a pipeline so a refactor can't silently drop
-// them the way the source proposal's hooks would have.
+// companion toggle (WARDEN-439), and the budget poll restart (WARDEN-415) —
+// declared as a pipeline so a refactor can't silently drop them the way the
+// source proposal's hooks would have.
 app.put('/api/config', async (req, res) => {
   applyConfigPut(cfg, req.body);
   await save(cfg); // persist to ~/.yatfa-warden/config.json (atomic, async — WARDEN-831)
@@ -1075,7 +1077,6 @@ app.put('/api/config', async (req, res) => {
     forwardTelemetryConfig,
     applyCompanionToggle,
     restartBudgetPoll,
-    restartAttentionPoll,
   });
   res.json({ ok: true });
 });
@@ -1098,9 +1099,8 @@ app.put('/api/config', async (req, res) => {
 //
 // The persist + live-apply path is IDENTICAL to PUT's: save round-trips through
 // config.json (survives a restart) and afterSave re-forwards the telemetry
-// config to main, re-applies the companion toggle, and restarts the budget /
-// attention polls — so the reset takes effect live on the next tick, not on
-// restart. This is an INSTANT action (not a draft-then-Save); the UI labels it
+// config to main, re-applies the companion toggle, and restarts the budget
+// poll — so the reset takes effect live on the next tick, not on restart. This is an INSTANT action (not a draft-then-Save); the UI labels it
 // so. No request body is consulted.
 app.post('/api/config/reset', async (_req, res) => {
   resetConfig(cfg);
@@ -1114,7 +1114,6 @@ app.post('/api/config/reset', async (_req, res) => {
     forwardTelemetryConfig,
     applyCompanionToggle,
     restartBudgetPoll,
-    restartAttentionPoll,
   });
   res.json({ ok: true });
 });
@@ -3086,28 +3085,22 @@ async function tickLifecycle(deps = {}) {
 // done-routing gate (webhookAlertDone) is checked here so the lifecycle sweep adds
 // ZERO webhook cost when the positive routing is off; the channel gate inside
 // dispatchWebhook is the second line of defense. Fire-and-forget + .catch so a slow
-// receiver never blocks the lifecycle sweep. Sibling of tickAttention's done
-// dispatch — same event id ('done') and non-alarming 'info' severity, so the
-// active→idle ("Finished a task", doneReason) and container-ended ("Agent finished
-// (container ended)", doneEndedIdentity) pings share a positive tone on the phone.
+// receiver never blocks the lifecycle sweep. Non-alarming 'info' severity, so the
+// container-ended ping ("Agent finished (container ended)", doneEndedIdentity) reads as
+// a positive tone on the phone.
 //
-// Intentional TWO-signal design (WARDEN-575 review): the active→idle ping (tickAttention)
-// means "the agent stopped working — finished a task"; THIS agent_ended ping means "the
-// container was genuinely recycled." They fire at DIFFERENT times with DIFFERENT wording
-// and convey distinct events. The common yatfa sequence — agent finishes (active→idle),
-// then its container is torn down (agent_ended) — can therefore produce two positive
-// pings for one task. That is intentional, not a bug to dedup away: the two pings are
-// separable in time (active→idle when work stops; agent_ended later, on recycle) and the
-// container-ended ping is a distinct, SSH-cleaned confirmation worth surfacing on its
-// own. Suppressing one would lose that signal; the per-event wording lets the human tell
-// them apart. (The two sweeps also key agents differently — t.name||t.key here vs
-// container||id — so a cross-sweep dedup would add shared state + key normalization for
-// a marginal noise win; documented-intentional is the lower-risk call.)
+// WARDEN-1274: this is now the ONLY done webhook. Its sibling — the 60s attention
+// sweep's active→idle "Finished a task" ping — is retired, because that transition was
+// GUESSED from pane text (a crash that returns to a prompt reads as a success). THIS
+// signal is different in kind and is why it survives: `agent_ended` is a container that
+// genuinely went away, already SSH-noise-cleaned by buildSnapshot's carry-forward — an
+// observed fact, not an inference. The `webhookAlertDone` gate is unchanged and still
+// routes it.
 //
 // `deps` (test seam, defaults to {} in production) threads fetchImpl/sleepImpl to
-// the webhook transport — mirroring tickBudget/tickAttention so the bridge is
-// testable with ZERO real network. Production callers (the timer, startLifecyclePoll)
-// pass nothing → dispatchWebhook falls through to globalThis.fetch.
+// the webhook transport — mirroring tickBudget so the bridge is testable with ZERO
+// real network. Production callers (the timer, startLifecyclePoll) pass nothing →
+// dispatchWebhook falls through to globalThis.fetch.
 async function appendLifecycleEvent(event, deps = {}) {
   // A single lifecycle event must never break the tick — a write failure is
   // swallowed (the prior sync try/catch is now an await + catch since the append
@@ -3229,7 +3222,7 @@ let budgetRunning = false;
 const BUDGET_PER_HOST_LIMIT = 100;
 
 // `deps` is a test seam (defaults to {} in production), identical in shape to
-// tickAttention's: `fetchImpl`/`sleepImpl` flow through to the webhook transport
+// the lifecycle bridge's: `fetchImpl`/`sleepImpl` flow through to the webhook transport
 // so a test drives the full gate → computeBudgetState → shouldFireBudgetAlert →
 // dispatch path with ZERO real network. Production calls pass no args, so
 // deps.fetchImpl is undefined and dispatchWebhook falls through to globalThis.fetch
@@ -3373,212 +3366,6 @@ function restartBudgetPoll() {
   budgetSweep.restart();
 }
 
-// ---- Server-side attention sweep for webhook push (WARDEN-555) ---------------
-//
-// The desktop-alert channel detects a newly-needy agent by diffing /api/agent-
-// states client-side (desktopAlerts.ts). That only fires while the Warden window
-// is live. For a webhook to reach the user's phone with the window CLOSED TO
-// TRAY, transition detection must happen SERVER-SIDE. This is that server-side
-// sweep: on its own slow beat it discovers the fleet, classifies every pane
-// (capturePanes + classifyPane — the SAME classify /api/agent-states uses, but
-// WITHOUT the companion reconcile, which the dashboard owns for OPEN panes), and
-// diffs the per-pane state against the previous sweep, dispatching a webhook on
-// each NEW transition into an attention state (stuck/erroring/waiting/blocked).
-//
-// COST GATE: the sweep self-clears its timer unless the webhook channel is
-// enabled, a URL is configured, AND attention routing is on — so it adds ZERO
-// per-host pane-capture cost for users who never enable webhooks. The 60s beat
-// is between the 2s live monitor (per-WS, window-open only) and the 120s budget
-// accumulator, and well inside the ticket's "within one sweep (~120s)" bar.
-const ATTENTION_SWEEP_MS = 60_000;
-let prevAttentionStates = new Map(); // key → state (the diff baseline)
-// Re-entrancy guard, same rationale as lifecycleRunning/budgetRunning. Owned by
-// the tick (not the supervisor), which only reads it for its settle seam.
-let attentionRunning = false;
-
-// tickAttention — one server-side attention sweep. Exported so a test can drive
-// a single sweep deterministically (the running server drives it off a 60s
-// setInterval via startAttentionPoll, which is too slow for a test). Self-gates
-// to idle when the channel is off; baseline-primes on the first sweep (empty
-// prevAttentionStates → no fire). Transient capture failures leave the baseline
-// in place and retry next sweep (no spurious fire / no flap).
-//
-// `deps` is a test seam (defaults to {} in production): `chats` overrides the
-// pane source (otherwise discovered fresh via discoverAll so the sweep is
-// window-independent — NOT the client-refreshed `cache`), `pollAgentStates`
-// overrides the capture+classify path, and `fetchImpl`/`sleepImpl` flow through
-// to the webhook transport — so a test drives the full gate → diff → dispatch
-// path with ZERO real pane capture and ZERO real network.
-async function tickAttention(deps = {}) {
-  // WARDEN-575: the sweep now serves TWO independent routings — the problem-side
-  // attention diff (webhookAlertAttention) AND the positive done diff
-  // (webhookAlertDone). It runs while the channel is on AND at least one routing is
-  // enabled, so a human can opt into "tell me when an agent finishes" even with the
-  // problem pings off (and vice versa). Each routing is gated separately inside, so
-  // neither dispatches when its own flag is off. The channel gate (webhookEnabled +
-  // webhookUrl) is unchanged: off / unconfigured → no sweep, zero capture cost.
-  if (!cfg.webhookEnabled || !cfg.webhookUrl) {
-    attentionSweep.stop();
-    return;
-  }
-  if (!cfg.webhookAlertAttention && !cfg.webhookAlertDone) {
-    attentionSweep.stop();
-    return;
-  }
-  if (attentionRunning) return;
-  attentionRunning = true;
-  try {
-    // Discover the fleet SERVER-SIDE so the sweep is self-sufficient: it does
-    // NOT rely on the `cache` (which is refreshed by client /api/chats +
-    // /api/discover calls and so can go stale with the window closed to tray).
-    // discoverAll over [LOCAL, ...cfg.hosts] covers local docker yatfa + local/
-    // remote manual tmux + remote docker — the same lean pass the lifecycle tick
-    // uses. Tests inject deps.chats to skip the SSH discovery entirely.
-    let chats = deps.chats;
-    if (chats === undefined) {
-      try {
-        ({ chats = [] } = await discoverAll([LOCAL, ...cfg.hosts], cfg, { activity: false }));
-      } catch {
-        return; // transient discovery failure; retry next sweep
-      }
-    }
-    if (!chats || chats.length === 0) return;
-    // Classify WITHOUT reconcilePaneSubscriptions: the dashboard's /api/agent-
-    // states reconciles the companion subscription to the OPEN panes, and this
-    // sweep classifies the WHOLE fleet — sharing the reconcile would make the two
-    // fight over the subscription set. capturePanes alone is fine (it falls back
-    // to the per-host SSH capture when a companion push subscription isn't live).
-    // Mirrors pollAgentStates' capture+classify, minus the reconcile. Tests inject
-    // deps.pollAgentStates to short-circuit the whole classify step (and when they
-    // inject the REAL pollAgentStates, that path logs transitions itself).
-    //
-    // WARDEN-788: the inline classify ALSO calls logAgentState — mirroring
-    // pollAgentStates' two calls — so the 60s server-side sweep persists genuine
-    // state_changed transitions into the same store. THIS IS THE LOAD-BEARING
-    // logging path for the timeline's headline use case: the dashboard polls
-    // (/api/agent-states) and the frontend's 90s sweep are CLIENT-driven and STOP
-    // when the window is closed to tray; tickAttention is the ONLY classifier that
-    // keeps running server-side (webhooks on), so without these two calls the
-    // "what oscillated while I was away" history the 24h timeline exists to surface
-    // would never be recorded. Shares the same key-keyed lastLoggedState dedup map
-    // as pollAgentStates, so a transition one path logs is not re-logged by the
-    // other (prevAttentionStates below is a SEPARATE baseline used only for the
-    // webhook fire diff — unrelated to transition persistence).
-    const classify = deps.pollAgentStates || (async (chatList) => {
-      // `deps.capturePanes` is a test seam mirroring pollAgentStates' own — lets a
-      // test drive THIS inline branch (the production path, since tickAttention() is
-      // called bare with no deps.pollAgentStates) with canned panes + ZERO SSH.
-      const capture = deps.capturePanes ?? capturePanes;
-      const panes = await capture(chatList, cfg);
-      // WARDEN-1010: the classify→log loop is classifyCapturedPanes, shared with
-      // pollAgentStates — the drift that made this copy miss captureError and
-      // customMatch is structurally impossible now. `classify` is already awaited at
-      // the call site, so returning this promise is unchanged for callers. The two
-      // added keys are inert on the webhook path (notify.js's two diffs read only
-      // key/state/signal/name/host, and the baseline advance builds a key→state Map).
-      return classifyCapturedPanes(chatList, panes, cfg);
-    });
-    const agents = await classify(chats);
-    // WARDEN-575: the done diff shares the SAME classified `agents` + the SAME
-    // prevAttentionStates baseline as the problem diff — zero extra capture cost
-    // (both are pure diffs over one classify pass). Computed before the baseline
-    // advances so it sees the working→idle transition against the prior sweep.
-    const doneTransitions = cfg.webhookAlertDone
-      ? notify.diffDoneTransitions(prevAttentionStates, agents)
-      : [];
-    const transitions = cfg.webhookAlertAttention
-      ? notify.diffAttentionTransitions(prevAttentionStates, agents)
-      : [];
-    for (const t of transitions) {
-      // Fire-and-forget: dispatchWebhook swallows terminal failure; the .catch
-      // guarantees a slow/unreachable destination never escapes the sweep.
-      notify.dispatchWebhook({
-        event: `attention-${t.state}`,
-        severity: notify.attentionSeverity(t.state),
-        agent: t.name || t.key,
-        reason: notify.attentionReason(t.state, t.signal),
-        cfg,
-        now: Date.now(),
-        fetchImpl: deps.fetchImpl,
-        sleepImpl: deps.sleepImpl,
-      }).catch(() => {});
-    }
-    // WARDEN-575: dispatch the POSITIVE "finished" transitions with a non-alarming
-    // 'info' severity + a positive reason (distinct from the red/amber problem
-    // tones). Same fire-and-forget contract; the webhookAlertDone gate above already
-    // held the diff to zero when the routing is off.
-    for (const t of doneTransitions) {
-      notify.dispatchWebhook({
-        event: 'done',
-        severity: notify.doneSeverity(),
-        agent: t.name || t.key,
-        reason: notify.doneReason(t.signal),
-        cfg,
-        now: Date.now(),
-        fetchImpl: deps.fetchImpl,
-        sleepImpl: deps.sleepImpl,
-      }).catch(() => {});
-    }
-    // Advance the baseline over EVERY classified row (including the non-attention
-    // ones) so recovery re-arms the one-shot and capture_failed rows don't get
-    // stuck firing on every sweep once capture recovers.
-    prevAttentionStates = new Map(
-      // WARDEN-1223: baseline keyed by the HOST-QUALIFIED identity
-      // (notify.attentionRowKey) — per agent, not per bare name, so a one-shot
-      // notification is never attributed to a same-named agent on another host.
-      agents.filter((a) => a && typeof a.state === 'string').map((a) => [notify.attentionRowKey(a), a.state]),
-    );
-  } catch {
-    // A transient capture failure leaves the previous baseline in place (no
-    // blanking) so a blip doesn't flap the sweep or re-prime spuriously.
-  } finally {
-    attentionRunning = false;
-  }
-}
-
-// WARDEN-575: the gate runs the sweep while the channel is on AND at least one
-// routing (attention OR done) is enabled — mirrors tickAttention's own gate so a
-// Settings flip of either routing takes effect on the next sweep. The baseline is
-// reset on BOTH legs: a clean prime on (re)enable, and no stale state left behind
-// on disable.
-const attentionSweep = createSweepSupervisor({
-  name: 'attention',
-  intervalMs: ATTENTION_SWEEP_MS,
-  tick: tickAttention,
-  isRunning: () => attentionRunning,
-  enabled: () => cfg.webhookEnabled && cfg.webhookUrl && (cfg.webhookAlertAttention || cfg.webhookAlertDone),
-  onEnable: () => { prevAttentionStates = new Map(); }, // clean baseline prime on (re)enable
-  onDisable: () => { prevAttentionStates = new Map(); },
-});
-
-function startAttentionPoll() {
-  // Self-gates via tickAttention's first line, so a parked idle timer is harmless
-  // and a later enable (PUT /api/config → restartAttentionPoll) wakes it without a
-  // second start call.
-  attentionSweep.start();
-}
-
-// Test seam: resolves once no attention sweep is in flight — the kicked one from
-// startAttentionPoll/restartAttentionPoll included. A test that enables the channel
-// (PUT /api/config) and then drives its own tickAttention() sweeps MUST await this
-// first, or the kicked sweep lands mid-test and stomps the baseline. That race is
-// real and was flaking server-attention-webhook.test.js on main: PUT /api/config →
-// restartAttentionPoll() → a kicked tickAttention(); when that sweep lands it STOMPS
-// prevAttentionStates with its own (real-fleet, usually empty) map, so the test's
-// primed baseline vanishes and its next sweep re-primes instead of firing — and while
-// it is still running, the attentionRunning guard turns the test's sweep into a silent
-// no-op. Both manifest as "0 POSTs, expected 1".
-export const __attentionSweepSettledForTest = attentionSweep.settled;
-
-// React to a config change: enable → ensure the timer runs + sweep now; disable
-// → stop + reset the baseline so the next enable gets a clean prime (no stale
-// state from a previous run). Shares restartBudgetPoll's supervisor.
-// Kept a NAMED function (not an alias): config-schema.js's afterSave pipeline is
-// injected with it by name — src/config-schema.test.js:393-402 pins that dep list.
-function restartAttentionPoll() {
-  attentionSweep.restart();
-}
-
 // Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
 // Not used by the running server — startServer() below drives the module-level
 // `server` directly.
@@ -3594,7 +3381,7 @@ function restartAttentionPoll() {
 // the integration glue the pure src/budget.test.js suite cannot reach:
 // localClaudeSessions → computeBudgetState → this cache → /api/budget, including
 // the '(local)' host tag and the window filter over a planted transcript.
-export { app, tickLifecycle, tickBudget, tickAttention, server };
+export { app, tickLifecycle, tickBudget, server };
 
 // WARDEN-1258 — the file-exists probe metrics producer, exported as the test
 // seam for the /api/file-exists instrumentation (the HTTP suite flips consent
@@ -3660,11 +3447,6 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     // until the human opts in via Settings; once enabled, reuses the existing
     // session-usage fetch on a 120s beat and caches the result for /api/budget.
     startBudgetPoll();
-    // Start the server-side attention sweep for webhook push (WARDEN-555).
-    // Self-gates: parks (zero pane-capture cost) until the user enables a
-    // webhook URL + attention routing; once enabled, classifies every known pane
-    // on a 60s beat and dispatches a webhook on each new attention transition.
-    startAttentionPoll();
     // Start the background pane-delta TTL sweep (WARDEN-413). When the last pane
     // closes the frontend stops polling, so the request-driven reconcile can't age
     // out subscriptions; this decoupled sweep releases them via unsubscribePanes.

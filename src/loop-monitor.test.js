@@ -89,12 +89,12 @@ describe('attributeStall — naming the work that held the loop', () => {
   it('ranks overlapping spans by how much of the blocked window they cover', () => {
     // Blocked window: [1000, 4000].
     const spans = [
-      { label: 'sweep:attention', start: 900, end: 3900 },   // 2900ms of overlap
+      { label: 'sweep:lifecycle', start: 900, end: 3900 },   // 2900ms of overlap
       { label: 'GET /api/config', start: 3000, end: 4100 },  // 1000ms of overlap
       { label: 'GET /api/health', start: 100, end: 500 },    // finished before: none
     ];
     const out = attributeStall(spans, 1000, 4000);
-    assert.deepEqual(out.map((a) => a.label), ['sweep:attention', 'GET /api/config']);
+    assert.deepEqual(out.map((a) => a.label), ['sweep:lifecycle', 'GET /api/config']);
     assert.equal(out[0].overlapMs, 2900);
     assert.equal(out[1].overlapMs, 1000);
     assert.equal(out[0].durationMs, 3000);
@@ -173,13 +173,13 @@ describe('buildStallRecord / formatStallLine — one stall vocabulary', () => {
     const line = formatStallLine({
       lagMs: 8433,
       attribution: [
-        { label: 'sweep:attention', overlapMs: 8400, open: true },
+        { label: 'sweep:lifecycle', overlapMs: 8400, open: true },
         { label: 'fs.statSync', overlapMs: 8300, open: false },
       ],
     });
     assert.match(line, /\[warden:stall\]/);
     assert.match(line, /8433ms/);
-    assert.match(line, /sweep:attention \(8400ms, still open\)/);
+    assert.match(line, /sweep:lifecycle \(8400ms, still open\)/);
     assert.match(line, /fs\.statSync \(8300ms\)/);
   });
 
@@ -220,7 +220,7 @@ describe('createLoopMonitor — detection (the false-negative direction)', () =>
     monitor.tick();
 
     // A sweep runs, and inside it a synchronous read blocks for 3s.
-    const sweep = monitor.begin('sweep:attention');
+    const sweep = monitor.begin('sweep:lifecycle');
     clock.advance(3000);
     monitor.recordSyncOp('fs.readFileSync', 2900);
     monitor.end(sweep);
@@ -230,7 +230,7 @@ describe('createLoopMonitor — detection (the false-negative direction)', () =>
     assert.equal(stalls.length, 1);
     const labels = stalls[0].attribution.map((a) => a.label);
     assert.ok(labels.includes('fs.readFileSync'), `expected the sync op in ${JSON.stringify(labels)}`);
-    assert.ok(labels.includes('sweep:attention'));
+    assert.ok(labels.includes('sweep:lifecycle'));
     // The reported overlap is the part of the op inside the BLOCKED WINDOW (the
     // overdue gap ending at the late tick), not the op's full duration — the
     // window is deliberately the tight one, since a synchronous block always ends
@@ -365,7 +365,7 @@ describe('sync aggregate — the stall built from many cheap calls', () => {
     clock.advance(1000);
     monitor.tick();
 
-    const sweep = monitor.begin('sweep:attention');
+    const sweep = monitor.begin('sweep:lifecycle');
     for (let i = 0; i < 4000; i++) monitor.recordSyncOp('fs.statSync', 2);
     monitor.recordSyncOp('fs.openSync', 3);
     clock.advance(8000);
@@ -375,7 +375,7 @@ describe('sync aggregate — the stall built from many cheap calls', () => {
     assert.equal(stalls.length, 1);
     const [record] = stalls;
     assert.equal(record.attribution.length, 1, 'no sync op crossed the ring floor');
-    assert.deepEqual(record.attribution.map((a) => a.label), ['sweep:attention']);
+    assert.deepEqual(record.attribution.map((a) => a.label), ['sweep:lifecycle']);
     // ...and yet the synchronous cost is fully accounted for.
     assert.deepEqual(record.syncTotals, [
       { label: 'fs.statSync', calls: 4000, totalMs: 8000 },

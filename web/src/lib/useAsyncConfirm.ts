@@ -22,10 +22,6 @@
 // base `grid` display). A wrapper component would swallow three `<DialogContent>`
 // tags and their `sm:max-w-md` classes out of the scanned caller files, weakening
 // those scans. A hook touches ZERO JSX, so every invariant is provably unaffected.
-//
-// NON-MEMBER: SnoozeDialog. Its `onSnooze` returns void and its handler is
-// synchronous — it has no busy state and no dismissal guard by design. Folding it
-// in would invent a loading state for an operation that cannot be in flight.
 import { useEffect, useState } from 'react';
 
 export interface AsyncConfirm {

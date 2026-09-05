@@ -118,12 +118,14 @@ test('sync-io labels map to their closed-set kebab keys (the dot never reaches t
 test('scoped sweep / websocket labels map only when BOTH halves are known literals', () => {
   assert.equal(culpritKey('sweep:budget'), 'sweep-budget');
   assert.equal(culpritKey('sweep:lifecycle'), 'sweep-lifecycle');
-  assert.equal(culpritKey('sweep:attention'), 'sweep-attention');
   assert.equal(culpritKey('sweep:pane-delta'), 'sweep-pane-delta');
   assert.equal(culpritKey('ws:pane-monitor'), 'ws-pane-monitor');
   // A scope we do not recognize, or a name we do not recognize, FOLDS. Losing
   // the distinction is the acceptable cost; passing through a dynamic name is
-  // not.
+  // not. `sweep:attention` is the live proof of the NAME half: it was a known
+  // literal until WARDEN-1274 retired the attention sweep, and dropping it from
+  // SCOPED_LABEL_NAMES is what makes it fold — a known scope is not enough.
+  assert.equal(culpritKey('sweep:attention'), OVERFLOW_CULPRIT);
   assert.equal(culpritKey('sweep:whatever-new'), OVERFLOW_CULPRIT);
   assert.equal(culpritKey('chat:myproject-researcher'), OVERFLOW_CULPRIT);
 });

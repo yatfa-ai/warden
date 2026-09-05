@@ -179,7 +179,7 @@ const STALL = (over = {}) => ({
   lagMs: 4200,
   heartbeatMs: 1000,
   thresholdMs: 1000,
-  attribution: [{ label: 'sweep:attention', overlapMs: 4100, open: true, durationMs: 4300 }],
+  attribution: [{ label: 'sweep:lifecycle', overlapMs: 4100, open: true, durationMs: 4300 }],
   syncTotals: [],
   ...over,
 });
@@ -204,7 +204,7 @@ describe('telemetry-stalls IPC forward (WARDEN-1278) — server fork → parent'
     assert.equal(s.maxMs, 6000);
     assert.equal(s.buckets.reduce((a, b) => a + b, 0), 3, 'every stall is in the histogram');
     const keys = s.culprits.map((c) => c.culprit);
-    assert.ok(keys.includes('sweep-attention'));
+    assert.ok(keys.includes('sweep-lifecycle'));
     assert.ok(keys.includes('get-api-claude-sessions'), 'the route arrives as a PATTERN key');
     assert.ok(keys.includes('fs-read-file-sync'));
   });

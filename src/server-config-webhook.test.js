@@ -109,8 +109,8 @@ describe('/api/config webhook fields — GET defaults (link 2 of the whitelist)'
     assert.strictEqual(body.webhookEnabled, false, 'webhookEnabled present + false default');
     assert.strictEqual(body.webhookSecretSet, false, 'webhookSecretSet present + false default');
     assert.strictEqual(body.webhookSecretTail, null, 'webhookSecretTail present + null default');
-    assert.strictEqual(body.webhookAlertAttention, true, 'attention routing default true');
     assert.strictEqual(body.webhookAlertBudget, true, 'budget routing default true');
+    assert.strictEqual(body.webhookAlertDone, true, 'done routing default true');
   });
 
   it('NEVER returns a cleartext webhookSecret field (write-only)', async () => {
@@ -141,15 +141,15 @@ describe('/api/config webhook fields — PUT round-trip + persistence (links 1+3
     assert.strictEqual((await get()).webhookEnabled, false);
   });
 
-  it('PUT webhookAlertAttention / webhookAlertBudget (booleans) round-trip', async () => {
-    await put({ webhookAlertAttention: false, webhookAlertBudget: false });
+  it('PUT webhookAlertBudget / webhookAlertDone (booleans) round-trip', async () => {
+    await put({ webhookAlertBudget: false, webhookAlertDone: false });
     const after = await get();
-    assert.strictEqual(after.webhookAlertAttention, false);
     assert.strictEqual(after.webhookAlertBudget, false);
-    await put({ webhookAlertAttention: true, webhookAlertBudget: true });
+    assert.strictEqual(after.webhookAlertDone, false);
+    await put({ webhookAlertBudget: true, webhookAlertDone: true });
     const on = await get();
-    assert.strictEqual(on.webhookAlertAttention, true);
     assert.strictEqual(on.webhookAlertBudget, true);
+    assert.strictEqual(on.webhookAlertDone, true);
   });
 });
 

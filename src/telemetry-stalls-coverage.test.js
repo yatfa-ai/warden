@@ -108,7 +108,12 @@ test('the sweep supervisor\'s DERIVED labels are known too (`sweep:<name>`)', ()
   const names = [];
   let m;
   while ((m = nameRe.exec(serverSource)) !== null) names.push(m[1]);
-  assert.ok(names.length >= 3, `expected the three resident sweeps, found ${JSON.stringify(names)}`);
+  // WARDEN-1274 retired the attention sweep, taking the count from three to two.
+  // The floor is what this guard is for — it proves the regex still MATCHES
+  // reality (a rename of createSweepSupervisor would empty `names` and make the
+  // mapping check below vacuously pass) — so it tracks the resident sweeps
+  // rather than a frozen number.
+  assert.ok(names.length >= 2, `expected the resident sweeps, found ${JSON.stringify(names)}`);
   const unmapped = names.filter((n) => culpritKey(`sweep:${n}`) === OVERFLOW_CULPRIT);
   assert.deepEqual(
     unmapped.map((n) => `sweep:${n}`),
