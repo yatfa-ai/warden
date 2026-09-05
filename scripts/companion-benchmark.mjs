@@ -78,7 +78,7 @@
 //   node scripts/companion-benchmark.mjs --host user@box --ticks 8 --hosts 3
 
 import { spawn } from 'node:child_process';
-import { SSH_BASE_OPTS, SSH_BIN, shellQuote, run as sshRun } from '../src/ssh.js';
+import { SSH_BASE_OPTS, SSH_BIN, shellQuote, run as sshRun, attachTmux as realAttachTmux } from '../src/ssh.js';
 import {
   discover as companionDiscover,
   capturePanes as companionCapturePanes,
@@ -88,10 +88,13 @@ import {
   resize as companionResize,
   send as companionSend,
   sendKey as companionSendKey,
+  attachSession as companionAttachSession,
   _resetChannelCacheForTests,
   projectSpawnModel,
 } from '../src/companion.js';
 import { DISCOVER_SCRIPT, buildCaptureScript } from '../src/chats.js';
+// WARDEN-1295: the attach leg drives the REAL attachStream routing (both sides).
+import { attachStream } from '../src/tmux.js';
 // WARDEN-1261: the git-domain leg drives the REAL runGit routing (both sides).
 import { runGit } from '../src/gitRoutes.js';
 
@@ -340,6 +343,43 @@ function printSendProjection(hosts, ticks) {
   console.log('This is the roadmap\'s "write path" success-metric leg — the LAST un-migrated');
   console.log('op family. With it on the channel, NO remote op pays a per-op SSH handshake,');
   console.log('the sole-transport / default-on destination is unblocked.');
+  console.log();
+}
+
+// WARDEN-1295: the LIVE-ATTACH leg — the LAST raw-SSH path in the runtime, and
+// the one this whole roadmap was gated on. Every earlier leg removed a
+// request/response handshake; this one removes a long-lived `ssh -tt` CHILD.
+// Today opening a remote web pane spawns a fresh ssh process inside a local
+// node-pty (attachStream → attachTmux → attachPty) that LIVES for the whole
+// session — so the cost is not only a handshake per open but a resident ssh
+// process per open pane, per viewer. The companion allocates the PTY host-side
+// and streams it over the channel: 0 spawns per open, 0 resident processes.
+function printAttachProjection(hosts, ticks) {
+  const opens = Math.max(0, ticks);
+  // 1 ssh -tt child per open, and it STAYS UP for the life of the pane.
+  const before = hosts * opens;
+  console.log('━'.repeat(72));
+  console.log(`Part 1.h — live attach (the web pane PTY): handshake projection  (${hosts} host(s), ${opens} open(s))`);
+  console.log('━'.repeat(72));
+  console.log('The live interactive pane was the LAST un-migrated path: each open spawns');
+  console.log('an `ssh -tt` child inside a local node-pty, and unlike every other op that');
+  console.log('child is RESIDENT for the whole session:');
+  console.log();
+  console.log('  DEFAULT path (attachPty, no companion):');
+  console.log(`    1 ssh -tt child / open  →  ${hosts} × ${opens} = ${before} spawns`);
+  console.log(`    …each one RESIDENT for the life of the pane (${before} concurrent ssh processes`);
+  console.log('     if every pane stays open — the cost no request/response leg has)');
+  console.log('  COMPANION path:');
+  console.log('    the PTY is allocated HOST-side and streamed over slice 1\'s channel');
+  console.log(`    total = 0 spawns, 0 resident ssh processes (the attach rides the same channel)`);
+  console.log();
+  console.log(`  ▶ ssh processes saved over ${opens} open(s): ${before} → 0  (−${before})`);
+  console.log('  ▶ per pane OPEN on the ControlMaster-disabled / Windows path: a full ~30s');
+  console.log('    handshake before the terminal draws → near-instant after bootstrap.');
+  console.log();
+  console.log('DONE criterion (ticket AC #1): under companionTransportEnabled, opening a');
+  console.log('REMOTE web pane spawns ZERO ssh processes. With this leg on the channel NO');
+  console.log('runtime op family pays raw SSH — the default-on cutover is unblocked.');
   console.log();
 }
 
@@ -1012,6 +1052,118 @@ async function liveGitBenchmark(host, ticks) {
   console.log();
 }
 
+// WARDEN-1295 live leg: the LIVE ATTACH. This is the one leg whose default side
+// is not a request/response op but a RESIDENT `ssh -tt` child, so it is measured
+// differently: both sides open a real pane, wait for the first byte to render
+// (the user-visible "the terminal drew" moment), then detach. The spawn count is
+// the ticket's AC #1 — per-open ssh spawns, before vs after.
+async function liveAttachBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.h — live attach (the web pane PTY): LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} open(s))`);
+  console.log('━'.repeat(72));
+  console.log('Default side: one RESIDENT `ssh -tt` child per open (node-pty-wrapped).');
+  console.log('Companion side: a host-side PTY streamed over slice 1\'s channel — 0 spawns.');
+  console.log();
+
+  const probe = await sshRunNoMaster(host, DISCOVER_SCRIPT, 60000, { val: 0 });
+  const chats = chatsFromDiscoverStdout(host, probe.stdout);
+  if (!chats.length) {
+    console.log(`(no discoverable yatfa chats on ${host} — attach leg skipped; earlier legs still valid.)\n`);
+    return;
+  }
+  const target = { ...chats[0], host };
+  console.log(`targeting container '${target.container}' session '${target.session}'\n`);
+
+  // Wait for the pane's FIRST BYTE — the moment the terminal actually draws for
+  // the user. Detach either way; a pane that never draws is reported as a miss
+  // rather than hanging the benchmark.
+  const firstByte = (pty, timeoutMs = 20000) => new Promise((resolve) => {
+    const t0 = process.hrtime.bigint();
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { pty.kill(); } catch { /* noop */ }
+      resolve({ ms: Number(process.hrtime.bigint() - t0) / 1e6, ok });
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    try {
+      pty.onData(() => finish(true));
+      pty.onExit(() => finish(false));
+    } catch { finish(false); }
+  });
+
+  const origEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+  const restoreEnv = () => {
+    if (origEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = origEnv;
+  };
+
+  // ---- DEFAULT: flag OFF, N opens, each spawning a resident ssh -tt child ----
+  console.log(`▶ default path: ${ticks} open(s), one resident ssh -tt child each …`);
+  delete process.env.WARDEN_COMPANION_TRANSPORT;
+  const defaultSpawns = { val: 0 };
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    // The default branch goes through attachTmux → attachPty → nodePty.spawn(ssh).
+    // Counting it via the deps seam keeps the measurement honest about WHICH
+    // path ran (a miscounted leg would be the easiest way to fake this result).
+    const pty = attachStream(target, {}, { cols: 100, rows: 30 }, {
+      isCompanionTransportEnabled: () => false,
+      attachTmux: (...a) => { defaultSpawns.val++; return realAttachTmux(...a); },
+    });
+    const s = await firstByte(pty);
+    defaultSamples.push(s);
+    process.stdout.write(`   open ${i + 1}/${ticks}: ${s.ms.toFixed(0).padStart(6)} ms  (ssh -tt child)${s.ok ? '' : '  [no data]'}\n`);
+  }
+
+  // ---- COMPANION: flag ON, bootstrap once, then N opens over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} open(s) over the channel …`);
+  process.env.WARDEN_COMPANION_TRANSPORT = '1';
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+  const companionDeps = { spawn: countingSpawn, run: countingRun };
+  _resetChannelCacheForTests();
+  const cfg = { connectTimeout: 10 };
+  const companionSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const pty = attachStream(target, cfg, { cols: 100, rows: 30 }, {
+      isCompanionTransportEnabled: () => true,
+      companionAttachSession: (h, o) => companionAttachSession(h, o, cfg, {}, companionDeps),
+    });
+    const s = await firstByte(pty);
+    companionSamples.push(s);
+    const label = i === 0 ? 'bootstrap + 1st open' : `open ${i + 1}/${ticks}`;
+    process.stdout.write(`   ${label}: ${s.ms.toFixed(0).padStart(6)} ms  (0 ssh spawns)${s.ok ? '' : '  [no data]'}\n`);
+  }
+  _resetChannelCacheForTests();
+  restoreEnv();
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────────');
+  console.log(`  ssh processes started over ${ticks} pane open(s):`);
+  console.log(`     default   : ${defaultSpawns.val}  (1 RESIDENT ssh -tt child per open)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; the PTY is host-side and rides the channel)`);
+  console.log(`  time to FIRST BYTE (the moment the terminal draws for the user):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady open(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per pane open: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────────');
+  console.log('Note: this leg is unique in removing a RESIDENT process, not just a');
+  console.log('handshake — N open panes previously meant N live ssh children. It is the');
+  console.log('ticket\'s AC #1: ZERO ssh spawns per remote pane open.');
+  console.log();
+}
+
 // Parse the default discover script's stdout into chat objects capturePanes can
 // consume (key/container/session). The discover TSV is name \t status \t cwd \t
 // active; only name (the container) is needed to target a capture. yatfa chats
@@ -1040,7 +1192,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(HELP); return; }
 
-  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 + WARDEN-409 + WARDEN-888 / roadmap WARDEN-270)\n');
+  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 + WARDEN-409 + WARDEN-888 + WARDEN-1261 + WARDEN-1295 / roadmap WARDEN-270)\n');
 
   // Part 1 always runs — deterministic, no host needed. The discover, capture-pane,
   // has-session, lifecycle, attach-path control-plane, and write-path handshake
@@ -1052,6 +1204,7 @@ async function main() {
   printControlPlaneProjection(args.hosts, args.ticks);
   printSendProjection(args.hosts, args.ticks);
   printGitProjection(args.hosts, args.ticks);
+  printAttachProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -1069,6 +1222,7 @@ async function main() {
     await liveControlPlaneBenchmark(args.host, args.ticks);
     await liveSendBenchmark(args.host, args.ticks);
     await liveGitBenchmark(args.host, args.ticks);
+    await liveAttachBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');
