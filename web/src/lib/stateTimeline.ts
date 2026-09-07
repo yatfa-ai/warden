@@ -175,8 +175,24 @@ export function selectStateCells(
  *    done-run → relabeled `done`.
  *  - `idle` with any other known predecessor (stuck/erroring/blocked/waiting/…)
  *    stays `idle` — only a clean active→idle reads as a finish.
- *  - any other known state ends the done-run; `null` (unobserved) is transparent
- *    (neither starts nor breaks a run), so an active…<gap>…idle still reads as done.
+ *  - any other known state ends the done-run; `null` (unobserved) BREAKS the run.
+ *
+ * WARDEN-1318 — WHY `null` BREAKS THE RUN (it used to be transparent). Before the
+ * forward-fill was bounded, a mid-row `null` was effectively impossible: nulls only
+ * ever appeared as the never-observed PREFIX, so "transparent across a gap" was a
+ * rule about a case that could not occur. Bounding the fill makes mid-row nulls
+ * routine and gives them a precise meaning — nobody was watching for at least
+ * STATE_STALE_AFTER_MS (see src/activity.js). Carrying a done-run across one would
+ * assert a COMPLETION that spans hours nobody observed: exactly the unsubstantiated
+ * claim this slice exists to remove, one derivation layer up. So a gap clears both
+ * `inDoneRun` AND `prevKnown` — clearing only the former would let the very next
+ * `idle` re-open the run off the pre-gap `active` and change nothing.
+ *
+ * The accepted residual, in the same under-claiming direction as the bound itself: a
+ * GENUINE active→idle completion whose middle hours went unlogged now reads `idle`
+ * rather than `done`. The store cannot tell that case apart from a blackout (it
+ * records transitions only — see STATE_STALE_AFTER_MS), and an honest `idle` is the
+ * cheaper error than a green ✓ nobody watched.
  */
 export function deriveDone(states: readonly (string | null)[]): (string | null)[] {
   const out = new Array<string | null>(states.length);
@@ -191,11 +207,14 @@ export function deriveDone(states: readonly (string | null)[]): (string | null)[
       if (prevKnown === 'active') inDoneRun = true; // clean active→idle transition
       out[i] = inDoneRun ? 'done' : 'idle';
     } else {
-      // Any other real state breaks the done-run; null is transparent (kept as-is).
-      if (s !== null) inDoneRun = false;
+      // Any other real state breaks the done-run; so does a null (WARDEN-1318: an
+      // unobserved gap must not carry a completion claim across it — see above).
+      inDoneRun = false;
       out[i] = s;
     }
-    if (s !== null) prevKnown = s;
+    // `prevKnown` is cleared by a gap too: the pre-gap state no longer qualifies as
+    // the predecessor of whatever is observed after it.
+    prevKnown = s;
   }
   return out;
 }
