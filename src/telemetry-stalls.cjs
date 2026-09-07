@@ -159,7 +159,7 @@ const ROUTE_SEGMENTS = Object.freeze([
   'claude-session', 'claude-sessions', 'claude-sessions-all',
   'claude-sessions-search', 'collections', 'companion', 'config', 'diagnostics',
   'directives', 'discover', 'file-exists', 'fleet', 'health', 'hosts', 'key',
-  'kill', 'pane', 'pane-export', 'pins', 'read-file', 'rename', 'reset',
+  'kill', 'pane', 'pane-export', 'paste-image', 'pins', 'read-file', 'rename', 'reset',
   'respawn', 'resume', 'search-files', 'search-pane', 'send', 'series',
   'session-kill', 'session-tags', 'sessions', 'spawn', 'ssh-hosts', 'stalls',
   'stats', 'status', 'telemetry-test', 'this-session', 'uninstall',
