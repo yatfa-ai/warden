@@ -16,7 +16,20 @@ import { useState } from 'react';
 import { Bell, X, Reply } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { QuickReply } from '@/components/QuickReply';
-import { formatCatchupSummary, formatWatchMiss, type WatchMiss } from '@/lib/watchCatchup';
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
+import {
+  formatCatchupSummary,
+  formatWatchMiss,
+  WATCH_MISS_REASON_LABEL,
+  type WatchMiss,
+} from '@/lib/watchCatchup';
 import { canReply } from '@/lib/quickReply';
 import { cn } from '@/lib/utils';
 
@@ -66,6 +79,21 @@ export function WatchCatchup({ misses, onOpenMiss, onDismiss, onReplyResult }: P
             return (
               <div key={m.key} className="flex flex-col">
                 <div className="flex items-center gap-1">
+                  {/*
+                    WARDEN-1315 — themed right-click menu on the miss row (mirrors the
+                    Attention rundown twin, AttentionList.tsx). The row is one click
+                    target whose formatWatchMiss label is `truncate`d, so the agent
+                    name / triggering signal / reason phrasing are all uncopyable by
+                    drag-select and right-click fell through to the native webview
+                    menu. `ContextMenuTrigger asChild` composes onContextMenu onto the
+                    existing deep-link Button — left-click and Enter/Space are
+                    untouched. The wrap covers ONLY the Button: the Reply toggle and
+                    the mounted QuickReply textarea stay OUTSIDE the trigger, so
+                    right-click inside the reply box keeps the native edit menu
+                    (cut/copy/paste) — the editable-field trap that withdrew WARDEN-495.
+                  */}
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
                   <Button
                     variant="ghost"
                     onClick={() => onOpenMiss(m)}
@@ -75,6 +103,26 @@ export function WatchCatchup({ misses, onOpenMiss, onDismiss, onReplyResult }: P
                     <span className="truncate text-left">{formatWatchMiss(m)}</span>
                     <span className="text-amber-600 dark:text-amber-400 shrink-0 ml-auto pl-2">open →</span>
                   </Button>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      {/* Open mirrors the row click and the Enter/Space deep-link. */}
+                      <ContextMenuItem onSelect={() => onOpenMiss(m)}>Open</ContextMenuItem>
+                      <ContextMenuSeparator />
+                      {/* The visible name is `truncate`d — copy the RAW name. */}
+                      <ContextMenuItem onSelect={() => copyWithToast(m.name)}>Copy agent name</ContextMenuItem>
+                      {/* The headline payload: the triggering signal, quoted verbatim in
+                          the row. Mirrors formatWatchMiss's own conditional — no item
+                          that would copy an empty string. */}
+                      {m.signal && (
+                        <ContextMenuItem onSelect={() => copyWithToast(m.signal!)}>Copy signal</ContextMenuItem>
+                      )}
+                      {/* Copy the SAME human phrasing the row renders (formatWatchMiss),
+                          not the raw enum — with the same fallback. */}
+                      <ContextMenuItem onSelect={() => copyWithToast(WATCH_MISS_REASON_LABEL[m.reason] || m.reason)}>
+                        Copy reason
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                   {replyable && (
                     <Button
                       type="button"

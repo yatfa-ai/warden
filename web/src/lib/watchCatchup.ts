@@ -241,7 +241,10 @@ export function reconcileAwayMisses(
 // Reason → human phrasing for the catch-up line. Mirrors desktopAlerts'
 // WATCH_REASON_LABEL (desktopAlerts.ts) so the in-app catch-up reads identically to
 // the lost OS notification's body — the catch-up is the in-app twin of the ping.
-const WATCH_MISS_REASON_LABEL: Record<WatchReason, string> = {
+// WARDEN-1315: exported so WatchCatchup's themed right-click `Copy reason` item can
+// copy the SAME human phrasing the row renders (formatWatchMiss) instead of forking
+// a private copy of the map or copying the raw enum.
+export const WATCH_MISS_REASON_LABEL: Record<WatchReason, string> = {
   waiting: 'waiting for your input',
   erroring: 'erroring',
   stuck: 'stuck (repeating output)',
