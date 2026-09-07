@@ -21,7 +21,7 @@
 //   2. sendWebhook        — the network transport (injectable fetch/sleep).
 //   3. dispatchWebhook    — the config-reading wrapper the server hooks call.
 // Plus the pure formatting helpers for the one POSITIVE signal that still
-// routes through it (doneSeverity / doneReason / doneEndedIdentity).
+// routes through it (doneSeverity / doneEndedIdentity).
 //
 // WARDEN-1274: this module used to own two PANE-TEXT transition diffs as well —
 // diffAttentionTransitions (newly stuck/erroring/waiting/blocked) and
@@ -216,6 +216,12 @@ export function dispatchWebhook({
 // signal that was never a guess: the lifecycle `agent_ended` event (a container
 // that genuinely went away, already SSH-noise-cleaned), bridged to this same
 // dispatch by server.js. These helpers format that one.
+//
+// `doneReason` — the working→idle "Finished a task" wording — was retired WITH
+// that diff: `tickAttention`'s done loop was its only caller, and the surviving
+// `agent_ended` bridge deliberately words its own reason (see doneEndedIdentity,
+// whose wording is distinct from the working→idle phrasing on purpose). Keeping
+// it would have left an export alive on nothing but its own test.
 
 // The NON-ALARMING severity for a "finished" transition (WARDEN-575). Positive
 // signal — deliberately NOT critical/warning (the red/amber problem tones). 'info'
@@ -224,19 +230,6 @@ export function dispatchWebhook({
 // it (and so a future severity-aware receiver stays consistent).
 export function doneSeverity() {
   return 'info';
-}
-
-// The one-line human-readable "why" for a finished transition — the SAME wording
-// the frontend watch ping uses for its `completed` reason
-// (WATCH_REASON_LABEL.completed = 'finished a task', web/src/lib/desktopAlerts.ts)
-// so the phone ping, the OS toast, and the in-app badge all speak with one voice on
-// the positive signal. Appends the triggering signal line when present (an idle row
-// usually carries none, but a real `signal` is surfaced when classifyPane attached
-// one).
-export function doneReason(signal) {
-  const label = 'Finished a task';
-  const sig = typeof signal === 'string' && signal.trim() ? signal.trim() : '';
-  return sig ? `${label}: ${sig}` : label;
 }
 
 // Build the agent identity + reason for a lifecycle `agent_ended` event dispatched
