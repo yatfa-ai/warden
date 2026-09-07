@@ -5,7 +5,6 @@ import {
   makeWebhookPayload,
   dispatchWebhook,
   doneSeverity,
-  doneReason,
   doneEndedIdentity,
   _INTERNALS,
 } from './notify.js';
@@ -345,15 +344,9 @@ describe('dispatchWebhook — config-reading wrapper', () => {
 // rather than left asserting against absent exports. What remains is the
 // formatting for the ONE positive signal that still routes: the lifecycle
 // `agent_ended` bridge (a container that genuinely went away).
-describe('doneSeverity / doneReason / doneEndedIdentity — positive formatting (WARDEN-575)', () => {
+describe('doneSeverity / doneEndedIdentity — positive formatting (WARDEN-575)', () => {
   it('doneSeverity is the non-alarming info tone (never critical/warning)', () => {
     assert.strictEqual(doneSeverity(), 'info');
-  });
-
-  it('doneReason uses the shared "Finished a task" wording, appending the signal when present', () => {
-    assert.strictEqual(doneReason(null), 'Finished a task');
-    assert.strictEqual(doneReason('  '), 'Finished a task');
-    assert.strictEqual(doneReason('implemented WARDEN-575'), 'Finished a task: implemented WARDEN-575');
   });
 
   it('doneEndedIdentity derives an agent + reason from a lifecycle agent_ended event', () => {
