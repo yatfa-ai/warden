@@ -103,7 +103,7 @@ describe('live: a real multi-second block is observed with a plausible duration'
       // --- quiet period AFTER the block: still silent ------------------------
       const before = stalls.length;
       for (let i = 0; i < 10; i++) {
-        const s = monitor.begin('sweep:attention');
+        const s = monitor.begin('sweep:lifecycle');
         await sleep(40);
         monitor.end(s);
       }
@@ -129,7 +129,7 @@ describe('live: the sync-I/O probe attributes a stall to the real blocking call'
     const restore = instrumentSyncIo(monitor, { fs });
     monitor.start();
     try {
-      const span = monitor.begin('sweep:attention');
+      const span = monitor.begin('sweep:lifecycle');
       // Real synchronous file I/O — the shape this ticket is hunting — plus a
       // parked block so the total reliably exceeds the threshold regardless of
       // how fast the test machine's page cache is.
@@ -142,7 +142,7 @@ describe('live: the sync-I/O probe attributes a stall to the real blocking call'
       assert.ok(stalls.length >= 1, 'the blocked window must be reported');
       const labels = stalls[0].attribution.map((a) => a.label);
       assert.ok(
-        labels.includes('sweep:attention'),
+        labels.includes('sweep:lifecycle'),
         `expected the sweep in ${JSON.stringify(labels)}`,
       );
       // The read is recorded as a span by the real patch. It only appears in THIS

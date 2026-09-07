@@ -405,12 +405,14 @@ export const SETTINGS_SECTIONS = [
       'Success messages',
       'Observer events',
       'Desktop alerts',
-      'Desktop alerts when agents need attention (while Warden is unfocused)',
+      'Desktop notifications while Warden is in the background',
       'Which alerts to push',
-      'Critical agents',
-      'Warning agents',
-      'Pending directives',
-      'Recent errors',
+      // WARDEN-1274: 'Critical agents' / 'Warning agents' / 'Pending directives' /
+      // 'Recent errors' (the four per-severity sub-toggles) and 'Attention' (the
+      // webhook routing switch) were transcribed here. All five rows are gone with
+      // the attention alert channel they routed, so their entries go too — a
+      // keyword that resolves to a preference the user cannot find is worse than
+      // no keyword.
       'Token budget',
       'Webhook push alerts',
       'Enable webhook push',
@@ -429,10 +431,8 @@ export const SETTINGS_SECTIONS = [
       // Synonyms
       'unfocused',
       'permission',
-      'mute',
-      'bell',
       'test alert',
-      'attention alert',
+      'watch pattern',
     ],
   },
 ] as const satisfies readonly SettingsSectionMeta[];

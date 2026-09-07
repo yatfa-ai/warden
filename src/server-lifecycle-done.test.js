@@ -76,7 +76,7 @@ describe('lifecycle agent_ended → positive done webhook (WARDEN-575)', () => {
   });
 
   after(async () => {
-    // Disable the webhook channel so restartAttentionPoll clears its interval.
+    // Disable the webhook channel so no configured destination is left armed.
     if (baseUrl) {
       try {
         await fetch(`${baseUrl}/api/config`, {

@@ -1,5 +1,6 @@
-// The shared target-agent list for the four fleet-action confirmation dialogs
-// (BroadcastDialog / KillDialog / KeySendDialog / SnoozeDialog).
+// The shared target-agent list for the fleet-action confirmation dialogs
+// (BroadcastDialog / KillDialog / KeySendDialog). WARDEN-1274 retired a fourth,
+// SnoozeDialog, along with the alert channel its snooze silenced.
 //
 // Each of those dialogs is a SAFETY GATE: it shows the FULL target list
 // (name · type · host · role) so a kind/host mismatch is visible BEFORE the
@@ -8,17 +9,17 @@
 // exactly what does that. So every dialog must render the SAME host tag for the
 // same target.
 //
-// This component exists because the four lists were hand-copied four times with
-// nothing enforcing consistency. Two of the four (KeySendDialog, SnoozeDialog)
-// had silently dropped the `useHostLabels` import and called hostTagOf with one
-// arg — rendering the raw SSH hostname where their siblings (BroadcastDialog,
-// KillDialog) rendered the friendly label (WARDEN-735). Calling useHostLabels()
-// ONCE here and passing it to hostTagOf in the 2-arg (label-resolving) form
-// means all four dialogs render the same host per target by construction, and
-// a future fifth copy cannot drift again.
+// This component exists because the lists were hand-copied per dialog with
+// nothing enforcing consistency. Two copies (KeySendDialog and the since-retired
+// SnoozeDialog) had silently dropped the `useHostLabels` import and called
+// hostTagOf with one arg — rendering the raw SSH hostname where their siblings
+// (BroadcastDialog, KillDialog) rendered the friendly label (WARDEN-735). Calling
+// useHostLabels() ONCE here and passing it to hostTagOf in the 2-arg
+// (label-resolving) form means every dialog renders the same host per target by
+// construction, and a future copy cannot drift again.
 //
 // Each caller keeps its OWN outer label span — the label text legitimately
-// differs ("Recipients" for Broadcast, "Targets" for the other three) — so this
+// differs ("Recipients" for Broadcast, "Targets" for the others) — so this
 // component renders only the bordered, scrollable list body. `targets` is a
 // Chat[] in display order, identical to the prop each dialog already receives.
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';

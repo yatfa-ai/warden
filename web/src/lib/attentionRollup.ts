@@ -91,15 +91,16 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
 
 /**
  * The one finalize step every rollup PRODUCER ends with: sum the problem buckets into
- * `total` and assemble the AttentionRollup. Three different producers converge here —
- * `buildAttentionRollup` (build from raw endpoints), `filterAttentionRollup` (narrow to
- * a host/agent), and `desktopAlerts.applySeverityPrefs` (route by severity + mute set) —
- * each having independently computed the same 10 inputs.
+ * `total` and assemble the AttentionRollup. Two producers converge here —
+ * `buildAttentionRollup` (build from raw endpoints) and `filterAttentionRollup` (narrow
+ * to a host/agent) — each having independently computed the same 10 inputs. (A third,
+ * `desktopAlerts.applySeverityPrefs`, went with the retired attention alert in
+ * WARDEN-1274; it was that module's only runtime import of this one.)
  *
  * It exists because the summation encodes a subtle invariant that was being restated by
  * hand in every copy: **`done` is EXCLUDED from `total`**. A finished agent is a positive
- * review cue, not an alarm, so it must not inflate the red/amber count nor trip the
- * increase-only desktop-alert gate (WARDEN-575; see the `total` docstring above). Getting
+ * review cue, not an alarm, so it must not inflate the red/amber count the badge header
+ * shows (WARDEN-575; see the `total` docstring above). Getting
  * it wrong in ONE copy makes the badge header contradict the list it heads — and every
  * bucket added since (WARDEN-540's `custom`, WARDEN-575's `done`) cost an identical
  * lockstep edit in each then-existing copy. One home, one edit.

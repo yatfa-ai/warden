@@ -13,16 +13,19 @@
 // Both consume App's lifted `attentionRollup` (single source of truth — no duplicate
 // polling) and the shared pure helpers `rankAttention` / `pickCalloutTop` /
 // `attentionReason` / `rollupSeverity`, so the ranking, the "because X" reasons, the
-// duration suffixes, the mute/snooze row actions, and the severity tone are bit-for-bit
-// identical across both surfaces. There is no second implementation to keep in sync.
+// duration suffixes, and the severity tone are bit-for-bit identical across both
+// surfaces. There is no second implementation to keep in sync.
+//
+// WARDEN-1274: every row also carried a mute/snooze bell that silenced the fleet
+// attention ALERT. Both went with that channel — this list is a PASSIVE readout the
+// human chooses to open, so it interrupts nobody and there is nothing to silence.
 //
 // This component renders ONLY the directed callout + the sectioned rundown. The caller
 // owns the zero-state decision (the badge hides entirely; the persistent view shows an
 // EmptyState) and the scroll geometry (the popover caps height at max-h-72; the
 // persistent view fills the panel) via the `className` / `scrollClassName` props.
-import { useMemo, useState, type ReactNode } from 'react';
-import { Bell, BellOff, Clock, Reply } from 'lucide-react';
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
+import { useState, type ReactNode } from 'react';
+import { Reply } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
@@ -41,7 +44,6 @@ import {
   type AttentionItem,
   type AttentionSeverity,
 } from '@/lib/attentionRollup';
-import { activeSnoozedKeys, alertMuteState, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
 import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
 import type { Snippet } from '@/lib/storage';
@@ -52,10 +54,10 @@ import { QuickReply } from '@/components/QuickReply';
 
 /**
  * The shared prop set every attention surface consumes. This is exactly the set App
- * already threads to the header `<AttentionBadge>` (WARDEN-436 lifted the rollup + the
- * mute/snooze/focus context up to App so the badge, the return banner, and now the
- * persistent view all share one rollup with no duplicate polling). The persistent
- * Attention view receives the SAME values, threaded through ObserverTabs.
+ * already threads to the header `<AttentionBadge>` (WARDEN-436 lifted the rollup +
+ * focus context up to App so the badge, the return banner, and the persistent view
+ * all share one rollup with no duplicate polling). The persistent Attention view
+ * receives the SAME values, threaded through ObserverTabs.
  */
 export interface AttentionListProps {
   /** The live, already-aggregated attention rollup (App's single source of truth). */
@@ -66,14 +68,6 @@ export interface AttentionListProps {
   onOpenChat: (id: string, anchor?: string) => void;
   /** Open the observer panel's Activity tab (reuses App's openActivityTab). */
   onOpenActivity: () => void;
-  /** Opt-in desktop alerts (WARDEN-259). Used only for the per-row mute bell affordance. */
-  attentionDesktopAlerts: boolean;
-  /** WARDEN-364 — per-agent permanent mute set for the desktop channel's row bell. */
-  mutedAlertKeys: string[];
-  /** WARDEN-551 — chat key → snooze expiry (ms). The time-boxed twin of mutedAlertKeys. */
-  snoozedAlertKeys: SnoozeMap;
-  /** WARDEN-551/364 — unified mute/snooze setter for a chat key. */
-  onSetAlertMute: (key: string, mode: AlertMuteMode) => void;
   /** WARDEN-482: the pane the human is currently focused on. pickCalloutTop excludes it
    *  when choosing the callout target so the directed answer never promotes the pane the
    *  human is already reading (the "trains the human to ignore it" product-killer). The
@@ -130,42 +124,12 @@ export function AttentionList({
   rollup,
   onOpenChat,
   onOpenActivity,
-  attentionDesktopAlerts,
-  mutedAlertKeys,
-  snoozedAlertKeys,
-  onSetAlertMute,
   focusedPaneKey,
   snippets,
   onReplyResult,
   className,
   scrollClassName = 'max-h-72 overflow-y-auto',
 }: AttentionListProps & { className?: string; scrollClassName?: string }) {
-  // The mute affordance is only meaningful while the desktop-alert channel is on
-  // (master toggle). When it's off the whole routing layer is moot, so the rows
-  // render exactly as before WARDEN-364 — no bell, no strike-through.
-  const muteEnabled = attentionDesktopAlerts;
-  // Fast membership check for the mute set on each render.
-  const mutedSet = useMemo(() => new Set(mutedAlertKeys), [mutedAlertKeys]);
-  // WARDEN-551: the set of snoozes still ACTIVE (expiry in the future). Computed
-  // each render against a fresh clock so the row's muted visual + bell re-arm the
-  // instant a snooze expires (App's prune effect also clears the stale entry from
-  // state on cadence, so this never lingers past expiry).
-  const snoozedSet = activeSnoozedKeys(snoozedAlertKeys, Date.now());
-  // WARDEN-1043: the per-row mute/snooze prop quad, derived in ONE place. Every
-  // per-agent problem section below spreads this instead of hand-copying the four
-  // props — the shape that produced WARDEN-953's silent no-op (a new section that
-  // simply forgot them) and that invites the subtler bug of reaching for
-  // `snoozedAlertKeys[key] ?? null` directly, which renders an EXPIRED snooze as
-  // active. The derivation itself lives in snooze.ts (unit-tested there, since
-  // web/ has no React test harness); this closure only binds the render-scoped
-  // values. `snoozedSet` is computed once above and reused, so this stays
-  // once-per-render work, not once-per-row.
-  const muteProps = (key: string) => ({
-    ...alertMuteState(key, muteEnabled, mutedSet, snoozedSet, snoozedAlertKeys),
-    muteEnabled,
-    onSetAlertMute,
-  });
-
   // The directed answer (WARDEN-384): the ONE pane a human should go to first,
   // "you're needed HERE, because X" — promoted above the flat rundown so the human
   // doesn't have to scan to find "first." calloutTop is null only when focus exclusion
@@ -220,7 +184,6 @@ export function AttentionList({
                     agent={a}
                     dot="bg-red-500"
                     onClick={() => onOpenChat(key)}
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -240,10 +203,6 @@ export function AttentionList({
                     durationStateLabel="stuck"
                     onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
                     // WARDEN-953: the pane-state sections carry the same per-agent
-                    // mute/snooze bell the health sections do — applySeverityPrefs now
-                    // suppresses these buckets too, so the affordance must be reachable
-                    // (and the snooze state visible) where the agent actually appears.
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -262,7 +221,6 @@ export function AttentionList({
                     enteredAt={a.enteredAt}
                     durationStateLabel="erroring"
                     onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -278,7 +236,6 @@ export function AttentionList({
                     agent={a}
                     dot="bg-yellow-500"
                     onClick={() => onOpenChat(key)}
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -303,8 +260,6 @@ export function AttentionList({
                     replyable
                     snippets={snippets}
                     onReplyResult={onReplyResult}
-                    // WARDEN-953: mute/snooze bell — see the Stuck section above.
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -328,8 +283,6 @@ export function AttentionList({
                     replyable
                     snippets={snippets}
                     onReplyResult={onReplyResult}
-                    // WARDEN-953: mute/snooze bell — see the Stuck section above.
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -350,8 +303,6 @@ export function AttentionList({
                     enteredAt={a.enteredAt}
                     durationStateLabel="matching a watch pattern"
                     onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
-                    // WARDEN-953: mute/snooze bell — see the Stuck section above.
-                    {...muteProps(key)}
                   />
                 );
               })}
@@ -421,10 +372,6 @@ function AgentRow({
   dot,
   onClick,
   detail,
-  muted = false,
-  snoozedUntil = null,
-  muteEnabled = false,
-  onSetAlertMute,
   enteredAt,
   durationStateLabel,
   durationTense = 'ongoing',
@@ -438,17 +385,6 @@ function AgentRow({
   /** The triggering signal (repeating line / matched prompt) for a pane-state row —
    * shown muted under the name so the human sees WHY it needs attention (WARDEN-344). */
   detail?: string | null;
-  /** WARDEN-364 permanent mute. Drives the BellOff icon specifically (the row's
-   * line-through/opacity styling keys off `suppressed` = muted OR snoozed below). */
-  muted?: boolean;
-  /** WARDEN-551 — snooze expiry (ms) for this row, or null. A future timestamp
-   * means the row is snoozed (Clock icon + countdown + "End snooze now"); null
-   * means not snoozed. WARDEN-953: passed by every per-agent section (health AND
-   * pane states), mirroring `muted` — the suppressed set applySeverityPrefs
-   * consults now covers all seven per-agent buckets. */
-  snoozedUntil?: number | null;
-  muteEnabled?: boolean;
-  onSetAlertMute?: (key: string, mode: AlertMuteMode) => void;
   /** WARDEN-587: the epoch-ms this agent entered its current state — drives the live
    * "stuck 2h 14m" duration suffix. Absent on health-bucket rows (Chat carries no
    * stamp) and on a row observed before any stamp landed → no suffix renders. */
@@ -470,17 +406,15 @@ function AgentRow({
   onReplyResult?: (ok: boolean, error?: string) => void;
 }) {
   const label = agent.name || agent.key || agent.id;
-  const muteKey = agent.key || agent.id;
-  const [muteMenuOpen, setMuteMenuOpen] = useState(false);
+  // The row's pane identity — the SAME key onOpenChat deep-links and QuickReply
+  // sends to.
+  const rowKey = agent.key || agent.id;
   // WARDEN-770: the inline reply panel's expand/collapse state. Off by default so the
   // row stays compact; the Reply toggle reveals the QuickReply control below the row.
   // Collapses automatically on a successful send (QuickReply.onDismiss).
   const [replyOpen, setReplyOpen] = useState(false);
-  // Read the clock once per render; the badge/view re-renders on the rollup cadence
-  // and when App's prune effect clears an expired snooze, so this stays current.
+  // Read the clock once per render; the badge/view re-renders on the rollup cadence.
   const now = Date.now();
-  const isSnoozed = snoozedUntil != null && snoozedUntil > now;
-  const remaining = snoozedUntil != null ? formatSnoozeRemaining(snoozedUntil, now) : '';
   // WARDEN-587: the live duration suffix + its supplementary tone + verbose tooltip.
   // formatStateDuration returns '' under a minute (and for an unstamped row), so a
   // freshly-observed row renders no suffix — never a false "0s". The visible text is
@@ -503,9 +437,6 @@ function AgentRow({
       ? `finished ${durationVerbose} ago`
       : `${durationStateLabel ?? 'in this state'} for ${durationVerbose}`
     : '';
-  // Either suppression state mutes the row visually (line-through + dim), matching
-  // the suppression the OS channel applies (WARDEN-551: a snoozed agent shows muted).
-  const suppressed = muted || isSnoozed;
   return (
     <div className="flex flex-col">
       <div className="flex items-stretch gap-0.5 pr-1">
@@ -520,11 +451,11 @@ function AgentRow({
       */}
       <ContextMenu>
         <ContextMenuTrigger asChild>
-      <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground', suppressed && 'opacity-60')}>
+      <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground')}>
         <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dot)} aria-hidden />
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1">
-            <span className={cn('truncate', suppressed && 'line-through')}>{label}</span>
+            <span className="truncate">{label}</span>
             {agent.role && <span className="text-xs text-blue-400 shrink-0">{agent.role}</span>}
             {agent.host && agent.host !== '(local)' && <span className="text-xs text-muted-foreground shrink-0">{agent.host}</span>}
           </span>
@@ -554,8 +485,8 @@ function AgentRow({
           {/* Open mirrors the row click and the Enter/Space keyboard open. */}
           <ContextMenuItem onSelect={onClick}>Open</ContextMenuItem>
           <ContextMenuSeparator />
-          {/* The visible name is `truncate` (and struck through while suppressed) —
-              copy the RAW label, since the styling is irrelevant to the payload. */}
+          {/* The visible name is `truncate` — copy the RAW label, since the
+              styling is irrelevant to the payload. */}
           <ContextMenuItem onSelect={() => copyWithToast(label)}>Copy agent name</ContextMenuItem>
           {/* The headline payload: the triggering signal (repeating terminal line /
               matched watch-pattern prompt) rendered truncated under the name. Mirrors
@@ -599,77 +530,6 @@ function AgentRow({
           <Reply className="size-3.5" />
         </Button>
       )}
-      {/*
-        WARDEN-364 + WARDEN-551 — per-agent mute/snooze on the desktop-alert
-        channel (WARDEN-953: every per-agent section, health AND pane states).
-        The bell now opens a small menu of
-        durations (permanent / 1 hour / until tomorrow) instead of toggling
-        permanent mute in one click, so the human can pick a time-boxed snooze
-        that auto-rearms. While suppressed it shows the state + a one-click resume.
-        stopPropagation on the trigger so tapping the bell never also opens the
-        chat pane. The icon swaps Bell (alerting) ↔ BellOff (permanent) ↔ Clock
-        (snoozed) so the state is glanceable without color alone (WCAG 1.4.1); the
-        menu is a nested Radix Popover layer with aria-haspopup/aria-expanded for
-        screen readers. Uses the library <Button> (variant=ghost size=icon-xs) —
-        WARDEN-68 Rule 1: no raw <button>.
-      */}
-      {muteEnabled && onSetAlertMute && (
-        <Popover open={muteMenuOpen} onOpenChange={setMuteMenuOpen}>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              onClick={(e) => e.stopPropagation()}
-              aria-haspopup="menu"
-              aria-expanded={muteMenuOpen}
-              aria-label={
-                isSnoozed
-                  ? `Snoozed desktop alerts for ${label}${remaining ? ` — resumes in ${remaining}` : ''}`
-                  : muted
-                    ? `Stop muting desktop alerts for ${label}`
-                    : `Mute desktop alerts for ${label}`
-              }
-              title={
-                isSnoozed
-                  ? (remaining ? `Snoozed — resumes in ${remaining}` : 'Snoozed')
-                  : muted
-                    ? 'Unmute desktop alerts for this agent'
-                    : 'Mute desktop alerts for this agent'
-              }
-              className="shrink-0 self-center text-muted-foreground hover:text-foreground"
-            >
-              {isSnoozed ? <Clock className="size-3.5" /> : muted ? <BellOff className="size-3.5" /> : <Bell className="size-3.5" />}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-48 p-1">
-            {isSnoozed && (
-              <div className="px-2 py-1 text-[10px] text-muted-foreground">
-                Snoozed{remaining ? ` — resumes in ${remaining}` : ''}
-              </div>
-            )}
-            {suppressed ? (
-              <MuteMenuRow
-                label={isSnoozed ? 'End snooze now' : 'Resume alerts'}
-                onClick={() => { onSetAlertMute(muteKey, 'off'); setMuteMenuOpen(false); }}
-              />
-            ) : (
-              <>
-                <MuteMenuRow label="Mute permanently" onClick={() => { onSetAlertMute(muteKey, 'permanent'); setMuteMenuOpen(false); }} />
-                {/*
-                  The two time-boxed snooze durations come from the SHARED
-                  SNOOZE_DURATION_OPTIONS (snooze.ts) so the per-row menu and the
-                  bulk SnoozeDialog (WARDEN-581) offer byte-for-byte the same
-                  durations + wording — one snooze vocabulary, two entry points.
-                */}
-                {SNOOZE_DURATION_OPTIONS.map((o) => (
-                  <MuteMenuRow key={o.value} label={o.label} onClick={() => { onSetAlertMute(muteKey, o.value); setMuteMenuOpen(false); }} />
-                ))}
-              </>
-            )}
-          </PopoverContent>
-        </Popover>
-      )}
       </div>
       {/*
         WARDEN-770 — the expanded inline reply control (waiting/blocked rows only).
@@ -682,7 +542,7 @@ function AgentRow({
       */}
       {replyable && replyOpen && (
         <QuickReply
-          targetId={muteKey}
+          targetId={rowKey}
           targetLabel={label}
           snippets={snippets ?? []}
           onReplyResult={onReplyResult}
@@ -690,22 +550,6 @@ function AgentRow({
         />
       )}
     </div>
-  );
-}
-
-// A single full-width option row inside the per-row mute/snooze menu. Mirrors the
-// row styling (ghost, left-aligned, compact) so the menu reads as part of the
-// same attention system. Reuses the library <Button> (WARDEN-68 Rule 1).
-function MuteMenuRow({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      onClick={onClick}
-      className="w-full justify-start h-auto px-2 py-1.5 font-normal text-xs text-foreground"
-    >
-      {label}
-    </Button>
   );
 }
 

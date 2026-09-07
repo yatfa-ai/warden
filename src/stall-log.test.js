@@ -45,7 +45,7 @@ function record(overrides = {}) {
     source: 'event-loop',
     timestamp: new Date().toISOString(),
     lagMs: 4200,
-    attribution: [{ label: 'sweep:attention', overlapMs: 4100, open: true, durationMs: 4300 }],
+    attribution: [{ label: 'sweep:lifecycle', overlapMs: 4100, open: true, durationMs: 4300 }],
     ...overrides,
   };
 }

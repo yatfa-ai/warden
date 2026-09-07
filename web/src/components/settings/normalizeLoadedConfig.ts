@@ -133,7 +133,6 @@ export function normalizeLoadedConfig(rawConfigData: any): ConfigData {
     // backend without these fields stays safely OFF / unconfigured.
     webhookUrl: configData.webhookUrl ?? '',
     webhookEnabled: configData.webhookEnabled ?? false,
-    webhookAlertAttention: configData.webhookAlertAttention ?? true,
     webhookAlertBudget: configData.webhookAlertBudget ?? true,
     webhookAlertDone: configData.webhookAlertDone ?? true,
     // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET

@@ -82,7 +82,6 @@ const DEFAULT_CONFIG: ConfigData = {
   // Webhook push channel (WARDEN-555) — off by default; both routing toggles on.
   webhookUrl: '',
   webhookEnabled: false,
-  webhookAlertAttention: true,
   webhookAlertBudget: true,
   webhookAlertDone: true,
   // WARDEN-540 — empty until the GET /api/config load populates it.

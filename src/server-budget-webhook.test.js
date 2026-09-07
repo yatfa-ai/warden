@@ -70,12 +70,10 @@ before(async () => {
   const wardenDir = path.join(tempHome, '.yatfa-warden');
   fs.mkdirSync(wardenDir, { recursive: true });
   // Enable BOTH the budget AND the webhook up front via the config FILE. No PUT
-  // here ⇒ restartBudgetPoll/restartAttentionPoll never run at import, so NO
-  // setInterval is created and the test drives every sweep itself via tickBudget.
-  // webhookAlertBudget starts FALSE so the gate-isolation test (below) needs no
-  // PUT at all; the lifecycle test flips it on. webhookAlertAttention is FALSE so
-  // a later PUT (which always calls restartAttentionPoll) can never start the 60s
-  // attention sweep — only the budget path is under test here.
+  // here ⇒ restartBudgetPoll never runs at import, so NO setInterval is created
+  // and the test drives every sweep itself via tickBudget. webhookAlertBudget
+  // starts FALSE so the gate-isolation test (below) needs no PUT at all; the
+  // lifecycle test flips it on.
   fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({
     hosts: [],
     tokenBudgetEnabled: true,
@@ -86,7 +84,6 @@ before(async () => {
     webhookUrl: URL,
     webhookSecret: SECRET,
     webhookAlertBudget: false,
-    webhookAlertAttention: false,
   }));
 
   // Start under threshold so the first sweep primes the debounce NON-alerted.

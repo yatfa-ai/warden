@@ -41,7 +41,7 @@ const STALL = (over = {}) => ({
   lagMs: 4200,
   heartbeatMs: 1000,
   thresholdMs: 1000,
-  attribution: [{ label: 'sweep:attention', overlapMs: 4100, open: true, durationMs: 4300 }],
+  attribution: [{ label: 'sweep:lifecycle', overlapMs: 4100, open: true, durationMs: 4300 }],
   ...over,
 });
 

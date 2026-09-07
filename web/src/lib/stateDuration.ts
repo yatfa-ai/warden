@@ -13,8 +13,8 @@
 // state). This module only formats + classifies the per-key enteredAt timestamp that
 // loop now stamps; it adds zero SSH, zero backend, zero new polling.
 //
-// Extracted as PURE functions on purpose (mirrors snooze.ts / whatsNew.ts +
-// their web/*.test.mjs): the duration + languishing math is testable without jsdom,
+// Extracted as PURE functions on purpose (mirrors whatsNew.ts + their
+// web/*.test.mjs): the duration + languishing math is testable without jsdom,
 // and AttentionBadge (the suffix) + useAttentionRollup (the stamp) stay thin call
 // sites. Every pure function takes `now` (ms-since-epoch) as an explicit parameter so
 // tests are deterministic and the call sites read the clock once per cadence.
@@ -51,10 +51,9 @@ export type StateDurationTone = 'fresh' | 'amber' | 'red';
 
 /**
  * A compact relative-duration label for how long an agent has been in its current
- * attention state (WARDEN-587). Direct sibling of `formatSnoozeRemaining` (snooze.ts):
- * same minute granularity (the rollup's coarse ~10s render / 30s poll cadence makes
- * seconds-precision false precision), extended to DAYS (an agent can languish for
- * days) and with the sub-minute window SUPPRESSED.
+ * attention state (WARDEN-587). Minute granularity (the rollup's coarse ~10s render /
+ * 30s poll cadence makes seconds-precision false precision), extended to DAYS (an
+ * agent can languish for days) and with the sub-minute window SUPPRESSED.
  *
  * Why sub-minute is suppressed (returns ''): the FIRST observation of a key stamps
  * `enteredAt = now` as a baseline, so its initial duration is ~0s. Rendering "0s"
@@ -142,8 +141,7 @@ export function languishingTone(enteredAt: number | null | undefined, now: numbe
  * state (`prev`, or null when first observed this session), its CURRENT state (`cur`),
  * whether it already has a stamp, and the clock, return the stamp to record — or `null`
  * to KEEP the existing stamp (no write). Extracted so the stamp-on-transition /
- * reset-on-change rule is unit-tested directly (without a React runner), mirroring how
- * snooze.ts extracted its decision logic.
+ * reset-on-change rule is unit-tested directly (without a React runner).
  *
  *   prev === null (first obs):  no existing stamp → `now` (baseline); existing stamp
  *                               (persisted across restart, or set in a prior poll) →

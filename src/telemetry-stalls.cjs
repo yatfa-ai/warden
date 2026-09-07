@@ -239,12 +239,21 @@ function culpritKey(label, knownSegments) {
 const BARE_LABELS = new Set(['unknown']);
 
 // The SCOPED span labels src/ actually emits, as whole literals. Sourced from
-// the four trace() call sites: the three sweep supervisors (src/server.js —
-// lifecycle / budget / attention), companion.js's pane-delta sweep, and the
-// websocket pane monitor. src/telemetry-stalls-coverage.test.js fails the build
-// if a new literal appears in src/ that this set does not name.
+// the trace() call sites: the resident sweep supervisors (src/server.js —
+// lifecycle / budget), companion.js's pane-delta sweep, and the websocket pane
+// monitor. src/telemetry-stalls-coverage.test.js fails the build if a new
+// literal appears in src/ that this set does not name, AND if this set names one
+// src/ no longer emits.
+//
+// WARDEN-1274 removed `sweep:attention`: the 60s attention webhook sweep
+// (tickAttention + its supervisor) was retired with the rest of the regex-guessed
+// alert machinery, so no call site emits that label any more. It is deliberately
+// NOT kept "just in case" — a stale entry promises a resolution the codebase
+// cannot produce, and the coverage guard fails the build on exactly that drift.
+// A stall attributed to some future attention sweep would fold to the overflow
+// bucket, which is the correct answer for a label src/ does not emit.
 const SCOPED_LABEL_NAMES = new Set([
-  'sweep:lifecycle', 'sweep:budget', 'sweep:attention', 'sweep:pane-delta',
+  'sweep:lifecycle', 'sweep:budget', 'sweep:pane-delta',
   'ws:pane-monitor',
 ]);
 

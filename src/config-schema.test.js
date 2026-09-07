@@ -123,10 +123,10 @@ describe('buildGetResponse — GET derived from the registry', () => {
   it('applies the non-uniform GET resolution rules', () => {
     // !== false → true; === true strict; ?? '' ; typeof-number-or-null.
     const out = buildGetResponse(
-      { webhookAlertAttention: undefined, webhookEnabled: 1, telemetryEndpoint: undefined, llm: {} },
+      { webhookAlertDone: undefined, webhookEnabled: 1, telemetryEndpoint: undefined, llm: {} },
       { companionEnvOverridden: false },
     );
-    assert.strictEqual(out.webhookAlertAttention, true, 'undefined → true via !== false');
+    assert.strictEqual(out.webhookAlertDone, true, 'undefined → true via !== false');
     assert.strictEqual(out.webhookEnabled, false, 'non-true → false via === true');
     assert.strictEqual(out.telemetryEndpoint, '', 'undefined → "" via ?? ""');
     assert.strictEqual(out.llm.maxTokens, null, 'non-number → null');
@@ -306,7 +306,6 @@ describe('resetConfig — restore every backend preference to its default (WARDE
       webhookUrl: 'https://hooks.example/notify',
       webhookEnabled: true,
       webhookSecret: 'sec-WXYZ',
-      webhookAlertAttention: false,
       webhookAlertBudget: false,
       webhookAlertDone: false,
       watchPatterns: [{ id: 'p1', name: 'X', expression: 'x', mode: 'string', enabled: true }],
@@ -382,25 +381,25 @@ describe('resetConfig — restore every backend preference to its default (WARDE
   });
 });
 
-describe('afterSave — the four post-save side-effects (Correction 2)', () => {
+describe('afterSave — the post-save side-effects (Correction 2)', () => {
   // The structural pin: a registry refactor that drops afterSave silently breaks
-  // telemetry/companion/budget/attention. This asserts the pipeline invokes every
-  // injected dep — the HTTP test observes only the two most observable ones
-  // (process.send + companion env) end-to-end.
-  it('invokes all four deps in order with the right arguments', () => {
+  // telemetry/companion/budget. This asserts the pipeline invokes every injected
+  // dep — the HTTP test observes only the two most observable ones (process.send
+  // + companion env) end-to-end. WARDEN-1274: this pipeline had a FOURTH step,
+  // restartAttentionPoll, retired with the server-side attention webhook sweep.
+  it('invokes all three deps in order with the right arguments', () => {
     const calls = [];
     const cfg = { companionTransportEnabled: true, telemetryIncidentsEnabled: true };
     afterSave(cfg, {
       forwardTelemetryConfig: (c) => calls.push(['forwardTelemetryConfig', c === cfg]),
       applyCompanionToggle: (enabled, opts) => calls.push(['applyCompanionToggle', enabled, opts]),
       restartBudgetPoll: () => calls.push(['restartBudgetPoll']),
-      restartAttentionPoll: () => calls.push(['restartAttentionPoll']),
       companionOverridden: false,
     });
     assert.deepStrictEqual(
       calls.map((c) => c[0]),
-      ['forwardTelemetryConfig', 'applyCompanionToggle', 'restartBudgetPoll', 'restartAttentionPoll'],
-      'all four side-effects fire in the declared order',
+      ['forwardTelemetryConfig', 'applyCompanionToggle', 'restartBudgetPoll'],
+      'all three side-effects fire in the declared order',
     );
     // forwardTelemetryConfig received the live cfg (it reads clamped values off it)
     assert.strictEqual(calls[0][1], true, 'forwardTelemetryConfig received cfg');
@@ -417,7 +416,6 @@ describe('afterSave — the four post-save side-effects (Correction 2)', () => {
         forwardTelemetryConfig: () => {},
         applyCompanionToggle: (_e, opts) => { received = opts; },
         restartBudgetPoll: () => {},
-        restartAttentionPoll: () => {},
         companionOverridden: true,
       },
     );

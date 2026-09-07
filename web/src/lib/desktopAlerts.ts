@@ -1,68 +1,37 @@
-// Opt-in OS desktop notification that fires when agents need attention AND the
-// human is away from Warden (WARDEN-259). Consumes the always-on attention rollup
-// from attentionRollup.ts (WARDEN-228) as its trigger.
+// OS desktop notification delivery for the TWO alert channels that rest on an
+// observed fact rather than an inference: the user-authored WATCH ping (a literal
+// the human themselves taught Warden to look for, matched in captured text) and
+// the token-BUDGET breach (a counted number crossing a threshold the human set).
 //
-// This module is the delivery CHANNEL, not the signal: the rollup already exists
-// and is polled by useAttentionRollup. Here we (a) decide WHEN to fire (pure, so
-// it is unit-tested directly), (b) format WHAT to show (pure, likewise testable),
-// and (c) talk to the browser via the renderer-side Web Notifications API — which
-// needs no IPC and works in both the Electron shell and a plain browser host.
+// This module is the delivery CHANNEL, not the signal. Here we (a) decide WHEN to
+// fire (pure, so it is unit-tested directly), (b) format WHAT to show (pure,
+// likewise testable), and (c) talk to the browser via the renderer-side Web
+// Notifications API — which needs no IPC and works in both the Electron shell and
+// a plain browser host.
 //
-// The pure helpers (shouldFireAlert, formatAlertMessage) are the only ones the
-// unit test exercises; requestAlertPermission / fireAttentionNotification touch
-// browser globals (no Notification API in the Node test runner) and are kept
-// defensive so they can never throw inside the 10s poll.
+// WARDEN-1274 — WHAT THIS FILE NO LONGER DOES, and why it must not come back. It
+// also used to own the fleet ATTENTION alert: shouldFireAlert / diffNewAttention /
+// applySeverityPrefs / fireAttentionNotification, fired off the fixed nine-regex
+// pane classifier in src/agentState.js. That classifier GUESSES — `SUMM_ERROR_RE`
+// matches the substring "error", so "✓ 42 tests passed, 0 errors" raised an alert
+// while a real `npm ERR! code ELIFECYCLE` did not. An interruption channel built on
+// a guess trains the human to ignore it, so the whole channel is retired rather
+// than re-tuned. The per-agent mute/snooze silencers went with it (they existed
+// only to quiet it). Do NOT re-add a rollup-diff alert here: the passive badge
+// readout is the surviving surface for that signal, and it interrupts nobody.
 //
-// This module has ONE runtime import — `finalizeRollup` from attentionRollup.ts
-// (WARDEN-1115, which collapsed the three hand-copied rollup-finalize blocks onto one
-// helper). Everything else is `import type`, fully erased at transpile time. That single
-// value import is why desktopAlerts.test.mjs must transpile attentionRollup.ts into the
-// SAME tmpdir and rewrite the `@/lib/attentionRollup` specifier — the emitted module is
-// no longer import-free, so a standalone import would fail to resolve at load. The
-// sibling is safe to transpile alongside: attentionRollup.ts has zero runtime imports of
-// its own, so the chain bottoms out there.
-import { finalizeRollup, type AttentionRollup } from '@/lib/attentionRollup';
+// The pure helpers are the ones the unit test exercises; requestAlertPermission /
+// fireWatchNotification / fireBudgetNotification touch browser globals (no
+// Notification API in the Node test runner) and are kept defensive so they can
+// never throw inside a poll.
+//
+// This module has NO runtime imports — everything below is `import type`, fully
+// erased at transpile time — so web/desktopAlerts.test.mjs can transpile and load
+// it standalone. (It briefly had one, `finalizeRollup`, used solely by
+// applySeverityPrefs; that went with the alert chain.) Keep it that way: a value
+// import here breaks the standalone loader.
 import type { AgentStateRow } from '@/lib/types';
 import type { WatchReason } from '@/lib/chatWatch';
-
-// Per-severity routing for the desktop-alert channel (WARDEN-364). These layer ON
-// TOP of the master `attentionDesktopAlerts` boolean: the master gates the whole
-// channel; these route WHICH of the four legacy attention buckets are allowed to
-// escalate to an OS notification. Each maps 1:1 to a rollup bucket that existed
-// before WARDEN-344's pane-state expansion:
-//   alertCritical  → critical-health agents
-//   alertWarning   → warning-health agents
-//   alertDirective → pending directives (aggregate count)
-//   alertError     → recent errors (aggregate count)
-// The WARDEN-344 pane-state buckets (stuck/erroring/waiting/blocked) are NOT gated
-// by these four SEVERITY TOGGLES — they pass through that half of
-// `applySeverityPrefs` unchanged so they still escalate to the desktop channel
-// exactly as WARDEN-344 intends; a pane state is silenced fleet-wide via
-// WARDEN-344's own `enabledStates` toggle (rollup-build level, badge + desktop), or
-// PER AGENT via the mute/snooze set (WARDEN-953 — see applySeverityPrefs below).
-// Defaults all-`true` so the routing layer is behavior-preserving: master on +
-// every bucket on + no mutes → alerts fire bit-for-bit as before WARDEN-364.
-export interface AttentionSeverityPrefs {
-  alertCritical: boolean;
-  alertWarning: boolean;
-  alertDirective: boolean;
-  alertError: boolean;
-}
-
-export const ATTENTION_SEVERITY_DEFAULTS: AttentionSeverityPrefs = {
-  alertCritical: true,
-  alertWarning: true,
-  alertDirective: true,
-  alertError: true,
-};
-
-// The agent identity key for desktop-alert routing — the SAME `a.key || a.id` the
-// AttentionBadge rows key on. Centralized so the per-agent mute set and the row
-// renderer agree on identity (a stale/blank key falls back to id, matching the
-// badge; an agent with neither is untouchable by mute and simply routes normally).
-export function alertAgentKey(a: { key?: string; id?: string }): string {
-  return a.key || a.id || '';
-}
 
 // Whether the Web Notifications API exists at all. Some embedded webviews lack
 // `Notification` entirely; everywhere else it is a global. Guarded (not
@@ -89,154 +58,21 @@ export async function requestAlertPermission(): Promise<boolean> {
   }
 }
 
-/**
- * Pure: should a desktop alert fire for this rollup transition? Returns `true`
- * ONLY on a genuine total increase (a new critical/warning agent, or a new
- * directive/error entering the recent window) — never on a decrease (recovery)
- * or no-change (so a persistent condition never spams). Either input missing
- * (e.g. the very first poll) does not fire: the "While you were away" banner
- * already covers the startup case. Pure so it is unit-tested directly.
- */
-export function shouldFireAlert(
-  prev: AttentionRollup | null,
-  next: AttentionRollup | null,
-): boolean {
-  if (!prev || !next) return false;
-  return next.total > prev.total;
-}
-
-/**
- * Pure: project a rollup through the desktop-alert severity prefs + per-agent
- * mute set into a ROUTABLE sub-rollup — the view the alert effect actually
- * decides on and formats (WARDEN-364).
- *
- *  - A bucket whose severity toggle is OFF is zeroed (its agents/counts survive
- *    in the raw rollup / in-app badge; only the desktop channel drops them).
- *  - A muted/snoozed agent is dropped from EVERY per-agent bucket: the
- *    critical/warning HEALTH buckets AND the WARDEN-344/540 pane-state buckets
- *    (stuck/erroring/waiting/blocked/custom) — WARDEN-953. All seven carry a
- *    per-agent identity (`alertAgentKey`), so the suppression the human asked for
- *    applies wherever the agent surfaces. Before WARDEN-953 the pane states passed
- *    through unfiltered, so muting/snoozing a chronically-stuck agent was a silent
- *    no-op — the very case SnoozeDialog advertises ("this host is flapping; quiet
- *    it for an hour"). directives/errors are aggregate windowed counts with NO
- *    per-agent identity, so per-agent mute still cannot apply to them — only the
- *    severity toggle does.
- *  - `total` is recomputed over the survivors so `shouldFireAlert`'s
- *    "fire on total increase" semantics compare apples to apples on the filtered
- *    view (an increase in ONLY a disabled/muted bucket leaves the routable total
- *    unchanged → no fire).
- *
- * Pure + dependency-free (only reads the rollup shape) so it is unit-tested
- * directly alongside `shouldFireAlert` / `formatAlertMessage`. With all toggles
- * on + an empty mute set the output is content-identical to the input (same
- * lengths, same total) → behavior-preserving.
- */
-export function applySeverityPrefs(
-  rollup: AttentionRollup,
-  prefs: AttentionSeverityPrefs,
-  mutedKeys: ReadonlySet<string> = new Set(),
-): AttentionRollup {
-  const critical = prefs.alertCritical
-    ? rollup.critical.filter((a) => !mutedKeys.has(alertAgentKey(a)))
-    : [];
-  const warning = prefs.alertWarning
-    ? rollup.warning.filter((a) => !mutedKeys.has(alertAgentKey(a)))
-    : [];
-  // The WARDEN-344 pane-state buckets (stuck/erroring/waiting/blocked) are not gated by
-  // the four SEVERITY TOGGLES above — those map 1:1 to the legacy health/directive/error
-  // buckets WARDEN-364 routes, and a pane state is silenced FLEET-WIDE via WARDEN-344's
-  // `enabledStates` (which drops it at the rollup-build level, so it never reaches here
-  // with content). But they ARE filtered by the per-agent suppressed set (WARDEN-953):
-  // each carries the same `alertAgentKey` identity the health buckets do, so a muted or
-  // snoozed agent is dropped here exactly as it is from critical/warning. Without this,
-  // per-agent mute/snooze was a silent no-op for the five pane-state buckets — the UI
-  // reported success while the next pane-state increase alerted anyway.
-  const stuck = rollup.stuck.filter((a) => !mutedKeys.has(alertAgentKey(a)));
-  const erroring = rollup.erroring.filter((a) => !mutedKeys.has(alertAgentKey(a)));
-  const waiting = rollup.waiting.filter((a) => !mutedKeys.has(alertAgentKey(a)));
-  const blocked = rollup.blocked.filter((a) => !mutedKeys.has(alertAgentKey(a)));
-  // WARDEN-540: custom-pattern matches are likewise ungated by the severity toggles —
-  // they are silenced fleet-wide via the per-pattern `enabled` flag (which prevents the
-  // match at the source) — and likewise suppressed per agent by the WARDEN-953 filter.
-  const custom = rollup.custom.filter((a) => !mutedKeys.has(alertAgentKey(a)));
-  // WARDEN-575: the positive "finished" bucket passes through UNCHANGED — it never
-  // participated in the problem `total` and is silenced via enabledStates.done (at
-  // rollup-build), not a severity toggle here. Carried through (defaulting to [] for
-  // a partial rollup) so the routable sub-rollup satisfies the AttentionRollup shape.
-  const done = rollup.done ?? [];
-  const directives = prefs.alertDirective ? rollup.directives : 0;
-  const errors = prefs.alertError ? rollup.errors : 0;
-  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
-}
-
-/**
- * Pure: build the notification title + body from the rollup buckets. Kept pure
- * (separate from the browser-touching `new Notification` call) so the wording is
- * unit-tested directly. "items" (not "agents") because the total includes
- * directives + errors, not just agents — matches the in-app AttentionBadge's own
- * "N items need attention" wording. The body lists only the non-zero buckets.
- */
-export function formatAlertMessage(rollup: AttentionRollup): { title: string; body: string } {
-  const { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total } = rollup;
-  const plural = (n: number, noun: string) => `${n} ${noun}${n !== 1 ? 's' : ''}`;
-  const parts: string[] = [];
-  // Red-tone buckets first (critical + the red pane states stuck/erroring), then
-  // amber (warning + the amber pane states waiting/blocked), then event counts. Each
-  // label reads as a bare noun (no plural-s); directives/errors pluralize. Only the
-  // non-zero buckets are listed. (WARDEN-344: stuck/erroring/waiting/blocked added.
-  // WARDEN-540: custom added — it counts toward `total`, so it must be listed for
-  // the body to agree with the title's count.)
-  if (critical.length > 0) parts.push(`${critical.length} critical`);
-  if (stuck.length > 0) parts.push(`${stuck.length} stuck`);
-  if (erroring.length > 0) parts.push(`${erroring.length} erroring`);
-  if (warning.length > 0) parts.push(`${warning.length} warning`);
-  if (waiting.length > 0) parts.push(`${waiting.length} waiting`);
-  if (blocked.length > 0) parts.push(`${blocked.length} blocked`);
-  if (custom.length > 0) parts.push(plural(custom.length, 'watch pattern'));
-  if (directives > 0) parts.push(plural(directives, 'directive'));
-  if (errors > 0) parts.push(plural(errors, 'error'));
-  const title = `Warden: ${total} ${total === 1 ? 'item needs' : 'items need'} attention`;
-  const body = parts.length > 0 ? parts.join(' · ') : title;
-  return { title, body };
-}
-
-/**
- * Show the attention desktop notification. No-op where the API is unsupported or
- * permission is not granted (e.g. the human opted in but the OS prompt is still
- * pending/denied). Uses a stable `tag` so a rapid sequence of increases replaces
- * the prior notification instead of stacking (a guardrail against notification
- * spam on a fast-moving incident). Clicking focuses/raises the Warden window.
- * Never throws — some embedded webviews reject `new Notification`.
- */
-export function fireAttentionNotification(rollup: AttentionRollup): void {
-  if (!notificationsSupported()) return;
-  if (Notification.permission !== 'granted') return;
-  try {
-    const { title, body } = formatAlertMessage(rollup);
-    const n = new Notification(title, { body, tag: 'warden-attention' });
-    n.onclick = () => {
-      window.focus();
-      n.close();
-    };
-  } catch {
-    // A construction failure (e.g. a restrictive webview) must never crash the
-    // 10s poll; the badge still covers the in-app case.
-  }
-}
-
 // --- Per-chat "watch" ping (WARDEN-378) -------------------------------------
 //
-// The targeted, reason-specific complement to the fleet-wide fireAttentionNotification
-// above. Where the fleet alert says "N items need attention" (lumped, count-based),
-// this fires ONCE per watched chat that newly needs the human and NAMES the agent +
+// The targeted, reason-specific ping for a chat the human explicitly opted to WATCH:
+// it fires ONCE per watched chat that newly needs the human and NAMES the agent +
 // quotes the concrete triggering signal. The transition detection (which chat, which
 // reason, fire-once) lives in chatWatch.ts (pure, unit-tested); this module is only
-// the formatting + browser delivery channel — the same discipline as the fleet alert.
+// the formatting + browser delivery channel.
+//
+// WARDEN-1274 — why this survived the alert retirement while the fleet channel did
+// not: a watch pattern is a literal the USER authored, matched against text Warden
+// actually captured. Finding it is an observed fact. The retired fleet alert inferred
+// a state from a fixed regex ladder nobody asked for, which is a guess.
 //
 // `import type { WatchReason }` is erased at transpile, so it adds nothing to this
-// module's runtime imports — which are exactly one (finalizeRollup, see the file
-// header), the one desktopAlerts.test.mjs's loader resolves by transpiling the sibling.
+// module's runtime imports — which are now zero (see the file header).
 
 // Reason → human phrasing for the watch body. Conveys the concrete "why" so the
 // human knows what kind of attention the chat needs, not just that it needs some.
@@ -284,7 +120,7 @@ const WATCH_REASON_LABEL: Record<WatchReason, string> = {
  * where the ping is the only signal. Identity is the SAME `row.key ?? row.id`
  * space the watch subsystem keys on (`indexByWatchKey`) and the ping deep-links
  * to, so the comparison is apples-to-apples. Pure + dependency-free so it is
- * unit-tested directly alongside `shouldFireAlert`. `visibilityState` is the live
+ * unit-tested directly. `visibilityState` is the live
  * `document.visibilityState` the caller passes in (kept out of the module so the
  * helper stays pure + dependency-free).
  */
@@ -347,11 +183,9 @@ export function watchStateLabel(reason: WatchReason, signal?: string | null): st
 
 /**
  * Pure: the severity TONE for a watch reason's crafted in-app toast (WARDEN-530).
- * Sibling of the fleet's per-entrant `tone` split (critical/warning — see
- * diffNewAttention), extended with a THIRD tone for the watch-only `completed` reason:
- * a POSITIVE state ("finished a task") the fleet's red/amber split has no analog for.
- * Mirrors the badge's own severity split for the broken/slowing reasons and adds
- * success (green) for completed:
+ * Mirrors the badge's own red/amber severity split for the broken/slowing reasons
+ * and adds a THIRD tone, success (green), for the watch-only `completed` reason —
+ * a POSITIVE state ("finished a task") a red/amber split has no analog for:
  *   - erroring / stuck → 'critical'  (broken agent — red)
  *   - waiting / blocked → 'warning'  (needs your input / mild — amber)
  *   - completed        → 'success'   (positive — green)
@@ -366,9 +200,9 @@ export function watchStateLabel(reason: WatchReason, signal?: string | null): st
  * channel already fires it (this is parity with the existing channel, not new noise), and
  * a green "finished a task" reads as crafted signal (WARDEN-68), not an alarm. Extracted
  * PURE + dependency-free so the reason→tone mapping — incl. the completed→success call —
- * is unit-tested directly (same discipline as formatInAppEntry / formatWatchMessage).
- * Returns 'critical' (not 'error') so it parallels the fleet's tone vocabulary; the
- * delivery side maps 'critical' → sonner's `error` variant (see fireWatchInApp).
+ * is unit-tested directly (same discipline as formatWatchMessage). Returns 'critical'
+ * (not 'error') so the badge's severity vocabulary is shared; the delivery side maps
+ * 'critical' → sonner's `error` variant (see fireWatchInApp).
  */
 export function watchReasonTone(reason: WatchReason): 'critical' | 'warning' | 'success' {
   if (reason === 'completed') return 'success';
@@ -378,13 +212,12 @@ export function watchReasonTone(reason: WatchReason): 'critical' | 'warning' | '
 
 /**
  * Pure: format a watched-chat alert into the crafted in-app sonner toast's title +
- * description (WARDEN-530). Sibling of formatInAppEntry (the fleet's in-app formatter,
- * WARDEN-402) for the per-chat watch channel: the agent's NAME leads as the title
- * (WHICH chat needs you) and the reason — quoting the triggering signal verbatim when
- * present — is the description (WHY), so the at-Warden ping is crafted and reason-
- * specific rather than the lumped "Warden: <label>" title the OS toast carries. Pure so
- * the wording is unit-tested directly (mirrors formatInAppEntry / formatWatchMessage's
- * testability); the sonner `toast(...)` delivery itself lives in useAttentionRollup.ts.
+ * description (WARDEN-530). The agent's NAME leads as the title (WHICH chat needs you)
+ * and the reason — quoting the triggering signal verbatim when present — is the
+ * description (WHY), so the at-Warden ping is crafted and reason-specific rather than
+ * a lumped count. Pure so
+ * the wording is unit-tested directly (mirrors formatWatchMessage's testability); the
+ * sonner `toast(...)` delivery itself lives in useAttentionRollup.ts.
  */
 export function formatWatchInApp(row: AgentStateRow, reason: WatchReason): { title: string; description?: string } {
   const name = row.name || row.key || row.id;
@@ -395,7 +228,7 @@ export function formatWatchInApp(row: AgentStateRow, reason: WatchReason): { tit
 
 /**
  * Show the per-chat watch desktop notification (WARDEN-378). Sibling of
- * fireAttentionNotification: same Web Notifications channel + the same
+ * fireBudgetNotification: same Web Notifications channel + the same
  * `notificationsSupported` / permission guards. Uses a DISTINCT `tag` per chat key
  * (`warden-watch:<key>`) so two watched chats never replace each other's ping, while
  * a repeat transition on the SAME chat replaces its prior ping (no stacking).
@@ -404,8 +237,8 @@ export function formatWatchInApp(row: AgentStateRow, reason: WatchReason): { tit
  * callback (reuses App's openChat), so a click lands the human straight on the chat
  * that needs them. Never throws — some embedded webviews reject `new Notification`.
  *
- * Deliberately NOT gated on document visibility ITSELF (unlike fireAttentionNotification):
- * the watch is opt-in per chat, so suppressing while Warden is visible would lose the
+ * Deliberately NOT gated on document visibility ITSELF: the watch is opt-in per
+ * chat, so suppressing while Warden is visible would lose the
  * signal entirely. The near-zero-false-signal bar is met by the transition detector
  * (fires once on entering a needs-you state, never on persistent state), not by a
  * visibility filter. WARDEN-530 adds the crafted in-app sibling fireWatchInApp for the
@@ -448,352 +281,23 @@ export function fireWatchNotification(row: AgentStateRow, reason: WatchReason, o
   }
 }
 
-// --- In-app attention ping (WARDEN-402) --------------------------------------
-//
-// The crafted, themed IN-APP complement to fireAttentionNotification above. Where
-// the OS toast says only "N items need attention" (lumped, count-based) AND is
-// hard-gated to fire ONLY while Warden is unfocused, this fills the at-Warden gap:
-// while the human IS looking at Warden, a watched chat / agent that NEWLY needs
-// them gets a crafted sonner toast — themed (WARDEN-68), transient (auto-dismiss),
-// reason-SPECIFIC, and one-click deep-linkable to the pane — instead of only the
-// header badge count silently ticking up.
-//
-// shouldFireAlert (above) decides WHETHER to ping by comparing only totals, so it
-// cannot say WHICH agent/bucket is newly needy. diffNewAttention fills that gap for
-// the in-app path: it diffs the six per-agent array buckets by identity and returns
-// the entrants present in `next` but not `prev`, each carrying its name + concrete
-// reason (+ signal for pane states). The aggregate count buckets (directives/errors)
-// have no per-agent identity, so a genuine increase there surfaces as a single
-// labeled summary entry with no deep-link.
-//
-// As with the fleet + watch channels above, the PURE pieces (diffNewAttention,
-// formatInAppEntry) live here — import-free, unit-tested directly — while the
-// sonner `toast(...)` delivery (which imports the runtime 'sonner' module) lives in
-// useAttentionRollup.ts alongside the visibility branch that calls it. Mirrors the
-// "pure decision/format here, browser delivery in the hook" discipline this file
-// already follows for fireAttentionNotification.
-
-/**
- * A single newly-needy item the in-app toast surfaces (WARDEN-402). Where the OS
- * aggregate toast says only "N items need attention", this carries the SPECIFIC
- * entrant — its name, the concrete reason (bucket label, plus the signal for pane
- * states), the deep-link key, and a severity tone — so the at-Warden ping is
- * crafted and reason-specific, not lumped.
- *
- * `key` is '' for the aggregate directives/errors summary entries (no per-agent
- * identity → no deep-link); the formatter renders those as a bare-reason title.
- */
-export interface NewAttentionEntry {
-  /** Deep-link key (a.key || a.id) for named agents; '' for aggregate count entries. */
-  key: string;
-  /** Display name for named agents (a.name || key); '' for aggregate entries. */
-  name: string;
-  /** Human-readable reason — the bucket label, e.g. "Stuck (repeating output)". */
-  reason: string;
-  /** The triggering signal line (pane states only); omitted when the row has none. */
-  signal?: string;
-  /** Severity tone for the toast: red (broken) vs amber (warning/waiting). */
-  tone: 'critical' | 'warning';
-}
-
-// Reason labels per bucket (WARDEN-402). Phrased to match the in-app badge's own
-// section language + the watch ping's wording so the product speaks with one voice:
-// the pane-state reasons read as the action the human must take; the health reasons
-// read as the bucket label (a Chat has no `signal` field, so the label IS the reason).
-const INAPP_REASON: Record<'critical' | 'warning' | 'stuck' | 'erroring' | 'waiting' | 'blocked' | 'custom', string> = {
-  critical: 'Critical — no recent activity',
-  warning: 'Warning — slowing down',
-  stuck: 'Stuck (repeating output)',
-  erroring: 'Erroring',
-  waiting: 'Waiting for your input',
-  blocked: 'Blocked on a dependency',
-  custom: 'Matched a watch pattern',
-};
-
-// Minimal structural shape diffNewAttention reads off either a health Chat or a
-// pane-state AgentStateRow. Both satisfy it (a Chat simply omits the optional
-// `signal`), so one helper handles all six array buckets uniformly.
-type NamedAttentionItem = { id?: string; key?: string; name?: string; signal?: string | null };
-
-/**
- * Pure: the NEWLY-needy items present in `next` but absent from `prev` (WARDEN-402).
- *
- * shouldFireAlert decides WHETHER to ping by comparing only totals, so it cannot
- * say WHICH agent/bucket is newly needy. This diffs the six per-agent array buckets
- * (critical/warning/stuck/erroring/waiting/blocked) by identity key and returns
- * only the entrants present in `next` but not `prev`, each carrying its name +
- * concrete reason (+ signal for pane states) + deep-link key + severity tone.
- *
- *  - Identity is the SAME `a.key || a.id` the badge rows + alertAgentKey use, so an
- *    agent MOVING bucket (e.g. waiting → erroring) is NOT a new entrant (same key
- *    in both) and does not surface — only a genuinely NEW key does.
- *  - Net-zero churn (one agent recovers while another newly errors) surfaces ONLY
- *    the newly-needy key, never the recovering one (its key is absent from `next`).
- *  - One entry PER KEY: an agent that newly enters two buckets at once (e.g.
- *    critical-health AND erroring) surfaces once, in severity order — one ping per
- *    agent, never two toasts for one chat (the noise the roadmap rejects). The
- *    badge remains the exhaustive list; this is the transient ping.
- *  - The aggregate count buckets (directives/errors) carry no per-agent identity,
- *    so a genuine increase there surfaces as a single labeled summary entry
- *    (`key: ''`, no deep-link) — the Activity tab is its resolution path. Their
- *    delta is clamped at 0 so a DECREASE (recovery) never produces a phantom entry.
- *  - Entries are returned in severity order (red buckets first, then amber),
- *    mirroring the badge's own section order, so a burst reads most-urgent-first.
- *
- * Operates on the ROUTABLE sub-rollup (severity prefs + per-agent mute applied) the
- * alert effect passes in, so a muted agent — filtered out of both prev and next —
- * never surfaces here, matching the OS-toast channel. Pure + dependency-free (reads
- * only the rollup shape) so it is unit-tested directly alongside shouldFireAlert.
- */
-export function diffNewAttention(
-  prev: AttentionRollup | null,
-  next: AttentionRollup | null,
-): NewAttentionEntry[] {
-  if (!prev || !next) return [];
-  // Every key present in ANY of prev's six array buckets is "already known" → not new.
-  const prevKeys = new Set<string>();
-  for (const a of prev.critical) prevKeys.add(alertAgentKey(a));
-  for (const a of prev.warning) prevKeys.add(alertAgentKey(a));
-  for (const a of prev.stuck) prevKeys.add(alertAgentKey(a));
-  for (const a of prev.erroring) prevKeys.add(alertAgentKey(a));
-  for (const a of prev.waiting) prevKeys.add(alertAgentKey(a));
-  for (const a of prev.blocked) prevKeys.add(alertAgentKey(a));
-  for (const a of prev.custom) prevKeys.add(alertAgentKey(a));
-
-  const entries: NewAttentionEntry[] = [];
-  const seen = new Set<string>(); // one entry per key: a key newly in two buckets surfaces once
-  const addNamed = (a: NamedAttentionItem, reason: string, tone: 'critical' | 'warning'): void => {
-    const key = alertAgentKey(a);
-    // A blank key (neither key nor id) can't be deep-linked and can't be tracked
-    // across polls, so it can never be a meaningful "new" entrant — skip it rather
-    // than surface an un-actionable row.
-    if (!key) return;
-    if (prevKeys.has(key) || seen.has(key)) return;
-    seen.add(key);
-    entries.push({ key, name: a.name || key, reason, signal: a.signal || undefined, tone });
-  };
-
-  // Red tone first (critical health, then stuck/erroring pane states) — badge order.
-  for (const a of next.critical) addNamed(a, INAPP_REASON.critical, 'critical');
-  for (const a of next.stuck) addNamed(a, INAPP_REASON.stuck, 'critical');
-  for (const a of next.erroring) addNamed(a, INAPP_REASON.erroring, 'critical');
-  // Amber tone (warning health, then waiting/blocked pane states).
-  for (const a of next.warning) addNamed(a, INAPP_REASON.warning, 'warning');
-  for (const a of next.waiting) addNamed(a, INAPP_REASON.waiting, 'warning');
-  for (const a of next.blocked) addNamed(a, INAPP_REASON.blocked, 'warning');
-  // WARDEN-540: a newly-matching watch pattern. Inlined (not via addNamed) so the
-  // entrant's signal is the MATCHING line (a.customMatch.line), not classifyPane's
-  // a.signal — the match is what the human asked to be told about.
-  for (const a of next.custom) {
-    const key = alertAgentKey(a);
-    if (!key || prevKeys.has(key) || seen.has(key)) continue;
-    seen.add(key);
-    entries.push({ key, name: a.name || key, reason: INAPP_REASON.custom, signal: a.customMatch?.line || undefined, tone: 'warning' });
-  }
-
-  // Aggregate count deltas: no per-agent identity → a labeled summary entry, no
-  // deep-link. Clamped at 0 so a recovery (count down) never invents an entry; the
-  // increase-only shouldFireAlert gate already guaranteed a net rise somewhere, but
-  // this stays correct standalone if ever called outside that gate.
-  const newDirectives = Math.max(0, (next.directives ?? 0) - (prev.directives ?? 0));
-  const newErrors = Math.max(0, (next.errors ?? 0) - (prev.errors ?? 0));
-  if (newDirectives > 0) {
-    entries.push({ key: '', name: '', reason: `${newDirectives} pending directive${newDirectives !== 1 ? 's' : ''}`, tone: 'warning' });
-  }
-  if (newErrors > 0) {
-    entries.push({ key: '', name: '', reason: `${newErrors} recent error${newErrors !== 1 ? 's' : ''}`, tone: 'critical' });
-  }
-  return entries;
-}
-
-/**
- * Pure: format a diffed entrant into the sonner toast's title + description
- * (WARDEN-402). Sibling of formatAlertMessage / formatWatchMessage for the in-app
- * channel: kept pure (separate from the `toast(...)` call) so the wording is
- * unit-tested directly.
- *
- * A NAMED entrant leads with its name as the title (which agent) and carries the
- * concrete reason — plus, when the row has a `signal`, quotes it verbatim — as the
- * description (why it needs you). An AGGREGATE entrant (directives/errors delta, no
- * identity) renders its reason as the title with no description.
- */
-export function formatInAppEntry(entry: NewAttentionEntry): { title: string; description?: string } {
-  if (!entry.name) return { title: entry.reason };
-  const description = entry.signal ? `${entry.reason} — '${entry.signal}'` : entry.reason;
-  return { title: entry.name, description };
-}
-
-/**
- * Pure: drop the in-app ping entrant for the pane the human is ALREADY focused on
- * (WARDEN-482). The live at-Warden attention ping (fireAttentionInApp) fires a toast
- * per genuinely-new entrant — but the entrant whose `key === focusedPaneKey` is the
- * pane the human is staring at, and pinging it is precisely the roadmap's named
- * product-killer ("a ping that fires when nothing's needed … it trains the human to
- * ignore it"). This is the symmetric focus-gate to shouldFireWatch (WARDEN-421/426)
- * which closed the same "not-after" trust bar for Job #1's watch ping.
- *
- *  - `focusedPaneKey == null` (no focus context) → nothing is dropped; every entrant
- *    toasts. This is the only path that matters because fireAttentionInApp runs solely
- *    on the VISIBLE branch, which is exactly when focus is meaningful.
- *  - Aggregate entrants (directives/errors deltas) carry `key: ''` — which never
- *    equals a real focused pane key (the key is derived `a.key || a.id`, always
- *    non-empty) — so they ALWAYS survive and still toast. They name no single pane,
- *    so they are never "the pane the human is reading."
- *  - Only the ONE named entrant matching the focused pane is removed; every other
- *    newly-needy pane still pings (focus-gating is per-pane, never a blanket mute).
- *
- * Applied here — as a pure, import-free filter on the entrant list — rather than
- * inlined in fireAttentionInApp so it stays unit-testable directly: the `toast(...)`
- * delivery lives in useAttentionRollup.ts (it imports 'sonner' + React + the `@/`
- * alias, so it cannot be loaded standalone under the OXC test transform — exactly
- * why fireAttentionNotification's delivery is untested too). Mirrors the purity
- * discipline this file already keeps for shouldFireAlert / diffNewAttention.
- */
-export function excludeFocusedPane(
-  entries: NewAttentionEntry[],
-  focusedPaneKey?: string | null,
-): NewAttentionEntry[] {
-  if (focusedPaneKey == null) return entries;
-  // Drop ONLY a NAMED entrant (key set) whose key is the focused pane. The `e.key &&`
-  // guard makes aggregate entrants (key: '') ALWAYS survive — faithful to "they are not
-  // the pane the human is reading" — even in the unreachable `focusedPaneKey === ''`
-  // case (App derives the key as `a.key || a.id || null`, so it is never '').
-  return entries.filter((e) => !(e.key && e.key === focusedPaneKey));
-}
-
-// --- Fleet problem-state alert flap cooldown (WARDEN-891) ---------------------
-//
-// The fleet problem-state alert (useAttentionRollup's increase-only effect) is the THIRD
-// attention channel, and — until WARDEN-891 — the only one WITHOUT the per-key flap
-// cooldown its two siblings already had:
-//  - Watch ping            (WARDEN-452): applyWatchCooldown (chatWatch.ts)        — WATCH_PING_COOLDOWN_MS
-//  - Fleet DONE ping       (WARDEN-575): DONE_PING_COOLDOWN_MS (useAttentionRollup) — inline per-key gate
-//  - Fleet PROBLEM-state   (WARDEN-891): applyFleetAttentionCooldown (here)        — reuses WATCH_PING_COOLDOWN_MS
-// Without it, a flapping UNWATCHED agent (erroring → active → erroring across polls) re-fires
-// the OS desktop toast + the in-app sonner toast on EVERY erroring→active→erroring re-increase
-// — the exact crying-wolf spam the Observer roadmap names as the product-killer. The stable OS
-// `tag` ('warden-attention') / sonner `id` ('warden-attention:<key>') only collapses a
-// STILL-DISPLAYED notification; the sonner toast duration (6000ms) is far shorter than the ~60s
-// flap period (two ~30s polls), so each re-fire is a fresh alert. This collapses a flapping key
-// to ONE alert per episode window (escalations override + reset), so a flapping agent reads
-// identically whether watched, merely open, or hidden/unwatched.
-
-/**
- * The last fleet problem-state alert that fired for a key — the cooldown's per-key tracker
- * (WARDEN-891). Sibling of chatWatch's WatchLastFired + useAttentionRollup's doneLastFiredRef:
- * a {key → entry} map the caller stashes in a ref and advances each fire, so a flapping agent
- * re-fires ONE alert per episode window, not one per re-increase once the prior toast is gone.
- *
- * `tone` (not a full reason vocabulary) is all the escalation detector needs: a fleet in-app
- * entrant (NewAttentionEntry) carries only a critical/warning severity, and an escalation IS a
- * warning→critical flip (e.g. waiting→erroring) — lower priority number = more urgent, mirroring
- * applyWatchCooldown's WATCH_REASON_PRIORITY direction.
- */
-export interface FleetLastFired {
-  /** The severity tone that last fired — to detect a higher-urgency escalation since. */
-  tone: 'critical' | 'warning';
-  /** Epoch-ms the last fire happened — the anchor the cooldown window is measured from. */
-  firedAt: number;
-}
-
-/** Per-key last-fired map: { key → { tone, firedAt } }. */
-export type FleetLastFiredMap = Record<string, FleetLastFired>;
-
-// Severity urgency for the fleet cooldown's escalation rule (WARDEN-891). Mirrors
-// applyWatchCooldown's WATCH_REASON_PRIORITY direction: a LOWER number = MORE urgent, so an
-// escalation (warning→critical) reads as priority[tone] < priority[last.tone]. Only the two
-// tones a NewAttentionEntry carries; there is no third — the positive `success` tone is
-// watch-only (watchReasonTone) and never reaches the fleet problem-state alert.
-const FLEET_TONE_PRIORITY: Record<'critical' | 'warning', number> = {
-  critical: 0,
-  warning: 1,
-};
-
-/**
- * Pure: gate the fleet problem-state alert's newly-needy entrants (diffNewAttention's output)
- * through a per-key cooldown so a flapping agent produces ONE alert per episode window —
- * escalations override + reset (WARDEN-891). The fleet sibling of applyWatchCooldown
- * (chatWatch.ts, WARDEN-452) + the done ping's inline DONE_PING_COOLDOWN_MS gate (WARDEN-575),
- * closing the asymmetry where a flapping UNWATCHED agent re-fired this channel on every
- * recover→re-enter.
- *
- * Gate rule (lower FLEET_TONE_PRIORITY number = MORE urgent — mind the direction, mirroring
- * applyWatchCooldown):
- *  - An AGGREGATE entrant (`key: ''` — directives/errors count delta, no per-agent identity) →
- *    always FIRE, unchanged. A count rise is not a flap, and these have no per-key identity to
- *    anchor; they stay on the existing increase-only shouldFireAlert gate and never enter the map.
- *  - No prior fire for the key → FIRE; anchor the window at `now`.
- *  - A HIGHER-URGENCY escalation (priority[tone] < priority[last.tone], e.g. waiting→erroring) →
- *    FIRE immediately AND reset the anchor to `now`. A genuinely worse state is never a false
- *    negative.
- *  - Same-or-lower urgency (priority[tone] >= priority[last.tone]) WITHIN the window → SUPPRESS:
- *    a re-entry into the same need-episode is the flap noise this collapses. The anchor is NOT
- *    advanced, so the window stays measured from the last ACTUAL fire — a continuously-flapping
- *    key re-alerts once the window elapses (a new episode), never silenced indefinitely.
- *  - Same-or-lower urgency AFTER the window → FIRE; re-anchor at `now`.
- *
- * Returns the subset that may fire PLUS the updated last-fired map. `lastFired` is treated
- * immutably — a NEW map is returned (the input is never mutated), and every prior anchor is
- * carried forward so a key with no entrant this poll (stable needs-state, or momentarily
- * recovered) KEEPS its anchor for the next poll's re-entry diff — THIS is what collapses a
- * recover→re-enter flap (the agent leaves every rollup bucket while recovered, so its identity
- * is "absent" that poll; carrying the anchor forward keeps the window measured correctly across
- * that absence). The caller prunes stale anchors per poll (mirroring watchLastFiredRef /
- * doneLastFiredRef). `now` is a parameter (not Date.now()) so the unit test pins the clock, the
- * discipline applyWatchCooldown follows.
- *
- * Pure + dependency-free (reads only the NewAttentionEntry shape defined in this file) so
- * web/desktopAlerts.test.mjs loads it standalone alongside diffNewAttention / excludeFocusedPane
- * via Vite's OXC transform. At most one entrant per key per diff (diffNewAttention's "one entry
- * PER KEY" contract), so the per-entrant update never races itself within one call.
- */
-export function applyFleetAttentionCooldown(
-  entries: NewAttentionEntry[],
-  lastFired: FleetLastFiredMap | null,
-  now: number,
-  cooldownMs: number,
-): { fire: NewAttentionEntry[]; lastFired: FleetLastFiredMap } {
-  const prev = lastFired || {};
-  // Carry forward every prior anchor: a key with no entrant this poll (stable needs-state, or
-  // momentarily recovered) must KEEP its last-fire time so the window is measured correctly when
-  // it next re-enters — this carry-forward is what collapses the recover→re-enter flap. The
-  // caller prunes stale anchors per poll.
-  const next: FleetLastFiredMap = { ...prev };
-  const fire: NewAttentionEntry[] = [];
-  for (const e of entries) {
-    // Aggregate directives/errors entrants (key: '') have no per-key identity — a count rise is
-    // not a flap, and there is no key to anchor. They stay on the existing increase-only gate and
-    // always pass through unchanged (never enter the map).
-    if (!e.key) {
-      fire.push(e);
-      continue;
-    }
-    const last = prev[e.key];
-    const isEscalation = !!last
-      && FLEET_TONE_PRIORITY[e.tone] < FLEET_TONE_PRIORITY[last.tone];
-    const elapsed = last ? now - last.firedAt : Infinity;
-    if (!last || isEscalation || elapsed >= cooldownMs) {
-      fire.push(e);
-      next[e.key] = { tone: e.tone, firedAt: now };
-    }
-    // else: suppressed — next[e.key] retains the carried-forward prior anchor (the window is
-    // NOT slid forward, so a continuous flap re-alerts once it elapses).
-  }
-  return { fire, lastFired: next };
-}
-
 // --- Token-spend budget alert (WARDEN-415) -----------------------------------
 //
 // The "while the founder is away" alarm that completes the meter WARDEN-367
-// shipped. Sibling of fireAttentionNotification / fireWatchNotification: same
-// Web Notifications channel + the same notificationsSupported / permission
-// guards. Takes PRE-FORMATTED title + body (computed by tokenBudget.ts's
-// formatBudgetMessageWith) rather than the BudgetState itself. Keep it that way:
-// the two siblings' formatters live HERE, this one's lives in tokenBudget.ts, and
-// the strings keep that cross-module dependency out of the loader (see the header).
+// shipped. Sibling of fireWatchNotification: same Web Notifications channel + the
+// same notificationsSupported / permission guards. Takes PRE-FORMATTED title +
+// body (computed by tokenBudget.ts's formatBudgetMessageWith) rather than the
+// BudgetState itself. Keep it that way: the watch formatters live HERE, this one's
+// lives in tokenBudget.ts, and the strings keep that cross-module dependency out
+// of the loader (see the header).
+//
+// WARDEN-1274 — why this survived the alert retirement: a budget breach is a
+// COUNTED number crossing a threshold the human set. Nothing about it is inferred
+// from pane text, so it cannot cry wolf the way the retired regex-driven fleet
+// attention alert did.
 //
 // Uses a DISTINCT stable tag (`warden-budget`) so the budget alert never
-// replaces — and is never replaced by — an attention/watch ping; a repeat
+// replaces — and is never replaced by — a watch ping; a repeat
 // crossing on the SAME breach replaces its prior ping (no stacking). The
 // debounce (one fire per crossing) lives in useTokenBudget, so in practice this
 // fires once per breach. Clicking deep-links to the All Sessions usage view

@@ -489,46 +489,31 @@ export interface UiState {
   sidebarWidth?: number;
   observerWidth?: number;
   terminalFontSize?: number;
-  // Opt-in OS desktop alert that fires when agents need attention AND Warden is
-  // unfocused (WARDEN-259). Default OFF (opt-in). Pure client-side pref (like
-  // terminalFontSize/scrollback); never sent to the backend / /api/config.
+  // Opt-in OS desktop alerts (WARDEN-259). Default OFF (opt-in). Pure client-side
+  // pref (like terminalFontSize/scrollback); never sent to the backend /
+  // /api/config. WARDEN-1274: the fleet ATTENTION alert this was named for is
+  // retired; it now gates the surviving token-BUDGET OS notification and the
+  // hidden-tab poll relaxation the WATCH ping needs. The key is unchanged for
+  // persistence compatibility.
   attentionDesktopAlerts?: boolean;
-  // Per-state toggle for the Attention badge + desktop alert (WARDEN-344): which
-  // pane states (stuck/erroring/waiting/blocked) raise attention. Each defaults to
-  // ON so every state surfaces; a human can silence a noisy "waiting" without losing
-  // "erroring". Pure client-side pref; never sent to the backend / /api/config.
-  // WARDEN-575: `done` gates the POSITIVE "finished" bucket + done desktop ping
-  // (same default-ON discipline); it is never sent to the backend either.
-  attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
-  // WARDEN-364 — per-severity routing for the desktop-alert channel, layered on
-  // top of the `attentionDesktopAlerts` master switch. The master gates the whole
-  // channel; these route WHICH of the four attention buckets may escalate to an
-  // OS notification (critical/warning health, pending directives, recent errors).
-  // Defaults all-true = behavior-preserving. Pure client-side pref; never sent to
-  // the backend / /api/config.
-  alertCritical?: boolean;
-  alertWarning?: boolean;
-  alertDirective?: boolean;
-  alertError?: boolean;
-  // WARDEN-364 — chat keys (`a.key || a.id`) muted on the desktop-alert channel.
-  // A muted agent driving a critical/warning increase fires NO OS notification
-  // while still appearing in the in-app AttentionBadge (which consumes the
-  // unfiltered rollup). directives/errors are aggregate counts with no per-agent
-  // identity, so mute applies to the health buckets only. Pure client-side pref;
-  // never sent to the backend / /api/config.
-  mutedAlertKeys?: string[];
-  // WARDEN-551 — time-boxed snooze: chat key → expiry (ms-since-epoch). A snoozed
-  // agent's desktop alerts are suppressed EXACTLY like a permanent mute, but only
-  // until its expiry — after which suppression auto-rearms (the key drops from
-  // the active set on the next attention cadence tick, no manual un-mute). This
-  // is the time-boxed twin of mutedAlertKeys above: deliberate temporary
-  // suppression that restores itself, closing the permanent-mute "forget → agent
-  // goes silently stale" gap. Mutually exclusive with mutedAlertKeys per key
-  // (App's setAlertMute clears one when setting the other), so an agent is either
-  // permanent-muted, snoozed, or un-muted — never both. Default {} = today's exact
-  // behavior (no snoozes → nothing suppressed beyond the existing mute set).
+  // Per-state toggle for the Attention badge (WARDEN-344): which pane states
+  // (stuck/erroring/waiting/blocked) raise attention. Each defaults to ON so every
+  // state surfaces; a human can hide a noisy "waiting" without losing "erroring".
   // Pure client-side pref; never sent to the backend / /api/config.
-  snoozedAlertKeys?: Record<string, number>;
+  // WARDEN-575: `done` gates the POSITIVE "finished" bucket (same default-ON
+  // discipline). WARDEN-1274: these are now purely DISPLAY filters on the passive
+  // readout — the desktop alert they also gated is retired.
+  attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
+  // WARDEN-1274 — REMOVED, and deliberately not migrated: `alertCritical` /
+  // `alertWarning` / `alertDirective` / `alertError` (per-severity routing) and
+  // `mutedAlertKeys` / `snoozedAlertKeys` (per-agent permanent mute + time-boxed
+  // snooze). All six existed ONLY to route or silence the fleet attention alert;
+  // with that channel retired there is nothing left for them to gate, and keeping
+  // them would leave settings that visibly do nothing. A legacy localStorage
+  // payload may still carry these keys — they are structurally IGNORED, because
+  // the PERSISTED_PREF_KEYS allow-list below never reads them back. One-way
+  // cleanup by design: no migration, and nothing to restore if the channel is
+  // never rebuilt.
   // Per-chat "watch" opt-in (WARDEN-378): pane keys the human marked "watch this
   // chat" for a targeted, reason-specific desktop ping when that chat newly needs
   // them. Global (not per-workspace) — a watched chat stays watched across workspace
@@ -743,7 +728,10 @@ function parseSnippets(raw: unknown): Snippet[] {
 // mutedAlertKeys, workspaces) each carried a byte-identical copy of the same
 // 6-line preamble, re-copied by five separate shipped features (WARDEN-219,
 // 256, 323, 364, 372) so each could inherit the WARDEN-89 guard. Now the guard
-// is inherited by CALLING this; only the delta is supplied.
+// is inherited by CALLING this; only the delta is supplied. (WARDEN-1274 retired
+// the mutedAlertKeys caller with the alert channel it silenced; the skeleton's
+// contract is unchanged, and the examples below still name it as the case that
+// motivated each non-uniform delta.)
 //
 // The invariants that live here once, for every caller:
 //   - a non-array `raw` degrades to [] — never throws (WARDEN-89), so one
@@ -754,14 +742,15 @@ function parseSnippets(raw: unknown): Snippet[] {
 //   - `coerce` returns the entry to keep, or `undefined` to DROP it. The drop
 //     sentinel is strictly `undefined`, not falsiness — a caller whose element
 //     type admits '' / 0 / false keeps those as real values. `coerce` also owns
-//     the per-caller ENTRY guard, which is NOT uniform across the five (four
-//     want `!entry || typeof entry !== 'object'`, mutedAlertKeys wants
-//     `typeof k !== 'string'`), so it does not belong in the skeleton.
+//     the per-caller ENTRY guard, which was NOT uniform across the five (four
+//     want `!entry || typeof entry !== 'object'`, the since-retired
+//     mutedAlertKeys wanted `typeof k !== 'string'`), so it does not belong in
+//     the skeleton.
 //
 // Two OPTIONAL deltas, because they are not universal:
 //   - `opts.cap` — stop after N kept entries (retaining the FIRST N valid ones).
-//     Only recentlyClosed and snippets cap; mutedAlertKeys deliberately has no
-//     cap. Checked at the top of the loop; the pre-refactor copies checked at
+//     Only recentlyClosed and snippets cap (the retired mutedAlertKeys
+//     deliberately had none). Checked at the top of the loop; the pre-refactor copies checked at
 //     the top (snippets) and after the push (recentlyClosed), which retain the
 //     same entries — the difference was never observable.
 //   - `opts.key` — DROP an entry whose key repeats (first occurrence wins,
@@ -924,18 +913,6 @@ function parsePresetByHost(
   });
 }
 
-// Sanitize a raw mutedAlertKeys value into a de-duplicated string[] of non-empty
-// chat keys (WARDEN-364). Defensive: never throws on malformed input (WARDEN-89)
-// — drops non-string / blank / duplicate entries instead, so one corrupt value
-// can never blank the mute set. Modeled on parseCustomPresets's drop-bad-entries
-// discipline; order is preserved (first occurrence wins) so the set is stable.
-function parseMutedKeys(raw: unknown): string[] {
-  return parseEntryArray<string>(raw, 'mutedAlertKeys', (k) => {
-    if (typeof k !== 'string') return undefined;
-    return k.trim() || undefined; // blank/whitespace-only → drop
-  }, { key: (k) => k });
-}
-
 // WARDEN-660: coerce a persisted gutter-ratio array to a valid number[] (each
 // entry a positive finite fr weight) or [] (equal split). A non-array, or ANY
 // non-finite / non-positive entry, degrades the WHOLE array to [] — a partial
@@ -971,23 +948,6 @@ function parseRatioArray(raw: unknown, label: string): number[] {
     out.push(r);
   }
   return out;
-}
-
-// Sanitize a raw snoozedAlertKeys value (chat key → expiry ms) into a valid
-// Record<string, number> (WARDEN-551 — the WARDEN-89 defensive norm). Each entry
-// requires a non-empty trimmed-string KEY and a finite, strictly-POSITIVE number
-// VALUE; anything else is dropped, so one corrupt entry can never blank the
-// snooze set. Note the value rule is STRICT: a numeric string is not coerced,
-// and 0 / negative / NaN / ±Infinity all drop. Entries whose expiry is already
-// in the past (a positive number < now) are NOT dropped here — they are harmless
-// (activeSnoozedKeys excludes them and App's mount prune clears them on the next
-// launch), and dropping them at load would require reading the clock inside this
-// pure loader, which it deliberately avoids. That non-behavior is pinned by the
-// WARDEN-1027 characterization tests in web/storage.test.mjs.
-function parseSnoozedKeys(raw: unknown): Record<string, number> {
-  return parseObjectMap(raw, 'snoozedAlertKeys', (v) => (
-    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
-  ));
 }
 
 // Sanitize a raw workspaces value into a valid, id-unique WorkspacePaneSet[].
@@ -1068,10 +1028,6 @@ export const DEFAULT_UI: UiState = {
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
   attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
-  alertCritical: true, alertWarning: true, alertDirective: true, alertError: true,
-  mutedAlertKeys: [],
-  // WARDEN-551: no snoozes by default (empty = today's exact behavior).
-  snoozedAlertKeys: {},
   // WARDEN-378: no chats watched by default (opt-in per chat).
   watchedChats: [],
   terminalScrollback: 10000, terminalFontFamily: '',
@@ -1109,8 +1065,7 @@ export const PERSISTED_PREF_KEYS = [
   'sidebarCollapsed', 'observerCollapsed', 'healthCollapsed', 'sourceControlCollapsed',
   'sidebarWidth', 'observerWidth', 'terminalFontSize',
   'attentionDesktopAlerts', 'attentionStates',
-  'alertCritical', 'alertWarning', 'alertDirective', 'alertError',
-  'mutedAlertKeys', 'snoozedAlertKeys', 'watchedChats',
+  'watchedChats',
   'terminalScrollback', 'terminalFontFamily', 'terminalColorScheme', 'terminalCursorStyle',
   'copyOnSelect', 'timestampFormat', 'fileViewerViewMode',
   'theme', 'density', 'paneLayout', 'paneColRatios', 'paneRowRatios', 'onExitBehavior', 'autoFocusNewPane',
@@ -1218,14 +1173,6 @@ export function resetUiPrefDefaults(): ResetUiDefaults {
     // Attention / desktop alerts
     attentionDesktopAlerts: false,
     attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
-    alertCritical: true,
-    alertWarning: true,
-    alertDirective: true,
-    alertError: true,
-    mutedAlertKeys: [],
-    // WARDEN-551: clear active snoozes too, so a reset leaves no stale
-    // temporary suppression behind (mirrors clearing the permanent mute set).
-    snoozedAlertKeys: {},
     watchedChats: [],
   };
 }
@@ -1291,19 +1238,6 @@ export function loadUi(): UiState {
           // partial/legacy payload never drops the finished signal silently.
           done: v.attentionStates?.done !== false,
         },
-        // WARDEN-364 — severity routing defaults ON (only an explicit `false`
-        // opts a bucket out), so an upgrade or a partial payload preserves the
-        // pre-routing "every bucket escalates" behavior bit-for-bit.
-        alertCritical: v.alertCritical !== false,
-        alertWarning: v.alertWarning !== false,
-        alertDirective: v.alertDirective !== false,
-        alertError: v.alertError !== false,
-        // Sanitized to a de-duplicated string[] of non-empty keys.
-        mutedAlertKeys: parseMutedKeys(v.mutedAlertKeys),
-        // WARDEN-551 — sanitized to a key → expiry map with non-number /
-        // non-positive entries dropped. Past-expiry survivors (positive but
-        // < now) are cleared on mount by App's prune effect, not here.
-        snoozedAlertKeys: parseSnoozedKeys(v.snoozedAlertKeys),
         // WARDEN-378: only string entries survive; a corrupt/non-array value
         // degrades to [] (no chats watched) — the conservative default.
         watchedChats: Array.isArray(v.watchedChats)

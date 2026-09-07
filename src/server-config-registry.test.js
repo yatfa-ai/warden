@@ -22,12 +22,11 @@ import os from 'node:os';
  * and the post-save side-effects (the IPC telemetry forward incl. cleartext
  * authToken that a naive registry would silently drop).
  *
- * POLL-SAFETY: the budget + attention polls arm via restartBudgetPoll /
- * restartAttentionPoll inside the PUT handler when their gates are true
- * (tokenBudgetEnabled; webhookEnabled && webhookUrl && an alert routing). The
- * tests use app.listen() (not startServer), so NO poll runs at boot; and every
- * PUT here keeps both gates OFF, so no setInterval is ever armed and the process
- * exits cleanly (a armed poll would both SSH-discover and keep the loop alive).
+ * POLL-SAFETY: the budget poll arms via restartBudgetPoll inside the PUT handler
+ * when its gate is true (tokenBudgetEnabled). The tests use app.listen() (not
+ * startServer), so NO poll runs at boot; and every PUT here keeps that gate OFF,
+ * so no setInterval is ever armed and the process exits cleanly (an armed poll
+ * would both SSH-discover and keep the loop alive).
  *
  * Same isolated-server pattern as the sibling files: each node --test file runs
  * in its own process, so the eager `cfg = load()` at server.js import reads OUR
@@ -65,7 +64,6 @@ const GET_TOP_LEVEL_KEYS = [
   'webhookEnabled',
   'webhookSecretSet',
   'webhookSecretTail',
-  'webhookAlertAttention',
   'webhookAlertBudget',
   'webhookAlertDone',
   'confirmDestructiveActions',
@@ -159,8 +157,7 @@ describe('/api/config GET default-resolution — the asymmetric rules (WARDEN-77
   it('resolves !== false toggles to true, === true to false, ?? "" to empty, maxTokens to null, watchPatterns to []', async () => {
     await put({ hosts: [], watchPatterns: [] });
     const body = await get();
-    // !== false → default true (the three webhook category routings)
-    assert.strictEqual(body.webhookAlertAttention, true, 'webhookAlertAttention defaults true via !== false');
+    // !== false → default true (the two webhook category routings)
     assert.strictEqual(body.webhookAlertBudget, true, 'webhookAlertBudget defaults true via !== false');
     assert.strictEqual(body.webhookAlertDone, true, 'webhookAlertDone defaults true via !== false');
     // === true → strict (webhookEnabled defaults false when not literally true)
@@ -205,7 +202,6 @@ describe('/api/config GET shape — byte-identical key set + order (WARDEN-773)'
       webhookUrl: 'http://wh',
       webhookEnabled: false,
       webhookSecret: WEBHOOK_SECRET,
-      webhookAlertAttention: false,
       webhookAlertBudget: false,
       webhookAlertDone: false,
       confirmDestructiveActions: false,

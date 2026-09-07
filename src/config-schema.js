@@ -399,16 +399,6 @@ export const CONFIG_FIELDS = [
     //                   WARDEN-883), mirroring llm.authToken.
   },
   {
-    key: 'webhookAlertAttention',
-    default: true,
-    exposure: 'public',
-    type: 'boolean',
-    resolve: 'neqFalse',
-    order: 24,
-    //   webhookAlertAttention — route newly stuck/erroring/waiting/blocked pane
-    //                           transitions (server-side attention sweep).
-  },
-  {
     key: 'webhookAlertBudget',
     default: true,
     exposure: 'public',
@@ -877,19 +867,22 @@ export function migrateConfig(raw) {
 // afterSave — the post-save side-effect pipeline (WARDEN-773 Correction 2).
 //
 // The source proposal modeled only per-field guards + crossField + derived and
-// omitted the four post-save side-effects the PUT handler runs after save(cfg).
+// omitted the post-save side-effects the PUT handler runs after save(cfg).
 // A registry refactor that drops them silently breaks: telemetry changes need a
-// restart, the companion toggle needs a restart, budget/attention config is
-// delayed up to 120s/60s. Declaring them here as a pipeline makes that drop
-// impossible — and because the impure callables are INJECTED by the caller
-// (server.js), this module stays dependency-free and fully unit-testable.
+// restart, the companion toggle needs a restart, budget config is delayed up to
+// 120s. Declaring them here as a pipeline makes that drop impossible — and
+// because the impure callables are INJECTED by the caller (server.js), this
+// module stays dependency-free and fully unit-testable.
+//
+// WARDEN-1274: this was a FOUR-step pipeline; the fourth (restartAttentionPoll)
+// went with the server-side attention webhook sweep it restarted.
 //
 // deps:
 //   forwardTelemetryConfig(cfg)    — guarded process.send of the telemetry-config
 //                                    IPC payload (incl. cleartext authToken) to
 //                                    the Electron main process (WARDEN-524/569).
 //   applyCompanionToggle           — the live companion-transport toggle fn.
-//   restartBudgetPoll / restartAttentionPoll — the live poll restart fns.
+//   restartBudgetPoll             — the live budget-poll restart fn.
 //   companionOverridden            — the boot snapshot of the env override.
 // ---------------------------------------------------------------------------
 
@@ -897,5 +890,4 @@ export function afterSave(cfg, deps) {
   deps.forwardTelemetryConfig(cfg);
   deps.applyCompanionToggle(cfg.companionTransportEnabled, { override: deps.companionOverridden });
   deps.restartBudgetPoll();
-  deps.restartAttentionPoll();
 }

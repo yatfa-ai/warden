@@ -46,22 +46,25 @@ export function SectionToggle({ expanded, onClick, label, title }: {
 
 /**
  * The contextual action bar for multi-select (WARDEN-292 broadcast + WARDEN-328
- * batch kill + WARDEN-492 batch interrupt + WARDEN-581 bulk snooze/watch). Appears
- * at the foot of a fleet view only when ≥1 agent is selected, showing the live
- * count and the selection actions in a destructiveness gradient: select-all
- * (within the current visible list), clear, "Send to N…" (confirm-and-send),
- * "Interrupt N…" (confirm-and-signal, non-destructive), "Snooze N…" (confirm-and-
- * snooze, local state), "Watch N"/"Unwatch N" (immediate, local state), and "Kill
- * N…" (confirm-and-stop, destructive). Built on shadcn <Button> per the WARDEN-68
- * quality bar. shrink-0 so it stays pinned at the bottom while the fleet list
- * scrolls above it.
+ * batch kill + WARDEN-492 batch interrupt + WARDEN-581 bulk watch). Appears at the
+ * foot of a fleet view only when ≥1 agent is selected, showing the live count and
+ * the selection actions in a destructiveness gradient: select-all (within the
+ * current visible list), clear, "Send to N…" (confirm-and-send), "Interrupt N…"
+ * (confirm-and-signal, non-destructive), "Watch N"/"Unwatch N" (immediate, local
+ * state), and "Kill N…" (confirm-and-stop, destructive). Built on shadcn <Button>
+ * per the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
+ * the fleet list scrolls above it.
  *
- * `onSend` (broadcast), `onInterrupt` (control-key send), `onSnooze` (open the
- * duration dialog), and `onWatch` (watch/unwatch, immediate) are ALL OPTIONAL: a
- * surface without one simply omits it and the matching button is not rendered.
- * Fleet Health (WARDEN-371) reuses this bar for batch-kill only — broadcast,
- * interrupt, snooze, and watch are deliberately out of scope there — so it passes
- * none of them. The sidebar passes all four, so its bar exposes the full set.
+ * WARDEN-1274: a fourth action, "Snooze N…", sat between Interrupt and Watch. It
+ * bulk-silenced the fleet attention alert, and it went with that channel — with
+ * nothing left to interrupt the human, there is nothing left to silence.
+ *
+ * `onSend` (broadcast), `onInterrupt` (control-key send), and `onWatch`
+ * (watch/unwatch, immediate) are ALL OPTIONAL: a surface without one simply omits
+ * it and the matching button is not rendered. Fleet Health (WARDEN-371) reuses
+ * this bar for batch-kill only — broadcast, interrupt, and watch are deliberately
+ * out of scope there — so it passes none of them. The sidebar passes all three,
+ * so its bar exposes the full set.
  *
  * WARDEN-581 watch label: the button reads "Watch N" when the action will ADD
  * watches (some selected agent isn't watched yet), else "Unwatch N" (every
@@ -70,13 +73,12 @@ export function SectionToggle({ expanded, onClick, label, title }: {
  * stays a dumb presentational component; it only renders the watch button when
  * `onWatch` is present.
  */
-export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInterrupt, onSnooze, onWatch, watchMode, onKill }: {
+export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInterrupt, onWatch, watchMode, onKill }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
   onSend?: () => void;
   onInterrupt?: () => void;
-  onSnooze?: () => void;
   onWatch?: () => void;
   watchMode?: 'watch' | 'unwatch';
   onKill: () => void;
@@ -99,23 +101,12 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInte
           </Button>
         )}
         {/*
-          WARDEN-581 — bulk attention controls. Snooze opens the duration dialog
-          ("…"); watch/unwatch is immediate (no dialog), so its label carries no
-          ellipsis. Both are local-state ops (no tmux fan-out, no per-agent
-          failure), the non-destructive end of the bar's gradient. outline variant
-          matches Interrupt (a quiet, reversible action) rather than the default
-          Send or the destructive Kill.
+          WARDEN-581 — bulk watch. Immediate (no dialog), so its label carries no
+          ellipsis. A local-state op (no tmux fan-out, no per-agent failure), the
+          non-destructive end of the bar's gradient. outline variant matches
+          Interrupt (a quiet, reversible action) rather than the default Send or
+          the destructive Kill.
         */}
-        {onSnooze && (
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={onSnooze}
-            title="temporarily silence desktop alerts for every selected agent until a chosen expiry (auto-rearms)"
-          >
-            Snooze {count}…
-          </Button>
-        )}
         {onWatch && (
           <Button
             variant="outline"

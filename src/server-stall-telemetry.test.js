@@ -47,7 +47,7 @@ const STALL = (over = {}) => ({
   lagMs: 4200,
   heartbeatMs: 1000,
   thresholdMs: 1000,
-  attribution: [{ label: 'sweep:attention', overlapMs: 4100, open: true, durationMs: 4300 }],
+  attribution: [{ label: 'sweep:lifecycle', overlapMs: 4100, open: true, durationMs: 4300 }],
   syncTotals: [],
   ...over,
 });
@@ -136,7 +136,7 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
     assert.equal(window.maxMs, 6000);
     assert.equal(window.buckets.reduce((a, b) => a + b, 0), 2, 'both landed in the histogram');
     const keys = window.culprits.map((c) => c.culprit);
-    assert.ok(keys.includes('sweep-attention'), 'the sweep is named');
+    assert.ok(keys.includes('sweep-lifecycle'), 'the sweep is named');
     assert.ok(keys.includes('get-api-claude-sessions'), 'the route is named by PATTERN');
     assert.ok(keys.includes('fs-read-file-sync'), 'and the sync aggregate is named');
   });
