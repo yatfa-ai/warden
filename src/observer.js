@@ -6,7 +6,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { discoverAll, capturePanes, resolveChat, agentTarget } from './chats.js';
-import { run, shellQuote } from './ssh.js';
+// `run` is no longer imported: WARDEN-1284 routed readTranscriptPhase's two
+// REMOTE branches through deliverRemoteScript, which owns the run()-vs-companion
+// choice, so this module has no direct transport call left.
+import { shellQuote } from './ssh.js';
+// WARDEN-1284: the companion-transport routing guard for the observer's
+// transcript tail. companion.js is a leaf sibling (it imports
+// ssh.js/chatMeta.js/loop-monitor.js, never this module) — no cycle.
+import { deliverRemoteScript } from './companion.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
@@ -536,15 +543,34 @@ async function readLocalTranscriptTail() {
 // null (null = no transcript available → caller falls back to the pane-state
 // path). Best-effort: any failure resolves to null so a transcript read can never
 // block or break a pane read (WARDEN-89: failures surfaced, never fatal).
-export async function readTranscriptPhase(chat, cfg = {}) {
+//
+// WARDEN-1284 (companion transport): both REMOTE branches deliver through
+// `deliverRemoteScript`, so under the `companionTransportEnabled` toggle they
+// ride the persistent companion channel instead of spawning an un-pooled ssh per
+// call. This leg rides the OBSERVER POLL CADENCE — a fleet-wide background
+// rhythm repeating the handshake silently across every watched agent — so it is
+// the highest-cadence of the nine WARDEN-1284 legs.
+//
+// ⚠️ CONTAINER-BRANCH PARITY (the one nuance): the default path delivers
+// `bash -lc 'docker exec <c> sh -c <script>'` — note `sh -c`, NOT `bash -lc`,
+// inside the container. Parity therefore comes from passing that FULL
+// pre-assembled string as the script with NO `container` option: routing it
+// through `container` would have the companion's host side re-assemble
+// `docker exec <c> bash -lc <script>`, silently changing the in-container
+// interpreter. The delivered string is pinned in a test either way.
+//
+// `deps` is the shared routing test seam; the LOCAL branch is untouched.
+export async function readTranscriptPhase(chat, cfg = {}, deps = {}) {
   if (!chat) return null;
   try {
     let stdout = '';
     if (chat.container) {
       // yatfa docker agent: claude runs in-container, so reach its transcript via
       // docker exec (no existing code path did this — WARDEN-166 adds it).
+      // The FULL docker-exec string rides as the script (container deliberately
+      // UNSET) so `sh -c` survives on both transports — see the ⚠️ note above.
       const cmd = `docker exec ${shellQuote(chat.container)} sh -c ${shellQuote(buildTranscriptTailScript())}`;
-      const res = await run(chat.host, cmd, { timeout: 10000 }, cfg);
+      const res = await deliverRemoteScript(chat.host, cmd, { timeout: 10000 }, cfg, deps);
       if (!res.ok) return null;
       stdout = res.stdout;
     } else if (chat.host === LOCAL) {
@@ -552,7 +578,7 @@ export async function readTranscriptPhase(chat, cfg = {}) {
       stdout = await readLocalTranscriptTail();
     } else {
       // bare remote tmux session: transcript on the remote host.
-      const res = await run(chat.host, buildTranscriptTailScript(), { timeout: 10000 }, cfg);
+      const res = await deliverRemoteScript(chat.host, buildTranscriptTailScript(), { timeout: 10000 }, cfg, deps);
       if (!res.ok) return null;
       stdout = res.stdout;
     }
