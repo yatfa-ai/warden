@@ -24,7 +24,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import express from 'express';
-import { run, shellQuote } from './ssh.js';
+import { shellQuote } from './ssh.js';
 import { captureAndSettle } from './childCapture.js';
 // WARDEN-1261: the companion-transport routing for the chat-scoped script domain.
 // companion.js is a leaf sibling (it imports ssh.js/chatMeta.js/loop-monitor.js,

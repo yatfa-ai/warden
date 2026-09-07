@@ -7,10 +7,11 @@
 // src/git.js (the log/show/diff/blame parsers extracted for the same reason) and
 // the chats.js / gitStatus.js extractions.
 //
-// Side-effect-free at module load: the only project imports are `run` from
-// ./ssh.js and the companion routing guard from ./companion.js, neither of which
-// has top-level statements, so importing this module boots nothing.
-// (WARDEN-606; the companion import added by WARDEN-1284.)
+// Side-effect-free at module load: the only project imports are
+// `isTransportFailure` from ./ssh.js and the companion routing guard from
+// ./companion.js, neither of which has top-level statements, so importing this
+// module boots nothing. (WARDEN-606; the companion import added by WARDEN-1284,
+// which also moved the remote delivery itself off `run` onto that guard.)
 //
 // NOTE: the full-content session-SEARCH helpers (searchLocalClaudeSessions,
 // buildSessionSearchScript, remoteSearchClaudeSessions + the SESSION_SEARCH_*
@@ -24,7 +25,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { run, isTransportFailure } from './ssh.js';
+import { isTransportFailure } from './ssh.js';
 // WARDEN-1284: the companion-transport routing guard for the session-listing
 // leg. companion.js imports ssh.js/chatMeta.js/loop-monitor.js and never this
 // module, so the dependency stays one-directional — no cycle.
