@@ -384,7 +384,15 @@ export class CompanionChannel {
   }
 
   call(method, params, opts = {}) {
+    // WARDEN-1312: count the op at the seam. `n` increments once per issued op
+    // (ping excluded — infra, see the companionOps block comment), including ops
+    // that go on to fail, so `failures <= n` always holds. Each of the three
+    // transport-failure rejects below (dead channel / timeout / write throw)
+    // ALSO increments `failures`; the host-side ok:false path rejects in _onLine
+    // (not here) and correctly counts in `n` only.
+    recordCompanionOp(this.host, method);
     if (this.dead) {
+      recordCompanionOpFailure(this.host, method);
       return Promise.reject(new CompanionTransportError(
         this.host, `channel is dead (${this._diedWith?.message || 'exited'}); cannot send '${method}'`));
     }
@@ -395,6 +403,7 @@ export class CompanionChannel {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(key)) {
+          recordCompanionOpFailure(this.host, method);
           reject(new CompanionTransportError(
             this.host, `timed out waiting for companion response to '${method}' after ${timeout}ms`));
         }
@@ -405,6 +414,7 @@ export class CompanionChannel {
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(key);
+        recordCompanionOpFailure(this.host, method);
         reject(new CompanionTransportError(this.host, `failed to write '${method}' request: ${e.message}`));
       }
     });
@@ -646,6 +656,74 @@ function setCompanionStatus(host, status) {
   companionStatus.set(host, status);
 }
 
+// ---- per-host op tallies (WARDEN-1312 — "are operations actually riding it") ----
+// Per-host, per-method counts of the ops issued over the companion channel:
+//   host -> { [method]: { n, failures, lastAt } }
+//   n        — ops issued for this method, INCLUDING ones that go on to fail,
+//              so `failures <= n` is a true invariant ("12 ops · 1 failed").
+//   failures — ops that failed at the TRANSPORT level (dead channel / timeout /
+//              write throw — the three CompanionTransportError rejects lexically
+//              inside CompanionChannel.call). A host-side command failure
+//              (msg.ok === false → CompanionRpcError, rejected in _onLine) is the
+//              op's own result semantics and is NOT a transport failure.
+//   lastAt   — epoch ms of the last ride.
+// PING IS NOT COUNTED, on purpose: both ping call sites (pingOnce — the bootstrap
+// probe — and channelMethods — the feature-detect fallback) are the channel's own
+// infrastructure, not product ops. Counting them would put ops:{ping:…} on every
+// bootstrapped host, (a) breaking the exact-shape status contract pinned by the
+// deepStrictEqual assertions in companion.test.js for bootstrapped-but-idle hosts,
+// and (b) making "exactly send: 2, discover: 1, exec: 1" unreadable. The tally is
+// keyed by host × the method names actually called, so it is bounded; repeated
+// ops mutate the same entry in place. Like companionStatus this is process-
+// lifetime in-memory state: a restart resets it, which is correct for an
+// "is it working right now" signal. NOT persisted, NOT telemetry — warden's own
+// product UI state (WARDEN-1265's surface is untouched).
+const companionOps = new Map();
+
+// Module-private writers — the single recording site is CompanionChannel.call
+// (the one choke point every RPC already passes through), so today's op set and
+// every future op is covered with no per-call-site edits. Two narrow mutators,
+// mirroring the setCompanionStatus one-writer discipline above:
+//   recordCompanionOp         — the op is ISSUED: n += 1, lastAt = now.
+//   recordCompanionOpFailure  — the op FAILED at the transport level:
+//                               failures += 1 ONLY (n was already counted at
+//                               issue time; double-counting would break the
+//                               "failures <= n, 12 ops · 1 failed" read).
+// Plain synchronous map mutation wrapped in a catch: the tally must NEVER throw
+// into the op path.
+function _companionOpTally(host, method) {
+  let perMethod = companionOps.get(host);
+  if (!perMethod) companionOps.set(host, (perMethod = {}));
+  let t = perMethod[method];
+  if (!t) t = perMethod[method] = { n: 0, failures: 0, lastAt: 0 };
+  return t;
+}
+
+function recordCompanionOp(host, method) {
+  if (method === 'ping') return; // infra probe — see the block comment above
+  try {
+    const t = _companionOpTally(host, method);
+    t.n += 1;
+    t.lastAt = Date.now();
+  } catch { /* bookkeeping must never break an op */ }
+}
+
+function recordCompanionOpFailure(host, method) {
+  if (method === 'ping') return;
+  try {
+    _companionOpTally(host, method).failures += 1;
+  } catch { /* bookkeeping must never break an op */ }
+}
+
+// Join the tally onto a status read — used by BOTH getters below. `ops` is added
+// ONLY when the host has a non-empty tally, so a host that has bootstrapped but
+// issued no ops keeps its byte-identical status shape (the exact-shape contract
+// pinned by companion.test.js's deepStrictEqual assertions).
+function joinCompanionOps(host, status) {
+  const ops = companionOps.get(host);
+  return ops && Object.keys(ops).length > 0 ? { ...status, ops } : status;
+}
+
 // Read one host's companion transport status — the single source the API layer
 // surfaces on /api/hosts/status. Returns {state:'inactive'} when the transport is
 // disabled (toggle off), for LOCAL (the companion is remote-only), or for a host
@@ -654,7 +732,7 @@ function setCompanionStatus(host, status) {
 export function getCompanionStatus(host) {
   if (!isCompanionTransportEnabled()) return { state: 'inactive' };
   if (host === LOCAL) return { state: 'inactive' };
-  return companionStatus.get(host) ?? { state: 'inactive' };
+  return joinCompanionOps(host, companionStatus.get(host) ?? { state: 'inactive' });
 }
 
 // Read every host's status (host -> status object). Empty when the transport is
@@ -663,8 +741,16 @@ export function getCompanionStatus(host) {
 export function getAllCompanionStatuses() {
   if (!isCompanionTransportEnabled()) return {};
   const out = {};
-  for (const [host, status] of companionStatus) out[host] = status;
+  for (const [host, status] of companionStatus) out[host] = joinCompanionOps(host, status);
   return out;
+}
+
+// Test-only: read the raw op-tally map (host -> method -> {n, failures, lastAt})
+// so tally behavior is unit-testable directly (a host can hold tallies before any
+// status transition has been asserted). Live map, same convention as
+// _getPaneSubscriptionsForTests. Not for production use. (WARDEN-1312)
+export function _getCompanionOpsForTests() {
+  return companionOps;
 }
 
 export function _resetChannelCacheForTests() {
@@ -673,6 +759,7 @@ export function _resetChannelCacheForTests() {
   }
   channelCache.clear();
   companionStatus.clear(); // WARDEN-878: clear captured per-host status too
+  companionOps.clear(); // WARDEN-1312: clear op tallies too (same reset contract)
 }
 
 // Test-only: whether a host currently has a cached channel/bootstrap — so
@@ -899,6 +986,12 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
   // reset: getCompanionStatus falls back to {state:'inactive'}, i.e. "companion
   // absent". This mirrors _resetChannelCacheForTests, which clears BOTH maps.
   companionStatus.delete(host);
+  // Invalidate the per-host op tallies too (WARDEN-1312): the channel and its
+  // status are gone, so counts from the removed channel must not survive a
+  // removal — the confirmation surface would read "inactive" while stale op
+  // numbers still rode along on any future re-bootstrap's status. Mirrors the
+  // companionOps.clear() in _resetChannelCacheForTests.
+  companionOps.delete(host);
   // Resolve the manifest version → remote path (companion.js:116) and run the
   // uninstall script via the same runFn/defaultRun path the probe uses. The
   // version is validated hex, safe to interpolate.

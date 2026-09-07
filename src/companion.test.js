@@ -32,6 +32,7 @@ import {
   isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
   getCompanionStatus, getAllCompanionStatuses,
+  _getCompanionOpsForTests,
   buildUninstallScript, uninstallCompanion, _channelCacheHasForTests,
   buildReapScript,
   resize as companionResize,
@@ -2104,6 +2105,187 @@ describe('companion transport status (WARDEN-878)', () => {
     resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
+  });
+});
+describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetChannelCacheForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+  });
+
+  // A transport that answers ping (bootstrap succeeds) and ACKs every other op.
+  const ackingTransport = () => fakeTransport((req) => (req.method === 'ping'
+    ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'send', 'exec'] } }
+    : { id: req.id, ok: true, result: {} }));
+
+  it('counts ops per method at the call() seam: 2 sends + 1 discover + 1 exec', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-counts', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    await ch.call('send', { session: 's', keys: 'y' }, { timeout: 500 });
+    await ch.call('discover', {}, { timeout: 500 });
+    await ch.call('exec', { script: 'echo hi' }, { timeout: 500 });
+
+    const tally = _getCompanionOpsForTests().get('ops-counts');
+    assert.strictEqual(tally.send.n, 2);
+    assert.strictEqual(tally.send.failures, 0);
+    assert.strictEqual(tally.discover.n, 1);
+    assert.strictEqual(tally.exec.n, 1);
+    assert.strictEqual(tally.ping, undefined,
+      'the bootstrap ping is channel infrastructure, not a counted product op');
+    assert.ok(Number.isInteger(tally.send.lastAt) && tally.send.lastAt > 0,
+      'lastAt is a positive epoch-ms stamp');
+  });
+
+  it('the tally joins into getCompanionStatus once ops have ridden the channel', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-join', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    const status = getCompanionStatus('ops-join');
+    assert.strictEqual(status.state, 'active');
+    const tally = _getCompanionOpsForTests().get('ops-join');
+    assert.deepStrictEqual(status.ops, { send: { n: 1, failures: 0, lastAt: tally.send.lastAt } });
+  });
+
+  it('two hosts are isolated: ops on one never appear on the other', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const a = await getChannel('ops-host-a', {}, deps);
+    await getChannel('ops-host-b', {}, deps);
+    await a.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    const ops = _getCompanionOpsForTests();
+    assert.strictEqual(ops.get('ops-host-a').send.n, 1);
+    assert.strictEqual(ops.get('ops-host-b')?.send, undefined,
+      'host B issued nothing -> no tally');
+    assert.strictEqual(getCompanionStatus('ops-host-b').ops, undefined,
+      'host B status stays byte-identical (no empty ops object)');
+  });
+
+  it('a host that bootstrapped but issued no ops keeps its byte-identical status shape', async () => {
+    const { deps } = fakeDeps();
+    await getChannel('ops-clean', {}, deps);
+    assert.deepStrictEqual(getCompanionStatus('ops-clean'), { state: 'active', version: TEST_VER },
+      'no ops object on a bootstrapped-but-idle host (the exact-shape contract)');
+  });
+
+  it('a transport timeout increments failures while the caller contract is byte-unchanged', async () => {
+    // ping answers (bootstrap succeeds); every other op never gets a response.
+    const t = fakeTransport((req) => (req.method === 'ping'
+      ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'send'] } }
+      : null));
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const ch = await getChannel('ops-timeout', {}, deps);
+    await assert.rejects(() => ch.call('send', {}, { timeout: 50 }), (e) => {
+      assert.ok(e instanceof CompanionTransportError, 'the CompanionTransportError contract is unchanged');
+      return true;
+    });
+    const tally = _getCompanionOpsForTests().get('ops-timeout');
+    assert.strictEqual(tally.send.n, 1, 'the op counts as issued (n includes failures)');
+    assert.strictEqual(tally.send.failures, 1, 'a transport-level failure increments failures');
+  });
+
+  it('a dead-channel call counts as issued AND transport-failed', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-dead', {}, deps);
+    ch.kill();
+    await assert.rejects(() => ch.call('send', {}, { timeout: 500 }), CompanionTransportError);
+    const tally = _getCompanionOpsForTests().get('ops-dead');
+    assert.strictEqual(tally.send.n, 1);
+    assert.strictEqual(tally.send.failures, 1);
+  });
+
+  it('THE CLASSIFICATION GUARD: a host-side command failure (ok:false) does NOT increment failures', async () => {
+    // ping answers; every other op gets ok:false — the companion ran the command
+    // and the command failed (e.g. tmux exited 1). That is the op's own result
+    // semantics (CompanionRpcError, rejected in _onLine), not a transport failure.
+    const t = fakeTransport((req) => (req.method === 'ping'
+      ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'send'] } }
+      : { id: req.id, ok: false, error: 'tmux exited 1' }));
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const ch = await getChannel('ops-rpcfail', {}, deps);
+    await assert.rejects(() => ch.call('send', {}, { timeout: 500 }), (e) => {
+      assert.ok(e instanceof CompanionRpcError, 'the CompanionRpcError contract is unchanged');
+      return true;
+    });
+    const tally = _getCompanionOpsForTests().get('ops-rpcfail');
+    assert.strictEqual(tally.send.n, 1, 'the op counts as issued');
+    assert.strictEqual(tally.send.failures, 0, 'a host-side command failure is NOT a transport failure');
+  });
+
+  it('toggle-off reports no ops even for a host holding tallies', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-toggled', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    assert.deepStrictEqual(getCompanionStatus('ops-toggled'), { state: 'inactive' },
+      'the existing short-circuit hides everything — no ops leak while off');
+    assert.deepStrictEqual(getAllCompanionStatuses(), {}, 'all-hosts map is empty while off');
+  });
+
+  it('LOCAL never surfaces ops (the companion is remote-only)', async () => {
+    // A raw channel on "(local)" records a tally, but the getter short-circuits.
+    const ch = new CompanionChannel('(local)', ackingTransport());
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    assert.deepStrictEqual(getCompanionStatus('(local)'), { state: 'inactive' });
+  });
+
+  it('uninstall clears the tallies beside the status (no stale counts survive a removal)', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-uninstalled', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    assert.ok(_getCompanionOpsForTests().has('ops-uninstalled'), 'precondition: tally exists');
+
+    await uninstallCompanion('ops-uninstalled', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+    });
+    assert.strictEqual(_getCompanionOpsForTests().get('ops-uninstalled'), undefined,
+      'the tally is cleared with the status');
+    assert.deepStrictEqual(getCompanionStatus('ops-uninstalled'), { state: 'inactive' });
+  });
+
+  it('channel death does NOT clear the tally (a process-lifetime signal, by design)', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-died', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    ch.kill();
+    assert.strictEqual(_getCompanionOpsForTests().get('ops-died').send.n, 1,
+      'the tally survives channel death');
+    assert.deepStrictEqual(getCompanionStatus('ops-died').ops,
+      { send: { n: 1, failures: 0, lastAt: _getCompanionOpsForTests().get('ops-died').send.lastAt } });
+  });
+
+  it('_resetChannelCacheForTests clears the tallies too', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-reset', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    assert.ok(_getCompanionOpsForTests().size > 0);
+    _resetChannelCacheForTests();
+    assert.strictEqual(_getCompanionOpsForTests().size, 0, 'the whole tally map is cleared');
+  });
+
+  it('bounded: repeated ops mutate one tally in place — the map never grows per call', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
+    const ch = await getChannel('ops-bounded', {}, deps);
+    await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
+    const tallyBefore = _getCompanionOpsForTests().get('ops-bounded');
+    const sendBefore = tallyBefore.send;
+    for (let i = 0; i < 5; i++) {
+      await ch.call('send', { session: 's', keys: `k${i}` }, { timeout: 500 });
+      await ch.call('discover', {}, { timeout: 500 });
+    }
+    const ops = _getCompanionOpsForTests();
+    assert.strictEqual(ops.size, 1, 'one host entry, no matter how many calls');
+    assert.strictEqual(Object.keys(ops.get('ops-bounded')).length, 2,
+      'keyed by the methods actually called — no per-call entries');
+    assert.strictEqual(ops.get('ops-bounded').send, sendBefore,
+      'the same tally object mutates in place (reference-stable)');
+    assert.strictEqual(ops.get('ops-bounded').send.n, 6, 'counts accumulate, entries do not multiply');
   });
 });
 

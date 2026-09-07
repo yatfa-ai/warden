@@ -473,6 +473,46 @@ test('garbage typed fields are dropped (only correctly-typed fields carried)', (
   assert.deepEqual(out, { state: 'active' });
 });
 
+console.log('\nnormalizeCompanionStatus: ops passthrough (WARDEN-1312)');
+test('a well-formed ops tally map is carried through verbatim', () => {
+  assert.deepEqual(
+    normalizeCompanionStatus({ state: 'active', version: 'abc123', ops: { send: { n: 2, failures: 0, lastAt: 1234 } } }),
+    { state: 'active', version: 'abc123', ops: { send: { n: 2, failures: 0, lastAt: 1234 } } },
+  );
+});
+test('a host with no ops keeps its exact shape (no empty ops object invented)', () => {
+  assert.deepEqual(normalizeCompanionStatus({ state: 'active', version: 'abc123' }), { state: 'active', version: 'abc123' });
+});
+test('garbage ops shapes collapse to omitted (the wire-trust boundary)', () => {
+  const stateOnly = { state: 'active' };
+  // non-object / array forms of the whole map
+  assert.deepEqual(normalizeCompanionStatus({ state: 'active', ops: '12 ops' }), stateOnly);
+  assert.deepEqual(normalizeCompanionStatus({ state: 'active', ops: [] }), stateOnly);
+  assert.deepEqual(normalizeCompanionStatus({ state: 'active', ops: null }), stateOnly);
+  // entries that are not {n, failures, lastAt} numbers
+  assert.deepEqual(
+    normalizeCompanionStatus({ state: 'active', ops: { send: { n: '2', failures: 0, lastAt: 1 }, exec: 7, ping: null } }),
+    stateOnly,
+  );
+  // non-finite numbers are garbage too (NaN is typeof 'number')
+  assert.deepEqual(
+    normalizeCompanionStatus({ state: 'active', ops: { send: { n: NaN, failures: 0, lastAt: 1 } } }),
+    stateOnly,
+  );
+  // an all-garbage map omits ops rather than carrying an empty object
+  assert.deepEqual(
+    normalizeCompanionStatus({ state: 'active', ops: { bad: { n: 'x', failures: 0, lastAt: 0 } } }),
+    stateOnly,
+  );
+});
+test('partially-garbage ops keep only the valid entries', () => {
+  const out = normalizeCompanionStatus({ state: 'active', ops: {
+    send: { n: 2, failures: 1, lastAt: 5 },
+    bad: { n: 'x', failures: 0, lastAt: 0 },
+  } });
+  assert.deepEqual(out.ops, { send: { n: 2, failures: 1, lastAt: 5 } });
+});
+
 console.log('\nsummarizeProjectHosts: companion passthrough (WARDEN-878)');
 test('a host span carries the connectivity companion field through', () => {
   const map = { prod: { status: 'online', latency_ms: 5, companion: { state: 'active', version: 'abc123' } } };

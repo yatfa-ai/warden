@@ -188,6 +188,16 @@ export type HostConnectivityStatus = 'online' | 'offline' | 'unknown';
 // getCompanionStatus shape exactly (state + optional version/lastError/lastErrorAt).
 export type CompanionState = 'active' | 'bootstrapping' | 'inactive' | 'error';
 
+/** Per-method tally of the ops riding the companion channel (WARDEN-1312). */
+export interface CompanionOpTally {
+  /** Ops issued for this method, including ones that failed (so failures <= n). */
+  n: number;
+  /** Transport-level failures among those ops (host-side command failures excluded). */
+  failures: number;
+  /** Epoch ms of the last ride. */
+  lastAt: number;
+}
+
 export interface CompanionStatus {
   state: CompanionState;
   /** Ping-verified companion manifest version (active only). */
@@ -196,6 +206,8 @@ export interface CompanionStatus {
   lastError?: string;
   /** Epoch ms of the last failure (error only). */
   lastErrorAt?: number;
+  /** Per-method op tallies; present only once ops have ridden the channel (WARDEN-1312). */
+  ops?: Record<string, CompanionOpTally>;
 }
 
 export interface HostConnectivity {
@@ -223,7 +235,32 @@ export function normalizeCompanionStatus(raw: unknown): CompanionStatus {
   if (typeof r.version === 'string') out.version = r.version;
   if (typeof r.lastError === 'string') out.lastError = r.lastError;
   if (typeof r.lastErrorAt === 'number') out.lastErrorAt = r.lastErrorAt;
+  const ops = normalizeCompanionOps(r.ops);
+  if (ops) out.ops = ops;
   return out;
+}
+
+/**
+ * Validate a wire `ops` tally map (WARDEN-1312) entry by entry: each method key
+ * must map to an object with finite numeric n/failures/lastAt. Unknown/garbage
+ * entries are dropped; a map with no valid entries collapses to omitted — the
+ * same "garbage never reaches the render" contract as the sibling fields above,
+ * and the same omission the server-side join uses for "no ops yet".
+ */
+function normalizeCompanionOps(raw: unknown): Record<string, CompanionOpTally> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, CompanionOpTally> = {};
+  for (const [method, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const e = entry as Record<string, unknown>;
+    const { n, failures, lastAt } = e;
+    if (typeof n === 'number' && Number.isFinite(n)
+      && typeof failures === 'number' && Number.isFinite(failures)
+      && typeof lastAt === 'number' && Number.isFinite(lastAt)) {
+      out[method] = { n, failures, lastAt };
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**

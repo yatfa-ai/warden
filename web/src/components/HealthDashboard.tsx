@@ -667,7 +667,32 @@ const FLEET_GIT_AXES: FleetGitAxis[] = [
 // dot's green-solid / red-square vocabulary transfers directly — active is the
 // "working" green solid, error the "bad" red square, and bootstrapping gets the
 // pulse variant (its literal meaning: an in-flight connection).
-function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
+//
+// WARDEN-1312: when the host carries op tallies, the activity summary (e.g.
+// "12 ops · send 8 · exec 4 · 1 failed") is folded into the dot's accessible
+// label/tooltip AND rendered as a compact visible suffix in the host-row's
+// existing muted micro-text idiom — the human sees ops riding the channel, not
+// merely a JSON field. Still only when there is actionable companion state
+// (the inactive early-return below stays).
+function companionOpsSummary(ops: CompanionStatus['ops']): string | null {
+  if (!ops) return null;
+  const entries = Object.entries(ops);
+  if (entries.length === 0) return null;
+  const total = entries.reduce((sum, [, t]) => sum + t.n, 0);
+  const failed = entries.reduce((sum, [, t]) => sum + t.failures, 0);
+  const top = [...entries]
+    .sort((a, b) => b[1].n - a[1].n)
+    .slice(0, 3)
+    .map(([method, t]) => `${method} ${t.n}`)
+    .join(' · ');
+  return [`${total} op${total === 1 ? '' : 's'}`, top, failed > 0 ? `${failed} failed` : null]
+    .filter((part): part is string => part !== null)
+    .join(' · ');
+}
+
+// Named export (not consumed outside this module) so the throwaway render
+// harness / future component tests can mount the real indicator.
+export function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
   if (!companion || companion.state === 'inactive') return null;
   const tone: StatusTone = companion.state === 'active' ? 'green'
     : companion.state === 'bootstrapping' ? 'yellow'
@@ -675,18 +700,23 @@ function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
   const variant = companion.state === 'active' ? 'solid'
     : companion.state === 'bootstrapping' ? 'pulse'
     : 'square'; // error
-  const label = companion.state === 'active'
+  const opsSummary = companionOpsSummary(companion.ops);
+  const label = (companion.state === 'active'
     ? `Companion active${companion.version ? ` (v${companion.version})` : ''}`
     : companion.state === 'bootstrapping'
       ? 'Companion bootstrapping'
-      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`;
+      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`)
+    + (opsSummary ? ` — ${opsSummary}` : '');
   return (
-    <StatusDot
-      tone={tone}
-      variant={variant}
-      label={label}
-      title={label}
-    />
+    <span className="inline-flex items-center gap-1">
+      <StatusDot
+        tone={tone}
+        variant={variant}
+        label={label}
+        title={label}
+      />
+      {opsSummary && <span className="text-[10px] text-muted-foreground">{opsSummary}</span>}
+    </span>
   );
 }
 
