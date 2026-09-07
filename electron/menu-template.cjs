@@ -40,6 +40,8 @@
  *   - showAbout()          native About dialog (Windows/Linux; macOS uses role:'about')
  *   - showStallDiagnostics() native dialog summarizing ~/.yatfa-warden/stalls.jsonl
  *   - openDataFolder()     shell.openPath on ~/.yatfa-warden/
+ *   - toggleMaximize()     maximize/restore the live window (Windows/Linux Window menu;
+ *                          macOS uses role:'zoom', which AppKit handles natively)
  * @returns {Array<object>} a Menu.buildFromTemplate-compatible template
  */
 function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warden', handlers = {} } = {}) {
@@ -49,6 +51,7 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
   const showAbout = handlers.showAbout || noop;
   const showStallDiagnostics = handlers.showStallDiagnostics || noop;
   const openDataFolder = handlers.openDataFolder || noop;
+  const toggleMaximize = handlers.toggleMaximize || noop;
 
   // The Settings item. On macOS the platform convention puts Preferences in the
   // APP menu (Cmd+,); on Windows/Linux it belongs in File (Ctrl+,). Same handler,
@@ -138,14 +141,25 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
     ],
   });
 
+  // --- Window ---------------------------------------------------------------
+  // ZOOM IS PLATFORM-SPLIT ON PURPOSE (WARDEN-1313). In Electron 43 the `zoom`
+  // role is `{ label: 'Zoom' }` — it carries NO appMethod/windowMethod/
+  // webContentsMethod, so `MenuItem.execute()` returns false and, with no `click`
+  // of its own, the item does literally nothing. On macOS that is CORRECT: the
+  // role has no `nonNativeMacOSRole`, so Electron deliberately declines to
+  // execute it and hands the item to AppKit's native window-zoom — the item is
+  // real there and must not change. Off macOS nothing picks it up, so the item
+  // renders enabled and inert — an inherited dead item, exactly what this
+  // roadmap forbids. Windows/Linux therefore get a real maximize/restore item
+  // wired through the injected `toggleMaximize` handler (main.cjs owns the live
+  // BrowserWindow; this module stays electron-free).
   template.push({
     label: 'Window',
     submenu: [
       { role: 'minimize' },
-      { role: 'zoom' },
       ...(isMac
-        ? [{ type: 'separator' }, { role: 'front' }]
-        : [{ role: 'close' }]),
+        ? [{ role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+        : [{ label: 'Maximize / Restore', click: () => toggleMaximize() }, { role: 'close' }]),
     ],
   });
 

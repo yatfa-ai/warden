@@ -24,6 +24,32 @@ const { buildMenuTemplate, flattenMenuItems } = require('../electron/menu-templa
 
 const PLATFORMS = ['darwin', 'win32', 'linux'];
 
+// Roles Electron 43 defines but does NOT execute: their entry in the bundled
+// `roleList` (lib/browser/api/menu-item-roles.ts, verified against the shipped
+// node_modules/electron/dist/electron binary) carries a `label` and nothing
+// else — no `appMethod`, no `windowMethod`, no `webContentsMethod`, no
+// `submenu`. `MenuItem#execute()` reads exactly those three method fields and
+// returns false when none is present, and a role-only item has no `click` of
+// its own to fall back to, so CLICKING ONE DOES NOTHING.
+//
+// On macOS that is deliberate rather than broken: `execute()` is gated on
+// `(!isDarwin || roleList[role].nonNativeMacOSRole)`, so these roles bail out on
+// darwin *by design* and the item is handed to AppKit, which implements it
+// natively. Off macOS nobody picks them up — an item with one of these roles and
+// no click handler renders enabled and inert. That is the "dead item" this
+// suite exists to catch, and a NAME check (`typeof item.role === 'string'`)
+// cannot see it: the name is perfectly valid, it just does not run.
+//
+// `help` and `window` appear here because they are inert as LEAVES; used as
+// container roles on a menu that carries its own submenu (as `help` is here)
+// they are fine, which is why the check below runs on leaves only.
+const INERT_ROLES = new Set([
+  'front', 'help', 'hide', 'hideOthers', 'services', 'recentDocuments',
+  'clearRecentDocuments', 'showSubstitutions', 'toggleSmartQuotes',
+  'toggleSmartDashes', 'toggleTextReplacement', 'startSpeaking', 'stopSpeaking',
+  'unhide', 'window', 'zoom',
+]);
+
 /** A template built with every handler recorded, so clicks can be traced. */
 function buildWithSpies(platform) {
   const calls = [];
@@ -36,6 +62,7 @@ function buildWithSpies(platform) {
       showAbout: spy('showAbout'),
       showStallDiagnostics: spy('showStallDiagnostics'),
       openDataFolder: spy('openDataFolder'),
+      toggleMaximize: spy('toggleMaximize'),
     },
   });
   return { template, calls };
@@ -54,15 +81,25 @@ function findItem(template, label) {
 // ---------------------------------------------------------------------------
 
 for (const platform of PLATFORMS) {
-  test(`[${platform}] every leaf item leads somewhere real (a role or a handler)`, () => {
+  test(`[${platform}] every leaf item leads somewhere real (an EXECUTABLE role or a handler)`, () => {
     const { template } = buildWithSpies(platform);
     const items = flattenMenuItems(template);
+    const isMac = platform === 'darwin';
     assert.ok(items.length > 0, 'the template has items');
     for (const item of items) {
-      const leadsSomewhere = typeof item.role === 'string' || typeof item.click === 'function';
+      if (typeof item.click === 'function') continue;
+      const role = typeof item.role === 'string' ? item.role : null;
       assert.ok(
-        leadsSomewhere,
+        role,
         `menu item ${JSON.stringify(item.label ?? item)} has neither a role nor a click handler — it is a dead item`,
+      );
+      // EXECUTABILITY, not spelling. Off macOS a role with no method in
+      // Electron 43's roleList is as dead as a typo'd one; on macOS AppKit
+      // implements it, so it is legitimate there.
+      assert.ok(
+        isMac || !INERT_ROLES.has(role),
+        `menu item ${JSON.stringify(item.label ?? role)} relies on role '${role}', which Electron 43 does not execute on ${platform} ` +
+          '(no appMethod/windowMethod/webContentsMethod) and which no native platform handler picks up off macOS — it is a dead item',
       );
     }
   });
@@ -107,9 +144,16 @@ for (const platform of PLATFORMS) {
     for (const r of ['reload', 'forceReload', 'toggleDevTools', 'resetZoom', 'zoomIn', 'zoomOut', 'togglefullscreen']) {
       assert.ok(roles.has(r), `view role '${r}' missing`);
     }
-    // Window.
-    for (const r of ['minimize', 'zoom']) {
-      assert.ok(roles.has(r), `window role '${r}' missing`);
+    // Window. `minimize` is executable everywhere (it carries a windowMethod).
+    // `zoom` is NOT: it is a macOS-only, AppKit-implemented role, so it is
+    // asserted on darwin and must be ABSENT elsewhere — off macOS the Window
+    // menu carries a genuinely-wired maximize/restore item instead
+    // (WARDEN-1313).
+    assert.ok(roles.has('minimize'), "window role 'minimize' missing");
+    if (platform === 'darwin') {
+      assert.ok(roles.has('zoom'), "window role 'zoom' missing on darwin");
+    } else {
+      assert.ok(!roles.has('zoom'), `inert role 'zoom' present on ${platform}`);
     }
     // Quit is reachable on every platform (app menu on macOS, File elsewhere).
     assert.ok(roles.has('quit'), 'quit role missing');
@@ -227,6 +271,35 @@ for (const platform of ['win32', 'linux']) {
     );
   });
 }
+
+for (const platform of ['win32', 'linux']) {
+  test(`[${platform}] Window > maximize/restore is genuinely wired, not the inert 'zoom' role`, () => {
+    const { template, calls } = buildWithSpies(platform);
+    const windowMenu = template.find((m) => m.label === 'Window');
+    assert.ok(windowMenu, 'Window menu missing');
+    const items = flattenMenuItems(windowMenu.submenu);
+    // Electron 43's `zoom` has no method off macOS: an item carrying it would
+    // render, be enabled, and do nothing.
+    assert.ok(!items.some((i) => i.role === 'zoom'), `role:'zoom' used on ${platform}, where it executes nothing`);
+    const maxItem = items.find((i) => /maximi[sz]e|restore/i.test(String(i.label ?? '')));
+    assert.ok(maxItem, 'no maximize/restore item in the Window menu');
+    assert.equal(typeof maxItem.click, 'function', 'the maximize/restore item carries no click handler');
+    maxItem.click();
+    assert.deepEqual(calls, ['toggleMaximize'], 'the maximize/restore item does not call the injected handler');
+  });
+}
+
+test("[darwin] Window > Zoom stays the native role:'zoom' item", () => {
+  const { template } = buildWithSpies('darwin');
+  const windowMenu = template.find((m) => m.label === 'Window');
+  const items = flattenMenuItems(windowMenu.submenu);
+  assert.ok(items.some((i) => i.role === 'zoom'), "role:'zoom' missing from the macOS Window menu");
+  // macOS must NOT take the injected handler — AppKit already implements zoom.
+  assert.ok(
+    !items.some((i) => /maximi[sz]e|restore/i.test(String(i.label ?? ''))),
+    'a maximize/restore item leaked into the macOS Window menu',
+  );
+});
 
 test('every platform exposes the same top-level menus apart from the macOS app menu', () => {
   const mac = topLevelLabels(buildWithSpies('darwin').template);
