@@ -30,6 +30,11 @@ interface WardenWindowBridge {
   // main, which enforces the http/https allow-list). Resolves true when the URL
   // was handed to the OS.
   openExternal?: (url: string) => Promise<boolean>;
+  // WARDEN-1280 — subscribe to the application menu's "Settings…" (CmdOrCtrl+,)
+  // click, pushed from main. Returns an unsubscribe. Optional: an older preload
+  // that predates the menu simply lacks it, and the helper below degrades to a
+  // no-op unsubscribe rather than throwing.
+  onOpenSettings?: (cb: () => void) => () => void;
 }
 
 interface WindowWithWarden extends Window {
@@ -184,6 +189,29 @@ export async function openExternalUrl(url: string): Promise<boolean> {
   } catch (e) {
     console.warn('[warden:electron] openExternal failed', e);
     return false;
+  }
+}
+
+// WARDEN-1280 — subscribe to the application menu's "Settings…" (CmdOrCtrl+,)
+// item. The menu lives in MAIN; the Settings page is renderer state, so the menu
+// reaches it through a main→renderer push. App.tsx installs ONE effect on this
+// that calls the same setSettingsOpen(true) the gear button calls, so the menu
+// item and the gear are literally the same destination.
+//
+// Same three-context story as everything else here: no preload (the `npm run
+// dev` browser, `node web/smoke.cjs`) means no bridge, which means no
+// subscription at all — those hosts have no application menu to fire it, and
+// this returns a no-op unsubscribe so the caller's useEffect cleanup stays safe.
+// An older preload that predates the menu lacks the method and takes the same
+// path. Never throws into the caller.
+export function onOpenSettings(cb: () => void): () => void {
+  const b = bridge();
+  if (!b || typeof b.onOpenSettings !== 'function') return () => {};
+  try {
+    return b.onOpenSettings(cb) ?? (() => {});
+  } catch (e) {
+    console.warn('[warden:electron] onOpenSettings failed', e);
+    return () => {};
   }
 }
 

@@ -3,7 +3,9 @@
 const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu, shell } = require('electron');
 const { fork, execSync } = require('child_process');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const fs = require('fs');
+const os = require('os');
 const http = require('http');
 // Pure window-bounds decision logic (no electron dependency) — see file header.
 // main.cjs wires the live electron APIs (screen, win.getBounds/isMaximized, fs)
@@ -51,6 +53,16 @@ const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
 const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('./telemetry-transmission-log.cjs');
+// Application menu (WARDEN-1280). Warden shipped Electron's STOCK template — which
+// advertises "About Electron", Help links to electronjs.org, and a File > New
+// Window that boots a second instance whose killStalePort() kills the FIRST
+// instance's backend. The template below replaces it with items that each lead
+// somewhere real; it is electron-free (same split as window-state.cjs) so the
+// menu's shape is unit-tested in web/menu-template.test.mjs, and main injects the
+// live actions. The stall-journal reduction the Diagnostics item shows is pure
+// too (web/stall-summary.test.mjs).
+const { buildMenuTemplate } = require('./menu-template.cjs');
+const { summarizeStalls, formatStallSummary } = require('./stall-summary.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
@@ -325,6 +337,183 @@ function broadcastTelemetryRuntimeStatus(status) {
     }
   } catch {
     /* a status broadcast must never break the host */
+  }
+}
+
+// --- Application menu (WARDEN-1280) -------------------------------------------
+// Replaces Electron's stock template. The template SHAPE lives in the
+// electron-free menu-template.cjs (unit-tested); everything below is the wiring
+// main alone can do — the live Electron APIs behind each item.
+//
+// The data dir is computed HERE rather than imported: package.json is
+// `"type": "module"` so everything under src/ is ESM, and this file is CJS and
+// cannot require() it. src/config.js:8 and src/activity.js:13 each already
+// compute this same path independently, so a third independent computation is
+// the established in-tree shape rather than a new one. (The stall JOURNAL read
+// below does NOT duplicate anything: it dynamically imports the REAL readStalls,
+// which CJS→ESM dynamic import supports inside the packaged asar since Electron
+// 28 — the same move main already makes for the telemetry transport.)
+function wardenDataDir() {
+  return path.join(os.homedir(), '.yatfa-warden');
+}
+
+// Resolve an ESM module under src/ to a specifier `import()` accepts on EVERY
+// platform. A bare `path.join(...)` result is NOT such a specifier: on win32 it
+// is a drive-letter path (`C:\...\src\stall-log.js`) whose leading `C:` Node's
+// ESM loader parses as a URL SCHEME and rejects before touching the filesystem
+// (`ERR_UNSUPPORTED_ESM_URL_SCHEME: ... Received protocol 'c:'`). Electron's main
+// process uses Node's own ESM loader, so this is Node's documented behavior, not
+// an Electron quirk. POSIX absolute paths happen to URL-resolve, which is exactly
+// why the bug is invisible on macOS/Linux — and warden ships a Windows NSIS
+// installer. `pathToFileURL().href` is the standard fix.
+function srcModuleUrl(...segments) {
+  return pathToFileURL(path.join(__dirname, '..', 'src', ...segments)).href;
+}
+
+// Push a main→renderer message defensively. Copied from
+// broadcastTelemetryRuntimeStatus's discipline: a missing/destroyed window or a
+// throwing webContents is swallowed, because a menu click must never crash the
+// host. Before any window exists this is a no-op (the menu is installed before
+// the window loads, and a click can also race a close).
+function sendToRenderer(channel, payload) {
+  try {
+    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send(channel, payload);
+      return true;
+    }
+  } catch {
+    /* a menu action must never break the host */
+  }
+  return false;
+}
+
+// About (Windows/Linux). `role: 'about'` renders the native About panel only on
+// macOS, so the other platforms take this dialog — carrying the SAME facts and no
+// others: the product name, the real app.getVersion(), and the package
+// description. Deliberately NO website/credits/authors: package.json carries no
+// repository/homepage/bugs/author fields, and an About box that invents a
+// destination is exactly what this ticket removes.
+//
+// The description is READ from package.json rather than transcribed, so an edit
+// to the manifest cannot silently drift out of the About box (app.getVersion()
+// already reads that same manifest for the version). package.json is JSON, so
+// require() crosses no ESM boundary, and it ships inside the asar (build.files).
+// A read failure falls back to the product name alone rather than throwing.
+function appDescription() {
+  try {
+    const desc = require('../package.json').description;
+    if (typeof desc === 'string' && desc.trim()) return desc.trim();
+  } catch (e) {
+    console.warn('[warden:menu] package description unreadable', e);
+  }
+  return 'Yatfa Warden';
+}
+
+function showAboutDialog() {
+  try {
+    dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+      type: 'info',
+      title: 'About Yatfa Warden',
+      message: 'Yatfa Warden',
+      detail: `Version ${app.getVersion()}\n${appDescription()}`,
+      buttons: ['OK'],
+      noLink: true,
+    });
+  } catch (e) {
+    console.warn('[warden:menu] About dialog failed', e);
+  }
+}
+
+// Open ~/.yatfa-warden/ in the OS file manager. The directory is created on
+// demand by its writers (stall-log / activity / config), so on a brand-new
+// install it may not exist yet — create it rather than showing the owner an
+// openPath error for a folder that is merely empty.
+async function openDataFolder() {
+  const dir = wardenDataDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    console.warn('[warden:menu] could not create data dir', e);
+  }
+  try {
+    const err = await shell.openPath(dir);
+    if (err) console.warn(`[warden:menu] openPath failed: ${err}`);
+  } catch (e) {
+    console.warn('[warden:menu] openPath threw', e);
+  }
+}
+
+// Stall diagnostics. The server writes ~/.yatfa-warden/stalls.jsonl (WARDEN-977)
+// and serves it at GET /api/diagnostics/stalls — a surface with zero UI consumers,
+// reachable only by knowing the path by heart. This item is the person-facing
+// read: the SAME journal, through the SAME reader (readStalls, dynamically
+// imported across the ESM boundary), bounded by the same 500-record ceiling the
+// endpoint applies, reduced to count / last / top culprit by the pure summarizer.
+// Every failure mode degrades to a readable dialog: an unloadable module or an
+// unreadable journal reports that rather than throwing out of the click handler.
+async function showStallDiagnostics() {
+  const journal = path.join(wardenDataDir(), 'stalls.jsonl');
+  let summaryText;
+  try {
+    const stallLog = await import(srcModuleUrl('stall-log.js'));
+    const stalls = await stallLog.readStalls({ limit: 500 });
+    summaryText = formatStallSummary(summarizeStalls(stalls), { logFile: journal });
+  } catch (e) {
+    console.warn('[warden:menu] stall diagnostics read failed', e);
+    summaryText = `Could not read the stall journal.\n\nJournal: ${journal}`;
+  }
+  try {
+    const res = await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+      type: 'info',
+      title: 'Stall Diagnostics',
+      message: 'Server event-loop stalls',
+      detail: summaryText,
+      buttons: ['Open Data Folder', 'Close'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (res && res.response === 0) await openDataFolder();
+  } catch (e) {
+    console.warn('[warden:menu] stall diagnostics dialog failed', e);
+  }
+}
+
+// Install the application menu. Called once from app.whenReady(), replacing the
+// stock template for every window in the app.
+function installApplicationMenu() {
+  try {
+    // The macOS About panel's contents (what the `role: 'about'` item renders).
+    // Name + version only — the same no-invented-destinations rule as the
+    // Windows/Linux dialog above.
+    if (process.platform === 'darwin') {
+      app.setAboutPanelOptions({
+        applicationName: 'Yatfa Warden',
+        applicationVersion: app.getVersion(),
+      });
+    }
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate(
+        buildMenuTemplate({
+          platform: process.platform,
+          appName: 'Yatfa Warden',
+          handlers: {
+            // The menu's Settings… item opens the SAME Settings page the gear
+            // button opens: main pushes this, the renderer's one effect calls
+            // setSettingsOpen(true). No preload (browser / smoke) → no
+            // subscription → those contexts are byte-unaffected.
+            openSettings: () => sendToRenderer('menu:open-settings'),
+            showAbout: () => showAboutDialog(),
+            showStallDiagnostics: () => { void showStallDiagnostics(); },
+            openDataFolder: () => { void openDataFolder(); },
+          },
+        }),
+      ),
+    );
+  } catch (e) {
+    // A menu failure must never stop the app from booting — the window and the
+    // backend matter more than the menu bar.
+    console.warn('[warden:menu] application menu install failed', e);
   }
 }
 
@@ -880,6 +1069,13 @@ ipcMain.on('telemetry:renderer-error', (_event, serialized) => {
 });
 
 app.whenReady().then(async () => {
+  // Replace Electron's STOCK application menu (WARDEN-1280). Installed FIRST —
+  // before the backend fork and the window — so the app never briefly shows the
+  // stock template's "About Electron" / electronjs.org / New Window items, and so
+  // a menu failure surfaces before anything depends on it. installApplicationMenu
+  // swallows its own errors, so this can never block boot.
+  installApplicationMenu();
+
   // Kill any stale server from a previous run
   killStalePort();
 
@@ -961,7 +1157,7 @@ app.whenReady().then(async () => {
   // — and nothing reaches the transport until baseConsent is applied below, so
   // the ordering is safe. WARDEN-524.
   try {
-    const transport = await import(path.join(__dirname, '..', 'src', 'telemetry-send.js'));
+    const transport = await import(srcModuleUrl('telemetry-send.js'));
     telemetryPipeline.setSend(transport.send);
   } catch (e) {
     console.warn('[warden:telemetry] transport module failed to load; telemetry stays inert', e);
