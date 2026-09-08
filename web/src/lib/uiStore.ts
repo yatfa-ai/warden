@@ -66,6 +66,17 @@ export interface UiStoreState {
   snippets: Snippet[];
   /** Replace the snippet library. The persisted write follows via App's snapshot. */
   setSnippets: (snippets: Snippet[]) => void;
+  /**
+   * The File Viewer's Rendered ⇄ Source markdown toggle (WARDEN-480), made one
+   * global remembered choice rather than a per-open reset. Exactly ONE reader
+   * and ONE writer — FileViewer's own toolbar — yet it used to travel App →
+   * {ChatSidebar, PaneGrid, HealthDashboard} → {PaneTile} → FileViewer through
+   * four PURE pass-through carriers. FileViewer now subscribes here directly
+   * (WARDEN-1288, roadmap WARDEN-1204 slice 2) and those hops are deleted.
+   */
+  fileViewerViewMode: 'rendered' | 'source';
+  /** Flip the File Viewer's view mode. The persisted write follows via App's snapshot. */
+  setFileViewerViewMode: (mode: 'rendered' | 'source') => void;
 }
 
 /**
@@ -77,7 +88,7 @@ export interface UiStoreState {
  *
  * Overridable so a test can seed a known slice without touching localStorage.
  */
-export type UiStoreSeed = Partial<Pick<UiStoreState, 'snippets'>>;
+export type UiStoreSeed = Partial<Pick<UiStoreState, 'snippets' | 'fileViewerViewMode'>>;
 
 /**
  * Build an INDEPENDENT store instance.
@@ -87,9 +98,14 @@ export type UiStoreSeed = Partial<Pick<UiStoreState, 'snippets'>>;
  * than a bare module-level `create()`.
  */
 export function createUiStore(seed: UiStoreSeed = {}) {
+  // ONE persisted read per store instance, shared by every seeded fact — the
+  // same single `loadUi()` App does for its own lazy initializers.
+  const persisted = loadUi();
   return createStore<UiStoreState>()((set) => ({
-    snippets: seed.snippets ?? loadUi().snippets ?? [],
+    snippets: seed.snippets ?? persisted.snippets ?? [],
     setSnippets: (snippets) => set({ snippets }),
+    fileViewerViewMode: seed.fileViewerViewMode ?? persisted.fileViewerViewMode ?? 'rendered',
+    setFileViewerViewMode: (fileViewerViewMode) => set({ fileViewerViewMode }),
   }));
 }
 
@@ -130,4 +146,22 @@ export function useSnippets(): Snippet[] {
  */
 export function useSetSnippets(): (snippets: Snippet[]) => void {
   return useUiStore((s) => s.setSnippets);
+}
+
+/**
+ * The File Viewer's Rendered ⇄ Source markdown toggle (WARDEN-480, WARDEN-1288).
+ * Read-only subscription — FileViewer reads it here instead of receiving it
+ * through four pass-through ancestors.
+ */
+export function useFileViewerViewMode(): 'rendered' | 'source' {
+  return useUiStore((s) => s.fileViewerViewMode);
+}
+
+/**
+ * The File Viewer view-mode setter. Stable across renders (zustand actions are
+ * created once with the store), so it is safe in a dependency array — and its
+ * plain value signature is what App's `resetSetters` entry calls.
+ */
+export function useSetFileViewerViewMode(): (mode: 'rendered' | 'source') => void {
+  return useUiStore((s) => s.setFileViewerViewMode);
 }

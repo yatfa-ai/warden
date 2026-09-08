@@ -146,11 +146,6 @@ interface Props {
   // this grid's own FileViewer — App owns the persisted pref; the FileViewer's
   // blame view formats author-dates per the pref, mirroring every other surface.
   timestampFormat: TimestampFormat;
-  // File Viewer markdown view mode (WARDEN-480): pure pass-through to PaneTile
-  // and to this grid's own FileViewer — App owns the persisted pref (one global
-  // remembered choice) so toggling Rendered⇄Source once sticks across opens.
-  fileViewerViewMode: 'rendered' | 'source';
-  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Follow poll cadence (WARDEN-749): pure pass-through to PaneTile and to this
   // grid's own FileViewer — App owns the resolved value (the same one the catalog
   // poll uses), so Follow shares the dashboard cadence instead of hardcoding one.
@@ -163,7 +158,7 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, timestampFormat, pollIntervalMs, onReorderPanes }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -810,8 +805,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     showHostTags={showHostTags}
                     onSpawned={onSpawned}
                     timestampFormat={timestampFormat}
-                    fileViewerViewMode={fileViewerViewMode}
-                    onFileViewerViewModeChange={onFileViewerViewModeChange}
                     pollIntervalMs={pollIntervalMs}
                   />
                 </div>
@@ -894,8 +887,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           line={fileLine}
           open={fileOpen}
           timestampFormat={timestampFormat}
-          viewMode={fileViewerViewMode}
-          onViewModeChange={onFileViewerViewModeChange}
           onNavigate={(p) => { setFilePath(p); setFileLine(undefined); }}
           pollIntervalMs={pollIntervalMs}
           onOpenChange={(open) => {

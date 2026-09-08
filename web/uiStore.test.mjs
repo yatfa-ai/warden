@@ -79,7 +79,11 @@ const test = (name, fn) => {
 // reading `store.getState().snippets` here IS what App's `useSnippets()` gives
 // its PersistedPrefSnapshot.
 const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpty = false } = {}) => {
-  const snapshot = { ...loadUi(), snippets: store.getState().snippets };
+  const snapshot = {
+    ...loadUi(),
+    snippets: store.getState().snippets,
+    fileViewerViewMode: store.getState().fileViewerViewMode,
+  };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
 
@@ -202,6 +206,121 @@ test('an empty-mode launch still persists the library (it rides the live spread,
   store.getState().setSnippets(mine);
   flushSnapshotToDisk(store, { restoreOnStartup: 'empty', startedEmpty: true });
   assert.deepEqual(loadUi().snippets, mine);
+});
+
+// ─── fileViewerViewMode (WARDEN-1288, roadmap WARDEN-1204 slice 2) ───────────
+//
+// The File Viewer's Rendered ⇄ Source toggle (WARDEN-480), the second fact
+// migrated onto the store. Its shape here is the whole point of the slice: ONE
+// reader and ONE writer (FileViewer's own toolbar) that used to be drilled
+// through four PURE pass-through carriers. The legs below prove the same two
+// invariants the snippets legs above do — the persistence boundary is unbroken
+// (the store never writes localStorage; App's saveUi effect still does) and the
+// factory really isolates.
+
+console.log('\ncreateUiStore — fileViewerViewMode seeds from storage.ts, never from a re-declared default');
+test('a fresh store seeds \'rendered\' on a clean install (the DEFAULT_UI value, not a local literal)', () => {
+  reset();
+  assert.equal(createUiStore().getState().fileViewerViewMode, 'rendered');
+  assert.equal(createUiStore().getState().fileViewerViewMode, DEFAULT_UI.fileViewerViewMode);
+});
+test('a fresh store seeds from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({ ...loadUi(), fileViewerViewMode: 'source' });
+  assert.equal(createUiStore().getState().fileViewerViewMode, 'source');
+});
+test('the seed runs through loadUi\'s sanitizer (a bogus persisted value falls back to \'rendered\')', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], fileViewerViewMode: 'bogus' }));
+  assert.equal(createUiStore().getState().fileViewerViewMode, 'rendered');
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage)', () => {
+  reset();
+  saveUi({ ...loadUi(), fileViewerViewMode: 'rendered' });
+  assert.equal(createUiStore({ fileViewerViewMode: 'source' }).getState().fileViewerViewMode, 'source');
+});
+
+console.log('\nsetFileViewerViewMode — the toolbar toggle\'s write, and it does NOT touch localStorage');
+test('setFileViewerViewMode replaces the value', () => {
+  reset();
+  const store = createUiStore({ fileViewerViewMode: 'rendered' });
+  store.getState().setFileViewerViewMode('source');
+  assert.equal(store.getState().fileViewerViewMode, 'source');
+  store.getState().setFileViewerViewMode('rendered');
+  assert.equal(store.getState().fileViewerViewMode, 'rendered');
+});
+test('a subscriber is notified with the new mode (the SHARING channel FileViewer reads)', () => {
+  reset();
+  const store = createUiStore({ fileViewerViewMode: 'rendered' });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push(s.fileViewerViewMode));
+  store.getState().setFileViewerViewMode('source');
+  unsubscribe();
+  assert.deepEqual(seen, ['source']);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setFileViewerViewMode('rendered');
+  assert.equal(seen.length, 1);
+});
+test('setFileViewerViewMode alone writes NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ fileViewerViewMode: 'rendered' });
+  store.getState().setFileViewerViewMode('source');
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the action identity is stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore({ fileViewerViewMode: 'rendered' });
+  const before = store.getState().setFileViewerViewMode;
+  before('source');
+  assert.equal(store.getState().setFileViewerViewMode, before);
+});
+
+console.log('\nround trip: FileViewer toggle → store → App snapshot → the saveUi effect → loadUi');
+test('a mode picked in the viewer survives a restart', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().fileViewerViewMode, 'rendered');
+  store.getState().setFileViewerViewMode('source');   // the toolbar toggle
+  flushSnapshotToDisk(store);                          // App snapshot → saveUi effect
+  assert.equal(loadUi().fileViewerViewMode, 'source'); // next launch
+  // And the next launch's store seeds from exactly that.
+  assert.equal(createUiStore().getState().fileViewerViewMode, 'source');
+});
+test('the reset path restores \'rendered\' through the store-backed setter', () => {
+  reset();
+  const store = createUiStore({ fileViewerViewMode: 'source' });
+  // App's resetSetters entry is `fileViewerViewMode: setFileViewerViewMode` —
+  // the SAME setter, now backed by the store, called with a plain value.
+  store.getState().setFileViewerViewMode(DEFAULT_UI.fileViewerViewMode);
+  flushSnapshotToDisk(store);
+  assert.equal(store.getState().fileViewerViewMode, 'rendered');
+  assert.equal(loadUi().fileViewerViewMode, 'rendered');
+});
+
+console.log('\nfactory isolation — fileViewerViewMode');
+test('two stores do not share the view mode', () => {
+  reset();
+  const a = createUiStore({ fileViewerViewMode: 'rendered' });
+  const b = createUiStore({ fileViewerViewMode: 'rendered' });
+  a.getState().setFileViewerViewMode('source');
+  assert.equal(a.getState().fileViewerViewMode, 'source');
+  assert.equal(b.getState().fileViewerViewMode, 'rendered');
+});
+test('mutating a factory store leaves the APP-LEVEL singleton\'s view mode untouched', () => {
+  reset();
+  const before = uiStore.getState().fileViewerViewMode;
+  createUiStore({ fileViewerViewMode: 'rendered' }).getState().setFileViewerViewMode('source');
+  assert.equal(uiStore.getState().fileViewerViewMode, before);
+});
+test('the two migrated facts are independent — writing one does not disturb the other', () => {
+  reset();
+  const store = createUiStore({ snippets: [{ name: 'Keep', text: 'k' }], fileViewerViewMode: 'rendered' });
+  store.getState().setFileViewerViewMode('source');
+  assert.deepEqual(store.getState().snippets, [{ name: 'Keep', text: 'k' }]);
+  store.getState().setSnippets([]);
+  assert.equal(store.getState().fileViewerViewMode, 'source');
 });
 
 console.log('\nfactory isolation — the reason this is a factory and not a bare module-level store');
