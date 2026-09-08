@@ -133,6 +133,7 @@ export function AppearanceSection(props: AppearanceSectionProps) {
         </Select>
         {customFontMode && (
           <Input
+            id="customTerminalFontFamily"
             aria-label="Custom terminal font family"
             value={customFontText}
             onChange={(e) => {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -20,9 +20,11 @@ import { sectionGate, canSaveBackendConfig } from '@/components/settings/section
 import {
   SETTINGS_SECTIONS,
   searchSections,
+  searchSectionsWithRows,
   normalizeSearchText,
   type SectionId,
 } from '@/components/settings/sectionSearch';
+import { applyRowMatchHighlights, clearRowMatchHighlights } from '@/components/settings/rowHighlight';
 import { SettingsSection } from '@/components/settings/SettingsSection';
 import {
   type AppearancePrefs,
@@ -156,6 +158,46 @@ export function SettingsPage({
   // trigger would go blank, so always include the active section here.
   const matchIds = new Set(matches.map((s) => s.id));
   const selectItems = SETTINGS_SECTIONS.filter((s) => matchIds.has(s.id) || s.id === activeSection);
+
+  // WARDEN-1290 — point the user AT the matched row, not merely at the section
+  // that holds it. Search told you `tray` is in Appearance and then stopped, so
+  // you landed on a 16-row section and re-found by eye the row the search had
+  // already matched. Now every matching row in the ACTIVE section is
+  // highlighted and the first is scrolled to center.
+  //
+  // The row ids come from searchSectionsWithRows, whose section results are
+  // identical to `matches` above by construction (same predicate, same
+  // normalization — asserted in sectionSearch.test.mjs), so the rail and the
+  // highlight can never disagree about what matched.
+  //
+  // Keyed on [search, activeSection, configLoaded]: a new query, a section
+  // switch, and the moment the backend sections' rows first exist are exactly
+  // the three times the answer can change. `configLoaded` matters because those
+  // rows are not in the DOM until the /api/config GET resolves — without it, a
+  // query typed during the load would silently find nothing and never retry.
+  //
+  // rAF before touching the DOM, mirroring FileViewer's line-jump scroll
+  // (WARDEN-227) and DiffViewer's region jump: it guarantees this render is
+  // committed before we measure and scroll. `behavior: 'auto'` is the house
+  // choice — instant, so there is no motion for prefers-reduced-motion to
+  // suppress (index.css, WCAG 2.3.3).
+  //
+  // Everything here is null-tolerant (see rowHighlight.ts): an anchor whose row
+  // has not rendered is skipped, and one that is mounted inside a HIDDEN
+  // section is skipped too — all sections stay mounted, so an ungated lookup
+  // would happily highlight and scroll to a row nobody can see.
+  useEffect(() => {
+    if (q === '') {
+      clearRowMatchHighlights();
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const active = searchSectionsWithRows(search).find((m) => m.section.id === activeSection);
+      const first = applyRowMatchHighlights(active?.matchedAnchors ?? []);
+      first?.scrollIntoView({ block: 'center', behavior: 'auto' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [search, q, activeSection, configLoaded]);
 
   // The active section's persistence model, shown in the footer so Save/Cancel
   // stop lying on the instant client-pref sections (Appearance/NewChats/
