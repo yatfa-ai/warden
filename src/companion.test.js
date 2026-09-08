@@ -29,6 +29,7 @@ import {
   targetForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
   encodeRequest, mapCompanionContainers, CompanionChannel, CompanionTransportError,
   CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
+  pingProbe,
   isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
   getCompanionStatus, getAllCompanionStatuses,
@@ -2694,6 +2695,164 @@ describe('hasSession() via companion (companion-or-fail)', () => {
     const res = await hasSession('(local)', { container: null, session: 'agent' }, {});
     assert.strictEqual(res.ok, false);
     assert.ok(/local/.test(res.error));
+  });
+});
+
+// ------------------- reachability probe over a live channel (WARDEN-1324) -------------------
+// pingProbe is the /api/hosts/status poll's companion leg. It is deliberately NOT
+// skeleton-shaped (companionOp → getChannel would bootstrap; a background probe
+// must never pay the binary-upload cost) and its `null` return is a DECLINE —
+// the caller falls back to raw-SSH validateHost — never an offline verdict.
+// These tests pin the two traps the ticket names:
+//   trap 1 — the probe never bootstraps (inactive host / dead channel / toggle off);
+//   trap 2 — a decline, not a failure, on every no-live-channel state.
+describe('pingProbe() — reachability over a live channel, never a bootstrap (WARDEN-1324)', () => {
+  let savedToggle;
+  before(() => { savedToggle = process.env.WARDEN_COMPANION_TRANSPORT; });
+  after(() => {
+    if (savedToggle === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedToggle;
+  });
+  beforeEach(() => {
+    _resetChannelCacheForTests();
+    applyCompanionToggle(true); // the gate short-circuits to 'inactive' when off; enable for the real path
+  });
+  afterEach(() => _resetChannelCacheForTests());
+
+  it('rides a live channel: a ping answer → {ok:true, host} (no version gate — reachability, not identity)', async () => {
+    // A STALE version must not read as unreachable: the bootstrap's ping reports
+    // TEST_VER (identity check), but the PROBE's ping reports a version matching
+    // no manifest — the probe must still say ok (no version gate).
+    let pings = 0;
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) => {
+        if (req.method !== 'ping') return { id: req.id, ok: false, error: 'unknown method' };
+        pings++;
+        return {
+          id: req.id, ok: true,
+          result: { version: pings === 1 ? TEST_VER : 'stale-but-alive', methods: ['ping'] },
+        };
+      }),
+    });
+    await getChannel('prod', {}, deps); // seed a live channel + active status
+    const res = await pingProbe('prod');
+    assert.deepStrictEqual(res, { ok: true, host: 'prod' });
+    assert.strictEqual(pings, 2, 'bootstrap ping + probe ping');
+  });
+
+  it('a live channel whose ping RPC fails → {ok:false, error} — companion-or-fail, NO raw-ssh retry', async () => {
+    let pings = 0;
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) => {
+        if (req.method !== 'ping') return { id: req.id, ok: false, error: 'unknown method' };
+        pings++;
+        // First ping is the bootstrap's identity check; the probe's ping fails.
+        return pings === 1
+          ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping'] } }
+          : { id: req.id, ok: false, error: 'companion wedged' };
+      }),
+    });
+    await getChannel('prod', {}, deps);
+    const res = await pingProbe('prod');
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('companion RPC error on prod'), res.error);
+    assert.ok(!('exists' in res), 'the envelope is the validateHost shape, not an op envelope');
+  });
+
+  it('a live channel whose ping times out at the transport level → {ok:false} with the recovery hint', async () => {
+    // The channel is alive for the bootstrap ping but never answers the probe's
+    // ping → channel.call rejects with CompanionTransportError (timeout) — the
+    // REAL rejection path, through the real CompanionChannel.
+    let pings = 0;
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) => {
+        if (req.method !== 'ping') return { id: req.id, ok: false, error: 'unknown method' };
+        pings++;
+        return pings === 1
+          ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping'] } }
+          : null; // the probe's ping never gets a reply
+      }),
+    });
+    await getChannel('prod', {}, deps);
+    const res = await pingProbe('prod', {}, { timeout: 25 });
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('companion transport error for prod'), res.error);
+    // The actionable opt-out guidance rides the error, as in every op contract.
+    assert.ok(res.error.includes('WARDEN_COMPANION_TRANSPORT=0'), res.error);
+  });
+
+  it('TRAP: an inactive host is declined and getChannel is NEVER called (no bootstrap from the probe)', async () => {
+    const { deps, calls } = fakeDeps();
+    const res = await pingProbe('never-engaged-host');
+    assert.strictEqual(res, null, 'a decline, not an offline verdict');
+    assert.strictEqual(calls.run, 0, 'no bootstrap probe run');
+    assert.strictEqual(calls.upload, 0, 'no binary upload');
+    assert.strictEqual(calls.spawnChannel, 0, 'no channel spawn');
+    assert.strictEqual(_channelCacheHasForTests('never-engaged-host'), false, 'no cache entry created');
+    assert.strictEqual(getCompanionStatus('never-engaged-host').state, 'inactive');
+  });
+
+  it('TRAP: the dead-channel window declines WITHOUT re-bootstrapping (status is a high-water mark)', async () => {
+    let t;
+    let spawns = 0; // counted here: the override replaces fakeDeps' counting spawnChannel
+    const { deps } = fakeDeps({
+      spawnChannel: () => { spawns++; t = fakeTransport((req) => (
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping'] } }
+          : { id: req.id, ok: false, error: 'unknown method' })); return t; },
+    });
+    await getChannel('prod', {}, deps); // bootstrap: live channel + status 'active'
+    t._die(new Error('ssh exited'));    // the channel dies — companionStatus is NOT reconciled
+    assert.strictEqual(getCompanionStatus('prod').state, 'active',
+      'the stale-active window is real: status still says active');
+    const res = await pingProbe('prod');
+    assert.strictEqual(res, null, 'declines in the window instead of bootstrapping');
+    assert.strictEqual(spawns, 1, 'NO re-bootstrap was triggered by the probe');
+    assert.strictEqual(_channelCacheHasForTests('prod'), true,
+      'the dead entry stays put — cleaning it up is not this probe\'s job');
+  });
+
+  it('declines while a bootstrap is in flight (not ours to await, not ours to stack on)', async () => {
+    // Hazard (companion.test.js history): a run() stub that never resolves hangs
+    // the whole file — defer ONLY the first call, resolve everything after.
+    let resolveFirst;
+    let firstRun = true;
+    const { deps } = fakeDeps({
+      run: (...a) => {
+        if (!firstRun) return Promise.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+        firstRun = false;
+        return new Promise((r) => { resolveFirst = () => r({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }); });
+      },
+    });
+    const pending = getChannel('prod', {}, deps); // bootstrap in flight → status 'bootstrapping'
+    const res = await pingProbe('prod');
+    assert.strictEqual(res, null, 'the probe neither awaits nor stacks on the in-flight bootstrap');
+    resolveFirst();
+    await pending;
+    // After the bootstrap lands, the SAME probe rides the now-live channel.
+    const after = await pingProbe('prod');
+    assert.deepStrictEqual(after, { ok: true, host: 'prod' });
+  });
+
+  it('toggle OFF: declines even with a live cached channel (byte-for-byte parity is asserted, not assumed)', async () => {
+    let pings = 0;
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) => {
+        if (req.method !== 'ping') return { id: req.id, ok: false, error: 'unknown method' };
+        pings++;
+        return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping'] } };
+      }),
+    });
+    await getChannel('prod', {}, deps); // seeded while ON
+    applyCompanionToggle(false);
+    const res = await pingProbe('prod');
+    assert.strictEqual(res, null, 'the toggle short-circuits getCompanionStatus → decline');
+    assert.strictEqual(pings, 1, 'no probe ping left the channel');
+  });
+
+  it('LOCAL declines (the companion serves remote hosts only — getCompanionStatus is inactive)', async () => {
+    const res = await pingProbe('(local)');
+    assert.strictEqual(res, null);
   });
 });
 

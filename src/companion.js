@@ -1307,6 +1307,89 @@ export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}
   });
 }
 
+// ----------------- reachability probe over a live channel (WARDEN-1324) -----------------
+// The /api/hosts/status poll is a fixed 30s clock that never stops while the app
+// is open, and today every tick pays one raw SSH handshake × N hosts — on Windows
+// a FULL handshake every time, since ControlMaster pooling is skipped there. When
+// the transport already holds a LIVE channel to the host, a `ping` on that channel
+// answers the same question with no spawn at all — and is the MORE truthful
+// answer: a channel that answers is the connection the app is already using, not
+// a fresh `echo OK` on a connection nothing else touches.
+//
+// ⚠️ THE TWO TRAPS THIS OP EXISTS TO AVOID (both pinned by test, not inspection):
+//
+//   1. NEVER BOOTSTRAP FROM THE PROBE. This op deliberately does NOT go through
+//      companionOp()/getChannel(): their contract is "acquire or bootstrap",
+//      which is exactly the wrong contract for a background poll — a bootstrap
+//      here would pay the binary-upload cost on a 30s clock, for a host the
+//      operator never gestured at.
+//
+//   2. companionStatus IS NOT A LIVE-CHANNEL READ. `state === 'active'` is a
+//      HIGH-WATER MARK: it is written by the getChannel bootstrap transitions and
+//      never reconciled when the channel dies (CompanionChannel._die() writes
+//      nothing), so an active-marked host can be holding a dead channel. Gating
+//      on the status map alone and then calling getChannel would bootstrap —
+//      trap 1 through the back door. THE EXPLICIT CHOICE (ticket-required to be
+//      stated, not left implicit): read the channel cache DIRECTLY via
+//      liveChannelFor() below — a module-private non-bootstrapping reader — and
+//      DECLINE whenever there is no live channel (absent, still bootstrapping, or
+//      dead). A decline is not a failure: the caller (probeHostReachability in
+//      server.js) takes today's raw-SSH validateHost path byte-for-byte.
+//
+// Return contract: the validateHost shape `{ ok, host, error? }` when the probe
+// RODE a live channel, or `null` when it DECLINED — null is the caller's signal
+// to fall back to raw SSH, never an offline verdict. (LOCAL never reaches the
+// channel read: getCompanionStatus(LOCAL) is 'inactive'.)
+//
+// Tally note for the WARDEN-1312 rebaser: this op calls `ping`, which
+// recordCompanionOp already excludes as channel infrastructure — nothing to add
+// there, and the probe must stay excluded (it would put ops:{ping:…} on every
+// polled host and break the exact-shape status assertions).
+//
+// No `deps` seam, unlike every skeleton op: those inject the bootstrap legs
+// (run/upload/spawnChannel) and this op runs none of them — that is the point.
+// `opts.timeout` bounds the ping (the seam the timeout test drives).
+export async function pingProbe(host, cfg = {}, opts = {}) {
+  // Gate, cheapest first: a host the transport never engaged, an errored or
+  // still-bootstrapping host, LOCAL, or a disabled toggle all read != 'active'
+  // and decline. The toggle-off short-circuit inside getCompanionStatus is what
+  // makes the whole op inert when the transport is off (byte-for-byte parity) —
+  // asserted, not assumed, in the tests.
+  if (getCompanionStatus(host).state !== 'active') return null;
+  const channel = liveChannelFor(host);
+  if (!channel) return null; // dead-channel window / bootstrap in flight: decline
+  try {
+    // Reachability, not identity: ANY ping answer proves the channel is alive,
+    // so unlike pingOnce (bootstrap) there is deliberately NO version check — a
+    // stale companion version must not read as an unreachable host. The bound
+    // sits comfortably under hostStatus's HOST_PROBE_TIMEOUT_MS (8s) and mirrors
+    // validateHost's own 5s ssh timeout.
+    await channel.call('ping', {}, { timeout: opts.timeout ?? 5000 });
+    return { ok: true, host };
+  } catch (e) {
+    // Companion-or-fail (the experimental path's contract): a live channel whose
+    // ping FAILED is reported as unreachable with the companion error — never
+    // silently retried over raw SSH (that would recreate the parallel transport
+    // the roadmap forbids).
+    return { ok: false, host, error: formatCompanionError(host, e, 'ping') };
+  }
+}
+
+// Module-private, NON-bootstrapping channel read — the production-safe reader the
+// status map cannot substitute for (see the trap note on pingProbe; the test-only
+// _channelCacheHasForTests is deliberately NOT used here). A host qualifies only
+// when its cache entry is a live CompanionChannel: an in-flight bootstrap Promise
+// and a dead channel both decline — awaiting the former would couple the poll's
+// latency to someone else's bootstrap; riding the latter would just throw.
+// getChannel remains the only code path that may CREATE a cache entry.
+function liveChannelFor(host) {
+  const existing = channelCache.get(host);
+  if (!existing) return null;
+  if (typeof existing.then === 'function') return null; // bootstrap in flight — not ours to await
+  if (existing.dead) return null;                       // died since last use — re-bootstrap is not the probe's job
+  return existing;
+}
+
 // --------------------------- deliverRemoteScript ------------------------------
 // THE ROUTING GUARD for the whole script-delivery domain — "I have an
 // already-assembled script and a REMOTE host; which transport carries it?"
