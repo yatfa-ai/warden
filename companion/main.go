@@ -455,14 +455,7 @@ func buildCaptureScript(panes []capturePaneReq) string {
 		} else {
 			tmuxCmd = "tmux"
 		}
-		target := c.Session
-		if target == "" {
-			target = c.Container
-		}
-		if target == "" {
-			target = "agent"
-		}
-		s := shellQuote(target)
+		s := shellQuote(resolveSession(c.Session, c.Container))
 		parts = append(parts,
 			"printf '___B_"+key+"___\\n'; "+tmuxCmd+
 				" capture-pane -t "+s+" -p -e -S -60 -E - 2>/dev/null; "+
@@ -759,13 +752,7 @@ func hasSession(params json.RawMessage) (map[string]any, error) {
 	if len(params) > 0 {
 		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
 	}
-	target := p.Session
-	if target == "" {
-		target = p.Container
-	}
-	if target == "" {
-		target = "agent"
-	}
+	target := resolveSession(p.Session, p.Container)
 	script := tmuxCmdFor(p.Container) + " has-session -t " + shellQuote(target)
 	err := exec.Command("bash", "-lc", script).Run()
 	return map[string]any{"exists": err == nil}, nil
@@ -782,7 +769,9 @@ func hasSession(params json.RawMessage) (map[string]any, error) {
 // spawnSessionParams mirrors the fields warden's tmux.spawn() (src/tmux.js) needs
 // to build the new-session argv: Container (docker container, or "" for a bare-
 // tmux / manual chat → bare `tmux`), Session (the tmux target, falling back to
-// Container then "agent" — identical to src/tmux.js sess()), Cwd (the working dir
+// Container then "agent" via resolveSession — identical to paneTarget() in
+// src/chatMeta.js, not to src/tmux.js sess(), which resolves a config-level
+// session and has no container leg), Cwd (the working dir
 // for `-c`; chat.cwd VERBATIM for remote, "" → omit `-c`), and Cmd (the command
 // argv appended after the tmux flags; empty → tmux launches its own default shell,
 // the WARDEN-223 "no explicit shell" case).
@@ -841,8 +830,12 @@ func tmuxCmdFor(container string) string {
 }
 
 // resolveSession applies the Session -> Container -> "agent" fallback shared by
-// src/tmux.js sess() and buildCaptureScript's target selection, so the companion
-// resolves the tmux target identically to the default path.
+// the companion's tmux-target callers (buildCaptureScript, hasSession, resize,
+// spawnSession, killSession, send, sendKeys), so every RPC resolves the tmux
+// target identically. Its JS twin is paneTarget() in src/chatMeta.js:115 — the
+// same session -> container -> "agent" chain. NOT src/tmux.js sess(), which is a
+// DIFFERENT ladder (chat.session -> cfg.tmuxSession -> "agent"): it has no
+// container leg and resolves a config-level session.
 func resolveSession(session, container string) string {
 	if session != "" {
 		return session
@@ -1021,11 +1014,9 @@ func resize(params json.RawMessage) cmdResult {
 	if len(params) > 0 {
 		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
 	}
-	target := p.Session
-	if target == "" {
-		target = p.Container
-	}
-	return runTmuxRaw(buildResizeScript(p.Container, target))
+	// resolveSession's "agent" default is the same value buildResizeScript would
+	// otherwise apply, so the emitted script is byte-identical either way.
+	return runTmuxRaw(buildResizeScript(p.Container, resolveSession(p.Session, p.Container)))
 }
 
 // ------------------------------- send / sendKeys ------------------------------
