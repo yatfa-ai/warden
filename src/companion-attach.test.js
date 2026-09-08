@@ -24,7 +24,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import {
   CompanionChannel, CompanionAttachSession, attachSession, attachPreflight,
-  decodeAttachData, encodeAttachInput, attachUnsupportedMessage,
+  createAttachDataDecoder, encodeAttachInput, attachUnsupportedMessage,
   readPaneDeltas, hasFreshPaneDelta,
   _wirePaneDeltaForTests, _primeChannelForTests,
   _resetChannelCacheForTests, _resetPaneDeltaStateForTests,
@@ -36,14 +36,20 @@ const ORIG_COMPANION_ENV = process.env.WARDEN_COMPANION_TRANSPORT;
 
 // A transport that speaks the companion protocol in-process. Mirrors
 // companion.test.js's fakeTransport, plus `_inject` for the unsolicited event
-// lines the attach stream is made of.
+// lines the attach stream is made of. A handler may return an ARRAY of
+// responses: they are delivered as consecutive lines in ONE synchronous pass —
+// a faithful model of a real transport handing _onLine a multi-line chunk
+// (the companion writes the attachStart ACK and the first output back-to-back).
 function fakeTransport(handler) {
   let lineCB = null, exitCb = null;
   return {
     write(line) {
       let resp = null;
       try { resp = handler(JSON.parse(line)); } catch { /* swallow */ }
-      if (resp) setImmediate(() => { if (lineCB) lineCB(JSON.stringify(resp)); });
+      if (resp) {
+        const lines = Array.isArray(resp) ? resp : [resp];
+        setImmediate(() => { if (lineCB) for (const l of lines) lineCB(JSON.stringify(l)); });
+      }
     },
     onLine(cb) { lineCB = cb; },
     onExit(cb) { exitCb = cb; },
@@ -212,14 +218,12 @@ describe('CompanionAttachSession: the IPty surface server.js consumes', () => {
     const hostBytes = Buffer.from('\x1b[31m\u2502RED\x1b[0m', 'utf8');
     transport._inject({ event: 'attachData', sid: 'a1', data: hostBytes.toString('base64') });
     await settle();
-    // The wrapper hands the consumer a latin1 (byte-preserving) string; the bytes
-    // must be identical to what the host emitted.
-    assert.deepStrictEqual(Buffer.from(chunks.join(''), 'binary'), hostBytes);
-    assert.strictEqual(
-      Buffer.from(chunks.join(''), 'binary').toString('utf8'),
-      '\x1b[31m\u2502RED\x1b[0m',
-      'the browser reassembles the bytes into the original glyph',
-    );
+    // The wrapper hands the consumer the string NODE-PTY would: UTF-8-decoded
+    // text (its master stream is setEncoding('utf8')), which server.js forwards
+    // verbatim and xterm.js renders as-is. The multibyte border glyph must
+    // arrive as ONE code unit — not the 3-code-unit latin1 mojibake
+    // "â\u0094\u0082" the previous latin1 decode produced.
+    assert.strictEqual(chunks.join(''), '\x1b[31m\u2502RED\x1b[0m');
   });
 
   it('buffers output that arrives BEFORE onData is registered (the pane\'s first frame)', async () => {
@@ -256,7 +260,27 @@ describe('CompanionAttachSession: the IPty surface server.js consumes', () => {
     const input = sent.find((c) => c.method === 'attachInput');
     assert.ok(input, 'attachInput was issued');
     assert.strictEqual(input.params.sid, 'a1');
-    assert.strictEqual(Buffer.from(input.params.data, 'base64').toString('binary'), 'ls -la\n');
+    // UTF-8 on the wire: the same bytes node-pty's write() would hand the
+    // terminal for this string (its WS input is JSON text; node-pty encodes utf8).
+    assert.deepStrictEqual(Buffer.from(input.params.data, 'base64'), Buffer.from('ls -la\n', 'utf8'));
+  });
+
+  it('write() encodes NON-ASCII input as UTF-8 — the bytes node-pty writes (a paste must survive)', async () => {
+    const sent = [];
+    const { channel } = attachChannel({ sent });
+    const s = new CompanionAttachSession('prod', Promise.resolve({ channel, sid: 'a1' }));
+    await settle();
+    s.write('héllo 😀\n');
+    await settle();
+    const input = sent.find((c) => c.method === 'attachInput');
+    assert.ok(input, 'attachInput was issued');
+    // The latin1 encoder turned é into a raw 0xE9 byte and 😀 into "=\0" —
+    // corrupted bytes delivered to the host PTY. node-pty's contract is UTF-8.
+    assert.deepStrictEqual(
+      Buffer.from(input.params.data, 'base64'),
+      Buffer.from('héllo 😀\n', 'utf8'),
+      'the host PTY receives exactly the bytes the default path would write',
+    );
   });
 
   it('write() before the ACK is QUEUED and replayed, not dropped (typing into a connecting pane)', async () => {
@@ -272,7 +296,7 @@ describe('CompanionAttachSession: the IPty surface server.js consumes', () => {
     await settle();
     const input = sent.find((c) => c.method === 'attachInput');
     assert.ok(input, 'the queued keystroke was replayed once the session went live');
-    assert.strictEqual(Buffer.from(input.params.data, 'base64').toString('binary'), 'early\n');
+    assert.deepStrictEqual(Buffer.from(input.params.data, 'base64'), Buffer.from('early\n', 'utf8'));
   });
 
   it('resize() sends attachResize; a pre-ACK burst COALESCES to the last size', async () => {
@@ -494,6 +518,102 @@ describe('event fan-out: paneDelta and the attach stream coexist on ONE channel'
   });
 });
 
+// ------------------- the coalesced-ACK race (F2 of the first review) ----------
+
+describe('output COALESCED into the ACK chunk is not dropped (the F2 registration-order race)', () => {
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _resetPaneDeltaStateForTests(); });
+
+  const METHODS = ['ping', 'attachStart', 'attachInput', 'attachResize', 'attachKill'];
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  const primedProdChannel = (t) => {
+    const ch = new CompanionChannel('prod', t);
+    ch._methods = METHODS;
+    _primeChannelForTests('prod', ch);
+    return ch;
+  };
+  const okPing = (req) => ({ id: req.id, ok: true, result: { version: 'v', methods: METHODS } });
+  const okOther = (req) => ({ id: req.id, ok: true, result: {} });
+
+  it('a fast shell first output riding the ACK chunk is DELIVERED, not dropped', async () => {
+    // The companion writes the {sid} ACK and launches the output pump
+    // back-to-back; _onLine dispatches both lines in one synchronous pass.
+    // Listeners registered only in the ACK .then (a microtask) were not yet in
+    // place for the second line — silently dropped opening output, most likely
+    // on a fast or local-adjacent host.
+    const t = fakeTransport((req) => {
+      if (req.method === 'attachStart') {
+        return [
+          { id: req.id, ok: true, result: { sid: 'a1' } },
+          { event: 'attachData', sid: 'a1', data: b64('PROMPT $ ') },
+        ];
+      }
+      if (req.method === 'ping') return okPing(req);
+      return okOther(req);
+    });
+    primedProdChannel(t);
+    const s = attachSession('prod', { script: 'x', cols: 80, rows: 24 }, {}, {}, { manifest: { version: 'v' } });
+    const chunks = [];
+    s.onData((d) => chunks.push(d));
+    await settle();
+    assert.strictEqual(chunks.join(''), 'PROMPT $ ',
+      'the opening bytes share the ACK chunk — they must surface, not vanish');
+  });
+
+  it('a glyph SPLIT inside the coalesced output reassembles through the pre-bind buffer', async () => {
+    const bytes = Buffer.from('é', 'utf8'); // C3 A9 — a read boundary lands between them
+    const t = fakeTransport((req) => {
+      if (req.method === 'attachStart') {
+        return [
+          { id: req.id, ok: true, result: { sid: 'a1' } },
+          { event: 'attachData', sid: 'a1', data: bytes.subarray(0, 1).toString('base64') },
+          { event: 'attachData', sid: 'a1', data: bytes.subarray(1).toString('base64') },
+        ];
+      }
+      if (req.method === 'ping') return okPing(req);
+      return okOther(req);
+    });
+    primedProdChannel(t);
+    const s = attachSession('prod', { script: 'x' }, {}, {}, { manifest: { version: 'v' } });
+    const chunks = [];
+    s.onData((d) => chunks.push(d));
+    await settle();
+    assert.strictEqual(chunks.join(''), 'é',
+      'the pre-bind _early path feeds the SAME stateful decoder in arrival order');
+  });
+
+  it('a SECOND session coalesced output survives even though ANOTHER session listener is already registered', async () => {
+    // The shape a dispatcher-level backlog could NOT fix: A is live, so the
+    // fan-out HAS an attachData listener when B's ACK+output land — they
+    // dispatch to A, whose sid filter drops them. Only pre-ACK per-session
+    // wiring (B buffers its own pre-sid events, filters at bind) covers it.
+    let starts = 0;
+    const t = fakeTransport((req) => {
+      if (req.method === 'attachStart') {
+        starts++;
+        if (starts === 1) return { id: req.id, ok: true, result: { sid: 'a1' } };
+        return [
+          { id: req.id, ok: true, result: { sid: 'a2' } },
+          { event: 'attachData', sid: 'a2', data: b64('B-PROMPT') },
+        ];
+      }
+      if (req.method === 'ping') return okPing(req);
+      return okOther(req);
+    });
+    primedProdChannel(t);
+    const a = attachSession('prod', { script: 'x' }, {}, {}, { manifest: { version: 'v' } });
+    const aChunks = [];
+    a.onData((d) => aChunks.push(d));
+    await settle(); // A is live: its listener is registered
+    const b = attachSession('prod', { script: 'x' }, {}, {}, { manifest: { version: 'v' } });
+    const bChunks = [];
+    b.onData((d) => bChunks.push(d));
+    await settle();
+    assert.strictEqual(aChunks.join(''), '', 'A receives nothing of B stream');
+    assert.strictEqual(bChunks.join(''), 'B-PROMPT', 'B coalesced first output is delivered');
+  });
+});
+
 // --------------------------- the stale-binary gate ---------------------------
 
 describe('stale-binary / no-PTY gate (WARDEN-1295 AC #5/#6, WARDEN-933 discipline)', () => {
@@ -581,32 +701,101 @@ describe('stale-binary / no-PTY gate (WARDEN-1295 AC #5/#6, WARDEN-933 disciplin
     await new Promise((r) => setTimeout(r, 50));
     assert.strictEqual(sshSpawns, 0, 'no ssh child is spawned when the companion path fails');
   });
+
+  it('a verification-ping FAILURE is not reported as "binary too old" (the blip must not misdirect)', async () => {
+    // channelMethods' degrade contract collapses a failed ping to [], which the
+    // attach path would read as "no attach RPCs" — telling the user to delete a
+    // perfectly current binary because the network blipped right after
+    // bootstrap. The strict verification distinguishes the two and says so.
+    const t = fakeTransport((req) => ({ id: req.id, ok: false, error: 'connection reset by peer' }));
+    const ch = new CompanionChannel('prod', t);
+    ch._methods = null; // methods not cached — the async path must ping to learn them
+    _primeChannelForTests('prod', ch);
+    const s = attachSession('prod', { script: 'x', cols: 80, rows: 24 }, {}, {}, { manifest: { version: 'abc123' } });
+    const exits = [];
+    s.onExit((e) => exits.push(e));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(exits.length, 1, 'the failure still settles as an exit, not a hang');
+    assert.match(String(s._exitError.message), /could not verify the binary's capabilities/);
+    assert.doesNotMatch(String(s._exitError.message), /too old/,
+      'a ping failure is not knowledge about the binary — do not claim it is');
+  });
+
+  it('a binary that ANSWERS ping without a methods field still gets the too-old message (a genuine answer)', async () => {
+    // Pre-methods-field binaries are definitionally too old; an empty methods
+    // list from a real answer is a real verdict, and the actionable message is
+    // correct for it.
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: 'ancient' } };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const ch = new CompanionChannel('prod', t);
+    ch._methods = null;
+    _primeChannelForTests('prod', ch);
+    const s = attachSession('prod', { script: 'x', cols: 80, rows: 24 }, {}, {}, { manifest: { version: 'abc123' } });
+    const exits = [];
+    s.onExit((e) => exits.push(e));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(exits.length, 1);
+    assert.match(String(s._exitError.message), /too old/);
+    assert.match(String(s._exitError.message), /ping methods: none/);
+  });
 });
 
 // ------------------------------ base64 framing -------------------------------
 
-describe('base64 framing helpers (the line-delimited-JSON constraint)', () => {
-  it('round-trips arbitrary bytes, including \\n and control sequences', () => {
+describe('base64 framing + UTF-8 decode (the line-delimited-JSON constraint, F1)', () => {
+  it('round-trips arbitrary ASCII/control bytes, including \\n and control sequences', () => {
     const raw = 'a\nb\r\x00\x1b[2J\x7f';
-    assert.strictEqual(decodeAttachData(encodeAttachInput(raw)), raw);
+    const decode = createAttachDataDecoder();
+    assert.strictEqual(decode(encodeAttachInput(raw)), raw);
   });
 
-  it('a multibyte glyph SPLIT across two events survives (why it is latin1, not utf8)', () => {
-    // \u2502 is 3 UTF-8 bytes; a real PTY read boundary can land inside it. Under
-    // a utf8 decode each half becomes U+FFFD and the glyph is destroyed; under
-    // latin1 the bytes survive and the browser reassembles them.
+  it('a multibyte glyph SPLIT across two events REASSEMBLES — the stateful decoder, not a per-event decode', () => {
+    // \u2502 is 3 UTF-8 bytes; a real PTY read boundary can land inside it —
+    // a full-screen tmux repaint produces this routinely. A STATELESS utf8
+    // decode of each half yields U+FFFD pairs and the glyph is destroyed; the
+    // StringDecoder holds the trailing partial sequence back and completes it
+    // with the next event — exactly what node-pty's setEncoding('utf8') stream
+    // does on the default path. This is the test that pins the fix for the
+    // latin1 regression the first review caught.
     const bytes = Buffer.from('\u2502', 'utf8');
-    const first = decodeAttachData(bytes.subarray(0, 2).toString('base64'));
-    const second = decodeAttachData(bytes.subarray(2).toString('base64'));
-    assert.strictEqual(
-      Buffer.from(first + second, 'binary').toString('utf8'),
-      '\u2502',
-      'the reassembled bytes must still be the original glyph',
-    );
+    const decode = createAttachDataDecoder();
+    const first = decode(bytes.subarray(0, 2).toString('base64'));
+    const second = decode(bytes.subarray(2).toString('base64'));
+    assert.strictEqual(first, '', 'nothing is emitted for a partial glyph — it is held, not corrupted');
+    assert.strictEqual(first + second, '\u2502', 'the completed glyph arrives as ONE code unit');
+  });
+
+  it('an emoji split across THREE events reassembles (4-byte sequence, worst case)', () => {
+    const bytes = Buffer.from('\u{1F600}', 'utf8'); // 😀 = F0 9F 98 80
+    const decode = createAttachDataDecoder();
+    const out = bytes.subarray(0, 1).toString('base64')
+      + '|' + bytes.subarray(1, 3).toString('base64')
+      + '|' + bytes.subarray(3).toString('base64');
+    const joined = out.split('|').map((b64) => decode(b64)).join('');
+    assert.strictEqual(joined, '\u{1F600}');
   });
 
   it('an empty/absent payload decodes to an empty string rather than throwing', () => {
-    assert.strictEqual(decodeAttachData(''), '');
-    assert.strictEqual(decodeAttachData(undefined), '');
+    const decode = createAttachDataDecoder();
+    assert.strictEqual(decode(''), '');
+    assert.strictEqual(decode(undefined), '');
+  });
+
+  it('output decoded through the SESSION is the string node-pty hands server.js (end-to-end shape)', async () => {
+    // The regression that reached first review: per-event latin1 passed every
+    // ASCII test and still mangled every non-ASCII glyph at the terminal,
+    // because xterm.js renders the WRAPPER'S string, not the wire bytes. Pin
+    // the consumer-visible text for a tmux-shaped repaint payload.
+    const { channel, transport } = attachChannel();
+    const s = new CompanionAttachSession('prod', Promise.resolve({ channel, sid: 'a1' }));
+    const chunks = [];
+    s.onData((d) => chunks.push(d));
+    await settle();
+    const frame = Buffer.from('\x1b]0;~/プロジェクト\x07\x1b[36m│\x1b[0m ~/héllo\r\n', 'utf8');
+    transport._inject({ event: 'attachData', sid: 'a1', data: frame.toString('base64') });
+    await settle();
+    assert.strictEqual(chunks.join(''), '\x1b]0;~/プロジェクト\x07\x1b[36m│\x1b[0m ~/héllo\r\n');
   });
 });

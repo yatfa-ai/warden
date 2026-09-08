@@ -26,6 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 // SSH_BASE_OPTS is no longer imported here: buildSshArgv applies it (WARDEN-989).
@@ -1423,27 +1424,40 @@ export async function deliverRemoteScript(host, fullScript, { innerScript, conta
 //     being delivered TWICE. Hence: exactly one onExit per session, whatever
 //     ends it (natural exit, our kill, channel death, or a failed startup).
 //
-//  2. Byte exactness. PTY output is arbitrary binary — control sequences,
-//     partial UTF-8 across chunk boundaries, and \n itself. The wire is
-//     line-delimited JSON, so it is base64 on both sides; the wrapper decodes to
-//     a latin1 ('binary') string, a LOSSLESS byte↔char mapping. node-pty hands
-//     server.js utf8-decoded strings, but server.js only forwards them into a WS
-//     frame the browser feeds to xterm.js, so what matters is that the BYTES
-//     survive — a utf8 decode here would corrupt any multibyte glyph split across
-//     two attachData events, which a full-screen tmux repaint produces routinely.
+//  2. Byte exactness, AT THE CONSUMER'S CONTRACT. PTY output is arbitrary
+//     binary — control sequences, partial UTF-8 across chunk boundaries, and \n
+//     itself. The wire is line-delimited JSON, so it is base64 on both sides;
+//     the wrapper then decodes to a UTF-8 string WITH A STATEFUL decoder — the
+//     exact contract node-pty establishes at the consumer boundary: node-pty's
+//     master stream is setEncoding('utf8'), server.js forwards that string
+//     verbatim into a WS frame (JSON text), and the browser writes it AS TEXT
+//     to xterm.js (which only re-decodes Uint8Array writes, never strings). A
+//     byte-lossless latin1 mapping here is therefore mojibake by the time it
+//     reaches the terminal: tmux's `│` border (UTF-8 E2 94 82, emitted on every
+//     repaint) would arrive at xterm.js as the three-code-unit sequence
+//     "â\u0094\u0082", and pasted non-ASCII would reach the host PTY as raw
+//     Latin-1 bytes. The chunk-boundary hazard is real — a PTY read CAN end
+//     mid-glyph — but the fix is a STATEFUL decoder (StringDecoder('utf8')
+//     buffers an incomplete trailing sequence across attachData events and
+//     emits exactly what node-pty would), not a lossy mapping.
 
-// Decode one base64 attachData payload to a byte-exact string. latin1 (Node's
-// 'binary') maps each byte to one code unit, so no multibyte sequence can be
-// mangled by a chunk boundary — see the note above.
-export function decodeAttachData(b64) {
-  return Buffer.from(b64 || '', 'base64').toString('binary');
+// createAttachDataDecoder — one STATEFUL UTF-8 decoder per attach session. The
+// returned function takes one base64 attachData payload and hands back the
+// string node-pty would have handed server.js for the same bytes. Stateful is
+// the point: an incomplete multibyte sequence at the end of one event is held
+// back and completed by the next, so a glyph split across two attachData
+// events reassembles instead of corrupting into U+FFFD pairs.
+export function createAttachDataDecoder() {
+  const decoder = new StringDecoder('utf8');
+  return (b64) => decoder.write(Buffer.from(b64 || '', 'base64'));
 }
 
-// Encode outgoing input the same way. server.js hands the wrapper a string that
-// came off a WS frame; latin1 round-trips it to the exact bytes the terminal
-// should receive.
+// Encode outgoing input. server.js hands the wrapper a string that came off a
+// WS frame (JSON text — UTF-8 by definition), and on the default path node-pty's
+// write() encodes that same string to UTF-8 bytes for the terminal; this is the
+// identical byte sequence, base64-framed for the wire.
 export function encodeAttachInput(s) {
-  return Buffer.from(String(s ?? ''), 'binary').toString('base64');
+  return Buffer.from(String(s ?? ''), 'utf8').toString('base64');
 }
 
 // The actionable too-old / unsupported-platform message. ONE builder so the
@@ -1461,11 +1475,26 @@ export function attachUnsupportedMessage(host, methods, version) {
 // It is deliberately NOT an EventEmitter and exposes NOTHING beyond the five
 // members server.js uses — a wider surface would invite a consumer to depend on
 // node-pty internals the companion path cannot honor.
+//
+// LISTENERS ARE WIRED BEFORE THE SID EXISTS. The companion writes the {sid} ACK
+// and launches the output pump back-to-back, so a fast shell's opening bytes can
+// arrive COALESCED INTO THE ACK'S CHUNK — and CompanionChannel._onLine dispatches
+// every line of a chunk synchronously. Registering the fan-out listeners only in
+// the ACK's .then (a microtask) left those lines with no attachData listener to
+// reach: silently dropped opening output. So the production path (attachSession)
+// wires the listeners sid-agnostically the moment the channel exists — BEFORE the
+// attachStart RPC is even issued — and each session buffers pre-sid events in
+// `_early`, filtering by sid once the ACK lands. Events for a CONCURRENT attach
+// on the same channel are captured too and discarded at drain time (sids are
+// unique per attachStart).
 export class CompanionAttachSession {
-  // `startPromise` resolves to { channel, sid } once attachStart has ACKed, or
-  // rejects with the actionable error. The handle is usable immediately either
-  // way: output buffers until onData is registered, input/resize queue until the
-  // sid lands, and a rejection settles as an exit the consumer already handles.
+  // `startPromise` is OPTIONAL. Production (attachSession) constructs the handle
+  // bare, calls _wire(channel) itself pre-ACK, then _start(promise) — because
+  // wiring must precede the attachStart RPC, which no .then on the promise can
+  // achieve. Direct construction with an already-known {channel, sid} promise
+  // (tests, embedders) still works: _start binds on resolution, wiring at bind
+  // time — on that path the pre-ACK race does not exist because the sid is
+  // already known.
   constructor(host, startPromise, opts = {}) {
     this.host = host;
     this.sid = null;
@@ -1479,19 +1508,73 @@ export class CompanionAttachSession {
     this._opts = opts;
     this._offData = null;
     this._offExit = null;
+    this._wired = false;
     // Output that arrives BEFORE server.js registers onData. The handle is
     // returned and the callbacks attached on the same tick, but the ACK and the
     // first attachData are both later — buffering keeps a fast shell's opening
     // prompt from being dropped.
     this._pending = [];
+    // Events captured between wiring and the ACK (see the class note). Raw msgs;
+    // filtered by sid and delivered in arrival order at bind time. Bounded: the
+    // window is one RPC round trip, and a channel death settles the session if
+    // the ACK never comes — the cap only keeps a pathological stream from
+    // growing while that settles.
+    this._early = [];
     // Input/resize issued before the sid exists (a user typing into a pane that
     // is still connecting). Replayed in order once the session is live rather
     // than silently discarded.
     this._queued = [];
+    // The stateful UTF-8 decoder (F1): one per session, fed in attachData
+    // arrival order, so a multibyte glyph split across events reassembles.
+    this._decoder = createAttachDataDecoder();
 
+    if (startPromise) this._start(startPromise);
+  }
+
+  // Begin the async startup. Separated from the constructor so the production
+  // path can _wire() BEFORE the body of `startPromise` issues attachStart.
+  _start(startPromise) {
     this._starting = startPromise
       .then(({ channel, sid }) => this._bind(channel, sid))
       .catch((e) => this._settleStartFailure(e));
+  }
+
+  // Wire this session's fan-out listeners SID-AGNOSTICALLY, before the sid is
+  // known (see the class note for why this timing is load-bearing). Events whose
+  // sid is not yet known are buffered in _early; once _bind learns the sid it
+  // drains them. Must be called with the channel BEFORE attachStart is sent.
+  _wire(channel) {
+    if (this._wired || this._exited) return;
+    this._wired = true;
+    this._offData = onChannelEvent(channel, 'attachData', (msg) => {
+      if (this._exited) return;
+      if (this.sid === null) { this._captureEarly(msg); return; } // pre-ACK: filter at bind
+      if (msg.sid !== this.sid) return; // another pane's stream on the shared channel
+      this._deliverData(msg);
+    });
+    this._offExit = onChannelEvent(channel, 'attachExit', (msg) => {
+      if (this._exited) return;
+      if (this.sid === null) { this._captureEarly(msg); return; }
+      if (msg.sid !== this.sid) return;
+      this._settleExit(typeof msg.code === 'number' ? msg.code : -1);
+    });
+    // A dead channel ends every stream riding it. Without this the pane would
+    // spin forever on a host whose companion just died: no attachExit can arrive
+    // over a channel that is gone. -1 is the same "no exit status" code the host
+    // side reports for an abnormal end.
+    channel.onDead(() => this._settleExit(-1));
+  }
+
+  _captureEarly(msg) {
+    if (this._early.length >= 256) this._early.shift(); // bound; see constructor note
+    this._early.push(msg);
+  }
+
+  // Decode and deliver (or buffer pre-onData) one attachData for THIS session.
+  _deliverData(msg) {
+    const chunk = this._decoder(msg && msg.data);
+    if (this._dataCb) this._dataCb(chunk);
+    else this._pending.push(chunk);
   }
 
   // Wire the live session: subscribe to this sid's events, flush queued writes.
@@ -1505,21 +1588,27 @@ export class CompanionAttachSession {
     }
     this.sid = sid;
     this._channel = channel;
-    this._offData = onChannelEvent(channel, 'attachData', (msg) => {
-      if (msg.sid !== sid) return; // another pane's stream on the shared channel
-      const chunk = decodeAttachData(msg.data);
-      if (this._dataCb) this._dataCb(chunk);
-      else this._pending.push(chunk);
-    });
-    this._offExit = onChannelEvent(channel, 'attachExit', (msg) => {
-      if (msg.sid !== sid) return;
-      this._settleExit(typeof msg.code === 'number' ? msg.code : -1);
-    });
-    // A dead channel ends every stream riding it. Without this the pane would
-    // spin forever on a host whose companion just died: no attachExit can arrive
-    // over a channel that is gone. -1 is the same "no exit status" code the host
-    // side reports for an abnormal end.
-    channel.onDead(() => this._settleExit(-1));
+    if (!this._wired) {
+      // Direct construction: the channel only became known at bind time, so the
+      // listeners go in here. The pre-ACK coalescing race this class defends
+      // against cannot occur on this path — the sid is already known.
+      this._wire(channel);
+    } else {
+      // Wired pre-ACK (production): drain what arrived before the sid was known,
+      // in arrival order — our sid's events are delivered, every other session's
+      // are discarded. Delivery happens before the queued writes flush, matching
+      // the old register-then-flush order.
+      const early = this._early;
+      this._early = null;
+      for (const msg of early) {
+        if (msg.sid !== sid) continue;
+        if (msg.event === 'attachExit') {
+          this._settleExit(typeof msg.code === 'number' ? msg.code : -1);
+          return; // exited: the queued writes below are moot (and self-guard)
+        }
+        this._deliverData(msg);
+      }
+    }
     const queued = this._queued;
     this._queued = [];
     for (const send of queued) send();
@@ -1677,9 +1766,28 @@ export function attachPreflight(host, deps = {}) {
 // kept in sync.
 export function attachSession(host, { script, cols = 100, rows = 30, term } = {}, cfg = {}, opts = {}, deps = {}) {
   attachPreflight(host, deps); // may THROW → server.js emits attach_error
-  const start = (async () => {
+  const session = new CompanionAttachSession(host, null, opts);
+  session._start((async () => {
     const channel = await getChannel(host, cfg, deps);
-    const methods = await channelMethods(channel, opts);
+    // Wire the fan-out listeners BEFORE attachStart is even issued — see the
+    // CompanionAttachSession class note. The companion writes the {sid} ACK and
+    // launches the output pump back-to-back, so a fast shell's first bytes can
+    // arrive coalesced INTO the ACK's chunk, and CompanionChannel._onLine
+    // dispatches a whole chunk synchronously; listeners registered only in the
+    // ACK's .then (a microtask) would miss those lines entirely.
+    session._wire(channel);
+    let methods;
+    try {
+      // Strict = throws on ping failure. A verification ping that FAILS is not
+      // knowledge about the binary: reporting "binary is too old" for a transient
+      // network blip right after bootstrap would send the user to delete a
+      // perfectly current binary (the channelMethods contract returns [] for
+      // both, which is correct for the degrade-don't-fail sibling ops but wrong
+      // for attach, where the verdict is a hard, actionable error).
+      methods = await channelMethodsStrict(channel, opts);
+    } catch (e) {
+      throw new Error(`companion attach on ${host} could not verify the binary's capabilities (ping failed: ${e && e.message ? e.message : e}). Retry the pane, or set WARDEN_COMPANION_TRANSPORT=0 to attach over the default SSH path.`);
+    }
     if (!methods.includes('attachStart')) {
       // NO graceful degradation, deliberately: a silent per-open raw-SSH fallback
       // would re-pay the exact handshake this slice removes while the toggle
@@ -1699,8 +1807,8 @@ export function attachSession(host, { script, cols = 100, rows = 30, term } = {}
     const sid = result && result.sid;
     if (!sid) throw new Error(`companion attachStart on ${host} returned no session id`);
     return { channel, sid };
-  })();
-  return new CompanionAttachSession(host, start, opts);
+  })());
+  return session;
 }
 
 // ------------------------------- subscribePanes --------------------------------
@@ -1853,6 +1961,20 @@ async function channelMethods(channel, opts = {}) {
   } catch {
     return [];
   }
+}
+
+// The STRICT sibling, for ops whose missing-method verdict is a hard actionable
+// error (attach) rather than a graceful degrade (subscribePanes/send). Identical
+// except that a ping FAILURE throws instead of collapsing to [] — the caller
+// must be able to tell "the binary answered and lacks the RPC" from "we could
+// not ask". A binary that ANSWERS ping but predates the methods field still
+// resolves to [] here: that, too, is a genuine answer (it is definitionally too
+// old), so the too-old message remains accurate for it.
+async function channelMethodsStrict(channel, opts = {}) {
+  if (Array.isArray(channel._methods)) return channel._methods;
+  const res = await channel.call('ping', {}, { timeout: opts.timeout ?? 8000 });
+  if (res && Array.isArray(res.methods)) channel._methods = res.methods;
+  return channel._methods || [];
 }
 
 // Wire the channel's paneDelta listener to feed the host's delta cache, once per

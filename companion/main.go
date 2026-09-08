@@ -1299,7 +1299,7 @@ func buildExecScript(container, script string) string {
 }
 
 // execScript runs one JS-assembled script host-side. Bad/absent params fall
-// through to an empty script (bash -lc ” exits 0 — a benign no-op, the same
+// through to an empty script (bash -lc '' exits 0 — a benign no-op, the same
 // tolerance the sibling RPCs' `_ = json.Unmarshal` lines carry); a non-positive
 // timeoutMs defaults to 8000ms, matching the { timeout: 8000 } both runGit
 // remote branches and runInContext's default pass run() today.

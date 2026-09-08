@@ -34,9 +34,16 @@ import (
 // BASE64 FRAMING is not a preference: the channel is newline-delimited JSON, and
 // raw PTY bytes are arbitrary binary (control sequences, partial UTF-8 mid-chunk,
 // and \n itself). Base64 makes every payload line-safe and byte-exact — a
-// terminal stream cannot survive lossy re-encoding, and a UTF-8-decoded chunk
-// boundary would corrupt multibyte glyphs. The JS side decodes with the same
-// 'binary'/latin1 discipline node-pty's utf8 decoder replaces.
+// terminal stream cannot survive lossy re-encoding. The JS side decodes with a
+// STATEFUL UTF-8 StringDecoder — the same stream discipline node-pty's
+// setEncoding('utf8') gives the default path — so a glyph split across two
+// attachData events reassembles instead of corrupting into U+FFFD pairs.
+//
+// ACK-THEN-STREAM ordering is mirrored on the client: the JS wrapper wires its
+// event listeners BEFORE the attachStart RPC is issued, so first output that
+// arrives coalesced into the ACK's chunk is buffered (by sid) rather than
+// dropped — _onLine dispatches a whole chunk synchronously, before any .then
+// microtask could register a listener.
 //
 // The PTY itself is allocated per-platform (pty_unix.go / pty_windows.go), the
 // same split procgroup_unix.go / procgroup_windows.go established.
