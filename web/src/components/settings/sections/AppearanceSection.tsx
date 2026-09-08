@@ -1,8 +1,18 @@
 // Appearance section — pure client localStorage prefs (terminal look, theme,
-// window/launch behavior). Receives its pref group from App via SettingsPage
-// and spreads it straight through. Owns the one piece of local state the
-// appearance controls need (the custom-font Select/free-text toggle). Extracted
-// verbatim from SettingsPage (WARDEN-664); behavior is unchanged.
+// window/launch behavior). Receives the remaining pref group from App via
+// SettingsPage and spreads it straight through. Owns the one piece of local
+// state the appearance controls need (the custom-font Select/free-text toggle).
+// Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged.
+//
+// WARDEN-1322 (roadmap WARDEN-1204 slice 3): the six terminal prefs this
+// section reads AND writes — terminalFontSize, terminalFontFamily,
+// terminalScrollback, terminalCursorStyle, copyOnSelect, onExitBehavior — left
+// the AppearancePrefs bag; the section SUBSCRIBES to them (and their setters)
+// in the shared client-state store (lib/uiStore.ts) instead, exactly as
+// SnippetsSection does for `snippets` (WARDEN-1271). They are the same facts
+// PaneTile reads/writes, so a store subscription is what keeps ONE read
+// channel per pref. `terminalColorScheme` stays in the bag: it is read only by
+// App and Settings and never reaches PaneTile at all.
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -23,23 +33,31 @@ import { TERMINAL_FONT_OPTIONS, CUSTOM_FONT_VALUE } from '../fontOptions';
 import { SettingsSection } from '../SettingsSection';
 import { ClientPrefResetToDefaultButton, ResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { clientPrefDefault, clientPrefDiffersFromDefault } from '../prefDefaultDiff';
+import {
+  useTerminalFontSize,
+  useSetTerminalFontSize,
+  useTerminalScrollback,
+  useSetTerminalScrollback,
+  useTerminalFontFamily,
+  useSetTerminalFontFamily,
+  useTerminalCursorStyle,
+  useSetTerminalCursorStyle,
+  useCopyOnSelect,
+  useSetCopyOnSelect,
+  useOnExitBehavior,
+  useSetOnExitBehavior,
+} from '@/lib/uiStore';
 import { type AppearancePrefs } from '../types';
 
 export type AppearanceSectionProps = AppearancePrefs & { hidden: boolean };
 
 export function AppearanceSection(props: AppearanceSectionProps) {
   const {
-    terminalFontSize, setTerminalFontSize,
-    terminalFontFamily, setTerminalFontFamily,
-    terminalScrollback, setTerminalScrollback,
     theme, setTheme,
     terminalColorScheme, setTerminalColorScheme,
-    terminalCursorStyle, setTerminalCursorStyle,
-    copyOnSelect, setCopyOnSelect,
     density, setDensity,
     timestampFormat, setTimestampFormat,
     paneLayout, setPaneLayout,
-    onExitBehavior, setOnExitBehavior,
     autoFocusNewPane, setAutoFocusNewPane,
     restoreOnStartup, setRestoreOnStartup,
     rememberWindowBounds, setRememberWindowBounds,
@@ -47,6 +65,22 @@ export function AppearanceSection(props: AppearanceSectionProps) {
     closeToTray, setCloseToTray,
     hidden,
   } = props;
+  // WARDEN-1322 (slice 3): the six terminal prefs + their setters come from the
+  // shared store, keeping the exact names the AppearancePrefs destructure used
+  // so every row body below (Inputs, Selects, the Switch, the reset buttons,
+  // the custom-font mode) is textually unchanged.
+  const terminalFontSize = useTerminalFontSize();
+  const setTerminalFontSize = useSetTerminalFontSize();
+  const terminalScrollback = useTerminalScrollback();
+  const setTerminalScrollback = useSetTerminalScrollback();
+  const terminalFontFamily = useTerminalFontFamily();
+  const setTerminalFontFamily = useSetTerminalFontFamily();
+  const terminalCursorStyle = useTerminalCursorStyle();
+  const setTerminalCursorStyle = useSetTerminalCursorStyle();
+  const copyOnSelect = useCopyOnSelect();
+  const setCopyOnSelect = useSetCopyOnSelect();
+  const onExitBehavior = useOnExitBehavior();
+  const setOnExitBehavior = useSetOnExitBehavior();
 
   // Terminal font family Select: a curated font, or "Custom…" which reveals a
   // free-text input for any installed CSS font (e.g. a Nerd Font for glyphs).

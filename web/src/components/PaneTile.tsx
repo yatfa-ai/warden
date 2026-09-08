@@ -14,8 +14,17 @@ import { handleOsc52 } from '@/lib/clipboard';
 import { readClipboardImage, deliverImagePaste } from '@/lib/pasteImage';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
-import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
-import { useSnippets } from '@/lib/uiStore';
+import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type Snippet } from '@/lib/storage';
+import {
+  useSnippets,
+  useTerminalFontSize,
+  useSetTerminalFontSize,
+  useTerminalScrollback,
+  useTerminalFontFamily,
+  useTerminalCursorStyle,
+  useCopyOnSelect,
+  useOnExitBehavior,
+} from '@/lib/uiStore';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
@@ -180,38 +189,24 @@ interface Props {
   chat?: Chat | null;     // chat metadata for export
   host?: string;          // host hint for restore (which host to discover)
   externalSearchQuery?: string;  // external search trigger from global search
-  fontSize: number;       // global, persisted terminal font size (UiState)
-  onFontSizeChange: (n: number) => void;  // bump the shared global preference
-  scrollback: number;     // global, persisted terminal scrollback depth (UiState)
-  // Global, persisted terminal font family (UiState) — the CSS font-family
-  // value xterm renders. Empty falls back to the default stack at the use site
-  // (App already guarantees non-empty, but we guard here too so a pane never
-  // goes blank). Settings-only: no in-pane control, unlike font size.
-  fontFamily: string;
+  // WARDEN-1322 (roadmap WARDEN-1204 slice 3): the six shared terminal prefs
+  // (fontSize/onFontSizeChange, scrollback, fontFamily, terminalCursorStyle,
+  // copyOnSelect, onExitBehavior) left this Props block — PaneTile SUBSCRIBES
+  // to them in the shared client-state store (lib/uiStore.ts) instead of
+  // receiving them through PaneGrid, a proven-zero-use pass-through carrier.
+  // PaneTile is both a reader (xterm options, effects, the dim overlay) and a
+  // WRITER (the A−/A+ toolbar buttons + context-menu entries) of these facts;
+  // persistence is unchanged (App's compile-locked saveUi effect via its
+  // snapshot subscription). `terminalThemeId` STAYS a prop: it is DERIVED per
+  // render (App resolves terminalColorScheme + the active theme) so an OS
+  // theme flip can re-theme open panes live — exactly the shape a store field
+  // must not duplicate.
+  //
   // Resolved terminal theme id (App resolves the terminalColorScheme pref + the
   // active theme down to a concrete named-theme id here). Drives the xterm
   // `theme` option (looked up from the registry) + the container background, and
   // re-themes already-open panes live via the [terminalThemeId] effect below.
   terminalThemeId: ThemeId;
-  // Terminal cursor shape × blink (blink/steady × block/underline/bar). Drives
-  // the xterm `cursorStyle` + `cursorBlink` options. A 'steady-*' value stops the
-  // blink — the accessibility payoff vs WARDEN-190 — and applies live to already-
-  // open panes via the [terminalCursorStyle] effect below.
-  terminalCursorStyle: TerminalCursorStyle;
-  // "Copy on select" (WARDEN-285): when true, completing a text selection in
-  // this pane copies it to the clipboard immediately (no Ctrl/Cmd+C needed).
-  // App owns the persisted pref; PaneTile mirrors it into a ref and the
-  // onSelectionChange handler reads the latest value so a Settings toggle
-  // applies LIVE to already-open panes (toggling OFF stops auto-copy at once).
-  // Default OFF = today's exact behavior (zero regression).
-  copyOnSelect: boolean;
-  // "Pane on agent exit" behavior (WARDEN-248): what this pane does when its
-  // agent process exits. 'keep' leaves the pane untouched (today's behavior);
-  // 'dim' shows an "agent exited" overlay + reduced opacity while keeping the
-  // last output readable; 'auto-close' calls onClose() once. The action only
-  // fires on a genuine live→exited transition (chat.active true→false of a pane
-  // that was ever active), never on a pane whose agent never attached.
-  onExitBehavior: OnExitBehavior;
   // Show the host tag in the pane header (WARDEN-290). Mirrors the sidebar's
   // showHostTags preference (WARDEN-37) onto the pane surface so a cross-host
   // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
@@ -229,7 +224,20 @@ interface Props {
   pollIntervalMs: number;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, timestampFormat, pollIntervalMs }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, onSpawned, timestampFormat, pollIntervalMs }: Props) {
+  // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
+  // keeping the exact variable names the Props destructure used so every
+  // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
+  // the live effects, the dim overlay, and the A−/A+ writer buttons) is
+  // textually unchanged. PaneTile writes font size through the SAME store
+  // action AppearanceSection does.
+  const fontSize = useTerminalFontSize();
+  const onFontSizeChange = useSetTerminalFontSize();
+  const scrollback = useTerminalScrollback();
+  const fontFamily = useTerminalFontFamily();
+  const terminalCursorStyle = useTerminalCursorStyle();
+  const copyOnSelect = useCopyOnSelect();
+  const onExitBehavior = useOnExitBehavior();
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();

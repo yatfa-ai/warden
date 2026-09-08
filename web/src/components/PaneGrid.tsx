@@ -15,7 +15,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
-import type { PaneLayout, TerminalCursorStyle, OnExitBehavior } from '@/lib/storage';
+import type { PaneLayout } from '@/lib/storage';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -100,12 +100,6 @@ interface Props {
   externalSearchQuery?: { paneId: string; query: string } | null;
   onToggleSidebar?: () => void;
   onToggleObserver?: () => void;
-  fontSize: number;
-  onFontSizeChange: (n: number) => void;
-  scrollback: number;
-  // Global, persisted terminal font family (UiState). Pure pass-through to
-  // PaneTile — App owns the value (and the empty → default fallback).
-  fontFamily: string;
   paneLayout: PaneLayout;
   // WARDEN-660: draggable resize-gutter ratios. Per-axis track weights for the
   // grid's columns / rows ([] or all-equal = today's uniform grid). App owns the
@@ -118,25 +112,18 @@ interface Props {
   paneRowRatios: number[];
   onPaneColRatiosChange: (ratios: number[]) => void;
   onPaneRowRatiosChange: (ratios: number[]) => void;
+  // WARDEN-1322 (roadmap WARDEN-1204 slice 3): this grid used to carry SEVEN
+  // terminal-config props it never read — fontSize/onFontSizeChange, scrollback,
+  // fontFamily, terminalCursorStyle, copyOnSelect, onExitBehavior — as a pure
+  // pass-through to the single PaneTile below. PaneTile now SUBSCRIBES to those
+  // six in the shared client-state store (lib/uiStore.ts), so none of them ride
+  // through here any more. `terminalThemeId` STAYS a prop (see below).
+  //
   // Resolved terminal theme id (App resolves terminalColorScheme + the active
   // theme down to a concrete named-theme id here). Pure pass-through to PaneTile
   // — App owns the resolution so an OS theme flip can re-theme open panes live
   // without PaneGrid knowing about the scheme pref.
   terminalThemeId: ThemeId;
-  // Terminal cursor shape × blink (blink/steady × block/underline/bar). Pure
-  // pass-through to PaneTile; App owns the state so a Settings change live-
-  // updates every open pane.
-  terminalCursorStyle: TerminalCursorStyle;
-  // "Copy on select" (WARDEN-285): when ON, completing a selection in a pane
-  // copies it to the clipboard immediately. Pure pass-through to PaneTile —
-  // App owns the persisted pref; PaneTile registers the xterm selection event
-  // and reads the latest value from a ref, so a toggle applies LIVE to already-
-  // open panes (better than the scrollback posture).
-  copyOnSelect: boolean;
-  // "Pane on agent exit" behavior (keep | dim | auto-close). Pure pass-through to
-  // PaneTile — App owns the persisted pref; PaneTile reacts to its own chat's
-  // live→exited transition. See WARDEN-248.
-  onExitBehavior: OnExitBehavior;
   // Show the host tag in each pane header (WARDEN-290). Pure pass-through to
   // PaneTile — App owns the persisted showHostTags pref (displaySettings) so a
   // Settings toggle live-updates already-open pane headers, mirroring the
@@ -158,7 +145,7 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, timestampFormat, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, timestampFormat, pollIntervalMs, onReorderPanes }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -795,13 +782,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
                     onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} onBrowseFiles={() => openBrowseFor(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
-                    fontSize={fontSize} onFontSizeChange={onFontSizeChange}
-                    scrollback={scrollback}
-                    fontFamily={fontFamily}
                     terminalThemeId={terminalThemeId}
-                    terminalCursorStyle={terminalCursorStyle}
-                    copyOnSelect={copyOnSelect}
-                    onExitBehavior={onExitBehavior}
                     showHostTags={showHostTags}
                     onSpawned={onSpawned}
                     timestampFormat={timestampFormat}

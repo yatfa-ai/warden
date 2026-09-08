@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type CustomPreset, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
@@ -22,7 +22,7 @@ import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } 
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -281,9 +281,28 @@ function App() {
   // process exits (chat.active goes true→false). 'keep' (default) is today's exact
   // behavior (dead terminal left for manual close); 'dim' marks it exited while
   // keeping the last output readable; 'auto-close' removes it via closePane once.
-  // Pure client-side pref (like paneLayout/terminalFontSize): persisted by the
-  // saveUi effect below, never sent to the backend. See WARDEN-248.
-  const [onExitBehavior, setOnExitBehavior] = useState<OnExitBehavior>(() => uiState.onExitBehavior ?? 'keep');
+  // See WARDEN-248.
+  //
+  // WARDEN-1322 (roadmap WARDEN-1204 slice 3) — this is the first of SIX App
+  // useStates migrated off App-owned useState + prop-drilling onto the shared
+  // client-state store (lib/uiStore.ts), following `snippets` and
+  // `fileViewerViewMode`: onExitBehavior, terminalFontSize, terminalScrollback,
+  // terminalFontFamily, terminalCursorStyle, copyOnSelect. Their readers are
+  // PaneTile (which also WRITES font size via its A−/A+ buttons and context
+  // menu) and AppearanceSection, both of which now SUBSCRIBE directly — so the
+  // seven terminal-config props PaneGrid carried to PaneTile without ever
+  // reading them are gone entirely.
+  //
+  // App still subscribes for the same two single-writer reasons as `snippets`:
+  // (1) each value must appear in the PersistedPrefSnapshot below so the ONE
+  // compile-locked saveUi effect keeps writing it, and (2) the reset partition
+  // (resetSetters) must keep a setter for each. The write path is unchanged end
+  // to end: store.setX → this subscription re-renders App → the snapshot's
+  // field changes → useConfigPersistence's effect fires → persistUiState →
+  // localStorage. The store seeds itself from loadUi() at module load, the same
+  // persisted read the useState lazy initializers did.
+  const onExitBehavior = useOnExitBehavior();
+  const setOnExitBehavior = useSetOnExitBehavior();
   // "Auto-focus new pane": whether opening/resuming/splitting a chat moves
   // keyboard focus to the new pane (default true = today's behavior). When false
   // the currently focused pane is preserved — xterm's native click-to-focus lets
@@ -291,7 +310,11 @@ function App() {
   // onExitBehavior/paneLayout): persisted by the saveUi effect below, never sent
   // to the backend. Gates the setFocused call in openChat below. See WARDEN-274.
   const [autoFocusNewPane, setAutoFocusNewPane] = useState<boolean>(() => uiState.autoFocusNewPane ?? true);
-  const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
+  // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
+  // above) — PaneTile and AppearanceSection subscribe; App subscribes only to
+  // keep the persisted snapshot + reset partition whole.
+  const terminalFontSize = useTerminalFontSize();
+  const setTerminalFontSize = useSetTerminalFontSize();
   // Opt-in OS desktop alerts (WARDEN-259). Pure client-side pref (like
   // terminalFontSize/scrollback): persisted by the saveUi effect below. Never sent
   // to the backend.
@@ -318,30 +341,40 @@ function App() {
   const { watchedChats, watchedChatSet, toggleWatch, toggleWatchMany, clearWatchedChats } = useWatchState({
     initialWatched: uiState.watchedChats ?? [],
   });
-  const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
-  // Terminal font family: the CSS font-family value every agent pane renders.
-  // '' / absent / blank → DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack) so
-  // an empty or unknown custom value can never blank a pane (uses || not ?? on
-  // purpose: '' must fall back). Pure client-side pref (like terminalFontSize/
-  // scrollback): persisted by the saveUi effect below, never sent to the backend.
-  const [terminalFontFamily, setTerminalFontFamily] = useState(() => uiState.terminalFontFamily || DEFAULT_TERMINAL_FONT_FAMILY);
+  // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
+  // above).
+  const terminalScrollback = useTerminalScrollback();
+  const setTerminalScrollback = useSetTerminalScrollback();
+  // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
+  // above). The store seed preserves the truthiness fallback below VERBATIM —
+  // DEFAULT_UI.terminalFontFamily is '' (blank = default stack) and a persisted
+  // '' must seed the real stack, never '' (a `??`-only seed would let '' reach
+  // xterm and blank a pane). The reset deviation documented at
+  // resetUiPrefDefaults (this pref resets to DEFAULT_TERMINAL_FONT_FAMILY, not
+  // to DEFAULT_UI's '') lives there and is untouched.
+  const terminalFontFamily = useTerminalFontFamily();
+  const setTerminalFontFamily = useSetTerminalFontFamily();
   // Terminal color scheme: 'auto' follows the effective app theme (above);
   // 'dark'/'light' force the terminal surface. Pure client-side pref (like
   // terminalFontSize/scrollback): persisted by the saveUi effect below, never
   // sent to the backend.
   const [terminalColorScheme, setTerminalColorScheme] = useState<TerminalColorScheme>(() => uiState.terminalColorScheme ?? 'auto');
-  // Terminal cursor style (shape × blink). Pure client-side pref (like
-  // terminalFontSize/scrollback/colorScheme): persisted by the saveUi effect
-  // below, applied live to all open panes via PaneTile's effect, and never sent
-  // to the backend. 'blink-block' is the default (today's exact cursor).
-  const [terminalCursorStyle, setTerminalCursorStyle] = useState<TerminalCursorStyle>(() => uiState.terminalCursorStyle ?? 'blink-block');
+  // Terminal cursor style (shape × blink). 'blink-block' is the default (today's
+  // exact cursor).
+  //
+  // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
+  // above).
+  const terminalCursorStyle = useTerminalCursorStyle();
+  const setTerminalCursorStyle = useSetTerminalCursorStyle();
   // "Copy on select" (WARDEN-285): when ON, completing a text selection in any
   // agent pane copies it to the clipboard immediately (no Ctrl/Cmd+C). Default
-  // OFF = today's exact behavior. Pure client-side pref (like terminalFontSize/
-  // scrollback): persisted by the saveUi effect below, applies LIVE to all open
-  // panes (PaneTile mirrors it into a ref its selection handler reads), and is
-  // never sent to the backend.
-  const [copyOnSelect, setCopyOnSelect] = useState(() => uiState.copyOnSelect ?? false);
+  // OFF = today's exact behavior. Applies LIVE to all open panes (PaneTile
+  // mirrors it into a ref its selection handler reads).
+  //
+  // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
+  // above).
+  const copyOnSelect = useCopyOnSelect();
+  const setCopyOnSelect = useSetCopyOnSelect();
   // Timestamp format (WARDEN-213): how every timestamp surface reads — 'relative'
   // (default = "2m"/"3h" buckets) or 'absolute' (clock time). Pure client-side
   // pref (like copyOnSelect/density): persisted by the saveUi effect below,
@@ -834,9 +867,11 @@ function App() {
   // The two things the types can NOT say:
   //   - terminalFontFamily resets to DEFAULT_TERMINAL_FONT_FAMILY (the curated
   //     "System default" value), NOT DEFAULT_UI.terminalFontFamily (''). The
-  //     persisted shape uses '' (blank = default stack), but the live React
-  //     initializer coerces '' → DEFAULT_TERMINAL_FONT_FAMILY via || (the
-  //     useState at terminalFontFamily) so a pane can never blank. Setting live
+  //     persisted shape uses '' (blank = default stack), but the live value is
+  //     seeded with the same truthiness fallback ('' →
+  //     DEFAULT_TERMINAL_FONT_FAMILY, now in uiStore's createUiStore since
+  //     WARDEN-1322 — formerly App's useState initializer) so a pane can never
+  //     blank. Setting live
   //     state to '' here would leave the Settings font-select showing "Custom…"
   //     (no '' option in the curated list) until reload.
   //   - User-curated lists (customPresets/snippets/watchedChats)
@@ -846,7 +881,10 @@ function App() {
   // Identity is stable because every value it closes over is: the useState
   // setters are stable by React contract, clearWatchedChats is a
   // useCallback(..., []) (useWatchState.ts), and setSnippets /
-  // setFileViewerViewMode are zustand actions created once with the store
+  // setFileViewerViewMode — plus the six terminal setters this reset covers
+  // since WARDEN-1322 (setTerminalFontSize/setTerminalScrollback/
+  // setTerminalFontFamily/setTerminalCursorStyle/setCopyOnSelect/
+  // setOnExitBehavior) — are zustand actions created once with the store
   // (lib/uiStore.ts) — so listing them in the dep array below costs nothing and
   // keeps the lint rule satisfied honestly rather than by suppression.
   const resetUiPrefsToDefaults = useCallback(() => {
@@ -920,7 +958,7 @@ function App() {
     // contract), so it joins clearWatchedChats outside the dep array.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
     setObserverResetToken((t) => t + 1);
-  }, [clearWatchedChats, setSnippets, setFileViewerViewMode]);
+  }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1866,15 +1904,14 @@ function App() {
             theme, setTheme,
             density, setDensity,
             paneLayout, setPaneLayout,
-            onExitBehavior, setOnExitBehavior,
             autoFocusNewPane, setAutoFocusNewPane,
             restoreOnStartup, setRestoreOnStartup,
-            terminalFontSize, setTerminalFontSize,
-            terminalScrollback, setTerminalScrollback,
-            terminalFontFamily, setTerminalFontFamily,
+            // WARDEN-1322 (slice 3): terminalFontSize/terminalScrollback/
+            // terminalFontFamily/terminalCursorStyle/copyOnSelect/onExitBehavior
+            // left this bag — AppearanceSection subscribes to them in the shared
+            // store instead (lib/uiStore.ts). terminalColorScheme STAYS: App is
+            // its only runtime reader (it derives terminalThemeId below).
             terminalColorScheme, setTerminalColorScheme,
-            terminalCursorStyle, setTerminalCursorStyle,
-            copyOnSelect, setCopyOnSelect,
             timestampFormat, setTimestampFormat,
             rememberWindowBounds, setRememberWindowBounds,
             launchAtLogin, setLaunchAtLogin,
@@ -2015,19 +2052,19 @@ function App() {
             externalSearchQuery={externalSearchQuery}
             onToggleSidebar={toggleSidebar}
             onToggleObserver={toggleObserver}
-            fontSize={terminalFontSize}
-            onFontSizeChange={setTerminalFontSize}
-            scrollback={terminalScrollback}
-            fontFamily={terminalFontFamily}
+            // WARDEN-1322 (slice 3): the six terminal prefs (fontSize/onFontSize-
+            // Change, scrollback, fontFamily, terminalCursorStyle, copyOnSelect,
+            // onExitBehavior) no longer ride through PaneGrid — PaneTile
+            // subscribes to them in the shared store (lib/uiStore.ts) and
+            // PaneGrid never read them. terminalThemeId STAYS a prop: it is
+            // derived per render below so an OS theme flip re-themes open panes
+            // live.
             paneLayout={paneLayout}
             paneColRatios={paneColRatios}
             paneRowRatios={paneRowRatios}
             onPaneColRatiosChange={setPaneColRatios}
             onPaneRowRatiosChange={setPaneRowRatios}
             terminalThemeId={terminalThemeId}
-            terminalCursorStyle={terminalCursorStyle}
-            copyOnSelect={copyOnSelect}
-            onExitBehavior={onExitBehavior}
             showHostTags={displaySettings.showHostTags}
             timestampFormat={timestampFormat}
             pollIntervalMs={pollIntervalMs}
