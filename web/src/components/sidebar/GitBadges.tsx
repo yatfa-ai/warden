@@ -417,23 +417,61 @@ function CommitRow({ cm, hashClass, title, expandedHash, toggleCommit, showCache
 }) {
   return (
     <li className="rounded">
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={expandedHash === cm.hash}
-        aria-label={`inspect files changed by commit ${cm.hash}`}
-        onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
-        title={title}
-        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-      >
-        <span className={`shrink-0 font-mono text-[10px] ${hashClass}`}>{cm.hash}</span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
-          <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
-        </span>
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
-      </div>
+      {/* Themed right-click menu (Context-Menu Completeness roadmap / WARDEN-1297).
+          The trigger wraps ONLY the row-header <div role="button"> below — the
+          expansion body (CommitMessage + CommitFile rows) deliberately stays OUTSIDE
+          it, so right-click inside an expanded commit's non-file regions does NOT
+          resolve to this menu and the WARDEN-917 FILE menu on the CommitFile rows
+          keeps its own coverage unambiguously. Same shape as the in-file
+          GitChangedFile precedent and the fleet twin (FleetRecentCommits.tsx:390,
+          "wraps the ROW div only").
+
+          Radix's ContextMenu root renders no DOM and `asChild` merges only handlers,
+          so the row's layout, role=button, tabIndex, aria-expanded/aria-label
+          contract, the onClick toggle and the onKeyDown stopPropagation are all
+          byte-identical — left-click and Enter/Space still expand. Pointer-context
+          menu only, per the roadmap's desktop-pointer boundary.
+
+          One wrap covers all THREE commit lists (recent · unpushed ↑N · incoming ↓N)
+          because CommitRow is shared by design (WARDEN-1039). */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            role="button"
+            tabIndex={0}
+            aria-expanded={expandedHash === cm.hash}
+            aria-label={`inspect files changed by commit ${cm.hash}`}
+            onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
+            title={title}
+            className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+          >
+            <span className={`shrink-0 font-mono text-[10px] ${hashClass}`}>{cm.hash}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
+              <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
+            </span>
+            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          {/* Open-first house pattern (WARDEN-444/853/1263): the row's own primary
+              action, surfaced in the menu for consistency. No new behavior — the
+              same toggleCommit a left-click fires. */}
+          <ContextMenuItem onSelect={() => toggleCommit(cm.hash)}>Inspect files</ContextMenuItem>
+          {/* Every copy goes through copyWithToast — never bare navigator.clipboard,
+              which fails silently in Electron. Wording mirrors the fleet twin. */}
+          <ContextMenuItem onSelect={() => copyWithToast(cm.hash)}>Copy commit hash</ContextMenuItem>
+          {/* The FULL subject: the row renders it `block truncate`, so on a long
+              subject the on-screen text is not the whole value. */}
+          <ContextMenuItem onSelect={() => copyWithToast(cm.subject)}>Copy commit subject</ContextMenuItem>
+          {/* Author is rendered conditionally on the row (`cm.author ? …`), so the
+              item mirrors that — no menu entry for a commit with no author. */}
+          {cm.author && <ContextMenuItem onSelect={() => copyWithToast(cm.author)}>Copy author</ContextMenuItem>}
+          {/* The displayed timestamp, verbatim (10px muted text, selection-hostile). */}
+          <ContextMenuItem onSelect={() => copyWithToast(cm.date)}>Copy timestamp</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {expandedHash === cm.hash && (
         <div className="pb-1 pl-1">
           <CommitMessage message={showCache[cm.hash]?.message} />
