@@ -2,8 +2,8 @@
 // container; manual: a host/local tmux session). This module builds tmux argv and
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
-import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd } from './ssh.js';
-import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey } from './companion.js';
+import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd, buildAttachCommand, buildAttachRemoteScript } from './ssh.js';
+import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey, attachSession as companionAttachSession } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -345,9 +345,47 @@ export function attachArgs(chat, cfg) {
   return ['attach', '-t', sess(chat, cfg)];
 }
 
-// Live web pane: returns a node-pty (local exec or ssh).
-export function attachStream(chat, cfg, { cols = 100, rows = 30 } = {}) {
-  return attachTmux(chat, attachArgs(chat, cfg), { cols, rows });
+// Live web pane: returns a node-pty (local exec or ssh), or — under the companion
+// transport on a REMOTE host — a channel-backed session exposing the identical
+// IPty surface (onData/onExit/write/resize/kill).
+//
+// Companion routing (WARDEN-1295, the streaming slice of roadmap WARDEN-270):
+// today every open of a remote pane spawns a fresh `ssh -tt` child inside a local
+// node-pty — the LAST raw-SSH path in the runtime. For a REMOTE host under the
+// companion transport this instead allocates the PTY on the HOST and streams it
+// over the persistent channel: ZERO ssh spawns per open.
+//
+// PARITY: the command run under the host PTY is built by the SAME two builders
+// the default path uses — buildAttachRemoteScript(buildAttachCommand(chat, args))
+// — so the delivered string is byte-for-byte what attachPty hands `ssh -tt`
+// today (the LANG/LC_ALL export, the inner `bash -lc`, the quoting, and the
+// `docker exec -it <container> ` prefix). One builder, both paths.
+//
+// LOCAL never routes through the companion (attachLocalTmux owns it). A stale
+// binary — or a host whose companion cannot allocate a PTY at all (windows) —
+// does NOT advertise attachStart, and the companion client THROWS the actionable
+// too-old/unsupported error rather than silently falling back to raw SSH: the
+// throw surfaces through server.js's existing attach_error path. Deliberately no
+// {unsupported} degradation here (same call as exec, WARDEN-1261): a silent
+// per-open fallback would re-pay the handshake this slice removes while the
+// toggle reads "on".
+//
+// SYNCHRONOUS SIGNATURE PRESERVED: server.js calls attachStream() inside a
+// try/catch and uses the result immediately (registers onData/onExit, stores the
+// entry) with NO await, so both branches must return a usable handle on the same
+// tick. The companion branch's startup (bootstrap + attachStart ACK) is async, so
+// the handle owns it internally — CompanionAttachSession buffers output, queues
+// input, and routes a startup failure into onExit. server.js is UNCHANGED.
+export function attachStream(chat, cfg, { cols = 100, rows = 30 } = {}, deps = {}) {
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (chat.host !== '(local)' && isEnabled()) {
+    return (deps.companionAttachSession ?? companionAttachSession)(chat.host, {
+      script: buildAttachRemoteScript(buildAttachCommand(chat, attachArgs(chat, cfg))),
+      cols,
+      rows,
+    }, cfg, {});
+  }
+  return (deps.attachTmux ?? attachTmux)(chat, attachArgs(chat, cfg), { cols, rows });
 }
 
 // CLI interactive attach (stdio inherit). Returns exit code.
