@@ -74,6 +74,23 @@
 // With this leg the ONLY remaining raw-SSH path in the runtime is the live
 // interactive attach PTY. All eight legs are reported below.
 //
+// WARDEN-1329 adds the DEPTH-CAPTURE leg: tmux.js read() — the single-pane
+// `capture-pane -p -e -S -<n>` behind /api/pane (200 lines), /api/pane-export
+// (5000 lines — the transcript the user downloads), the observer's read_chat
+// (120 lines) and the CLI tail. It is the LAST un-gated runtime op in tmux.js:
+// it fell between every prior slice's category (neither a poll nor a stream),
+// and it cannot ride the batched capturePanes RPC, which hardcodes `-S -60`
+// while read()'s callers pass up to 5000 lines. It rides the generic `exec`
+// RPC instead (the full pre-assembled command as the script, container UNSET —
+// bare `docker exec <c> tmux`, no in-container shell; explicit 30s deadline —
+// NOT execInContext's 8s default). The win, stated the way every sibling slice
+// states it: ZERO per-op ssh spawns — these reads are runWithPool ops, so on
+// macOS/Linux each paid a ControlMaster spawn (not a full handshake; the
+// handshake framing holds only on Windows, where pooling is unavailable), and
+// a pane open + export + one observer poll made the user wait on real ssh
+// process spawns. Per-leg ROUTING is pinned in src/companion-read.test.js.
+// All nine legs are reported below.
+//
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
@@ -494,6 +511,47 @@ function printScriptDeliveryProjection(hosts, ticks) {
   console.log('REMOTE invocation of the nine legs issues ZERO per-op ssh spawns. After');
   console.log('this slice the ONLY raw-SSH path left in the runtime is the interactive');
   console.log('attach PTY.');
+  console.log();
+}
+
+// Slice WARDEN-1329: the depth-capture leg — tmux.js read(). Where the nine
+// script-delivery legs were UN-POOLED, read() rode runWithPool, so on
+// macOS/Linux its per-op cost was a ControlMaster SPAWN (a full handshake only
+// on Windows). The measure is therefore the one every sibling slice uses:
+// per-op ssh spawns, not handshakes. Cadence: a user-initiated pane open
+// (/api/pane, 200 lines) and export (/api/pane-export, 5000 lines — the
+// transcript download), plus the observer's read_chat (120 lines) once per
+// watched agent per poll.
+const PANE_VIEWS_PER_TICK = 1;   // /api/pane per pane open (+ /api/pane-export on download)
+const OBSERVER_READ_CHAT = 4;    // watched agents per host (one read_chat per poll)
+function printDepthCaptureProjection(hosts, ticks) {
+  const perTick = PANE_VIEWS_PER_TICK + OBSERVER_READ_CHAT;
+  const before = hosts * perTick * ticks;
+  console.log('━'.repeat(72));
+  console.log(`Part 1.r — depth capture (tmux.js read): per-op spawn projection  (${hosts} host(s), ${ticks} tick(s))`);
+  console.log('━'.repeat(72));
+  console.log('The last un-gated runtime op in tmux.js. It cannot ride the batched');
+  console.log('capturePanes RPC (hardcoded -S -60) because its callers ask for up to');
+  console.log('5000 lines (/api/pane-export) — it rides the generic `exec` RPC:');
+  console.log();
+  console.log(`  DEFAULT path (runTmux -> runWithPool), per host per tick:`);
+  console.log(`    ${PANE_VIEWS_PER_TICK} × pane open/export  (user-initiated: /api/pane 200, /api/pane-export 5000)`);
+  console.log(`    ${OBSERVER_READ_CHAT} × observer read_chat (per watched agent, per poll)`);
+  console.log(`    = ${perTick} ssh spawns / host / tick  →  ${hosts} × ${perTick} × ${ticks} = ${before} spawns`);
+  console.log('    (a full handshake each on Windows; a ControlMaster spawn on macOS/Linux)');
+  console.log('  COMPANION path:');
+  console.log(`    reuses the bootstrapped channel via the \`exec\` RPC — 0 spawns/call`);
+  console.log(`    total = 0 per-op spawns (bootstrap was paid by discover)`);
+  console.log();
+  console.log(`  ▶ per-op ssh spawns saved over ${ticks} tick(s): ${before} → 0  (−${before})`);
+  console.log('  ▶ the 5000-line export is the largest payload warden asks of a host;');
+  console.log('    the exec leg carries it with an explicit 30s deadline (run() parity,');
+  console.log('    not execInContext\'s 8s default) and its UTF-8 round-trip is gated by');
+  console.log('    src/companion-read.test.js (>64KB multibyte, byte-identical).');
+  console.log();
+  console.log('DONE criterion (ticket AC #1): under companionTransportEnabled, a REMOTE');
+  console.log('read() issues ZERO per-op ssh spawns — pinned by deps in');
+  console.log('src/companion-read.test.js (runTmux never consulted under the flag).');
   console.log();
 }
 
@@ -1394,6 +1452,7 @@ async function main() {
   printSendProjection(args.hosts, args.ticks);
   printGitProjection(args.hosts, args.ticks);
   printScriptDeliveryProjection(args.hosts, args.ticks);
+  printDepthCaptureProjection(args.hosts, args.ticks);
   printAttachProjection(args.hosts, args.ticks);
 
   if (!args.host) {
