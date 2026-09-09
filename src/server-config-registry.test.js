@@ -80,6 +80,14 @@ const GET_TOP_LEVEL_KEYS = [
   'telemetryIncidentsEnabled',
   'telemetryNamesEnabled',
   'telemetryOperationalMetricsEnabled',
+  // WARDEN-1331 — the pin MOVED by exactly one ADDITIVE entry: `bounds`, the
+  // numeric-range metadata buildGetResponse now serves so the Settings UI can
+  // derive its advertised min/max from the server instead of hand-copying it.
+  // It is emitted last (registry order 41, after the telemetry consent keys)
+  // precisely so this list's existing order is untouched. The key set + order
+  // assertions below are deliberately NOT loosened — they now pin the new
+  // shape, bounds included.
+  'bounds',
 ];
 
 // The EXACT nested llm key order GET emits today.
@@ -227,6 +235,33 @@ describe('/api/config GET shape — byte-identical key set + order (WARDEN-773)'
     const body = await get();
     assert.deepStrictEqual(Object.keys(body.llm), GET_LLM_KEYS,
       'llm nested key set and order must be byte-identical');
+  });
+
+  it('serves the numeric bounds the registry declares (WARDEN-1331)', async () => {
+    // The additive metadata key the pin above moved for. Every numeric bound
+    // in scope is emitted from the SAME descriptor the PUT guard reads, so the
+    // advertised range cannot drift from the enforced one. One-sided bounds
+    // omit the unbounded side; pollIntervalMs carries its uiRange (the WEB
+    // INPUT band — the server deliberately does NOT clamp that field, whose
+    // CLI consumer legitimately stores 1500 below the band).
+    const body = await get();
+    assert.deepStrictEqual(body.bounds, {
+      pollIntervalMs: { min: 10_000, max: 120_000 },
+      connectTimeout: { min: 1, max: 60 },
+      observerSessionTimeout: { min: 1, max: 180 },
+      'llm.maxTokens': { min: 1 },
+      healthWarningThresholdMin: { min: 1 },
+      healthCriticalThresholdMin: { min: 1 },
+      tokenBudgetThresholdTokens: { min: 1 },
+      tokenBudgetWindowHours: { min: 1 },
+      tokenBudgetPerSessionThresholdTokens: { min: 1 },
+    });
+    // It is read-only metadata, not a field: a PUT carrying bounds must not
+    // store anything (derived exposure is never applied, never persisted).
+    await put({ bounds: { connectTimeout: { min: 999 } } });
+    const after = await get();
+    assert.deepStrictEqual(after.bounds.connectTimeout, { min: 1, max: 60 },
+      'bounds is GET-only metadata — a PUT cannot rewrite it');
   });
 
   it('NEVER returns any of the three cleartext secrets anywhere in the GET body', async () => {

@@ -53,16 +53,33 @@ const TELEMETRY_CONSENT_ORDER = 38;
 //
 // type values (the PUT guard + the value class):
 //   'array'                   — truthy array (hosts).
-//   'number'                  — typeof number (optional clamp: [min,max]).
+//   'number'                  — typeof number (optional clamp: [min,max]; a
+//                               side may be null = unbounded on that side).
 //   'string'                  — typeof string.
 //   'boolean'                 — typeof boolean.
 //   'oneOf'                   — truthy + member of `oneOf`.
-//   'nullablePositiveNumber'  — null OR a finite number > 0.
+//   'nullablePositiveNumber'  — null OR a finite number > 0 (clamped into its
+//                               advertised range when `clamp` is present).
 //   'flooredNumber'           — finite number → Math.max(1, x); accepts null
 //                               iff `nullable: true` (the tokenBudget asymmetry).
 //   'watchPatterns'           — sanitizeWatchPatterns (null → no mutation).
 //   'secret'                  — non-empty string only (no-clobber).
 //   'llm'                     — nested object; sub-fields described by `fields`.
+//
+// range descriptors (WARDEN-1331 — the BOUNDS axis gets the same one-place
+// treatment the type axis got from this registry):
+//   clamp:   [min, max] — the range the PUT guards ENFORCE. `null` on a side =
+//              unbounded on that side (the min-only [1, null] health bounds).
+//              Honored only by types that read it ('number',
+//              'nullablePositiveNumber'); validateRegistry rejects it anywhere
+//              else so "added clamp: to a registry entry" can never again be a
+//              silent no-op. buildBounds serves every clamp over GET.
+//   uiRange: [min, max] — the WEB INPUT band for a field the server
+//              deliberately does NOT clamp (pollIntervalMs: the CLI reads the
+//              stored value raw at a 1500 default below this band). Metadata
+//              only — never enforces a PUT. Served over GET alongside clamp.
+//   Neither: emitted in `bounds` from the flooredNumber guard (min 1) so the
+//              tokenBudget inputs derive their floor from the server too.
 //
 // resolve values (the GET emission for 'public' fields; default 'identity'):
 //   'identity'    — cfg[key]
@@ -118,6 +135,18 @@ export const CONFIG_FIELDS = [
     type: 'number',
     resolve: 'identity',
     order: 2,
+    // WARDEN-1331 — deliberately NOT clamped server-side, and this is a stated
+    // decision, not an omission. The field is shared with the CLI, whose watch
+    // mode reads it RAW (`src/cli.js`: `cfg.pollIntervalMs || 1500`) and whose
+    // default (1500) sits far BELOW the web input band; any server-side clamp
+    // at the web floor would rewrite the CLI's legitimate cadence on the next
+    // web save, and a [1,∞) clamp would enforce nothing the typeof guard
+    // doesn't. What the web control needs — the INPUT band it advertises and
+    // clamps to on blur — is declared ONCE here as `uiRange` and served over
+    // GET in `bounds` (buildBounds), so the frontend no longer hand-copies it.
+    // `uiRange` is metadata only: it never clamps a PUT. The web resolver
+    // (resolvePollIntervalMs) remains the enforcement for stale/CLI values.
+    uiRange: [10_000, 120_000],
   },
   {
     key: 'pins',
@@ -204,7 +233,11 @@ export const CONFIG_FIELDS = [
     fields: [
       { key: 'model', type: 'string', get: 'orEmpty' },
       { key: 'baseUrl', type: 'string', get: 'orEmpty' },
-      { key: 'maxTokens', type: 'nullablePositiveNumber', get: 'numberOrNull' },
+      // WARDEN-1331: clamp into the [1, …] bound the Settings input advertises
+      // (min=1, no max) — the last of the three clamp-less nullablePositiveNumber
+      // fields named by WARDEN-867's byte-identical guard. Null (use the llm.js
+      // default) passes through unclamped, exactly like the top-level fields.
+      { key: 'maxTokens', type: 'nullablePositiveNumber', get: 'numberOrNull', clamp: [1, null] },
       // null clears to "use the llm.js default (2048)"; a finite positive int sets it.
       // authToken is a SECRET: GET masks it (Set + Tail only), PUT is no-clobber
       // (non-empty overwrites; explicit null CLEARS it — WARDEN-883).
@@ -218,6 +251,12 @@ export const CONFIG_FIELDS = [
     type: 'nullablePositiveNumber',
     resolve: 'identity',
     order: 9,
+    // WARDEN-1331: clamp into the [1, …] bound the Settings input advertises
+    // (min=1, no max) — a direct PUT of 0.5 used to pass the bare `value > 0`
+    // guard and persist a fraction the UI cannot express. Null passes through
+    // unclamped. There is NO static max: the warning≤critical ceiling is the
+    // crossField RELATIONSHIP below, not a range, and stays there.
+    clamp: [1, null],
     // Fleet health attention thresholds (minutes of inactivity).
     // healthWarningThresholdMin maps to the healthy→WARNING boundary: once an
     // agent has been inactive this long it needs attention (WARNING). Must be <=
@@ -230,6 +269,8 @@ export const CONFIG_FIELDS = [
     type: 'nullablePositiveNumber',
     resolve: 'identity',
     order: 10,
+    // WARDEN-1331: clamp [1, …] — same as healthWarningThresholdMin above.
+    clamp: [1, null],
     // healthCriticalThresholdMin maps to the warning→CRITICAL boundary: at this
     // much inactivity an agent is CRITICAL (and fires a desktop alert). ALSO
     // drives the IDLE branch for manual tmux sessions, so all three
@@ -529,6 +570,21 @@ export const CONFIG_FIELDS = [
     // be true). The boot snapshot is passed in via ctx.companionEnvOverridden.
     derived: (ctx = {}) => ctx.companionEnvOverridden === true,
   },
+  {
+    key: 'bounds',
+    exposure: 'derived',
+    order: 41,
+    // WARDEN-1331 — the numeric-range metadata key. NOT a config field: nothing
+    // is persisted, nothing is accepted on PUT (derived exposure guarantees
+    // both — applyConfigPut/deriveDefaults/resetConfig all skip 'derived'), and
+    // it emits at the END of the byte-pinned GET order (rank 41, after the
+    // telemetry consent keys at 38/39/40) so the pin moves by exactly one
+    // additive entry.
+    // buildBounds() derives it from the same `clamp` / `uiRange` descriptors
+    // the PUT guards read, so a range is declared once and both the server's
+    // enforcement and the UI's advertised min/max come from that one place.
+    derived: () => buildBounds(),
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -552,6 +608,28 @@ const VALID_TYPES = new Set([
 const VALID_RESOLVES = new Set(['identity', 'neqFalse', 'eqTrue', 'orEmpty', 'arrayOrEmpty']);
 const VALID_EXPOSURES = new Set(['public', 'secret', 'derived', 'internal']);
 
+// Types whose applyField case honors `clamp` (WARDEN-1331: this is the check
+// that keeps "adding clamp: to a registry entry is a NO-OP" from recurring —
+// a clamp on an unhonoring type is now a startup error, not a silent no-op).
+const CLAMPABLE_TYPES = new Set(['number', 'nullablePositiveNumber']);
+
+// A range descriptor is `[min, max]` with each side a finite number or null
+// (null = unbounded on that side). Both-null is legal but pointless, so it is
+// rejected as the typo it almost certainly is.
+function validateRangeDescriptor(range, where) {
+  if (!Array.isArray(range) || range.length !== 2) {
+    throw new Error(`${where} must be [min, max]`);
+  }
+  const [min, max] = range;
+  for (const side of [min, max]) {
+    if (side !== null && (typeof side !== 'number' || !Number.isFinite(side))) {
+      throw new Error(`${where} sides must be finite numbers or null`);
+    }
+  }
+  if (min === null && max === null) throw new Error(`${where} cannot be [null, null]`);
+  if (min !== null && max !== null && min > max) throw new Error(`${where}: min ${min} > max ${max}`);
+}
+
 function validateRegistry(fields = CONFIG_FIELDS) {
   const seenOrders = new Map(); // order → key (to name a collision)
   fields.forEach((d, i) => {
@@ -560,6 +638,32 @@ function validateRegistry(fields = CONFIG_FIELDS) {
     if (d.exposure !== 'derived' && !('default' in d)) throw new Error(`${where}: missing 'default'`);
     if (d.type !== undefined && !VALID_TYPES.has(d.type)) throw new Error(`${where}: unknown type '${d.type}'`);
     if (d.resolve !== undefined && !VALID_RESOLVES.has(d.resolve)) throw new Error(`${where}: unknown resolve '${d.resolve}'`);
+    // WARDEN-1331 — validate the range descriptors the way type/resolve are
+    // validated: a malformed clamp (swapped bounds, a string min) would clamp
+    // every PUT to a wrong value SILENTLY (the exact disease this module
+    // exists to prevent), so make it a startup error instead.
+    if (d.clamp !== undefined) validateRangeDescriptor(d.clamp, `${where} clamp`);
+    if (d.uiRange !== undefined) validateRangeDescriptor(d.uiRange, `${where} uiRange`);
+    if (d.clamp !== undefined && d.uiRange !== undefined) {
+      throw new Error(`${where}: cannot declare both 'clamp' and 'uiRange' — one enforced range per field (uiRange is the input band for an unclamped field)`);
+    }
+    if (d.clamp !== undefined && !CLAMPABLE_TYPES.has(d.type)) {
+      throw new Error(`${where}: 'clamp' is not valid on type '${d.type}'`);
+    }
+    // The nested llm sub-fields aren't top-level descriptors, but they now
+    // carry `clamp` too (llm.maxTokens) and buildBounds/applyField read it —
+    // validate it under the same rules so a typo'd sub-field bound is also a
+    // startup error rather than a wrong clamp.
+    if (d.type === 'llm') {
+      for (const f of d.fields || []) {
+        if (f.clamp !== undefined) {
+          validateRangeDescriptor(f.clamp, `${where} field '${f.key}' clamp`);
+          if (!CLAMPABLE_TYPES.has(f.type)) {
+            throw new Error(`${where} field '${f.key}': 'clamp' is not valid on type '${f.type}'`);
+          }
+        }
+      }
+    }
     // GET-visible fields must carry a unique numeric order (the byte-pinned GET rank).
     if (d.exposure === 'public' || d.exposure === 'secret' || d.exposure === 'derived') {
       if (typeof d.order !== 'number') throw new Error(`${where}: GET-visible field missing numeric 'order'`);
@@ -697,6 +801,50 @@ function resolveGet(d, v) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// bounds — the numeric-range metadata emitted over GET (WARDEN-1331).
+//
+// One `bounds` object keyed by dotted field name ('llm.maxTokens' for the
+// nested llm sub-field), each value {min?, max?} with an unbounded side
+// OMITTED (the one-sided [1, null] bounds emit {min: 1}). This is what lets
+// the Settings UI delete its hand-copies: the input's min/max attributes, the
+// onBlur clamp and the "capped to N on blur" hint all derive from the served
+// bound, exactly the bound the PUT guards enforce.
+//
+// Two deliberate shape decisions:
+//   - `clamp` (server-ENFORCED) and `uiRange` (input band for a field the
+//     server deliberately does not clamp — pollIntervalMs, whose CLI consumer
+//     legitimately stores 1500 below the web band) emit the SAME {min, max}
+//     shape. Consumers don't branch; the distinction is documented on the
+//     registry entries and in the ticket, not re-encoded on the wire.
+//   - `flooredNumber` fields emit {min: 1} derived from what the case actually
+//     enforces (Math.max(1, x)) — they carry no clamp descriptor by design, so
+//     their bound is derived from the guard, not re-declared.
+// ---------------------------------------------------------------------------
+export function buildBounds() {
+  const out = {};
+  const visible = CONFIG_FIELDS
+    .filter((d) => d.exposure === 'public')
+    .slice()
+    .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+  const emit = (key, [min, max]) => {
+    const b = {};
+    if (min !== null) b.min = min;
+    if (max !== null) b.max = max;
+    out[key] = b;
+  };
+  for (const d of visible) {
+    if (d.type === 'llm') {
+      for (const f of d.fields || []) if (f.clamp) emit(`llm.${f.key}`, f.clamp);
+      continue;
+    }
+    if (d.uiRange) emit(d.key, d.uiRange);
+    else if (d.clamp) emit(d.key, d.clamp);
+    else if (d.type === 'flooredNumber') emit(d.key, [1, null]);
+  }
+  return out;
+}
+
 // The nested llm object has its own (byte-pinned) key order + masking. Its
 // sub-field semantics are declared once in the llm descriptor's `fields` (the
 // hoisted LLM_FIELDS above) and driven through the same resolve/apply machinery
@@ -722,64 +870,85 @@ function buildLlmGet(cfg) {
 // then run the cross-field invariants. Each guard rejects undefined/absent
 // fields (PATCH semantics — a field not in the body is left untouched), matching
 // the pre-refactor destructure+guard behavior exactly.
+//
+// WARDEN-1331 — the route no longer has to answer { ok: true } to a REJECTED
+// write. applyConfigPut now also returns WHICH present-but-invalid values it
+// refused, as `{ refused: { [dottedFieldKey]: refusedBodyValue } }`. Refusal is
+// strictly narrower than "didn't write": a value that was CLAMPED into its
+// advertised range (the WARDEN-747/867/1331 discipline — commit matches
+// display) is applied, not refused. Only a value that failed its type/shape
+// guard outright (a string where a number belongs, a sub-zero threshold, a
+// malformed pattern list) is reported. An ABSENT field is never a refusal —
+// that is the PATCH no-op, not a rejected write. The no-clobber secret paths
+// (blank string, wrong type) ARE refusals when the field was present in the
+// body; an omitted secret (the normal untouched-field save) is not.
 // ---------------------------------------------------------------------------
 
-export function applyConfigPut(cfg, body) {
+export function applyConfigPut(cfg, body = {}) {
+  const refused = {};
   for (const d of CONFIG_FIELDS) {
     if (d.exposure === 'internal' || d.exposure === 'derived') continue;
-    if (d.type === 'llm') { applyLlmPut(cfg, body.llm); continue; }
-    applyField(d, cfg, body[d.key]);
+    if (d.type === 'llm') { applyLlmPut(cfg, body.llm, refused); continue; }
+    applyField(d, cfg, body[d.key], refused);
   }
   crossField(cfg);
-  return cfg;
+  return { refused };
 }
 
 // Apply one field's declared guard to a target object. Shared by top-level
 // fields and the nested llm sub-fields (target = cfg, or cfg.llm respectively).
-function applyField(d, target, value) {
+// `refused` (WARDEN-1331) collects present-but-invalid values under their
+// dotted key so the route can report them instead of answering a bare ok.
+function applyField(d, target, value, refused, refuseKey) {
+  const note = () => { if (refused && value !== undefined) refused[refuseKey ?? d.key] = value; };
   const { key, type } = d;
   switch (type) {
     case 'array':
       if (value && Array.isArray(value)) target[key] = value;
+      else note();
       return;
     case 'number':
       if (typeof value === 'number') {
-        target[key] = d.clamp ? Math.min(d.clamp[1], Math.max(d.clamp[0], value)) : value;
-      }
+        target[key] = d.clamp ? clampToBounds(value, d.clamp) : value;
+      } else note();
       return;
     case 'string':
       if (typeof value === 'string') target[key] = value;
+      else note();
       return;
     case 'boolean':
       if (typeof value === 'boolean') target[key] = value;
+      else note();
       return;
     case 'oneOf':
       if (value && d.oneOf.includes(value)) target[key] = value;
+      else note();
       return;
     case 'nullablePositiveNumber':
-      // WARDEN-867: honor d.clamp when present (mirrors the 'number' case's
-      // ternary). Null is the disable path — it passes through UNclamped so the
-      // clamp can't silently turn a "disabled" into a number. A finite positive
-      // number clamps into [clamp[0], clamp[1]]; ≤ 0 is still rejected (no
-      // write). The `d.clamp ?` guard keeps the three clamp-less fields
-      // (healthWarningThresholdMin, healthCriticalThresholdMin, llm.maxTokens)
-      // byte-identical.
+      // Null is the disable path — it passes through UNclamped so the clamp
+      // can't silently turn a "disabled" into a number. A finite positive
+      // number clamps into its advertised range via the shared clampToBounds
+      // (WARDEN-1331: every nullablePositiveNumber field now carries `clamp`,
+      // so the bare `value > 0` pass-through that let 0.5 persist is gone);
+      // ≤ 0 / non-numbers are refused (no write).
       if (value === null) { target[key] = null; return; }
       if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-        target[key] = d.clamp ? Math.min(d.clamp[1], Math.max(d.clamp[0], value)) : value;
-      }
+        target[key] = d.clamp ? clampToBounds(value, d.clamp) : value;
+      } else note();
       return;
     case 'flooredNumber':
       // null-asymmetry (WARDEN-773 correction 3): tokenBudgetThresholdTokens +
       // per-session accept null (clear-to-default-at-read); windowHours does NOT.
       if (d.nullable && value === null) { target[key] = null; return; }
       if (typeof value === 'number' && Number.isFinite(value)) target[key] = Math.max(1, value);
+      else note();
       return;
     case 'watchPatterns': {
       // sanitizeWatchPatterns returns null for a non-array (→ no mutation); a
       // sanitized array otherwise (capped, deduped by id, bad entries dropped).
       const cleaned = sanitizeWatchPatterns(value);
       if (cleaned) target[key] = cleaned;
+      else note();
       return;
     }
     case 'secret':
@@ -787,21 +956,35 @@ function applyField(d, target, value) {
       // untouched password field (GET never seeds cleartext) survives a save.
       // An explicit null CLEARS the stored secret to '' (WARDEN-883) — the Remove
       // control mirrors the nullablePositiveNumber null path (above) so a user
-      // can fall back to "no token" without hand-editing config.json. The '' /
-      // undefined / other branches below are byte-identical to the prior behavior
-      // (still no-clobber), so an untouched or blank field is left as-is.
+      // can fall back to "no token" without hand-editing config.json. A present
+      // but non-clearing, non-string value (including '') is REFUSED
+      // (WARDEN-1331) rather than silently dropped; an omitted secret is the
+      // normal untouched-field save and never appears in `refused`.
       if (value === null) { target[key] = ''; return; }
       if (typeof value === 'string' && value.length > 0) target[key] = value;
+      else note();
       return;
     default:
       return;
   }
 }
 
-function applyLlmPut(cfg, llm) {
+// The ONE clamp the numeric guards use (WARDEN-1331). Range sides may be null
+// (= unbounded on that side — the one-sided [1, null] min-only bounds), so the
+// old `Math.min(d.clamp[1], …)` ternary is replaced wholesale: Math.min(null, x)
+// would coerce null to 0 and clamp everything to zero.
+function clampToBounds(value, [min, max]) {
+  if (min !== null && value < min) return min;
+  if (max !== null && value > max) return max;
+  return value;
+}
+
+function applyLlmPut(cfg, llm, refused) {
   if (!llm || typeof llm !== 'object' || Array.isArray(llm)) return;
   if (!cfg.llm || typeof cfg.llm !== 'object' || Array.isArray(cfg.llm)) cfg.llm = {};
-  for (const f of LLM_FIELDS) applyField(f, cfg.llm, llm[f.key]);
+  for (const f of LLM_FIELDS) {
+    applyField(f, cfg.llm, llm[f.key], refused, `llm.${f.key}`);
+  }
 }
 
 // Cross-field invariants — run AFTER the per-field loop (each depends only on
