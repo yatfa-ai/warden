@@ -36,6 +36,9 @@
  * @param {string} [opts.platform]  process.platform ('darwin' | 'win32' | 'linux' | …)
  * @param {string} [opts.appName]   the product name shown in the macOS app menu
  * @param {object} [opts.handlers]  injected actions (main wires the live Electron APIs):
+ *   - ensureMainWindowVisible() restore the main window IF it is hidden (no-op
+ *     when it is visible) — run before every window-targeting action; see the
+ *     REACHABILITY block below
  *   - openSettings()       push 'menu:open-settings' to the renderer
  *   - showAbout()          native About dialog (Windows/Linux; macOS uses role:'about')
  *   - showStallDiagnostics() native dialog summarizing ~/.yatfa-warden/stalls.jsonl
@@ -44,14 +47,73 @@
  *                          macOS uses role:'zoom', which AppKit handles natively)
  * @returns {Array<object>} a Menu.buildFromTemplate-compatible template
  */
+
+// --- REACHABILITY (WARDEN-1333) ---------------------------------------------
+// With close-to-tray ON the window is hidden but ALIVE (the close intercept
+// hide()s it; window-all-closed never fires, so the app keeps running), and on
+// macOS the application menu bar stays present and fully clickable in exactly
+// that state. A menu action that targets the main window is therefore only real
+// if it first makes the window visible: Settings pushed into a hidden window
+// opens where nobody can see it, and a dialog parented to a hidden window sits
+// open awaiting a click with zero visible windows.
+//
+// The rule lives HERE, not in main.cjs, for the same reason the template does
+// (the window-state.cjs split): this module is electron-free, so the rule is
+// unit-testable, and the wrap below applies it to the handlers as the template
+// is BUILT — so the next window-targeting handler added to this menu inherits
+// the rule instead of re-forgetting it. menu-template.test.mjs asserts the
+// ordering (ensure BEFORE act) and pins main.cjs's wiring of
+// `ensureMainWindowVisible` by source assertion, since main.cjs itself cannot
+// be required under `node --test`.
+//
+// Pure decision: does this window need restoring before an action that targets
+// it can reach its user? main.cjs wires the live BrowserWindow to this (its
+// ensureMainWindowVisible) and restores through showMainWindow() — which is
+// show()+focus(), exactly the restore the tray has used since close-to-tray
+// shipped (WARDEN-330).
+function windowNeedsRestore(w) {
+  return Boolean(w && !w.isDestroyed() && !w.isVisible());
+}
+
+// Actions exempt from the reachability wrap, each with its recorded reason.
+// Deliberately an explicit list: exempting an action must be a stated decision
+// (its item is added here WITH a reason), never an accident of forgetting to
+// wrap it — and the test suite asserts the observable behaviour of the one
+// exemption below.
+const REACHABILITY_EXEMPT = new Map([
+  // Its destination is the OS file manager (shell.openPath on ~/.yatfa-warden/),
+  // not the app window: the user sees the folder open whether or not the app
+  // window is visible, so restoring the window would be a spurious raise the
+  // item never promised.
+  ['openDataFolder', 'opens the OS file manager, not the app window'],
+]);
+
 function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warden', handlers = {} } = {}) {
   const isMac = platform === 'darwin';
   const noop = () => {};
-  const openSettings = handlers.openSettings || noop;
-  const showAbout = handlers.showAbout || noop;
-  const showStallDiagnostics = handlers.showStallDiagnostics || noop;
-  const openDataFolder = handlers.openDataFolder || noop;
-  const toggleMaximize = handlers.toggleMaximize || noop;
+
+  // The reachability wrap (WARDEN-1333): every injected action runs main's
+  // ensureMainWindowVisible() BEFORE doing its work, so a click made while the
+  // window is hidden to the tray restores the window instead of vanishing into
+  // it. The callback itself is a no-op while the window is visible (see the
+  // isVisible gate in main.cjs), so nothing raises or steals focus on the
+  // ordinary visible-window path. With the callback absent (legacy callers,
+  // tests that inject only their own handlers) the wrap degrades to an
+  // unwired click rather than throwing — the wiring itself is pinned by the
+  // source assertions in web/menu-template.test.mjs.
+  const ensureVisible =
+    typeof handlers.ensureMainWindowVisible === 'function' ? handlers.ensureMainWindowVisible : null;
+  const reach = (name, action) => {
+    const fn = action || noop;
+    if (!ensureVisible || REACHABILITY_EXEMPT.has(name)) return fn;
+    return (...args) => { ensureVisible(); return fn(...args); };
+  };
+
+  const openSettings = reach('openSettings', handlers.openSettings);
+  const showAbout = reach('showAbout', handlers.showAbout);
+  const showStallDiagnostics = reach('showStallDiagnostics', handlers.showStallDiagnostics);
+  const openDataFolder = reach('openDataFolder', handlers.openDataFolder);
+  const toggleMaximize = reach('toggleMaximize', handlers.toggleMaximize);
 
   // The Settings item. On macOS the platform convention puts Preferences in the
   // APP menu (Cmd+,); on Windows/Linux it belongs in File (Ctrl+,). Same handler,
@@ -202,4 +264,4 @@ function flattenMenuItems(template) {
   return out;
 }
 
-module.exports = { buildMenuTemplate, flattenMenuItems };
+module.exports = { buildMenuTemplate, flattenMenuItems, windowNeedsRestore, REACHABILITY_EXEMPT };
