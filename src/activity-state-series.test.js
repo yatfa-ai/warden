@@ -117,7 +117,12 @@ describe('getStateSeriesSince — per-agent state series forward-fill (WARDEN-78
   });
 
   it('carries forward a state set BEFORE the window into the first bucket', async () => {
-    now = Date.now();
+    // Snap `now` (hence `start`) to the bucket grid: epoch-aligned buckets mean an
+    // unsnapped start lets the observation's 15-min coverage reach into bucket 1 by
+    // wall-clock luck (flaky whenever start's minute-of-hour >= 46). Aligned, the
+    // coverage provably stops inside bucket 0 and the exact assertion below holds
+    // deterministically.
+    now = Math.floor(Date.now() / BUCKET) * BUCKET;
     // Pre-window carry-forward survives the WARDEN-1318 bound: a transition logged
     // just BEFORE the window start still substantiates bucket 0 (its coverage
     // intersects it), so the row does not open blank. What CHANGED is the scope of
@@ -230,7 +235,13 @@ describe('getStateSeriesSince — per-agent state series forward-fill (WARDEN-78
     it('THE DEFECT: one observation 20h ago does NOT render 21 solid buckets (positive control included)', async () => {
       // The ticket's exact reproduction, with the positive control in the SAME run
       // so a broken harness is distinguishable from a real reading.
-      now = Date.now();
+      // Snap `now` to the bucket grid: the bucket grid is epoch-aligned, so an
+      // unsnapped `now` lets the 15-min coverage of the seeded observation straddle
+      // a bucket boundary by wall-clock luck (flaky whenever now's minute-of-hour
+      // >= 45). Hour-aligned `now` puts the 20h-old observation exactly ON a
+      // boundary, so its coverage stays inside one bucket and the exact-count
+      // assertions below are deterministic.
+      now = Math.floor(Date.now() / BUCKET) * BUCKET;
       const H = 60 * 60 * 1000;
       const lines = [SC('blackout', now - 20 * H, 'active')];
       // Control: genuinely observed every hour across the whole window (alternating
@@ -275,8 +286,7 @@ describe('getStateSeriesSince — per-agent state series forward-fill (WARDEN-78
         states.slice(firstIdx).every((s) => s !== null),
         'no null appears once observation starts — a watched agent has no gap-flicker',
       );
-      assert.strictEqual(states[states.length - 1], states[states.length - 1], 'row reaches now');
-      assert.notStrictEqual(states[states.length - 1], null, 'the "now" column is substantiated');
+      assert.notStrictEqual(states[states.length - 1], null, 'row reaches now — the "now" column is substantiated');
     });
 
     it('a `from: null` re-baseline breaks the segment: the pre-blackout state is not carried across it', async () => {
