@@ -244,4 +244,32 @@ test('a null/undefined payload normalizes to defaults rather than throwing', () 
   assert.equal(normalizeLoadedConfig(undefined).tokenBudgetPerSessionThresholdTokens, 1_000_000);
 });
 
+console.log('\nWARDEN-1331 — the served numeric bounds normalize like every other field');
+test('a served bounds object passes through per key (the shape the sections render)', () => {
+  const loaded = normalizeLoadedConfig(RESPONSE());
+  assert.deepEqual(loaded.bounds.connectTimeout, { min: 1, max: 60 });
+  assert.deepEqual(loaded.bounds.observerSessionTimeout, { min: 1, max: 180 });
+  assert.deepEqual(loaded.bounds.pollIntervalMs, { min: 10_000, max: 120_000 });
+  assert.deepEqual(loaded.bounds.healthWarningThresholdMin, { min: 1 });
+  assert.deepEqual(loaded.bounds['llm.maxTokens'], { min: 1 });
+});
+test('a wholly absent bounds payload falls back to the current server bands (version-skew net)', () => {
+  const loaded = normalizeLoadedConfig({});
+  assert.deepEqual(loaded.bounds.connectTimeout, { min: 1, max: 60 });
+  assert.deepEqual(loaded.bounds.pollIntervalMs, { min: 10_000, max: 120_000 });
+});
+test('a malformed bound entry falls back per key; a served one-sided bound stays one-sided', () => {
+  const loaded = normalizeLoadedConfig(RESPONSE({
+    bounds: { connectTimeout: '1..60', healthWarningThresholdMin: { min: 1 } },
+  }));
+  assert.deepEqual(loaded.bounds.connectTimeout, { min: 1, max: 60 }, 'malformed → fallback band');
+  assert.deepEqual(loaded.bounds.healthWarningThresholdMin, { min: 1 }, 'one-sided served bound preserved');
+});
+test('a non-numeric bound side falls back to the declared band', () => {
+  const loaded = normalizeLoadedConfig(RESPONSE({
+    bounds: { pollIntervalMs: { min: '10k', max: 120_000 } },
+  }));
+  assert.deepEqual(loaded.bounds.pollIntervalMs, { min: 10_000, max: 120_000 });
+});
+
 console.log(`\n✓ SETTINGS CONFIG-NORMALIZATION TESTS PASS (${passed})`);

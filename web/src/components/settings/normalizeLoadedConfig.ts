@@ -37,7 +37,7 @@
 // (2,000,000), which is exactly this fallback, so coercing it is correct. The
 // health thresholds and `pollIntervalMs` are not nullable at all. Only the two
 // fields above carry the disable meaning; copy the discrimination, not the guard.
-import type { ConfigData } from './types';
+import type { ConfigData, ConfigBounds, ConfigFieldBounds } from './types';
 
 /**
  * Normalize one of the two DISABLE-PATH numeric prefs.
@@ -139,5 +139,68 @@ export function normalizeLoadedConfig(rawConfigData: any): ConfigData {
     // response is already well-formed. Defensive ?? [] keeps an older backend
     // (no watchPatterns field) safely empty → no alerts.
     watchPatterns: Array.isArray(configData.watchPatterns) ? configData.watchPatterns : [],
+    // WARDEN-1331 — the served numeric bounds, guarded field-by-field with the
+    // SAME fail-safe-for-unknown intent as every fallback above: an older
+    // backend (or a corrupted payload) that omits/malforms `bounds` falls back
+    // to the bands the current backend declares, so the sections' advertised
+    // min/max can never go undefined. These literals are the defensive-floor
+    // copy of src/config-schema.js's clamp/uiRange descriptors — reachable
+    // only in a version-skew window (web+backend ship from one repo), never in
+    // steady state, where the served bound always wins.
+    bounds: normalizeBounds(configData.bounds),
   };
+}
+
+/**
+ * Fallback bands for the bounds normalization above. Keep in sync with
+ * src/config-schema.js — but note this is a fail-safe for an OLDER backend,
+ * not the second declaration the WARDEN-1331 refactor removed: the live value
+ * always comes from GET /api/config.
+ */
+const FALLBACK_BOUNDS: Record<keyof ConfigBounds, ConfigFieldBounds> = {
+  pollIntervalMs: { min: 10_000, max: 120_000 },
+  connectTimeout: { min: 1, max: 60 },
+  observerSessionTimeout: { min: 1, max: 180 },
+  healthWarningThresholdMin: { min: 1 },
+  healthCriticalThresholdMin: { min: 1 },
+  'llm.maxTokens': { min: 1 },
+  tokenBudgetThresholdTokens: { min: 1 },
+  tokenBudgetWindowHours: { min: 1 },
+  tokenBudgetPerSessionThresholdTokens: { min: 1 },
+};
+
+/**
+ * Build the concrete ConfigBounds the sections render from. Per key: a served
+ * numeric side wins; a side the current server declares but the payload
+ * misses/malforms falls back to the FALLBACK_BOUNDS band (the version-skew
+ * safety net, same intent as the per-field ?? guards above); a side NEITHER
+ * declares stays absent (one-sided bounds are preserved — the fallback never
+ * invents a max the server does not enforce).
+ */
+function normalizeBounds(raw: unknown): ConfigBounds {
+  const source = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out: Record<string, ConfigFieldBounds> = {};
+  for (const key of Object.keys(FALLBACK_BOUNDS)) {
+    const fb = FALLBACK_BOUNDS[key as keyof ConfigBounds];
+    const served = isFieldBounds(source[key]) ? source[key] : {};
+    const entry: ConfigFieldBounds = {};
+    if (typeof served.min === 'number') entry.min = served.min;
+    else if (fb.min !== undefined) entry.min = fb.min;
+    if (typeof served.max === 'number') entry.max = served.max;
+    else if (fb.max !== undefined) entry.max = fb.max;
+    out[key] = entry;
+  }
+  // Every ConfigBounds key was populated from FALLBACK_BOUNDS' key set, whose
+  // bands carry each key's REQUIRED sides (the current server's declared
+  // shape), so the concrete ConfigBounds shape holds at runtime. TS cannot see
+  // per-key side requirements through the loop, hence this single cast.
+  return out as unknown as ConfigBounds;
+}
+
+function isFieldBounds(v: unknown): v is ConfigFieldBounds {
+  if (!v || typeof v !== 'object') return false;
+  const { min, max } = v as { min?: unknown; max?: unknown };
+  if (min !== undefined && typeof min !== 'number') return false;
+  if (max !== undefined && typeof max !== 'number') return false;
+  return min !== undefined || max !== undefined; // an entry with no sides is malformed
 }

@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
+import { clampToBounds, isOutOfBounds } from '../numericBounds';
 import { type ConfigData, type SetConfig } from '../types';
 
 export function TokenBudgetSection({ config, setConfig, hidden }: { config: ConfigData; setConfig: SetConfig; hidden: boolean }) {
@@ -22,6 +23,14 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
   // wrapper instead would compound with the Input's `disabled:opacity-50` and
   // fade the fields to ~0.25.)
   const dim = gated ? 'opacity-50' : undefined;
+  // WARDEN-1331 — the floors these inputs advertise come from the SERVED
+  // bounds (GET /api/config). The backend has no clamp descriptor for these
+  // three: they are `flooredNumber` fields whose guard floors every finite
+  // number at 1, and buildBounds derives {min: 1} from that guard — the served
+  // bound IS what the backend enforces.
+  const fleetBounds = config.bounds.tokenBudgetThresholdTokens;
+  const windowBounds = config.bounds.tokenBudgetWindowHours;
+  const perSessionBounds = config.bounds.tokenBudgetPerSessionThresholdTokens;
   return (
     <SettingsSection title="Token budget" className={hidden ? 'hidden' : undefined}>
       <div className="flex items-center gap-2">
@@ -52,7 +61,7 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
           <Input
             id="tokenBudgetThresholdTokens"
             type="number"
-            min="1"
+            min={fleetBounds.min}
             step="100000"
             disabled={gated}
             value={config.tokenBudgetThresholdTokens ?? ''}
@@ -63,13 +72,14 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
               })
             }
             onBlur={() => {
-              // WARDEN-747: floor at 1 (the min the input advertises) — mirrors
-              // the WARDEN-374 attention-threshold clamp + the backend PUT
-              // /api/config guard. These fields are null-able (empty = use the
-              // default), so only clamp when a value is actually present.
+              // Floor at the SERVED min (the bound the input advertises) —
+              // mirrors the backend flooredNumber guard. These fields are
+              // null-able (empty = use the default), so only clamp when a
+              // value is actually present. WARDEN-1331: bound derived, not
+              // hand-copied.
               const v = config.tokenBudgetThresholdTokens;
-              if (v != null && v < 1) {
-                setConfig({ ...config, tokenBudgetThresholdTokens: 1 });
+              if (v != null && isOutOfBounds(v, fleetBounds)) {
+                setConfig({ ...config, tokenBudgetThresholdTokens: clampToBounds(v, fleetBounds) });
               }
             }}
             placeholder="Default 2,000,000"
@@ -80,9 +90,9 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
           </p>
           {!gated &&
             config.tokenBudgetThresholdTokens != null &&
-            config.tokenBudgetThresholdTokens < 1 && (
+            isOutOfBounds(config.tokenBudgetThresholdTokens, fleetBounds) && (
               <p className="text-xs text-destructive">
-                Must be at least 1 — capped to 1 on blur.
+                Must be at least {fleetBounds.min} — capped to {fleetBounds.min} on blur.
               </p>
             )}
         </div>
@@ -97,7 +107,7 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
           <Input
             id="tokenBudgetWindowHours"
             type="number"
-            min="1"
+            min={windowBounds.min}
             step="1"
             disabled={gated}
             value={config.tokenBudgetWindowHours ?? ''}
@@ -108,11 +118,12 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
               })
             }
             onBlur={() => {
-              // WARDEN-747: floor at 1 — mirrors WARDEN-374 + the backend guard.
-              // Null-able (empty = use default), so only clamp when non-null.
+              // Floor at the SERVED min — mirrors the backend flooredNumber
+              // guard. Null-able (empty = use default), so only clamp when
+              // non-null. (WARDEN-747 discipline, WARDEN-1331 derivation.)
               const v = config.tokenBudgetWindowHours;
-              if (v != null && v < 1) {
-                setConfig({ ...config, tokenBudgetWindowHours: 1 });
+              if (v != null && isOutOfBounds(v, windowBounds)) {
+                setConfig({ ...config, tokenBudgetWindowHours: clampToBounds(v, windowBounds) });
               }
             }}
             placeholder="Default 24"
@@ -122,9 +133,9 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
             full lifetime token total (the existing meter), not just turns within the
             window — so a runaway that's burning tokens right now is captured. Default 24.
           </p>
-          {!gated && config.tokenBudgetWindowHours != null && config.tokenBudgetWindowHours < 1 && (
+          {!gated && config.tokenBudgetWindowHours != null && isOutOfBounds(config.tokenBudgetWindowHours, windowBounds) && (
             <p className="text-xs text-destructive">
-              Must be at least 1 — capped to 1 on blur.
+              Must be at least {windowBounds.min} — capped to {windowBounds.min} on blur.
             </p>
           )}
         </div>
@@ -139,7 +150,7 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
           <Input
             id="tokenBudgetPerSessionThresholdTokens"
             type="number"
-            min="1"
+            min={perSessionBounds.min}
             step="100000"
             disabled={gated}
             value={config.tokenBudgetPerSessionThresholdTokens ?? ''}
@@ -150,12 +161,12 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
               })
             }
             onBlur={() => {
-              // WARDEN-747: floor at 1 — mirrors WARDEN-374 + the backend guard.
-              // Null-able (empty = use default / disable), so only clamp when
-              // non-null; clearing the field stays null, the disable path.
+              // Floor at the SERVED min — mirrors the backend flooredNumber
+              // guard. Null-able (empty = use default / disable), so only clamp
+              // when non-null; clearing the field stays null, the disable path.
               const v = config.tokenBudgetPerSessionThresholdTokens;
-              if (v != null && v < 1) {
-                setConfig({ ...config, tokenBudgetPerSessionThresholdTokens: 1 });
+              if (v != null && isOutOfBounds(v, perSessionBounds)) {
+                setConfig({ ...config, tokenBudgetPerSessionThresholdTokens: clampToBounds(v, perSessionBounds) });
               }
             }}
             placeholder="Default 1,000,000"
@@ -167,9 +178,9 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
           </p>
           {!gated &&
             config.tokenBudgetPerSessionThresholdTokens != null &&
-            config.tokenBudgetPerSessionThresholdTokens < 1 && (
+            isOutOfBounds(config.tokenBudgetPerSessionThresholdTokens, perSessionBounds) && (
               <p className="text-xs text-destructive">
-                Must be at least 1 — capped to 1 on blur.
+                Must be at least {perSessionBounds.min} — capped to {perSessionBounds.min} on blur.
               </p>
             )}
         </div>

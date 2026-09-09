@@ -32,6 +32,44 @@ import type { WatchPattern } from '@/lib/storage';
 import type { TelemetryConsentConfigKey } from '@/lib/telemetry/consent';
 
 /**
+ * The numeric bound the server advertises for ONE field (WARDEN-1331).
+ * Served over GET in the additive top-level `bounds` object, derived from the
+ * SAME registry descriptor the PUT guards enforce — so an input's min/max
+ * attributes, its onBlur clamp and its "capped to N on blur" hint are the
+ * served contract, not frontend literals. A one-sided bound omits the
+ * unbounded side (`healthWarningThresholdMin` serves {min: 1} with no max).
+ */
+export interface ConfigFieldBounds {
+  min?: number;
+  max?: number;
+}
+
+/**
+ * The per-field numeric bounds GET /api/config now serves (WARDEN-1331).
+ *
+ * Every numeric field the Settings sections render is listed CONCRETELY, so a
+ * section reads `config.bounds.connectTimeout.min` with full type support and
+ * a new backend bound that no section consumes yet is a visible gap rather
+ * than an invisible string key. The per-key shape mirrors what
+ * src/config-schema.js actually declares: bilateral {min, max} where the
+ * descriptor is bilateral (connectTimeout / observerSessionTimeout / the
+ * pollIntervalMs uiRange), min-only where the descriptor is one-sided
+ * ([1, null] health bounds + llm.maxTokens; the flooredNumber floors).
+ * Keys mirror the registry: nested llm sub-fields are dotted ('llm.maxTokens').
+ */
+export interface ConfigBounds {
+  pollIntervalMs: { min: number; max: number };
+  connectTimeout: { min: number; max: number };
+  observerSessionTimeout: { min: number; max: number };
+  healthWarningThresholdMin: { min: number };
+  healthCriticalThresholdMin: { min: number };
+  'llm.maxTokens': { min: number };
+  tokenBudgetThresholdTokens: { min: number };
+  tokenBudgetWindowHours: { min: number };
+  tokenBudgetPerSessionThresholdTokens: { min: number };
+}
+
+/**
  * The setter signature for the shared backend `config` state. Backend sections
  * receive `config` + `setConfig` and write with the exact prior pattern
  * `setConfig({ ...config, field: value })` (spread-from-closure), preserved
@@ -123,6 +161,12 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
   // (SERVER-side — the matcher runs in pollAgentStates, not the renderer), NOT client
   // localStorage. Round-tripped through GET/PUT like the other config fields above.
   watchPatterns: WatchPattern[];
+  // WARDEN-1331 — the numeric bounds the server advertises (read-only GET
+  // metadata, derived from the same registry descriptors its PUT guards
+  // enforce). NOT a user-editable field: the sections read it to derive
+  // min/max/clamp/hints, and the PUT ignores it (the server never applies a
+  // 'bounds' key). Normalize-guarded on load like every other field.
+  bounds: ConfigBounds;
 }
 
 // ─── Client pref groups (the App → SettingsPage contract) ───────────────────

@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/select';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
+import { clampToBounds, isOutOfBounds } from '../numericBounds';
 import { type ConfigData, type SetConfig } from '../types';
 
 export interface ObserverSectionProps {
@@ -47,6 +48,11 @@ export function ObserverSection({
   undoRemoveObserverAuthToken,
   hidden,
 }: ObserverSectionProps) {
+  // WARDEN-1331 — the numeric bounds these inputs advertise come from the
+  // SERVED bounds (GET /api/config), derived from the same registry
+  // descriptors the backend PUT guards enforce.
+  const sessionTimeoutBounds = config.bounds.observerSessionTimeout;
+  const maxTokensBounds = config.bounds['llm.maxTokens'];
   // WARDEN-883 — confirm the irreversible token removal (cleartext is deleted;
   // the Observer falls back to env / config-file credentials). Always gated by
   // the confirm, matching the Reset section's stance that reverting credentials
@@ -101,8 +107,8 @@ export function ObserverSection({
         <Input
           id="observerSessionTimeout"
           type="number"
-          min="1"
-          max="180"
+          min={sessionTimeoutBounds.min}
+          max={sessionTimeoutBounds.max}
           step="1"
           value={config.observerSessionTimeout ?? ''}
           onChange={(e) =>
@@ -112,25 +118,25 @@ export function ObserverSection({
             })
           }
           onBlur={() => {
-            // [WARDEN-867]: clamp the committed value into the [1, 180] bounds
-            // the input advertises — mirrors WARDEN-747 (connectTimeout bilateral
-            // clamp + tokenBudget nullable floor). Null is the disable path and
-            // stays null; only clamp when a value is present.
+            // Clamp the committed value into the SERVED bounds the input
+            // advertises (config-schema.js's clamp: [1, 180] descriptor) —
+            // WARDEN-867's discipline, now derived instead of hand-copied
+            // (WARDEN-1331). Null is the disable path and stays null; only
+            // clamp when a value is present.
             const v = config.observerSessionTimeout;
             if (v != null) {
-              const clamped = Math.min(180, Math.max(1, v));
+              const clamped = clampToBounds(v, sessionTimeoutBounds);
               if (clamped !== v) setConfig({ ...config, observerSessionTimeout: clamped });
             }
           }}
           placeholder="Disabled when empty"
         />
-        {config.observerSessionTimeout != null &&
-          (config.observerSessionTimeout < 1 || config.observerSessionTimeout > 180) && (
-            <p className="text-xs text-destructive">
-              Must be between 1 and 180 minutes — capped to{' '}
-              {Math.min(180, Math.max(1, config.observerSessionTimeout))} on blur.
-            </p>
-          )}
+        {config.observerSessionTimeout != null && isOutOfBounds(config.observerSessionTimeout, sessionTimeoutBounds) && (
+          <p className="text-xs text-destructive">
+            Must be between {sessionTimeoutBounds.min} and {sessionTimeoutBounds.max} minutes — capped to{' '}
+            {clampToBounds(config.observerSessionTimeout, sessionTimeoutBounds)} on blur.
+          </p>
+        )}
         <p className="text-xs text-muted-foreground">
           Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
         </p>
@@ -234,7 +240,7 @@ export function ObserverSection({
           <Input
             id="observerMaxTokens"
             type="number"
-            min="1"
+            min={maxTokensBounds.min}
             step="1"
             value={config.llm.maxTokens ?? ''}
             onChange={(e) => {
@@ -243,22 +249,24 @@ export function ObserverSection({
             }}
             placeholder="2048 (default)"
             onBlur={() => {
-              // WARDEN-925: floor at 1 (the min the input advertises) — mirrors
-              // observerSessionTimeout (WARDEN-867) above. `0`/negative reached
-              // the backend's `nullablePositiveNumber` guard (`value > 0`), which
-              // silently refuses the write while PUT /api/config still answers
-              // { ok: true }, so the field reverted on the next open with no error
-              // shown. Null is the use-the-default (2048) path and stays null.
-              // Nested under `llm`, so the setter spreads config.llm like the
-              // onChange above.
+              // Floor at the SERVED min (the bound the input advertises —
+              // config-schema.js's llm.maxTokens clamp descriptor). `0`/negative
+              // used to be silently refused by the backend's `value > 0` guard
+              // while PUT /api/config still answered { ok: true } (WARDEN-925);
+              // the backend now clamps instead (WARDEN-1331) and this onBlur
+              // mirrors it. Null is the use-the-default (2048) path and stays
+              // null. Nested under `llm`, so the setter spreads config.llm like
+              // the onChange above.
               const v = config.llm.maxTokens;
-              if (v != null && v < 1) {
-                setConfig({ ...config, llm: { ...config.llm, maxTokens: 1 } });
+              if (v != null && maxTokensBounds.min !== undefined && v < maxTokensBounds.min) {
+                setConfig({ ...config, llm: { ...config.llm, maxTokens: maxTokensBounds.min } });
               }
             }}
           />
-          {config.llm.maxTokens != null && config.llm.maxTokens < 1 && (
-            <p className="text-xs text-destructive">Must be at least 1 — capped to 1 on blur.</p>
+          {config.llm.maxTokens != null && isOutOfBounds(config.llm.maxTokens, maxTokensBounds) && (
+            <p className="text-xs text-destructive">
+              Must be at least {maxTokensBounds.min} — capped to {maxTokensBounds.min} on blur.
+            </p>
           )}
           <p className="text-xs text-muted-foreground">
             Maximum tokens the Observer model may generate per call. Leave empty for the default (2048).
