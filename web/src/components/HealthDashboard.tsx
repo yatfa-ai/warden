@@ -19,9 +19,9 @@ import {
   type HealthStateValue,
   type HostHealthGroup,
   type ProjectHealthGroup,
-  type CompanionStatus,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
+import { CompanionIndicator } from './CompanionIndicator';
 import { Sparkline } from '@/components/Sparkline';
 import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
 import { FleetStateTimeline } from '@/components/FleetStateTimeline';
@@ -651,74 +651,6 @@ const FLEET_GIT_AXES: FleetGitAxis[] = [
     label: 'stashed',
   },
 ];
-
-// Companion transport indicator (WARDEN-878 / roadmap WARDEN-270 Visibility): a
-// per-host dot placed next to the connectivity dot so the human can tell at a
-// glance whether the companion transport is working on each host — active (with
-// version), bootstrapping, or errored (with the actionable last error).
-//
-// Renders ONLY for active/bootstrapping/error. `inactive` (LOCAL, or a host no
-// companion op has engaged yet) renders nothing — the indicator appears ONLY when
-// there is actionable state to read, so a healthy fleet isn't blanketed in gray
-// dots. The `companion` field is itself absent entirely when the transport is
-// disabled (the server omits it), so a toggle-off fleet shows no indicators.
-//
-// Reuses the themed StatusDot primitive (WARDEN-68 Rule 3): the connectivity
-// dot's green-solid / red-square vocabulary transfers directly — active is the
-// "working" green solid, error the "bad" red square, and bootstrapping gets the
-// pulse variant (its literal meaning: an in-flight connection).
-//
-// WARDEN-1312: when the host carries op tallies, the activity summary (e.g.
-// "12 ops · send 8 · exec 4 · 1 failed") is folded into the dot's accessible
-// label/tooltip AND rendered as a compact visible suffix in the host-row's
-// existing muted micro-text idiom — the human sees ops riding the channel, not
-// merely a JSON field. Still only when there is actionable companion state
-// (the inactive early-return below stays).
-function companionOpsSummary(ops: CompanionStatus['ops']): string | null {
-  if (!ops) return null;
-  const entries = Object.entries(ops);
-  if (entries.length === 0) return null;
-  const total = entries.reduce((sum, [, t]) => sum + t.n, 0);
-  const failed = entries.reduce((sum, [, t]) => sum + t.failures, 0);
-  const top = [...entries]
-    .sort((a, b) => b[1].n - a[1].n)
-    .slice(0, 3)
-    .map(([method, t]) => `${method} ${t.n}`)
-    .join(' · ');
-  return [`${total} op${total === 1 ? '' : 's'}`, top, failed > 0 ? `${failed} failed` : null]
-    .filter((part): part is string => part !== null)
-    .join(' · ');
-}
-
-// Named export (not consumed outside this module) so the throwaway render
-// harness / future component tests can mount the real indicator.
-export function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
-  if (!companion || companion.state === 'inactive') return null;
-  const tone: StatusTone = companion.state === 'active' ? 'green'
-    : companion.state === 'bootstrapping' ? 'yellow'
-    : 'red'; // error
-  const variant = companion.state === 'active' ? 'solid'
-    : companion.state === 'bootstrapping' ? 'pulse'
-    : 'square'; // error
-  const opsSummary = companionOpsSummary(companion.ops);
-  const label = (companion.state === 'active'
-    ? `Companion active${companion.version ? ` (v${companion.version})` : ''}`
-    : companion.state === 'bootstrapping'
-      ? 'Companion bootstrapping'
-      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`)
-    + (opsSummary ? ` — ${opsSummary}` : '');
-  return (
-    <span className="inline-flex items-center gap-1">
-      <StatusDot
-        tone={tone}
-        variant={variant}
-        label={label}
-        title={label}
-      />
-      {opsSummary && <span className="text-[10px] text-muted-foreground">{opsSummary}</span>}
-    </span>
-  );
-}
 
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
