@@ -506,6 +506,19 @@ function installApplicationMenu() {
             showAbout: () => showAboutDialog(),
             showStallDiagnostics: () => { void showStallDiagnostics(); },
             openDataFolder: () => { void openDataFolder(); },
+            // Window > Maximize / Restore (Windows/Linux only — macOS keeps
+            // role:'zoom', which AppKit executes natively). Electron 43's `zoom`
+            // role carries no windowMethod off darwin, so the stock item was
+            // inert; this does the real thing against the live window. The
+            // resulting maximize/unmaximize events are already wired to
+            // flushMaximizedCapture, so the state is persisted exactly as it is
+            // when the user hits the title-bar button. WARDEN-1313.
+            toggleMaximize: () => {
+              const target = BrowserWindow.getFocusedWindow() || win;
+              if (!target || target.isDestroyed()) return;
+              if (target.isMaximized()) target.unmaximize();
+              else target.maximize();
+            },
           },
         }),
       ),
