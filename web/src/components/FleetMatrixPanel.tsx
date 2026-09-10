@@ -3,6 +3,8 @@ import type { Chat } from '@/lib/types';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { displayName } from '@/lib/chatDisplay';
+import { copyWithToast } from '@/lib/clipboardToast';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
 import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import { bucketLabelIndices } from '@/lib/heatmap';
 
@@ -115,6 +117,12 @@ export interface FleetMatrixPanelProps<TCell> {
   /** The panel's legend body, rendered inside the shared legend row when there
    *  are rows. The two legends are unrelated components, so this is a slot. */
   legend?: ReactNode;
+  /** Optional: opens an agent's chat — the same navigation the agent-catalog
+   *  row's Open fires. Adds an Open item (FIRST, the Open-first house pattern)
+   *  to each row header's themed context menu. Optional: when absent, the menu
+   *  renders the three Copy items only (mirrors FleetRecentCommits' onOpenFile?:
+   *  the host opts in; the scaffold stays usable without it). */
+  onOpenChat?: (id: string) => void;
 }
 
 // Sparse column label cadence: label ~every 6 buckets (≈ every 6h for the default
@@ -142,6 +150,7 @@ export function FleetMatrixPanel<TCell>({
   rowAriaLabel,
   renderCell,
   legend,
+  onOpenChat,
 }: FleetMatrixPanelProps<TCell>) {
   // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
   // trap). Defaults open so the fleet pattern is glanceable on entry.
@@ -153,6 +162,16 @@ export function FleetMatrixPanel<TCell>({
   const nameByContainer = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of agents) if (a.container) m.set(a.container, displayName(a));
+    return m;
+  }, [agents]);
+
+  // The full Chat behind each row — the context menu's Open and Copy host
+  // payloads need the chat KEY (to open) and the RAW host string (to paste into
+  // a command), neither of which the name-only map yields. Sibling of
+  // nameByContainer over the same in-scope `agents` array, same key, same guard.
+  const chatByContainer = useMemo(() => {
+    const m = new Map<string, Chat>();
+    for (const a of agents) if (a.container) m.set(a.container, a);
     return m;
   }, [agents]);
 
@@ -220,6 +239,13 @@ export function FleetMatrixPanel<TCell>({
                   tooltips for granularity without 24×N tab stops. */}
               {rows.map((row) => {
                 const name = nameByContainer.get(row.agent.container) ?? row.agent.container;
+                // The Chat behind this row. Every row's container is BY
+                // CONSTRUCTION a container-bearing agent from `agents` (both
+                // selectors build rows from that same array), so this lookup
+                // always hits in practice; falsy only if a future selector ever
+                // broke that invariant, and the menu then degrades to the items
+                // that need no Chat (Copy agent name / Copy container id).
+                const chat = chatByContainer.get(row.agent.container);
                 return (
                   <div
                     key={row.agent.container}
@@ -229,13 +255,50 @@ export function FleetMatrixPanel<TCell>({
                     className="grid items-center rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-primary focus-visible:bg-accent/40"
                     style={{ gridTemplateColumns: gridCols, gap: '1px' }}
                   >
-                    <div
-                      role="rowheader"
-                      className="truncate text-[10px] text-muted-foreground pr-1"
-                      title={name}
-                    >
-                      {name}
-                    </div>
+                    {/* Themed right-click menu on the ROW HEADER ONLY
+                        (WARDEN-1336): the row also carries 24 gridcells, each
+                        with its own per-bucket tooltip, so a whole-row wrap
+                        would answer a cell right-click with an agent-level
+                        menu — the wrong menu. asChild on the existing div keeps
+                        the rendered DOM unchanged (role/className/title survive
+                        the handler merge) and the content portals out of the
+                        grid rather than becoming a stray grid child
+                        (WARDEN-926). */}
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        <div
+                          role="rowheader"
+                          className="truncate text-[10px] text-muted-foreground pr-1"
+                          title={name}
+                        >
+                          {name}
+                        </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        {/* Open-first house pattern; mirrors the agent-catalog
+                            row's Open byte-for-byte (same onOpenChat(chat.key ||
+                            chat.id) payload). Rendered only when the host
+                            threaded the callback; when absent, the three Copy
+                            items still render. */}
+                        {onOpenChat && chat && (
+                          <ContextMenuItem onSelect={() => onOpenChat(chat.key || chat.id)}>Open</ContextMenuItem>
+                        )}
+                        {/* The truncated name / host are selection-hostile in
+                            the rowheader (`truncate` + the 5rem-max column), so
+                            the menu is the ergonomic way to copy them. Host
+                            copies the RAW SSH / docker-exec identifier
+                            (chat.host) — what a human pastes into a command —
+                            not the display label, same as the agent-catalog
+                            row. The container id is rendered nowhere on this
+                            surface, yet it is the id every docker exec / docker
+                            logs takes. */}
+                        <ContextMenuItem onSelect={() => copyWithToast(name)}>Copy agent name</ContextMenuItem>
+                        {chat && (
+                          <ContextMenuItem onSelect={() => copyWithToast(chat.host)}>Copy host</ContextMenuItem>
+                        )}
+                        <ContextMenuItem onSelect={() => copyWithToast(row.agent.container)}>Copy container id</ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                     {row.cells.map((cell, i) =>
                       renderCell({ cell, index: i, agentName: name, bucket: buckets[i] }),
                     )}

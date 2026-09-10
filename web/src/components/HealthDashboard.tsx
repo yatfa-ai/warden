@@ -1299,6 +1299,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollInte
               timestampFormat={timestampFormat}
               loading={activityLoading}
               error={activityError}
+              onOpenChat={onOpenChat}
             />
             {/*
               Fleet-wide 24h per-agent STATE timeline (WARDEN-788). The orthogonal
@@ -1318,6 +1319,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollInte
               timestampFormat={timestampFormat}
               loading={activityLoading}
               error={activityError}
+              onOpenChat={onOpenChat}
             />
             {/*
               Fleet-wide recent-commits feed (WARDEN-597). The commit-history analog

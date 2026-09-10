@@ -68,6 +68,11 @@ interface Props {
    *  series has ever arrived; a blip after a good poll keeps the last good
    *  matrix on screen rather than swapping it for an error. */
   error: Error | null;
+  /** Optional: opens an agent's chat. Threaded straight through to the shared
+   *  matrix scaffold's row-header context menu (its Open item). When absent,
+   *  that menu renders the three Copy items only — same opt-in shape as
+   *  FleetRecentCommits' onOpenFile?. */
+  onOpenChat?: (id: string) => void;
 }
 
 // Intensity → opacity ramp. Floor 0.2 so an idle row reads as a visible flat dim
@@ -79,7 +84,7 @@ function intensityOpacity(intensity: number): number {
   return OPACITY_FLOOR + OPACITY_RANGE * intensity;
 }
 
-export function FleetActivityHeatmap({ series, agents, timestampFormat, loading, error }: Props) {
+export function FleetActivityHeatmap({ series, agents, timestampFormat, loading, error, onOpenChat }: Props) {
   // The matrix is memoized on the series + agents ONLY — it refreshes on the
   // 60s series cadence, never on the 10s /api/health tick.
   const matrix = useMemo(() => selectHeatmapCells(series, agents), [series, agents]);
@@ -94,6 +99,7 @@ export function FleetActivityHeatmap({ series, agents, timestampFormat, loading,
       timestampFormat={timestampFormat}
       loading={loading}
       error={error}
+      onOpenChat={onOpenChat}
       hasSeries={series != null}
       loadingText="Loading fleet activity…"
       errorText="Couldn't load fleet activity"
