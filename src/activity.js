@@ -182,6 +182,52 @@ const ERROR_TYPES = new Set(['error', 'agent_session_down', 'host_error']);
 export const NON_ACTIVITY_TYPES = new Set(['state_changed']);
 
 /**
+ * How long a logged `state_changed` observation substantiates the state it
+ * reports (WARDEN-1318). Past this, `getStateSeriesSince` renders `null`
+ * ("unknown / not yet observed") instead of forward-filling the held state.
+ *
+ * WHY A BOUND EXISTS AT ALL. `state_changed` logging is CLIENT-driven: since
+ * WARDEN-1274 retired the 60s server-side attention sweep, NOTHING classifies
+ * agents while the dashboard window is closed (see the block comment above
+ * pollAgentStates in server.js — re-introducing a backend sweep is explicitly
+ * forbidden). An unbounded forward-fill therefore painted a confident colored
+ * stripe across hours nobody watched: one `state_changed(active)` 20h before now
+ * rendered as 21 solid `active` buckets. The fix is to stop claiming to know.
+ *
+ * WHY 15 MINUTES. The observers that can log a transition run at
+ * AGENT_STATE_POLL_MS = 30s (the open ∪ watched poll) and FLEET_SWEEP_POLL_MS =
+ * 90s (the hidden-fleet sweep) — both in web/src/lib/useAttentionRollup.ts. 90s is
+ * the worst-case interval between two consecutive observations of a live agent, so
+ * 15 minutes is 10 consecutive missed sweeps: comfortably past any single slow SSH
+ * round-trip, fetch-deadline miss or transient host failure, and far below the 1h
+ * default bucket so a wholly unobserved hour can never be painted.
+ *
+ * THE ACCEPTED RESIDUAL — READ THIS BEFORE "FIXING" A STEADY AGENT THAT READS
+ * UNKNOWN. The journal records TRANSITIONS ONLY: `logStateTransition` writes
+ * nothing on an unchanged tick and no heartbeat/`observed_at` event type exists
+ * (that is deliberate — see the NON_ACTIVITY_TYPES rationale above: per-observation
+ * rows would be observation-boundary noise). So a genuinely-observed, genuinely-
+ * STEADY agent is byte-for-byte INDISTINGUISHABLE from an unobserved one — both are
+ * "one transition, then silence". No bound derived from this data alone can tell
+ * them apart, so a long-steady watched agent WILL read unknown past this threshold,
+ * including in the rightmost ("now") column. That is the deliberate trade: the
+ * roadmap bar is "nothing that stays may report a state it cannot substantiate", and
+ * under-claiming is the correct direction of error — `countStateSegments` skips
+ * nulls, so extra nulls can never manufacture a false oscillation signal, whereas
+ * the old fill manufactured false held state.
+ *
+ * ALTERNATIVE CONSIDERED AND NOT TAKEN (deliberately, not by oversight): observation
+ * liveness is a property of the OBSERVER, not of one agent — a transition logged for
+ * ANY agent at time T proves warden was open at T, and could substantiate a steady
+ * agent's held state across that same instant. That would recover most of the
+ * residual above, but it couples every row's truth to unrelated agents' churn (a
+ * single-agent fleet gains nothing; one oscillating neighbour would keep every other
+ * row lit). It is a separate design decision with its own failure modes — left to a
+ * follow-up rather than smuggled in here.
+ */
+export const STATE_STALE_AFTER_MS = 15 * 60 * 1000;
+
+/**
  * Build a per-agent, per-time-bucket activity series for the Fleet Health
  * sparklines (WARDEN-299). Sibling to `getStatsSince`: it scans the same JSONL
  * activity log via `readEvents`, but instead of a flat global tally it returns a
@@ -321,7 +367,15 @@ export async function getStateSeriesSince(after, { bucketMs = 3_600_000, by = 'c
     if (key === undefined || key === null || key === '') continue;
     const ts = new Date(event.timestamp).getTime();
     if (!Number.isFinite(ts)) continue; // malformed timestamp (readEvents already warned)
-    (transitionsByKey[key] ??= []).push({ ts, to: event.to ?? null });
+    // `from` is carried through (WARDEN-1318): `from === null` is the
+    // first-observation baseline marker logStateTransition writes when its
+    // in-memory diff map has no prior entry for the agent (server.js:~574). The
+    // map is module-level, so it is cleared on every warden restart — a `from:
+    // null` therefore fires for every agent on the first poll after warden
+    // reopens, and is the one piece of positive EVIDENCE in this store that
+    // observation was interrupted. The forward-fill walk below uses it as a hard
+    // discontinuity.
+    (transitionsByKey[key] ??= []).push({ ts, to: event.to ?? null, from: event.from ?? null });
   }
 
   const series = Object.create(null);
@@ -336,15 +390,49 @@ export async function getStateSeriesSince(after, { bucketMs = 3_600_000, by = 'c
     // persists across buckets (held state → continuous segment) and is seeded null
     // so the carry-forward from a pre-window transition lands in bucket 0 while a
     // never-observed prefix reads null (honest "unknown", not a false segment).
+    //
+    // WARDEN-1318 — THE FILL IS BOUNDED. `current` no longer persists forever: each
+    // transition substantiates its state only over [ts, currentUntil), and a bucket
+    // that interval does not reach reads `null` ("unknown / not yet observed", which
+    // the renderer already draws as a transparent outlined cell). Two independent
+    // bounds, because the store offers two different kinds of evidence:
+    //
+    //   1. ELAPSED TIME (STATE_STALE_AFTER_MS, see its comment above) — the general
+    //      case. Observation is client-driven, so a clean window close leaves NO
+    //      marker at all; only the silence itself says nobody was watching.
+    //   2. A `from: null` RE-BASELINE on the NEXT transition — positive evidence that
+    //      observation restarted, so the previously-held state is not carried up to
+    //      it. Note what this marker does and does not prove: it says the gap ENDED
+    //      here, and says nothing about when it BEGAN — so it necessarily nulls some
+    //      genuinely-observed steady hours preceding the restart. Under-claiming is
+    //      the accepted direction (see STATE_STALE_AFTER_MS).
+    //
+    // A bucket renders the last-known state iff that state's coverage interval
+    // INTERSECTS the bucket. So the bucket a transition lands in always renders it
+    // (even a 15-min coverage inside a 1h bucket — the same last-known-per-bucket
+    // aliasing the fill has always had), while a bucket the coverage never reaches
+    // reads null. An agent observed at least once per bound therefore still renders
+    // ONE continuous segment: each transition's interval reaches the next. A
+    // following re-baseline collapses the preceding coverage to the observation
+    // INSTANT — the marker proves observation was interrupted somewhere in that
+    // stretch without saying where, so none of the stretch can be claimed.
     let current = null;
+    let currentUntil = -Infinity; // epoch ms at which `current` stops being substantiated
     let ti = 0;
     for (let i = 0; i < n; i++) {
-      const bucketEnd = buckets[i] + bucketMs; // exclusive upper bound for bucket i
+      const bucketStart = buckets[i];
+      const bucketEnd = bucketStart + bucketMs; // exclusive upper bound for bucket i
       while (ti < transitions.length && transitions[ti].ts < bucketEnd) {
-        current = transitions[ti].to;
+        const t = transitions[ti];
+        const next = transitions[ti + 1];
+        current = t.to;
+        currentUntil = next && next.from === null ? t.ts : t.ts + STATE_STALE_AFTER_MS;
         ti++;
       }
-      states[i] = current;
+      // `>=` (not `>`) so a transition's OWN bucket always renders even when its
+      // coverage collapses to the observation instant (a re-baseline landing exactly
+      // on a bucket boundary) — the observed bucket is never nulled by its own event.
+      states[i] = current !== null && currentUntil >= bucketStart ? current : null;
     }
     series[key] = { states };
   }

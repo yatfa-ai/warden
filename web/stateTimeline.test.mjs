@@ -12,7 +12,9 @@
 //      with NO stateSeries entry still yields a null-filled row (alive-but-
 //      untracked reads as a row, not a gap), and manual chats (no container) drop.
 //   2. deriveDone relabels active→idle runs as `done` (the WARDEN-575 completion),
-//      but idle after a NON-active predecessor stays `idle`.
+//      but idle after a NON-active predecessor stays `idle` — and (WARDEN-1318) an
+//      unobserved `null` gap BREAKS the run rather than being transparent, so a
+//      completion is never asserted across hours nobody watched.
 //   3. countStateSegments / rowStateAriaLabel surface the oscillation signal — a
 //      stuck→active→stuck row reads as multiple state changes, a steady one as none.
 //
@@ -127,9 +129,19 @@ test('idle after a non-active state (stuck/erroring/…) stays idle', () => {
 test('a second work burst restarts the done-run (active→idle→active→idle)', () => {
   assert.deepEqual(deriveDone(['active', 'idle', 'active', 'idle']), ['active', 'done', 'active', 'done']);
 });
-test('null (unobserved) is transparent — does not break a done-run across a gap', () => {
-  // active, <unobserved gap>, idle: the idle still reads as done (bookends suggest a finish).
-  assert.deepEqual(deriveDone(['active', null, 'idle']), ['active', null, 'done']);
+test('null (unobserved) BREAKS a done-run — a completion is not asserted across a blackout (WARDEN-1318)', () => {
+  // Before the forward-fill was bounded, a mid-row null was effectively impossible
+  // (nulls appeared only as the never-observed prefix), so "transparent across a
+  // gap" was a rule about an unreachable case. Now a mid-row null means "nobody
+  // watched for >= STATE_STALE_AFTER_MS", and carrying a done-run across one would
+  // assert a completion spanning hours nobody observed. active, <gap>, idle → the
+  // idle stays honest `idle`.
+  assert.deepEqual(deriveDone(['active', null, 'idle']), ['active', null, 'idle']);
+  // The gap clears prevKnown too, so a LATER active→idle inside the observed
+  // stretch still reads done — only the claim across the gap is withheld.
+  assert.deepEqual(deriveDone(['active', null, 'active', 'idle']), ['active', null, 'active', 'done']);
+  // A gap that interrupts an EXISTING done-run also ends it.
+  assert.deepEqual(deriveDone(['active', 'idle', null, 'idle']), ['active', 'done', null, 'idle']);
 });
 
 console.log('\nselectStateCells applies deriveDone (done surfaces on the rendered matrix)');
