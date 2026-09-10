@@ -7,6 +7,15 @@
 // at all. Both entry branches were text-only, including the Electron
 // execCommand fallback.
 //
+// WARDEN-1338 EXTENSION: the app menu's Edit ▸ Paste is the THIRD paste entry
+// point and the only one that never reached pasteIntoTerm — `{ role: 'paste' }`
+// is executed by Electron as webContents.paste(), which never consults the DOM
+// handlers. On an image clipboard it died in TOTAL silence. The fix claims the
+// role's native paste event in the CAPTURE phase (the only phase that sees it —
+// xterm's own paste listener stops propagation) when the event targets the
+// pane's terminal textarea AND the payload carries files, then routes into the
+// same pasteIntoTerm.
+//
 // WHAT THIS SUITE LOCKS IN:
 //   - IMAGE WINS on an image+text clipboard (one deterministic rule);
 //   - a TEXT-ONLY clipboard never reaches this module — so the WARDEN-254
@@ -17,6 +26,12 @@
 //   - NO MARKER WITHOUT A FILE — a failed delivery returns an error and no
 //     marker, because pasting one would point the agent at a file that is not
 //     there (worse than the silence being fixed);
+//   - the WARDEN-1338 routing decision: a native paste event is claimed only
+//     for THIS pane's focused terminal textarea carrying files — Settings
+//     inputs and text-only pastes are never claimed (the menu roles must keep
+//     pasting natively outside the terminal);
+//   - ALL THREE paste entry points (Ctrl/Cmd+V, themed menu item, Edit ▸
+//     Paste capture wiring) go through the image-aware routine;
 //   - the request is a RAW body with the id on the query string (the server's
 //     global 1mb express.json limit is untouchable, and base64 in JSON would
 //     inflate a screenshot ~33% past a limit it already exceeds).
@@ -48,7 +63,7 @@ const { code } = await transformWithOxc(src, join(libDir, 'pasteImage.ts'), {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-pasteimage-test-'));
 const file = join(tmpDir, 'pasteImage.mjs');
 writeFileSync(file, code);
-const { readClipboardImage, deliverImagePaste } = await import(file);
+const { readClipboardImage, deliverImagePaste, shouldRouteNativePasteToTerminal } = await import(file);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -212,6 +227,48 @@ await test('a 2xx carrying NO marker is refused, not pasted as undefined', async
   assert.equal(r.marker, undefined);
 });
 
+console.log('shouldRouteNativePasteToTerminal — the WARDEN-1338 claim conditions');
+
+// Fake DataTransfer / FileList stand-ins: the helper only reads .files.length.
+const clipData = (n) => ({ files: Array.from({ length: n }, (_, i) => ({ name: `f${i}.png` })) });
+const TERM_TA = { tagName: 'TEXTAREA' };   // stands in for term.textarea
+const SETTINGS_INPUT = { tagName: 'INPUT' }; // a Settings field's focused element
+
+await test('claims a paste event that targets the terminal textarea carrying files', async () => {
+  // The Edit ▸ Paste role path: image clipboard, pane focused. THIS is the
+  // claim that makes the third entry point deliver images.
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, clipData(1)), true);
+});
+
+await test('claims a multi-file payload (a FileList has a length, not a fixed shape)', async () => {
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, clipData(3)), true);
+});
+
+await test('NEVER claims when the target is another element — Settings stays native', async () => {
+  // A paste into a Settings input targets THAT input. The Edit roles exist
+  // for exactly those fields (menu-template.cjs's constraint comment), so the
+  // capture wiring must not take the event — this assertion is the mutation
+  // check for "no regression in Settings".
+  assert.equal(shouldRouteNativePasteToTerminal(SETTINGS_INPUT, TERM_TA, clipData(1)), false);
+  assert.equal(shouldRouteNativePasteToTerminal(null, TERM_TA, clipData(1)), false);
+});
+
+await test('NEVER claims a TEXT-ONLY paste — the native xterm path stays byte-for-byte', async () => {
+  // files.length === 0 is the text clipboard shape (verified live:
+  // types=['text/plain'], files=0). Leaving it unclaimed is what preserves
+  // the WARDEN-254 bracketed-paste contract on the role path.
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, clipData(0)), false);
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, { files: null }), false);
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, null), false);
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, undefined), false);
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, TERM_TA, {}), false);
+});
+
+await test('NEVER claims when the pane has no terminal (disposed / not yet open)', async () => {
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, null, clipData(1)), false);
+  assert.equal(shouldRouteNativePasteToTerminal(TERM_TA, undefined, clipData(1)), false);
+});
+
 // --- STATIC wiring guard over PaneTile.tsx ----------------------------------
 // The component can't be imported in Node, and these are exactly the facts no
 // function-level test can see.
@@ -254,14 +311,16 @@ await test('ONLY the marker is pasted — the blob never reaches term.paste', as
   assert.ok(!/term\.paste\(\s*(image|blob)/.test(fn));
 });
 
-await test('BOTH entry points call the image-aware routine', async () => {
-  // The Ctrl/Cmd+V binding AND the themed Paste menu item (WARDEN-380). Wiring
-  // only one would leave half the gesture text-only — the exact asymmetry the
-  // research addendum flagged in the ORIGINAL two-branch reader.
+await test('ALL THREE entry points call the image-aware routine', async () => {
+  // The Ctrl/Cmd+V binding (WARDEN-254), the themed Paste menu item
+  // (WARDEN-380), and the Edit ▸ Paste capture wiring (WARDEN-1338 — the
+  // application menu's role:'paste' never reached this routine at all).
+  // Wiring only some of them leaves the other gestures text-only / silent —
+  // the exact asymmetry each successive slice fixed.
   // `void ` prefixed — which excludes the declaration itself (`async function
   // pasteIntoTerm(term: Terminal, …)`), whose signature would otherwise match.
   const calls = [...pane.matchAll(/void pasteIntoTerm\((term|termRef\.current!)[^)]*\)/g)].map((m) => m[0]);
-  assert.equal(calls.length, 2, `expected 2 call sites, found ${calls.length}`);
+  assert.equal(calls.length, 3, `expected 3 call sites, found ${calls.length}`);
   for (const c of calls) {
     assert.ok(/,\s*id\s*,/.test(c), `call site does not pass the pane id: ${c}`);
     assert.ok(/notifyErrorsRef\.current/.test(c), `call site does not pass the pref: ${c}`);
@@ -275,6 +334,55 @@ await test('the pref is read through notifyErrorsRef, never captured at mount', 
   assert.ok(key, 'the Ctrl/Cmd+V handler was not found');
   assert.ok(/notifyErrorsRef\.current/.test(key[0]));
   assert.ok(!/prefs\.notifyErrors/.test(key[0]));
+});
+
+// --- WARDEN-1338: the Edit ▸ Paste capture wiring ----------------------------
+// The application menu's { role: 'paste' } never reached pasteIntoTerm —
+// Electron runs it as webContents.paste(), which consults no DOM handler. The
+// fix claims the role's native paste event in the CAPTURE phase. These guards
+// pin the wiring's shape; removing or weakening any of them is the mutation
+// the suite must catch (revert the wiring → RED here).
+console.log('PaneTile Edit-Paste capture wiring — the third entry point');
+
+await test('the capture listener is registered on document with capture=true', async () => {
+  // Capture is LOAD-BEARING, not a style choice: xterm's own paste listener
+  // stops propagation, so a bubble-phase listener never sees the role's event
+  // (verified live under Electron 43 — capture fired, bubble never did).
+  const reg = pane.match(/document\.addEventListener\('paste',\s*(\w+),\s*true\)/);
+  assert.ok(reg, 'no document-level CAPTURE paste listener found — the third entry point is unwired');
+  assert.ok(reg[1] === 'onNativePasteCapture', `unexpected handler name: ${reg[1]}`);
+  const rm = pane.match(/document\.removeEventListener\('paste',\s*onNativePasteCapture,\s*true\)/);
+  assert.ok(rm, 'the capture listener is never removed — a pane disposal would leak it');
+});
+
+await test('the claim decision goes through the routing helper, not an inline ad-hoc check', async () => {
+  const handler = pane.match(/const onNativePasteCapture = \(e: ClipboardEvent\) => \{[\s\S]*?\n    \};/);
+  assert.ok(handler, 'onNativePasteCapture handler not found');
+  assert.ok(handler[0].includes('shouldRouteNativePasteToTerminal('),
+    'the claim decision bypasses the unit-tested routing helper');
+});
+
+await test('a claimed event is stopped from BOTH xterm and the default action', async () => {
+  // stopPropagation in the capture phase is what keeps xterm's own handler
+  // from running (it would paste getData('text/plain') === '' — a no-op today
+  // but a latent double-paste if an image clipboard ever also carried text);
+  // preventDefault is what stops the browser's default insertion.
+  const handler = pane.match(/const onNativePasteCapture = \(e: ClipboardEvent\) => \{[\s\S]*?\n    \};/);
+  const claim = handler[0].slice(handler[0].indexOf('shouldRouteNativePasteToTerminal'));
+  const posDefault = claim.indexOf('e.preventDefault()');
+  const posStop = claim.indexOf('e.stopPropagation()');
+  const posRoute = claim.indexOf('void pasteIntoTerm(');
+  assert.ok(posDefault >= 0, 'no preventDefault on the claimed path');
+  assert.ok(posStop >= 0, 'no stopPropagation on the claimed path');
+  assert.ok(posRoute >= 0, 'claimed event is not routed to pasteIntoTerm');
+  assert.ok(posDefault < posRoute && posStop < posRoute,
+    'the event must be stopped BEFORE routing, so the route is the only consequence');
+});
+
+await test('the capture route reuses the SAME routine with id + live pref', async () => {
+  const handler = pane.match(/const onNativePasteCapture = \(e: ClipboardEvent\) => \{[\s\S]*?\n    \};/);
+  const route = handler[0].match(/void pasteIntoTerm\(term, id, notifyErrorsRef\.current\)/);
+  assert.ok(route, 'the capture wiring must call pasteIntoTerm(term, id, notifyErrorsRef.current) — the shared routine, the pane id, and the LIVE pref');
 });
 
 console.log(`\n${passed} tests passed`);

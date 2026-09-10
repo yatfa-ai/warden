@@ -11,7 +11,7 @@ import { openExternalUrl } from '@/lib/electron';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { handleOsc52, copyText } from '@/lib/clipboard';
-import { readClipboardImage, deliverImagePaste } from '@/lib/pasteImage';
+import { readClipboardImage, deliverImagePaste, shouldRouteNativePasteToTerminal } from '@/lib/pasteImage';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type Snippet } from '@/lib/storage';
@@ -540,6 +540,46 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       return true;
     });
 
+    // --- WARDEN-1338: Edit ▸ Paste — the app menu's third paste entry point ---
+    // The application menu's Edit submenu carries { role: 'paste' }, which
+    // Electron executes as webContents.paste() against the focused webContents.
+    // It never consults pasteIntoTerm, the key handler above, or the themed
+    // context menu — so on an image clipboard the gesture died in total
+    // silence (verified live: no paste, no marker, no toast; xterm reads only
+    // text/plain, which an image clipboard answers with '').
+    //
+    // The role's ONE renderer-visible signal is a native paste event at the
+    // focused element (verified live: types=['Files'], files=1, and NEVER a
+    // keydown — the event cannot be raced, only intercepted). And it is
+    // interceptable ONLY in the capture phase: xterm's own paste listener
+    // stops propagation, so bubble-phase observers never fire on this path
+    // (both phases instrumented in the same run — capture saw the event,
+    // bubble saw nothing).
+    //
+    // The claim conditions are the whole Settings-safety story (see the
+    // constraint comment in electron/menu-template.cjs — the Edit roles exist
+    // so Copy/Paste/Select All keep working in Settings fields):
+    //   - the event's target is THIS pane's helper textarea → the terminal
+    //     genuinely has keyboard focus. A paste into a Settings input targets
+    //     that input and is never claimed — native paste survives everywhere
+    //     outside the terminal, byte-for-byte;
+    //   - the payload carries files → an image. Text-only pastes stay on
+    //     xterm's native path untouched (WARDEN-254 bracketed paste), and a
+    //     mixed clipboard claims exactly like Ctrl/Cmd+V, where IMAGE WINS.
+    // A claimed event routes into the SAME pasteIntoTerm the other two entry
+    // points use — image-first delivery, the loud WARDEN-400 toast on
+    // failure, the marker through the identical term.paste() — so all three
+    // entry points can no longer disagree about what a paste is.
+    const onNativePasteCapture = (e: ClipboardEvent) => {
+      const term = termRef.current;
+      if (!term) return;
+      if (!shouldRouteNativePasteToTerminal(e.target, term.textarea, e.clipboardData)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void pasteIntoTerm(term, id, notifyErrorsRef.current);
+    };
+    document.addEventListener('paste', onNativePasteCapture, true);
+
     // --- WARDEN-227: Ctrl/Cmd-clickable file paths in the live terminal --------
     // Reset the per-chat existence cache for this term instance — a different `id`
     // means a different cwd, so prior results must not carry over.
@@ -754,6 +794,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       selectionDisposable.dispose();
       osc52.dispose();
       linkProvider.dispose(); hideTooltip();
+      document.removeEventListener('paste', onNativePasteCapture, true);
       if (tooltipElRef.current) tooltipElRef.current = null;
       term.dispose(); termRef.current = null;
     };
