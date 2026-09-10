@@ -139,8 +139,6 @@ import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type {
   RestoreOnStartup,
   PaneLayout,
-  TerminalCursorStyle,
-  OnExitBehavior,
   CustomPreset,
 } from '@/lib/storage';
 import type { HostLabels } from '@/lib/chatDisplay';
@@ -159,24 +157,12 @@ export interface AppearancePrefs {
   setDensity: (density: Density) => void;
   paneLayout: PaneLayout;
   setPaneLayout: (layout: PaneLayout) => void;
-  onExitBehavior: OnExitBehavior;
-  setOnExitBehavior: (v: OnExitBehavior) => void;
   autoFocusNewPane: boolean;
   setAutoFocusNewPane: (v: boolean) => void;
   restoreOnStartup: RestoreOnStartup;
   setRestoreOnStartup: (v: RestoreOnStartup) => void;
-  terminalFontSize: number;
-  setTerminalFontSize: (n: number) => void;
-  terminalScrollback: number;
-  setTerminalScrollback: (n: number) => void;
-  terminalFontFamily: string;
-  setTerminalFontFamily: (v: string) => void;
   terminalColorScheme: TerminalColorScheme;
   setTerminalColorScheme: (v: TerminalColorScheme) => void;
-  terminalCursorStyle: TerminalCursorStyle;
-  setTerminalCursorStyle: (v: TerminalCursorStyle) => void;
-  copyOnSelect: boolean;
-  setCopyOnSelect: (v: boolean) => void;
   timestampFormat: TimestampFormat;
   setTimestampFormat: (v: TimestampFormat) => void;
   rememberWindowBounds: boolean;
@@ -221,6 +207,17 @@ export interface NewChatsPrefs {
 // its PersistedPrefSnapshot, and the ONE compile-locked saveUi effect remains
 // the single writer. A pref that is read by exactly one section still belongs
 // in a *Prefs group below; this one is read by five surfaces.
+//
+// NOTE (WARDEN-1322): the same shape took SIX more pairs out of AppearancePrefs —
+// terminalFontSize, terminalScrollback, terminalFontFamily, terminalCursorStyle,
+// copyOnSelect and onExitBehavior — the largest shared cluster behind a single
+// proven-zero-use carrier (PaneGrid forwarded all six to PaneTile without
+// reading them). PaneTile and AppearanceSection both subscribe (PaneTile is
+// also a WRITER: its A−/A+ toolbar + context-menu entries call the same store
+// action this section does). `terminalColorScheme` STAYS in the bag: it is read
+// only by App and Settings and is never prop-drilled to PaneTile — its derived
+// product terminalThemeId remains an App-computed prop so an OS theme flip can
+// re-theme open panes live.
 
 /**
  * Desktop-alert client prefs for the Notifications section (the OS-notification

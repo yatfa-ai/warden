@@ -62,7 +62,7 @@ await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
-const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS } =
+const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore } = await import(join(tmpDir, 'uiStore.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
@@ -79,10 +79,20 @@ const test = (name, fn) => {
 // reading `store.getState().snippets` here IS what App's `useSnippets()` gives
 // its PersistedPrefSnapshot.
 const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpty = false } = {}) => {
+  const s = store.getState();
   const snapshot = {
     ...loadUi(),
-    snippets: store.getState().snippets,
-    fileViewerViewMode: store.getState().fileViewerViewMode,
+    snippets: s.snippets,
+    fileViewerViewMode: s.fileViewerViewMode,
+    // WARDEN-1322: the six terminal prefs ride the same snapshot — App's
+    // PersistedPrefSnapshot carries every one of them (compile-locked), so the
+    // honest stand-in for "App re-rendered" includes all eight facts.
+    terminalFontSize: s.terminalFontSize,
+    terminalScrollback: s.terminalScrollback,
+    terminalFontFamily: s.terminalFontFamily,
+    terminalCursorStyle: s.terminalCursorStyle,
+    copyOnSelect: s.copyOnSelect,
+    onExitBehavior: s.onExitBehavior,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -349,6 +359,256 @@ test('mutating a factory store leaves the APP-LEVEL singleton untouched', () => 
   assert.deepEqual(uiStore.getState().snippets, before);
   assert.ok(!uiStore.getState().snippets.some((s) => s.name === 'Test-only'),
     'a test store\'s write must never leak into the app store');
+});
+
+// ─── the six terminal prefs (WARDEN-1322, roadmap WARDEN-1204 slice 3) ───────
+//
+// terminalFontSize, terminalScrollback, terminalFontFamily, terminalCursorStyle,
+// copyOnSelect, onExitBehavior — the largest cluster migrated onto the store.
+// TWO components read them (PaneTile — which also WRITES font size via its
+// A−/A+ buttons and context menu — and Settings' AppearanceSection), and the
+// prop chain between App and them was a proven-zero-use carrier (PaneGrid
+// forwarded all of them without reading one). The legs below prove the same
+// invariants the earlier slices do, PLUS the slice's one trap: the
+// terminalFontFamily seed is truthiness, not nullish — DEFAULT_UI's value is ''
+// and a persisted '' must seed the real font stack, never ''.
+
+console.log('\ncreateUiStore — the six terminal prefs seed from storage.ts, never from re-declared defaults');
+test('a fresh store seeds the five ??-seeded terminal prefs from DEFAULT_UI (not local literals)', () => {
+  reset();
+  const s = createUiStore().getState();
+  assert.equal(s.terminalFontSize, DEFAULT_UI.terminalFontSize);
+  assert.equal(s.terminalScrollback, DEFAULT_UI.terminalScrollback);
+  assert.equal(s.terminalCursorStyle, DEFAULT_UI.terminalCursorStyle);
+  assert.equal(s.copyOnSelect, DEFAULT_UI.copyOnSelect);
+  assert.equal(s.onExitBehavior, DEFAULT_UI.onExitBehavior);
+});
+test('a fresh store seeds the six from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({
+    ...loadUi(),
+    terminalFontSize: 18,
+    terminalScrollback: 5000,
+    terminalFontFamily: '"Hack Nerd Font", monospace',
+    terminalCursorStyle: 'steady-bar',
+    copyOnSelect: true,
+    onExitBehavior: 'dim',
+  });
+  const s = createUiStore().getState();
+  assert.equal(s.terminalFontSize, 18);
+  assert.equal(s.terminalScrollback, 5000);
+  assert.equal(s.terminalFontFamily, '"Hack Nerd Font", monospace');
+  assert.equal(s.terminalCursorStyle, 'steady-bar');
+  assert.equal(s.copyOnSelect, true);
+  assert.equal(s.onExitBehavior, 'dim');
+});
+test('a persisted terminalFontFamily of \'\' seeds the DEFAULT stack, never \'\' (the truthiness trap)', () => {
+  reset();
+  // DEFAULT_UI.terminalFontFamily is '' (blank = default stack) — exactly what a
+  // user who never picked a custom font has on disk. A ??-only seed would hand
+  // '' to xterm and blank the pane; the seed must use || like App's old
+  // useState initializer did.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], terminalFontFamily: '' }));
+  const seeded = createUiStore().getState().terminalFontFamily;
+  assert.equal(seeded, DEFAULT_TERMINAL_FONT_FAMILY);
+  assert.notEqual(seeded, '');
+  // And an absent value behaves identically (loadUi normalizes it to '').
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(createUiStore().getState().terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+});
+test('the seed runs through loadUi\'s sanitizers (bogus values fall back, then the font seed applies)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    terminalFontSize: 'big',
+    terminalScrollback: 'many',
+    terminalFontFamily: 42,
+    terminalCursorStyle: 'wiggly',
+    onExitBehavior: 'explode',
+  }));
+  const s = createUiStore().getState();
+  assert.equal(s.terminalFontSize, DEFAULT_UI.terminalFontSize);
+  assert.equal(s.terminalScrollback, DEFAULT_UI.terminalScrollback);
+  // A non-string font is coerced to '' by loadUi — which the || seed then
+  // lifts to the real stack. The sanitizer and the seed compose.
+  assert.equal(s.terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+  assert.equal(s.terminalCursorStyle, DEFAULT_UI.terminalCursorStyle);
+  assert.equal(s.onExitBehavior, DEFAULT_UI.onExitBehavior);
+  // The sanitizer rejects TYPES, not ranges: an out-of-range number passes
+  // through raw, exactly as the old useState seeds did — the 8–24 / 100–100000
+  // clamps live at PaneTile's use site (safeFontSize/safeScrollback), where
+  // they have always been.
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], terminalFontSize: 999, terminalScrollback: -5 }));
+  const raw = createUiStore().getState();
+  assert.equal(raw.terminalFontSize, 999);
+  assert.equal(raw.terminalScrollback, -5);
+});
+test('an explicit seed overrides the persisted read for all six (so a test needs no localStorage)', () => {
+  reset();
+  saveUi({
+    ...loadUi(),
+    terminalFontSize: 18,
+    terminalScrollback: 5000,
+    terminalFontFamily: '"Hack Nerd Font", monospace',
+    terminalCursorStyle: 'steady-bar',
+    copyOnSelect: true,
+    onExitBehavior: 'dim',
+  });
+  const seeded = {
+    terminalFontSize: 10,
+    terminalScrollback: 2000,
+    terminalFontFamily: '"Seeded Font", monospace',
+    terminalCursorStyle: 'blink-underline',
+    copyOnSelect: false,
+    onExitBehavior: 'auto-close',
+  };
+  const s = createUiStore(seeded).getState();
+  assert.equal(s.terminalFontSize, 10);
+  assert.equal(s.terminalScrollback, 2000);
+  assert.equal(s.terminalFontFamily, '"Seeded Font", monospace');
+  assert.equal(s.terminalCursorStyle, 'blink-underline');
+  assert.equal(s.copyOnSelect, false);
+  assert.equal(s.onExitBehavior, 'auto-close');
+});
+
+console.log('\nthe six setters — the store is the live copy, and it does NOT write localStorage');
+test('each of the six setters replaces its value and notifies subscribers', () => {
+  reset();
+  const store = createUiStore();
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push({
+    fontSize: s.terminalFontSize, scrollback: s.terminalScrollback, font: s.terminalFontFamily,
+    cursor: s.terminalCursorStyle, copy: s.copyOnSelect, exit: s.onExitBehavior,
+  }));
+  store.getState().setTerminalFontSize(20);            // PaneTile's A+ button, AppearanceSection's input
+  store.getState().setTerminalScrollback(25000);
+  store.getState().setTerminalFontFamily('"F", monospace');
+  store.getState().setTerminalCursorStyle('steady-block');
+  store.getState().setCopyOnSelect(true);
+  store.getState().setOnExitBehavior('auto-close');
+  unsubscribe();
+  assert.equal(seen.length, 6);
+  assert.deepEqual(seen[0], { fontSize: 20, scrollback: 10000, font: DEFAULT_TERMINAL_FONT_FAMILY, cursor: 'blink-block', copy: false, exit: 'keep' });
+  assert.deepEqual(seen[5], { fontSize: 20, scrollback: 25000, font: '"F", monospace', cursor: 'steady-block', copy: true, exit: 'auto-close' });
+});
+test('the six setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setTerminalFontSize(22);
+  store.getState().setTerminalScrollback(30000);
+  store.getState().setTerminalFontFamily('"Ghost Font", monospace');
+  store.getState().setTerminalCursorStyle('blink-bar');
+  store.getState().setCopyOnSelect(true);
+  store.getState().setOnExitBehavior('dim');
+  // No write-through persistence in the store — a second writer here would
+  // silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the six action identities are stable across writes (safe in resetSetters and dep arrays)', () => {
+  reset();
+  const store = createUiStore();
+  const before = store.getState();
+  before.setTerminalFontSize(16);
+  before.setTerminalScrollback(9000);
+  before.setTerminalFontFamily('"X", monospace');
+  before.setTerminalCursorStyle('steady-underline');
+  before.setCopyOnSelect(true);
+  before.setOnExitBehavior('keep');
+  const after = store.getState();
+  assert.equal(after.setTerminalFontSize, before.setTerminalFontSize);
+  assert.equal(after.setTerminalScrollback, before.setTerminalScrollback);
+  assert.equal(after.setTerminalFontFamily, before.setTerminalFontFamily);
+  assert.equal(after.setTerminalCursorStyle, before.setTerminalCursorStyle);
+  assert.equal(after.setCopyOnSelect, before.setCopyOnSelect);
+  assert.equal(after.setOnExitBehavior, before.setOnExitBehavior);
+});
+
+console.log('\nround trip: each terminal pref survives a restart through the real chain');
+test('all six round-trip store → App snapshot → the saveUi effect → loadUi → the next store', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setTerminalFontSize(9);             // clamped at the use site, stored raw
+  store.getState().setTerminalScrollback(77777);
+  store.getState().setTerminalFontFamily('"Round Trip", monospace');
+  store.getState().setTerminalCursorStyle('steady-bar');
+  store.getState().setCopyOnSelect(true);
+  store.getState().setOnExitBehavior('auto-close');
+  flushSnapshotToDisk(store);                           // App snapshot → saveUi effect
+  const persisted = loadUi();
+  assert.equal(persisted.terminalFontSize, 9);
+  assert.equal(persisted.terminalScrollback, 77777);
+  assert.equal(persisted.terminalFontFamily, '"Round Trip", monospace');
+  assert.equal(persisted.terminalCursorStyle, 'steady-bar');
+  assert.equal(persisted.copyOnSelect, true);
+  assert.equal(persisted.onExitBehavior, 'auto-close');
+  // The next launch's store seeds from exactly that.
+  const relaunched = createUiStore().getState();
+  assert.equal(relaunched.terminalFontSize, 9);
+  assert.equal(relaunched.terminalScrollback, 77777);
+  assert.equal(relaunched.terminalFontFamily, '"Round Trip", monospace');
+  assert.equal(relaunched.terminalCursorStyle, 'steady-bar');
+  assert.equal(relaunched.copyOnSelect, true);
+  assert.equal(relaunched.onExitBehavior, 'auto-close');
+});
+test('the reset path restores all six defaults through the store-backed setters — with the terminalFontFamily deviation', () => {
+  reset();
+  const store = createUiStore({
+    terminalFontSize: 20,
+    terminalScrollback: 5000,
+    terminalFontFamily: '"Mine", monospace',
+    terminalCursorStyle: 'steady-block',
+    copyOnSelect: true,
+    onExitBehavior: 'dim',
+  });
+  // App's resetSetters entries are the SAME store setters, called with
+  // resetUiPrefDefaults()' values. That is where the terminalFontFamily
+  // deviation lives: the curated stack, NOT DEFAULT_UI's '' sentinel.
+  const defaults = resetUiPrefDefaults();
+  assert.equal(defaults.terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+  assert.notEqual(defaults.terminalFontFamily, DEFAULT_UI.terminalFontFamily);
+  store.getState().setTerminalFontSize(defaults.terminalFontSize);
+  store.getState().setTerminalScrollback(defaults.terminalScrollback);
+  store.getState().setTerminalFontFamily(defaults.terminalFontFamily);
+  store.getState().setTerminalCursorStyle(defaults.terminalCursorStyle);
+  store.getState().setCopyOnSelect(defaults.copyOnSelect);
+  store.getState().setOnExitBehavior(defaults.onExitBehavior);
+  flushSnapshotToDisk(store);
+  const s = store.getState();
+  assert.equal(s.terminalFontSize, DEFAULT_UI.terminalFontSize);
+  assert.equal(s.terminalScrollback, DEFAULT_UI.terminalScrollback);
+  assert.equal(s.terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+  assert.equal(s.terminalCursorStyle, DEFAULT_UI.terminalCursorStyle);
+  assert.equal(s.copyOnSelect, DEFAULT_UI.copyOnSelect);
+  assert.equal(s.onExitBehavior, DEFAULT_UI.onExitBehavior);
+  // Persisted too — and the next launch's seed keeps the stack (the || seed
+  // leaves a truthy persisted value untouched).
+  assert.equal(loadUi().terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+  assert.equal(createUiStore().getState().terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+});
+
+console.log('\nfactory isolation + fact independence — the six terminal prefs');
+test('two stores do not share terminal prefs; writing one does not disturb the others', () => {
+  reset();
+  const a = createUiStore({ terminalFontSize: 14, copyOnSelect: false });
+  const b = createUiStore({ terminalFontSize: 14, copyOnSelect: false });
+  a.getState().setTerminalFontSize(24);
+  a.getState().setCopyOnSelect(true);
+  assert.equal(a.getState().terminalFontSize, 24);
+  assert.equal(b.getState().terminalFontSize, 14);
+  assert.equal(b.getState().copyOnSelect, false);
+  // Within one store, the eight migrated facts are independent.
+  a.getState().setTerminalScrollback(1234);
+  assert.equal(a.getState().terminalFontSize, 24);
+  assert.deepEqual(a.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(a.getState().fileViewerViewMode, 'rendered');
+});
+test('mutating a factory store\'s terminal prefs leaves the APP-LEVEL singleton untouched', () => {
+  reset();
+  const before = uiStore.getState().terminalFontSize;
+  createUiStore().getState().setTerminalFontSize(23);
+  assert.equal(uiStore.getState().terminalFontSize, before);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
