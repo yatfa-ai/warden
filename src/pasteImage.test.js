@@ -14,7 +14,10 @@ import {
   pasteFileName,
   buildMarker,
   deliverPastedImage,
+  prunePasteDir,
   PASTE_DIR,
+  PASTE_RETENTION_MS,
+  MAX_RETAINED_PASTES,
   CLOSE_GRACE_MS,
 } from './pasteImage.js';
 import { SSH_BASE_OPTS } from './ssh.js';
@@ -30,9 +33,12 @@ import { SSH_BASE_OPTS } from './ssh.js';
  * assert the EXACT argv/script bytes. A regression in the far-side command is
  * caught without a remote in the loop.
  *
- * The legs that CAN run — the local filesystem write, and the whole
- * stdin-streaming child discipline — are exercised for real, the second against
- * a fake child so the WARDEN-982/1007/1018/1045 scars have live coverage.
+ * The legs that CAN run — the local filesystem write, the composed prune, and
+ * the whole stdin-streaming child discipline — are exercised for real, the
+ * last against a fake child so the WARDEN-982/1007/1018/1045 scars have live
+ * coverage. The prune's far-side clauses run under the system's real `sh` (and
+ * once under `dash`) because a retention script is exactly the kind of string
+ * that rots syntactically without anyone noticing.
  */
 
 // A minimal PNG header: 8-byte signature + IHDR length/type + 1024×640.
@@ -45,12 +51,41 @@ function pngHeader(w = 1024, h = 640) {
   return b;
 }
 
-describe('buildReceiveScript — mkdir then receive on stdin', () => {
-  it('makes the parent dir and cats stdin into the file', () => {
-    assert.equal(
-      buildReceiveScript('/tmp/warden/paste/paste-x.png'),
-      `mkdir -p '/tmp/warden/paste' && cat > '/tmp/warden/paste/paste-x.png'`,
-    );
+const RECEIVE_SCRIPT_P = `mkdir -p '/tmp/warden/paste' && { find '/tmp/warden/paste' -maxdepth 1 -type f -mtime +6 -exec rm -f {} + 2>/dev/null || true; ls -1t '/tmp/warden/paste' 2>/dev/null | tail -n +${MAX_RETAINED_PASTES + 1} | while IFS= read -r f; do rm -f '/tmp/warden/paste'/"$f" 2>/dev/null || true; done; } 2>/dev/null || true; cat > '/tmp/warden/paste/p.png'`;
+
+describe('buildReceiveScript — prune, then receive on stdin (WARDEN-1320)', () => {
+  it('makes the parent dir, bounds what lives there, then cats stdin into the file', () => {
+    assert.equal(buildReceiveScript('/tmp/warden/paste/p.png'), RECEIVE_SCRIPT_P);
+  });
+
+  it('the prune sits BETWEEN mkdir and cat, age first then count', () => {
+    const s = buildReceiveScript('/tmp/warden/paste/p.png');
+    const mkdir = s.indexOf('mkdir -p');
+    const find = s.indexOf('find ');
+    const ls = s.indexOf('ls -1t');
+    const cat = s.indexOf('cat >');
+    assert.ok(mkdir >= 0 && find > mkdir && ls > find && cat > ls, s);
+  });
+
+  it('encodes the house 7-day window as -mtime +6 and the cap as tail -n +<MAX+1>', () => {
+    // find's -mtime counts WHOLE 24h days, so "older than 7 days" is +6; the
+    // count clause keeps the newest MAX_RETAINED_PASTES and deletes from
+    // line MAX+1 of `ls -1t` downward.
+    const s = buildReceiveScript('/tmp/warden/paste/p.png');
+    assert.ok(s.includes('-mtime +6'), s);
+    assert.ok(s.includes(`tail -n +${MAX_RETAINED_PASTES + 1}`), s);
+    assert.equal(PASTE_RETENTION_MS, 7 * 24 * 60 * 60 * 1000);
+  });
+
+  it('is failure-isolated — every prune clause ends in || true and the group cannot fail the cat', () => {
+    const s = buildReceiveScript('/tmp/warden/paste/p.png');
+    // Retention must never cost a paste: a missing/misflagged find or ls
+    // degrades to a no-op. Pinned syntactically here, behaviourally below.
+    assert.ok(s.includes('-exec rm -f {} + 2>/dev/null || true;'), s);
+    assert.ok(s.includes('2>/dev/null || true; done; } 2>/dev/null || true; cat >'), s);
+    // The cat is joined to the prune with `;`, never `&&` — even a wildly
+    // unexpected prune failure must not short-circuit the delivery.
+    assert.ok(s.includes('|| true; cat >'), s);
   });
 
   it('never puts the payload in an argv — the script mentions only the path', () => {
@@ -65,13 +100,70 @@ describe('buildReceiveScript — mkdir then receive on stdin', () => {
     const script = buildReceiveScript(`/tmp/warden/paste/it's.png`);
     assert.ok(script.includes(`'/tmp/warden/paste/it'\\''s.png'`));
   });
+
+  it('a FAILING find still delivers the payload — retention never costs a paste', () => {
+    // The load-bearing isolation property, under a real shell: a stub `find`
+    // that exits 127 (absent from a minimal agent image, or a busybox quirk)
+    // must leave exit 0 and the payload byte-exact on disk.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-nofind-'));
+    fs.writeFileSync(path.join(dir, 'find'), '#!/bin/sh\nexit 127\n', { mode: 0o755 });
+    const dest = path.join(dir, 'paste-keep.png');
+    const r = spawnSync('sh', ['-c', buildReceiveScript(dest)], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      input: 'PAYLOAD',
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(fs.readFileSync(dest, 'utf8'), 'PAYLOAD');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('the age clause really removes a 10-day-old file and keeps a fresh one (real sh)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-age-'));
+    const oldFile = path.join(dir, 'paste-old.png');
+    const freshFile = path.join(dir, 'paste-new.png');
+    fs.writeFileSync(oldFile, 'old');
+    fs.writeFileSync(freshFile, 'fresh');
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000);
+    fs.utimesSync(oldFile, tenDaysAgo, tenDaysAgo);
+    const dest = path.join(dir, 'paste-2026-09-07T00-00-00-000.png');
+    const r = spawnSync('sh', ['-c', buildReceiveScript(dest)], { input: 'PAYLOAD', encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(oldFile), 'the aged file survived — the age clause is dead');
+    assert.ok(fs.existsSync(freshFile), 'a fresh file was wrongly pruned');
+    assert.equal(fs.readFileSync(dest, 'utf8'), 'PAYLOAD');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('the count clause really keeps only the newest MAX_RETAINED_PASTES (real sh)', () => {
+    // MAX_RETAINED_PASTES + 2 pre-existing files → the two OLDEST go, the cap
+    // holds, and the new payload lands afterwards (MAX+1 files transiently —
+    // the same steady-state shape as the stall log's once-per-delivery prune).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-cap-'));
+    const base = Date.now() - 3_600_000; // an hour ago: recent enough to pass the age clause
+    for (let i = 0; i < MAX_RETAINED_PASTES + 2; i++) {
+      const p = path.join(dir, `paste-${String(i).padStart(3, '0')}.png`);
+      fs.writeFileSync(p, `v${i}`);
+      const t = new Date(base + i * 1000);
+      fs.utimesSync(p, t, t);
+    }
+    const dest = path.join(dir, 'paste-new.png');
+    const r = spawnSync('sh', ['-c', buildReceiveScript(dest)], { input: 'PAYLOAD', encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(path.join(dir, 'paste-000.png')), 'the oldest file survived — the cap is dead');
+    assert.ok(!fs.existsSync(path.join(dir, 'paste-001.png')), 'the second-oldest file survived');
+    assert.ok(fs.existsSync(path.join(dir, `paste-${String(MAX_RETAINED_PASTES + 1).padStart(3, '0')}.png`)), 'a recent file was wrongly pruned');
+    assert.equal(fs.readdirSync(dir).length, MAX_RETAINED_PASTES + 1);
+    assert.equal(fs.readFileSync(dest, 'utf8'), 'PAYLOAD');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('buildContainerExecArgv — the docker leg is `-i`, never `-it`', () => {
   it('builds the exact argv', () => {
     assert.deepStrictEqual(
       buildContainerExecArgv('yatfa-worker', '/tmp/warden/paste/p.png'),
-      ['exec', '-i', 'yatfa-worker', 'sh', '-c', `mkdir -p '/tmp/warden/paste' && cat > '/tmp/warden/paste/p.png'`],
+      ['exec', '-i', 'yatfa-worker', 'sh', '-c', RECEIVE_SCRIPT_P],
     );
   });
 
@@ -100,14 +192,14 @@ describe('buildRemoteCommand — the one string ssh runs', () => {
   it('containerized chat → docker exec -i, with the script quoted whole', () => {
     assert.equal(
       buildRemoteCommand('yatfa-worker', '/tmp/warden/paste/p.png'),
-      `docker exec -i 'yatfa-worker' sh -c 'mkdir -p '\\''/tmp/warden/paste'\\'' && cat > '\\''/tmp/warden/paste/p.png'\\'''`,
+      `docker exec -i 'yatfa-worker' sh -c 'mkdir -p '\\''/tmp/warden/paste'\\'' && { find '\\''/tmp/warden/paste'\\'' -maxdepth 1 -type f -mtime +6 -exec rm -f {} + 2>/dev/null || true; ls -1t '\\''/tmp/warden/paste'\\'' 2>/dev/null | tail -n +${MAX_RETAINED_PASTES + 1} | while IFS= read -r f; do rm -f '\\''/tmp/warden/paste'\\''/"$f" 2>/dev/null || true; done; } 2>/dev/null || true; cat > '\\''/tmp/warden/paste/p.png'\\'''`,
     );
   });
 
   it('plain-tmux host (no container) → bash -lc, the streamFileToHost shape', () => {
     assert.equal(
       buildRemoteCommand(null, '/tmp/warden/paste/p.png'),
-      `bash -lc 'mkdir -p '\\''/tmp/warden/paste'\\'' && cat > '\\''/tmp/warden/paste/p.png'\\'''`,
+      `bash -lc 'mkdir -p '\\''/tmp/warden/paste'\\'' && { find '\\''/tmp/warden/paste'\\'' -maxdepth 1 -type f -mtime +6 -exec rm -f {} + 2>/dev/null || true; ls -1t '\\''/tmp/warden/paste'\\'' 2>/dev/null | tail -n +${MAX_RETAINED_PASTES + 1} | while IFS= read -r f; do rm -f '\\''/tmp/warden/paste'\\''/"$f" 2>/dev/null || true; done; } 2>/dev/null || true; cat > '\\''/tmp/warden/paste/p.png'\\'''`,
     );
   });
 
@@ -298,6 +390,7 @@ describe('deliverPastedImage — local, no container: a direct write', () => {
       now: Date.parse('2026-09-03T00:00:00Z'),
       mkdir: async () => {},
       writeFile: async (p, b) => { written.path = p; written.bytes = b; },
+      prune: async () => 0,
     });
     assert.equal(r.ok, true);
     assert.equal(written.bytes, buf);
@@ -313,6 +406,7 @@ describe('deliverPastedImage — local, no container: a direct write', () => {
     const r = await deliverPastedImage({ host: '(local)' }, {}, buf, {
       mkdir: (d, o) => fs.promises.mkdir(path.dirname(dest), o),
       writeFile: () => fs.promises.writeFile(dest, buf),
+      prune: async () => 0,
     });
     assert.equal(r.ok, true);
     assert.deepStrictEqual(fs.readFileSync(dest), buf);
@@ -325,6 +419,7 @@ describe('deliverPastedImage — local, no container: a direct write', () => {
     const r = await deliverPastedImage({ host: '(local)' }, {}, pngHeader(), {
       mkdir: async () => {},
       writeFile: async () => { throw new Error('EACCES: permission denied'); },
+      prune: async () => 0,
     });
     assert.equal(r.ok, false);
     assert.match(r.error, /EACCES/);
@@ -335,6 +430,125 @@ describe('deliverPastedImage — local, no container: a direct write', () => {
     const r = await deliverPastedImage({ host: '(local)' }, {}, Buffer.alloc(0));
     assert.equal(r.ok, false);
     assert.equal(r.marker, undefined);
+  });
+
+  it('bounds the directory: the prune runs with the paste dir and the house policy (WARDEN-1320)', async () => {
+    // The local leg bypasses buildReceiveScript (no child, no shell), so THIS
+    // is where its retention has to happen. The stub records the call: right
+    // directory, the 7-day house window, the count cap — no defaults silently
+    // drifting away from the far-side script's encodings.
+    const seen = [];
+    const r = await deliverPastedImage({ host: '(local)' }, {}, pngHeader(), {
+      mkdir: async () => {},
+      writeFile: async () => {},
+      prune: async (...args) => { seen.push(args); },
+    });
+    assert.equal(r.ok, true);
+    assert.deepStrictEqual(seen, [[path.dirname(r.path), PASTE_RETENTION_MS, MAX_RETAINED_PASTES]]);
+  });
+
+  it('a FAILING prune cannot fail the delivery', async () => {
+    // Retention must never cost a paste — the JS twin of the far-side script's
+    // `2>/dev/null || true` isolation.
+    const r = await deliverPastedImage({ host: '(local)' }, {}, pngHeader(), {
+      mkdir: async () => {},
+      writeFile: async () => {},
+      prune: async () => { throw new Error('EACCES: prune blew up'); },
+    });
+    assert.equal(r.ok, true);
+    assert.ok(r.marker.includes(r.path));
+  });
+
+  it('a FAILED delivery skips the prune — nothing new landed, nothing new to bound', async () => {
+    let pruned = false;
+    const r = await deliverPastedImage({ host: '(local)' }, {}, pngHeader(), {
+      mkdir: async () => {},
+      writeFile: async () => { throw new Error('ENOSPC: no space left on device'); },
+      prune: async () => { pruned = true; },
+    });
+    assert.equal(r.ok, false);
+    assert.equal(pruned, false);
+  });
+});
+
+describe('prunePasteDir — the local leg\u2019s JS prune, mirroring pruneStallLog', () => {
+  it('removes an aged file, keeps a recent one, and reports the count', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-prune-'));
+    const oldFile = path.join(dir, 'paste-old.png');
+    const freshFile = path.join(dir, 'paste-new.png');
+    fs.writeFileSync(oldFile, 'old');
+    fs.writeFileSync(freshFile, 'fresh');
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000);
+    fs.utimesSync(oldFile, tenDaysAgo, tenDaysAgo);
+    const removed = await prunePasteDir(dir);
+    assert.equal(removed, 1);
+    assert.ok(!fs.existsSync(oldFile));
+    assert.ok(fs.existsSync(freshFile));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a file right at the age boundary survives (strictly OLDER than the window goes)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-edge-'));
+    const edge = path.join(dir, 'paste-edge.png');
+    fs.writeFileSync(edge, 'edge');
+    const justInside = new Date(Date.now() - (PASTE_RETENTION_MS - 60_000)); // a minute inside the window
+    fs.utimesSync(edge, justInside, justInside);
+    assert.equal(await prunePasteDir(dir), 0);
+    assert.ok(fs.existsSync(edge));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('applies the count cap AFTER the age bound, keeping the NEWEST', async () => {
+    // The pruneStallLog shape: age first, then the cap on what remains — five
+    // recent files with a cap of 3 leave the three newest.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-capjs-'));
+    const base = Date.now() - 60_000;
+    for (let i = 0; i < 5; i++) {
+      const p = path.join(dir, `paste-${i}.png`);
+      fs.writeFileSync(p, `v${i}`);
+      const t = new Date(base + i * 1000);
+      fs.utimesSync(p, t, t);
+    }
+    const removed = await prunePasteDir(dir, PASTE_RETENTION_MS, 3);
+    assert.equal(removed, 2);
+    assert.ok(!fs.existsSync(path.join(dir, 'paste-0.png')));
+    assert.ok(!fs.existsSync(path.join(dir, 'paste-1.png')));
+    for (const i of [2, 3, 4]) assert.ok(fs.existsSync(path.join(dir, `paste-${i}.png`)));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an aged file counts against the cap too — age never resurrects a capped-out file', async () => {
+    // Two aged + two fresh with a cap of 1: the aged pair goes on age, and the
+    // cap keeps only the single newest of what is left.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-mix-'));
+    const aged = new Date(Date.now() - 10 * 86_400_000);
+    for (const n of ['paste-a0.png', 'paste-a1.png']) {
+      const p = path.join(dir, n);
+      fs.writeFileSync(p, n);
+      fs.utimesSync(p, aged, aged);
+    }
+    const base = Date.now() - 60_000;
+    for (const i of [0, 1]) {
+      const p = path.join(dir, `paste-f${i}.png`);
+      fs.writeFileSync(p, `f${i}`);
+      const t = new Date(base + i * 1000);
+      fs.utimesSync(p, t, t);
+    }
+    const removed = await prunePasteDir(dir, PASTE_RETENTION_MS, 1);
+    assert.equal(removed, 3);
+    assert.ok(fs.existsSync(path.join(dir, 'paste-f1.png')), 'the newest file was wrongly pruned');
+    assert.equal(fs.readdirSync(dir).length, 1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('never touches a subdirectory, and a missing directory is a healthy zero', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-skip-'));
+    fs.mkdirSync(path.join(dir, 'not-a-paste'));
+    fs.writeFileSync(path.join(dir, 'not-a-paste', 'keep.txt'), 'keep');
+    assert.equal(await prunePasteDir(dir, PASTE_RETENTION_MS, 1), 0);
+    assert.ok(fs.existsSync(path.join(dir, 'not-a-paste', 'keep.txt')));
+    fs.rmSync(dir, { recursive: true, force: true });
+    await assert.doesNotReject(() => prunePasteDir(path.join(dir, 'never-existed')));
   });
 });
 

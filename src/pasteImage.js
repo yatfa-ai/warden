@@ -22,6 +22,16 @@
 //   local  + container → docker exec -i <c> sh -c '<script>' (no ssh hop)
 //   local, no container → a direct fs write (no child at all)
 //
+// What ACCUMULATES in the destination is bounded (WARDEN-1320). A pasted
+// screenshot is the densest privacy artifact a person can hand over — before
+// this bound, every paste on every host and container lived forever,
+// unreferenced-but-not-gone once its pane closed. Each delivery prunes the
+// paste directory with the stall-log.js house policy (age first, then a count
+// cap keeping the newest): the three script legs carry the prune inside
+// buildReceiveScript — failure-isolated, so retention can never cost a paste —
+// and the direct-write leg, which bypasses that script entirely, prunes in JS
+// via prunePasteDir.
+//
 // The command builders are pure and exported so the ssh/docker legs are pinned
 // by byte-exact unit tests without ssh or docker present — the buildSshArgv
 // precedent (WARDEN-986), and the same argument that made buildUploadScript and
@@ -58,6 +68,18 @@ export function localPasteDir() {
   return process.platform === 'win32' ? path.join(os.tmpdir(), 'warden', 'paste') : PASTE_DIR;
 }
 
+// Retention policy for what the paste directory is allowed to accumulate
+// (WARDEN-1320) — the stall-log.js house policy (age first, then a count cap
+// keeping the newest), applied at delivery time on all four legs.
+//
+// 7 days is the house value, not a fresh judgement: SEVEN_DAYS_MS in
+// stall-log.js, activity.js and observer.js all use it. The count cap is tuned
+// for PIXELS, not lines: a screenshot is single-digit MB, so a stall-log-style
+// cap of 2000 would permit ~6GB; 200 bounds a burst day to a few hundred MB
+// while leaving a long session's history readable by the agent it named.
+export const PASTE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_RETAINED_PASTES = 200;
+
 // How long a delivery child may run before it is killed. Generous — an image is
 // small (a screenshot is single-digit MB) and the ssh handshake dominates — but
 // bounded, so a wedged ssh can never leave the paste promise pending forever.
@@ -71,15 +93,87 @@ export const CLOSE_GRACE_MS = 1000;
 
 // ------------------------------ pure helpers -------------------------------
 
-// The far-side script: make the directory, then receive the file on stdin.
-// Byte-identical in shape to companion.js's buildUploadScript — `mkdir -p`
-// first so the very first paste to a host/container needs zero prep, and `cat >`
-// so the payload never appears in an argv (an argv is visible in `ps` and is
+// The far-side script: bound what already lives in the directory, then receive
+// the file on stdin. `mkdir -p` first so the very first paste to a host/
+// container needs zero prep, then the prune (WARDEN-1320), then `cat >` so the
+// payload never appears in an argv (an argv is visible in `ps` and is
 // length-bounded; a 3MB screenshot is neither of those things).
+//
+// The prune is the stall-log.js house policy in POSIX sh — age first, then a
+// count cap keeping the newest — and it is FAILURE-ISOLATED, the load-bearing
+// property: the whole prune group is wrapped in `2>/dev/null || true`, so a
+// missing or misflagged `find`/`ls`/`tail` (a minimal agent image, a busybox
+// quirk) degrades to a no-op and the delivery proceeds untouched. Retention
+// must never cost a paste; that is pinned by a test that stubs `find` to exit
+// 127 and asserts the payload still lands byte-exact.
+//
+// Both clauses keep only plain files at depth 1 (`-type f` / `rm -f` on names
+// `ls` lists), so nothing outside this directory is ever touched, and the
+// filename charset is `[a-z0-9.-]` by construction (pasteFileName — the client
+// supplies bytes only, never a name), so the `while read` loop cannot be fed a
+// hostile name.
 export function buildReceiveScript(destPath) {
   const slash = destPath.lastIndexOf('/');
   const dir = slash > 0 ? destPath.slice(0, slash) : '/';
-  return `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(destPath)}`;
+  const d = shellQuote(dir);
+  // find's -mtime counts WHOLE 24h days, so the house 7-day window is spelled
+  // +6 (age in whole days strictly greater than 6 ≡ older than 7 days). Derived
+  // from PASTE_RETENTION_MS so the two encodings cannot drift apart.
+  const findDays = Math.floor(PASTE_RETENTION_MS / 86_400_000) - 1;
+  return (
+    `mkdir -p ${d} && { ` +
+      `find ${d} -maxdepth 1 -type f -mtime +${findDays} -exec rm -f {} + 2>/dev/null || true; ` +
+      `ls -1t ${d} 2>/dev/null | tail -n +${MAX_RETAINED_PASTES + 1} | ` +
+        `while IFS= read -r f; do rm -f ${d}/"$f" 2>/dev/null || true; done; ` +
+    `} 2>/dev/null || true; cat > ${shellQuote(destPath)}`
+  );
+}
+
+// The JS twin of the far-side prune above (WARDEN-1320): the local,
+// container-less delivery leg writes straight to disk and bypasses
+// buildReceiveScript entirely, so the same age-then-count bound is applied
+// here in JS, mirroring pruneStallLog's shape (stall-log.js).
+//
+// WHERE IT RUNS, and why on the delivery path rather than at boot: the
+// stall-log precedent prunes once at server start because the stall log has
+// exactly one writer process with a boot hook. The paste directory has four
+// writer legs and the three far-side ones can have no boot hook at all —
+// warden never starts on a remote host or inside the agent's container — so
+// their bound necessarily rides the delivery. One policy applied at one moment
+// on all four legs beats a boot-time special case for the fourth; pastes are
+// rare, human-paced gestures (not the per-second appends that made per-append
+// pruning wrong for the stall log), so an O(n) readdir here costs nothing.
+//
+// Age first (anything older than `maxAgeMs` goes), then the count cap keeping
+// the NEWEST — `ls -1t`'s order. Only plain files are candidates, so a
+// stray subdirectory is never touched. Returns the number removed.
+export async function prunePasteDir(dir = localPasteDir(), maxAgeMs = PASTE_RETENTION_MS, maxRetained = MAX_RETAINED_PASTES) {
+  let names;
+  try {
+    names = await fs.promises.readdir(dir);
+  } catch (err) {
+    if (err.code === 'ENOENT') return 0; // nothing has ever landed — the healthy first-paste case
+    throw err;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  const entries = [];
+  for (const name of names) {
+    try {
+      const st = await fs.promises.stat(path.join(dir, name));
+      if (st.isFile()) entries.push({ name, mtimeMs: st.mtimeMs });
+    } catch { /* the file vanished mid-prune — there is nothing left to remove */ }
+  }
+  entries.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first, like `ls -1t`
+  const doomed = [];
+  entries.forEach((e, i) => {
+    if (e.mtimeMs < cutoff || i >= maxRetained) doomed.push(e.name);
+  });
+  // Best-effort, file by file: a single rm that fails (a raced reader, an odd
+  // permission) must not abort the sweep — the next delivery retries it.
+  for (const name of doomed) {
+    try { await fs.promises.rm(path.join(dir, name), { force: true }); } catch { /* leave it for the next delivery */ }
+  }
+  return doomed.length;
 }
 
 // argv for a DIRECT `docker exec` (the local+container leg) — an array, so no
@@ -269,8 +363,8 @@ function streamToChild(bin, argv, buf, spawnFn) {
  * file would tell the agent to open something that is not there, which is a
  * worse defect than the silence this ticket exists to fix.
  *
- * `deps` are test seams (spawn, writeFile, now); production callers omit them,
- * mirroring the deps seam in tmux.js send() and ssh.js runWithPool.
+ * `deps` are test seams (spawn, writeFile, now, prune); production callers omit
+ * them, mirroring the deps seam in tmux.js send() and ssh.js runWithPool.
  */
 export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
   const spawnFn = deps.spawn ?? defaultSpawn;
@@ -292,6 +386,18 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
       await (deps.writeFile ?? fs.promises.writeFile)(dest, buf);
     } catch (e) {
       return { ok: false, error: `write failed: ${e.message}` };
+    }
+    // Bound the directory (WARDEN-1320) — the same bound the other three legs
+    // carry inside buildReceiveScript; this leg bypasses that script (no child,
+    // no shell), so it prunes here in JS instead. AFTER the write is settled, so
+    // a fresh paste can never race its own retention, and best-effort: a
+    // failing prune must never fail a delivery that already succeeded. A FAILED
+    // delivery deliberately skips it — a failed write adds no new file, so
+    // there is nothing new to bound and the next successful delivery prunes.
+    try {
+      await (deps.prune ?? prunePasteDir)(dir, PASTE_RETENTION_MS, MAX_RETAINED_PASTES);
+    } catch (e) {
+      console.warn(`[warden:paste] prune failed: ${e.message}`);
     }
     return { ok: true, path: dest, marker: buildMarker(dest, info), info };
   }
