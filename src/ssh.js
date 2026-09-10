@@ -722,20 +722,35 @@ export function attachLocalTmux(args, { cols = 100, rows = 30 } = {}) {
 // `args` is a tmux argv (without the leading `tmux`). Routes by chat.host.
 // For a yatfa chat (container set) on a remote, prefixes `docker exec <c>`.
 
-export async function runTmux(chat, args, opts = {}) {
-  if (chat.host === '(local)') return runLocalTmux(args, { timeout: opts.timeout });
+// The tmux command string runTmux delivers remotely: the BARE `docker exec <c>`
+// prefix (no -it — a non-tty capture, unlike buildAttachCommand) plus the
+// shellQuote'd argv. ONE builder so the default runTmux path and the companion
+// exec path (tmux.js read, WARDEN-1329) deliver the byte-identical string — the
+// same parity-by-construction contract buildAttachCommand serves for attach
+// (WARDEN-1295). run() wraps it as `bash -lc ${shellQuote(cmd)}` at spawn time,
+// and the companion's host side runs the identical string under `bash -lc` too
+// (runScriptCtx), so both transports execute the same command.
+export function buildRunCommand(chat, args) {
   const prefix = chat.container ? `docker exec ${shellQuote(chat.container)} ` : '';
+  return prefix + 'tmux ' + args.map(shellQuote).join(' ');
+}
 
-  // Use pooled connection for remote hosts
+export async function runTmux(chat, args, opts = {}, deps = {}) {
+  if (chat.host === '(local)') return runLocalTmux(args, { timeout: opts.timeout });
+  const cmd = buildRunCommand(chat, args);
+
+  // Use pooled connection for remote hosts. `deps` threads the runWithPool test
+  // seam (run / getConnection / markUnhealthy) so a test can capture the exact
+  // command runTmux delivers without spawning real ssh; production callers pass
+  // no 4th arg and this is byte-for-byte the pre-WARDEN-1329 path.
   try {
-    const cmd = prefix + 'tmux ' + args.map(shellQuote).join(' ');
-    return await runWithPool(chat.host, cmd, opts, {});
+    return await runWithPool(chat.host, cmd, opts, {}, deps);
   } catch (e) {
     if (e instanceof HostConnectionError) {
       throw e;
     }
     // Fallback to direct connection
-    return run(chat.host, prefix + 'tmux ' + args.map(shellQuote).join(' '), opts);
+    return run(chat.host, cmd, opts);
   }
 }
 

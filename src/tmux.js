@@ -2,8 +2,8 @@
 // container; manual: a host/local tmux session). This module builds tmux argv and
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
-import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd, buildAttachCommand, buildAttachRemoteScript } from './ssh.js';
-import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey, attachSession as companionAttachSession } from './companion.js';
+import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd, buildAttachCommand, buildAttachRemoteScript, buildRunCommand } from './ssh.js';
+import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey, attachSession as companionAttachSession, execInContext } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -14,8 +14,53 @@ const ALLOWED_KEYS = new Set([
 ]);
 
 // Capture the pane: colored scrollback (ANSI via -e), up to `lines` back.
-export async function read(chat, cfg, lines = 500) {
-  const r = await runTmux(chat, ['capture-pane', '-t', sess(chat, cfg), '-p', '-e', '-S', `-${lines}`, '-E', '-']);
+//
+// Companion routing (WARDEN-1329, roadmap WARDEN-270): for a REMOTE host under
+// WARDEN_COMPANION_TRANSPORT=1 the capture rides the persistent companion
+// channel through the generic `exec` RPC (execInContext — zero per-op ssh
+// spawns; the last un-gated runtime op in this module). read() fell between the
+// categories prior slices were organized around — it is neither a poll nor a
+// stream — and it cannot ride the batched capturePanes RPC either, which
+// hardcodes `-S -60`: read()'s callers pass up to 5000 lines (/api/pane-export,
+// the transcript the user downloads), so an arbitrary-depth capture is exactly
+// what the generic exec RPC is for.
+//
+// Two delivery details a naive migration gets wrong, both pinned by
+// companion-read.test.js:
+//   1. The FULL pre-assembled command rides as the script with `container`
+//      UNSET. runTmux's container prefix is bare `docker exec <c> tmux …` (no
+//      -it, NO in-container shell); passing `container` would have the host
+//      rebuild `docker exec <c> bash -lc <script>`, inserting a login shell
+//      today's path does not have (the WARDEN-1284 leg-6 nuance). Both paths
+//      assemble through ONE builder (ssh.js buildRunCommand), so the delivered
+//      command is identical by construction, not by two kept-in-sync literals.
+//   2. The deadline is passed EXPLICITLY. The default path passes no
+//      opts.timeout to runTmux, so run()'s 30000 applies; execInContext
+//      defaults to 8000 — a silent 30s→8s downgrade that would turn a slow
+//      5000-line export into a timeout. 30000 keeps today's ceiling.
+//
+// execInContext resolves the SAME {ok,code,stdout,stderr} envelope run() does,
+// so the existing `if (!r.ok) throw` covers the companion path unchanged —
+// companion-or-fail: a dead channel throws, never a silent runTmux retry, and
+// a stale cached binary predating the `exec` RPC surfaces the actionable
+// too-old error execInContext emits (no {unsupported:true} degradation — a
+// silent per-op fallback would quietly re-pay the spawns this migration
+// removes). LOCAL never routes through the companion. `deps.runTmux` /
+// `deps.companionExec` / `deps.isCompanionTransportEnabled` are optional test
+// seams (production callers omit them; mirrors send / sendKey / hasSession).
+const COMPANION_READ_TIMEOUT_MS = 30000; // parity with run()'s default (ssh.js) — NOT execInContext's 8000
+
+export async function read(chat, cfg, lines = 500, deps = {}) {
+  const args = ['capture-pane', '-t', sess(chat, cfg), '-p', '-e', '-S', `-${lines}`, '-E', '-'];
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
+    // container deliberately UNSET: the docker-exec prefix is already inside the
+    // script (bare `docker exec <c> tmux …`, no in-container shell — see above).
+    const r = await (deps.companionExec ?? execInContext)(
+      chat.host, buildRunCommand(chat, args), { timeout: COMPANION_READ_TIMEOUT_MS }, cfg, {});
+    if (!r.ok) throw new Error((r.stderr || '').trim() || `read failed (exit ${r.code})`);
+    return r.stdout;
+  }
+  const r = await (deps.runTmux ?? runTmux)(chat, args);
   if (!r.ok) throw new Error((r.stderr || '').trim() || `read failed (exit ${r.code})`);
   return r.stdout;
 }
