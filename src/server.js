@@ -1158,7 +1158,14 @@ app.get('/api/config', (_req, res) => res.json(
 // declared as a pipeline so a refactor can't silently drop them the way the
 // source proposal's hooks would have.
 app.put('/api/config', async (req, res) => {
-  applyConfigPut(cfg, req.body);
+  // WARDEN-1331 — applyConfigPut now reports WHICH present-but-invalid values it
+  // refused, so the route stops answering a bare { ok: true } to a rejected
+  // write (the silent-ok is the amplifier that let the out-of-range-persist
+  // defect class hide through five one-field repairs). The response stays
+  // ADDITIVE: ok is still true whenever the request was processed (good fields
+  // in a mixed body still save), and `refused` is {} on the normal path — only
+  // the renderer's save flow reads it, to warn instead of silently dropping.
+  const { refused } = applyConfigPut(cfg, req.body);
   await save(cfg); // persist to ~/.yatfa-warden/config.json (atomic, async — WARDEN-831)
   afterSave(cfg, {
     companionOverridden: companionEnvOverridden,
@@ -1166,7 +1173,7 @@ app.put('/api/config', async (req, res) => {
     applyCompanionToggle,
     restartBudgetPoll,
   });
-  res.json({ ok: true });
+  res.json({ ok: true, refused });
 });
 
 // POST /api/config/reset — restore EVERY backend preference to its default

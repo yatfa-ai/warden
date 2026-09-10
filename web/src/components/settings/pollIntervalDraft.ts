@@ -1,5 +1,5 @@
 // Typed-draft rules for the Settings "Dashboard Refresh Interval (ms)" control
-// (WARDEN-938).
+// (WARDEN-938, bounds-parameterized by WARDEN-1331).
 //
 // The control used to render `resolvePollIntervalMs(config.pollIntervalMs)`
 // directly as a controlled `value`, which made the field un-typeable: the first
@@ -15,35 +15,40 @@
 //      merely tabbing through the field must not rewrite the stored value up to
 //      the web floor. A `null` draft therefore commits `null`.
 //   2. What is committed is what the dashboard runs. Everything this returns is
-//      inside [POLL_INPUT_MIN_MS, POLL_INPUT_MAX_MS], the band that
+//      inside the SERVED band [min, max] (config.bounds.pollIntervalMs, derived
+//      from src/config-schema.js's uiRange descriptor), the band that
 //      `resolvePollIntervalMs` passes through unchanged — so displayed value ==
 //      persisted value == actual cadence.
 //
-// Deliberately import-free (not even `import type`) so web/pollIntervalDraft.test.mjs
-// can load it standalone through Vite's OXC transform, exactly like
-// configDirty.ts and lib/pollInterval.ts. The bounds below MIRROR
-// WEB_POLL_FLOOR_MS / WEB_POLL_CEILING_MS in lib/pollInterval.ts (which must not
-// be modified — its below-floor branch is the defense for stale/CLI/migrated
-// values); that test asserts the two pairs stay equal.
+// WARDEN-1331: the [10_000, 120_000] band used to live HERE as hand-copied
+// module constants (POLL_INPUT_MIN_MS/POLL_INPUT_MAX_MS mirroring
+// WEB_POLL_FLOOR_MS/WEB_POLL_CEILING_MS, agreement held together by a test).
+// The band is now DECLARED once on the backend registry and SERVED over GET;
+// callers pass `config.bounds.pollIntervalMs` and this module holds no copy of
+// any range. Deliberately import-free (not even `import type`) so
+// web/pollIntervalDraft.test.mjs can load it standalone through Vite's OXC
+// transform, exactly like configDirty.ts and lib/pollInterval.ts.
 
-/** Smallest cadence the UI accepts — mirrors WEB_POLL_FLOOR_MS. */
-export const POLL_INPUT_MIN_MS = 10_000;
-
-/** Largest cadence the UI accepts — mirrors WEB_POLL_CEILING_MS. */
-export const POLL_INPUT_MAX_MS = 120_000;
+export interface PollDraftBounds {
+  min: number;
+  max: number;
+}
 
 /**
  * Parse a typed draft into the number to commit to `config.pollIntervalMs`.
  *
  *   - `null` (field never edited)  -> null (commit NOTHING; see invariant 1)
  *   - unparseable ('', '-', 'abc') -> null (revert to the stored value)
- *   - anything else                -> clamped into [MIN, MAX]
+ *   - anything else                -> clamped into [bounds.min, bounds.max]
  */
-export function commitPollIntervalDraft(draft: string | null): number | null {
+export function commitPollIntervalDraft(
+  draft: string | null,
+  bounds: PollDraftBounds,
+): number | null {
   if (draft === null) return null;
   const n = Number.parseInt(draft, 10);
   if (!Number.isFinite(n)) return null;
-  return Math.min(POLL_INPUT_MAX_MS, Math.max(POLL_INPUT_MIN_MS, n));
+  return Math.min(bounds.max, Math.max(bounds.min, n));
 }
 
 /**
@@ -52,9 +57,12 @@ export function commitPollIntervalDraft(draft: string | null): number | null {
  * An untouched or unparseable draft is never "out of range" (nothing is
  * committed for either, so there is nothing to warn about).
  */
-export function isPollDraftOutOfRange(draft: string | null): boolean {
+export function isPollDraftOutOfRange(
+  draft: string | null,
+  bounds: PollDraftBounds,
+): boolean {
   if (draft === null) return false;
   const n = Number.parseInt(draft, 10);
   if (!Number.isFinite(n)) return false;
-  return n < POLL_INPUT_MIN_MS || n > POLL_INPUT_MAX_MS;
+  return n < bounds.min || n > bounds.max;
 }

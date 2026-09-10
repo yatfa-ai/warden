@@ -115,9 +115,18 @@ src = src
   .replace(/from\s+(['"])@\/components\/ui\/label\1/g, "from './ui-stubs.mjs'")
   .replace(/from\s+(['"])\.\.\/SettingsSection\1/g, "from './ui-stubs.mjs'")
   // WARDEN-1276 — the reset-to-default affordance (a real runtime import).
-  .replace(/from\s+(['"])\.\.\/rows\/ResetToDefaultButton\1/g, "from './ui-stubs.mjs'");
+  .replace(/from\s+(['"])\.\.\/rows\/ResetToDefaultButton\1/g, "from './ui-stubs.mjs'")
+  // WARDEN-1331 — the clamp now comes from the real pure helper module. Keep
+  // the REAL numericBounds.ts in the loop (it is import-free, so it transforms
+  // standalone): the blur handlers under test delegate to it, and stubbing a
+  // clamp would make these tests assert nothing.
+  .replace(/from\s+(['"])\.\.\/numericBounds\1/g, "from './numericBounds.mjs'");
 
 const { code } = await transformWithOxc(src, sectionPath, {});
+// numericBounds.ts — same transform, emitted SIBLING to the section so the
+// rewritten './numericBounds.mjs' specifier resolves.
+const numericBoundsPath = resolve(__dirname, 'src/components/settings/numericBounds.ts');
+const numericBoundsCode = (await transformWithOxc(readFileSync(numericBoundsPath, 'utf8'), numericBoundsPath, {})).code;
 
 // Inside web/ (NOT os.tmpdir) so the bare react/jsx-runtime specifier resolves
 // via web/node_modules.
@@ -126,6 +135,7 @@ let mod;
 let stubs;
 try {
   writeFileSync(join(tmpDir, 'ui-stubs.mjs'), STUB_MODULE);
+  writeFileSync(join(tmpDir, 'numericBounds.mjs'), numericBoundsCode);
   const tmpFile = join(tmpDir, 'AttentionThresholdsSection.mjs');
   writeFileSync(tmpFile, code);
   mod = await import(tmpFile);
@@ -159,10 +169,17 @@ function inputById(root, id) {
 
 // Render the section with a recording setConfig and the pair under test.
 // One sibling field (hosts) rides along so spread-preservation is assertable.
+// WARDEN-1331: the section derives its clamps from the SERVED bounds, so the
+// fixture carries what GET /api/config now serves for these fields —
+// one-sided {min: 1} entries, exactly as config-schema.js declares them.
 const configOf = (warning, critical) => ({
   hosts: ['alpha', 'beta'],
   healthWarningThresholdMin: warning,
   healthCriticalThresholdMin: critical,
+  bounds: {
+    healthWarningThresholdMin: { min: 1 },
+    healthCriticalThresholdMin: { min: 1 },
+  },
 });
 
 function render(warning, critical) {
@@ -186,7 +203,7 @@ describe('harness — the REAL section renders through the stubbed UI atoms', ()
     for (const id of ['healthWarningThresholdMin', 'healthCriticalThresholdMin']) {
       const el = inputById(root, id);
       assert.equal(el.props.type, 'number');
-      assert.equal(el.props.min, '1', 'the advertised min IS the clamp floor');
+      assert.equal(el.props.min, 1, 'the advertised min IS the clamp floor (the SERVED bound, WARDEN-1331)');
       assert.equal(el.props.step, '1');
     }
   });

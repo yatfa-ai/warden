@@ -20,6 +20,7 @@ import {
   CONFIG_FIELDS,
   deriveDefaults,
   buildGetResponse,
+  buildBounds,
   applyConfigPut,
   afterSave,
   resetConfig,
@@ -86,6 +87,45 @@ describe('deriveDefaults — DEFAULTS is fully derived from CONFIG_FIELDS', () =
     // Identity: two derivations are distinct objects (not the shared registry ref).
     assert.notStrictEqual(b.llm, a.llm, 'each derivation gets its own llm object');
     assert.notStrictEqual(b.hosts, a.hosts, 'each derivation gets its own hosts array');
+  });
+});
+
+describe('buildBounds — the numeric-range metadata served over GET (WARDEN-1331)', () => {
+  it('emits exactly the in-scope bounds, from the same descriptors the PUT guards read', () => {
+    assert.deepStrictEqual(buildBounds(), {
+      pollIntervalMs: { min: 10_000, max: 120_000 }, // uiRange — the WEB INPUT band
+      connectTimeout: { min: 1, max: 60 },
+      observerSessionTimeout: { min: 1, max: 180 },
+      'llm.maxTokens': { min: 1 },
+      healthWarningThresholdMin: { min: 1 },
+      healthCriticalThresholdMin: { min: 1 },
+      tokenBudgetThresholdTokens: { min: 1 },
+      tokenBudgetWindowHours: { min: 1 },
+      tokenBudgetPerSessionThresholdTokens: { min: 1 },
+    });
+  });
+
+  it('derives from the registry — every clamp/uiRange descriptor and every flooredNumber is represented', () => {
+    const bounds = buildBounds();
+    for (const d of CONFIG_FIELDS) {
+      if (d.exposure !== 'public') continue;
+      if (d.clamp) assert.ok(d.key in bounds, `'${d.key}' clamp served`);
+      if (d.uiRange) assert.ok(d.key in bounds, `'${d.key}' uiRange served`);
+      if (d.type === 'flooredNumber') {
+        assert.deepStrictEqual(bounds[d.key], { min: 1 }, `'${d.key}' floor served`);
+      }
+    }
+    // One-sided bounds omit the unbounded side (no invented max).
+    assert.deepStrictEqual(bounds.healthWarningThresholdMin, { min: 1 },
+      'no max is invented for the min-only health bounds');
+    // The derived `bounds` key itself is not a bound holder — no self-recursion.
+    assert.ok(!('bounds' in bounds));
+  });
+
+  it('rides the GET response as one additive top-level key (never a scatter of siblings)', () => {
+    const out = buildGetResponse({}, { companionEnvOverridden: false });
+    assert.ok('bounds' in out, 'bounds is a single top-level key');
+    assert.deepStrictEqual(out.bounds, buildBounds());
   });
 });
 
@@ -174,6 +214,35 @@ describe('validateRegistry — fail loud on a malformed descriptor (no silent no
   it('rejects an unknown exposure', () => {
     assert.throws(() => validateRegistry([ok({ exposure: 'pubic' })]), /unknown exposure/);
   });
+
+  it('rejects a malformed clamp/uiRange (WARDEN-1331 — a wrong clamp would fire silently on every PUT)', () => {
+    // Swapped bounds.
+    assert.throws(() => validateRegistry([ok({ type: 'number', clamp: [60, 1] })]), /min 60 > max 1/);
+    // Wrong arity / wrong shape.
+    assert.throws(() => validateRegistry([ok({ type: 'number', clamp: [1] })]), /must be \[min, max\]/);
+    assert.throws(() => validateRegistry([ok({ type: 'number', clamp: '1..60' })]), /must be \[min, max\]/);
+    // Non-numeric side.
+    assert.throws(() => validateRegistry([ok({ type: 'number', clamp: ['1', 60] })]), /finite numbers or null/);
+    // Both sides null = clamps nothing = a typo.
+    assert.throws(() => validateRegistry([ok({ type: 'number', clamp: [null, null] })]), /cannot be \[null, null\]/);
+    // uiRange obeys the same rules.
+    assert.throws(() => validateRegistry([ok({ type: 'number', uiRange: [5] })]), /must be \[min, max\]/);
+    // A clamp on a type whose applyField case does not honor it is a startup
+    // error, not a silent no-op (the exact "adding clamp: is a NO-OP" trap).
+    assert.throws(() => validateRegistry([ok({ type: 'flooredNumber', clamp: [1, 5] })]), /not valid on type 'flooredNumber'/);
+    // One field cannot carry both an enforced range and an input band.
+    assert.throws(
+      () => validateRegistry([ok({ type: 'number', clamp: [1, 60], uiRange: [1, 60] })]),
+      /both 'clamp' and 'uiRange'/,
+    );
+  });
+
+  it('accepts the shipping registry with its clamp/uiRange descriptors', () => {
+    assert.doesNotThrow(() => validateRegistry(CONFIG_FIELDS));
+    const clamped = CONFIG_FIELDS.filter((d) => d.clamp || d.uiRange).map((d) => d.key);
+    assert.ok(clamped.includes('connectTimeout') && clamped.includes('pollIntervalMs'),
+      'the shipping registry carries both kinds of range descriptor');
+  });
 });
 
 describe('applyConfigPut — PUT guards derived from the registry', () => {
@@ -185,6 +254,42 @@ describe('applyConfigPut — PUT guards derived from the registry', () => {
     assert.strictEqual(cfg.connectTimeout, 1);
     applyConfigPut(cfg, { connectTimeout: 30 });
     assert.strictEqual(cfg.connectTimeout, 30);
+  });
+
+  it('clamps the three formerly-clamp-less nullablePositiveNumber fields into [1, …] (WARDEN-1331)', () => {
+    // A direct PUT of 0.5 used to pass the bare `value > 0` guard and persist a
+    // fraction the UI cannot express. Now it clamps up to 1 — the same
+    // discipline as connectTimeout/observerSessionTimeout. The assertions read
+    // the PERSISTED cfg value, not the (silently-successful) return.
+    const cfg = { healthWarningThresholdMin: 5, healthCriticalThresholdMin: 30, llm: {} };
+    applyConfigPut(cfg, { healthWarningThresholdMin: 0.5, healthCriticalThresholdMin: 0.25 });
+    assert.strictEqual(cfg.healthWarningThresholdMin, 1, 'warning 0.5 clamped to 1');
+    assert.strictEqual(cfg.healthCriticalThresholdMin, 1, 'critical 0.25 clamped to 1');
+    applyConfigPut(cfg, { llm: { maxTokens: 0.5 } });
+    assert.strictEqual(cfg.llm.maxTokens, 1, 'llm.maxTokens 0.5 clamped to 1');
+    // In-range values pass through; null stays the disable path; the min-only
+    // bound invents NO max (large values persist verbatim).
+    applyConfigPut(cfg, { healthCriticalThresholdMin: 5000 });
+    assert.strictEqual(cfg.healthCriticalThresholdMin, 5000, 'no max invented');
+    applyConfigPut(cfg, { healthWarningThresholdMin: null, llm: { maxTokens: null } });
+    assert.strictEqual(cfg.healthWarningThresholdMin, null, 'null disable path unclamped');
+    assert.strictEqual(cfg.llm.maxTokens, null, 'null disable path unclamped (nested)');
+  });
+
+  it('leaves pollIntervalMs UNCLAMPED server-side — the stated WARDEN-1331 decision', () => {
+    // The field is shared with the CLI, whose watch mode reads it RAW with a
+    // default of 1500 — BELOW the web input band [10_000, 120_000]. Clamping
+    // the stored value to the web band would rewrite the CLI's legitimate
+    // cadence; this test pins the decision so a future "naive clamp" is caught
+    // here. The web input band travels as `uiRange` (served in bounds), and the
+    // web resolver remains the enforcement for stale/CLI values.
+    const cfg = { pollIntervalMs: 1500 };
+    applyConfigPut(cfg, { pollIntervalMs: 1500 });
+    assert.strictEqual(cfg.pollIntervalMs, 1500, 'the CLI default round-trips unmodified');
+    applyConfigPut(cfg, { pollIntervalMs: 5000 });
+    assert.strictEqual(cfg.pollIntervalMs, 5000, 'below the web floor — still stored');
+    applyConfigPut(cfg, { pollIntervalMs: 999_999 });
+    assert.strictEqual(cfg.pollIntervalMs, 999_999, 'above the web ceiling — still stored');
   });
 
   it('preserves the tokenBudget null-asymmetry + Math.max(1) floor', () => {
@@ -263,6 +368,62 @@ describe('applyConfigPut — PUT guards derived from the registry', () => {
     assert.strictEqual(cfg.tmuxSession, 'agent', 'non-string rejected');
     assert.strictEqual(cfg.observerConfirmMode, 'always', 'non-oneOf rejected');
     assert.ok(!('bogusField' in cfg), 'unknown field not stored');
+  });
+});
+
+describe('applyConfigPut refusal reporting — the route stops answering bare ok to a rejected write (WARDEN-1331)', () => {
+  it('reports present-but-invalid values under their dotted key, with the offending value', () => {
+    const cfg = { connectTimeout: 10, pollIntervalMs: 1500, tmuxSession: 'agent', llm: {} };
+    const { refused } = applyConfigPut(cfg, {
+      connectTimeout: 'fast',       // wrong type outright — refused (NOT clamped)
+      pollIntervalMs: null,          // present null on a non-nullable number — refused
+      tmuxSession: 42,               // non-string — refused
+      llm: { maxTokens: 'lots' },    // nested wrong type — refused under llm.maxTokens
+    });
+    assert.deepStrictEqual(refused, {
+      connectTimeout: 'fast',
+      pollIntervalMs: null,
+      tmuxSession: 42,
+      'llm.maxTokens': 'lots',
+    });
+    // And nothing was written.
+    assert.strictEqual(cfg.connectTimeout, 10);
+    assert.strictEqual(cfg.pollIntervalMs, 1500);
+    assert.strictEqual(cfg.tmuxSession, 'agent');
+  });
+
+  it('does NOT report clamped writes, PATCH no-ops, or the null disable paths', () => {
+    const cfg = { connectTimeout: 10, observerSessionTimeout: 30, healthWarningThresholdMin: 5, llm: { maxTokens: 2048 } };
+    const { refused } = applyConfigPut(cfg, {
+      connectTimeout: 999,               // clamped into range — APPLIED, not refused
+      observerSessionTimeout: 0.5,       // clamped — APPLIED
+      healthWarningThresholdMin: null,   // disable path — APPLIED
+      llm: { maxTokens: null },          // disable path — APPLIED
+      // watchPatterns / hosts / secrets all ABSENT — PATCH no-op, never refused
+    });
+    assert.deepStrictEqual(refused, {}, 'no refusals: clamps applied, nulls applied, absent = no-op');
+    assert.strictEqual(cfg.connectTimeout, 60);
+    assert.strictEqual(cfg.observerSessionTimeout, 1);
+    assert.strictEqual(cfg.healthWarningThresholdMin, null);
+    assert.strictEqual(cfg.llm.maxTokens, null);
+  });
+
+  it('reports a present blank/wrong-type secret but not an omitted or explicitly-cleared one', () => {
+    const cfg = { telemetryAuthToken: 'tok', llm: { authToken: 'sk' } };
+    const { refused } = applyConfigPut(cfg, { telemetryAuthToken: '', llm: { authToken: 7 } });
+    assert.deepStrictEqual(refused, { telemetryAuthToken: '', 'llm.authToken': 7 });
+    assert.strictEqual(cfg.telemetryAuthToken, 'tok', 'no-clobber preserved');
+    const second = applyConfigPut(cfg, { telemetryAuthToken: null }); // the Remove path
+    assert.deepStrictEqual(second.refused, {}, 'explicit null clear is applied, not refused');
+    assert.strictEqual(cfg.telemetryAuthToken, '');
+  });
+
+  it('returns {} refused for a fully valid body — the normal Save path', () => {
+    const cfg = { connectTimeout: 10, pollIntervalMs: 1500 };
+    const { refused } = applyConfigPut(cfg, { connectTimeout: 30, pollIntervalMs: 60_000 });
+    assert.deepStrictEqual(refused, {});
+    assert.strictEqual(cfg.connectTimeout, 30);
+    assert.strictEqual(cfg.pollIntervalMs, 60_000);
   });
 });
 

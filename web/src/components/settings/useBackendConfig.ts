@@ -30,7 +30,7 @@ import {
   clearTelemetryRuntimeDrift,
   type TelemetryRuntimeStatus,
 } from '@/lib/electron';
-import { type ConfigData } from './types';
+import { type ConfigData, type ConfigBounds } from './types';
 import { isBackendConfigDirty, type BackendConfigDraft } from './configDirty';
 import { normalizeLoadedConfig } from './normalizeLoadedConfig';
 
@@ -86,6 +86,13 @@ const DEFAULT_CONFIG: ConfigData = {
   webhookAlertDone: true,
   // WARDEN-540 — empty until the GET /api/config load populates it.
   watchPatterns: [],
+  // WARDEN-1331 — the served numeric bounds. NEVER RENDERED from this
+  // placeholder: WARDEN-976 mounts the backend sections only once the GET
+  // load resolves (configLoaded), and the object that replaces this one via
+  // normalizeLoadedConfig carries the real, per-field-guarded bands. It is a
+  // shape placeholder, not a declared set of ranges — the declared ranges
+  // live in src/config-schema.js alone.
+  bounds: {} as ConfigBounds,
 };
 
 /**
@@ -397,9 +404,25 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
       const telemetryExtra: { telemetryAuthToken?: string | null } = {};
       if (telemetryAuthTokenPendingClear) telemetryExtra.telemetryAuthToken = null;
       else if (telemetryAuthToken) telemetryExtra.telemetryAuthToken = telemetryAuthToken;
-      const { ok, error } = await putJson('/api/config', { ...config, llm, ...webhookExtra, ...telemetryExtra });
+      const { ok, error, data } = await putJson<{ ok: boolean; refused?: Record<string, unknown> }>('/api/config', { ...config, llm, ...webhookExtra, ...telemetryExtra });
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
+      }
+      // WARDEN-1331 — the backend now reports values it REFUSED (present in
+      // the body but failing a type/range guard outright) instead of silently
+      // answering ok while dropping them — the silent-ok that let the
+      // out-of-range-persist defect class hide through five one-field repairs.
+      // Clamped values (the normal onBlur-miss case) are APPLIED server-side,
+      // not refused, so this fires only for genuinely invalid payloads. A
+      // refused value stays on screen (the config state is untouched by the
+      // refusal) with an explicit warning naming the fields.
+      const refused = (data && typeof data === 'object' && data.refused && typeof data.refused === 'object'
+        ? Object.keys(data.refused)
+        : []) as string[];
+      if (refused.length > 0) {
+        toast.warning(`Some values could not be saved: ${refused.join(', ')}`, {
+          description: 'The server rejected these values (wrong type or out of range). Fix them and save again.',
+        });
       }
       // WARDEN-906 — the PUT succeeded, so what is on screen IS what is
       // persisted: re-baseline to the exact draft that was just sent (config +

@@ -33,9 +33,8 @@ import { validateNewHost } from '@/lib/hostInput';
 import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
+import { clampToBounds, isOutOfBounds } from '../numericBounds';
 import {
-  POLL_INPUT_MAX_MS,
-  POLL_INPUT_MIN_MS,
   commitPollIntervalDraft,
   isPollDraftOutOfRange,
 } from '../pollIntervalDraft';
@@ -82,6 +81,15 @@ export function HostsSection({
   // AppearanceSection.
   const [pollDraft, setPollDraft] = useState<string | null>(null);
   const pollDisplay = pollDraft ?? String(resolvePollIntervalMs(config.pollIntervalMs));
+  // WARDEN-1331 — the input band the control advertises is the SERVED bound
+  // (config-schema.js's uiRange descriptor, delivered via GET /api/config),
+  // not a frontend constant. The resolver's own floor/ceiling
+  // (lib/pollInterval.ts) is a separate defense layer for stale/CLI values and
+  // is pinned against the served band by web/pollIntervalDraft.test.mjs.
+  const pollBounds = config.bounds.pollIntervalMs;
+  // Same for connectTimeout's enforced [1, 60] clamp (the server clamps this
+  // one; the served bound IS the enforced range).
+  const timeoutBounds = config.bounds.connectTimeout;
 
   // WARDEN-940 — the typed-host draft. Purely local component state: typing (or
   // merely focusing) never touches setConfig, so the Settings dirty check
@@ -283,23 +291,23 @@ export function HostsSection({
         <Input
           id="pollIntervalMs"
           type="number"
-          min={POLL_INPUT_MIN_MS}
-          max={POLL_INPUT_MAX_MS}
+          min={pollBounds.min}
+          max={pollBounds.max}
           step="5000"
           value={pollDisplay}
           onChange={(e) => setPollDraft(e.target.value)}
           onBlur={() => {
-            // Commit the typed value, clamped into the [10000, 120000] band the
-            // input advertises — mirrors the connectTimeout clamp below. The
-            // untouched case is the one that matters: a `null` draft means the
-            // field was never edited, and clamping there would rewrite the
-            // STORED value (turning the CLI's 1500ms watch default into 10000ms
-            // just because the user tabbed past). Both this early return and
-            // `commitPollIntervalDraft`'s own null result keep that path silent.
-            // An unparseable draft likewise commits nothing, so clearing the
-            // field and leaving reverts to the stored cadence.
+            // Commit the typed value, clamped into the served band the input
+            // advertises (config.bounds.pollIntervalMs). The untouched case is
+            // the one that matters: a `null` draft means the field was never
+            // edited, and clamping there would rewrite the STORED value
+            // (turning the CLI's 1500ms watch default into 10000ms just
+            // because the user tabbed past). Both this early return and
+            // `commitPollIntervalDraft`'s own null result keep that path
+            // silent. An unparseable draft likewise commits nothing, so
+            // clearing the field and leaving reverts to the stored cadence.
             if (pollDraft === null) return;
-            const committed = commitPollIntervalDraft(pollDraft);
+            const committed = commitPollIntervalDraft(pollDraft, pollBounds);
             if (committed !== null && committed !== config.pollIntervalMs) {
               setConfig({ ...config, pollIntervalMs: committed });
             }
@@ -309,14 +317,14 @@ export function HostsSection({
             setPollDraft(null);
           }}
         />
-        {isPollDraftOutOfRange(pollDraft) && (
+        {isPollDraftOutOfRange(pollDraft, pollBounds) && (
           <p className="text-xs text-destructive">
-            Must be between {POLL_INPUT_MIN_MS} and {POLL_INPUT_MAX_MS} ms — capped to{' '}
-            {commitPollIntervalDraft(pollDraft)} on blur.
+            Must be between {pollBounds.min} and {pollBounds.max} ms — capped to{' '}
+            {commitPollIntervalDraft(pollDraft, pollBounds)} on blur.
           </p>
         )}
         <p className="text-xs text-muted-foreground">
-          How often the dashboard auto-refreshes — re-pulls the chat catalog, re-checks engaged hosts for live status, and re-checks host connectivity. Range 10000–120000ms (10s–2min); a typed value outside that range is capped to it when you leave the field. The dashboard enforces a 10s minimum and reverts any smaller stored value (including the 1500ms CLI default) to 60s, so the value shown is the cadence you get. The CLI reads the raw value directly for its watch mode (default 1500ms) — this field leaves that default alone unless you edit it. Backgrounded tabs still skip ticks.
+          How often the dashboard auto-refreshes — re-pulls the chat catalog, re-checks engaged hosts for live status, and re-checks host connectivity. Range {pollBounds.min}–{pollBounds.max}ms ({Math.round(pollBounds.min / 1000)}s–{Math.round(pollBounds.max / 60000)}min); a typed value outside that range is capped to it when you leave the field. The dashboard enforces a 10s minimum and reverts any smaller stored value (including the 1500ms CLI default) to 60s, so the value shown is the cadence you get. The CLI reads the raw value directly for its watch mode (default 1500ms) — this field leaves that default alone unless you edit it. Backgrounded tabs still skip ticks.
         </p>
       </div>
 
@@ -340,28 +348,29 @@ export function HostsSection({
         <Input
           id="connectTimeout"
           type="number"
-          min="1"
-          max="60"
+          min={timeoutBounds.min}
+          max={timeoutBounds.max}
           value={config.connectTimeout}
           onChange={(e) =>
             setConfig({ ...config, connectTimeout: parseInt(e.target.value) || 10 })
           }
           onBlur={() => {
-            // WARDEN-747: clamp the committed value into the [1, 60] bounds the
-            // input already advertises — mirrors the WARDEN-374 attention-
-            // threshold clamp and the backend PUT /api/config guard so the value
-            // that persists is the value displayed. connectTimeout is always a
-            // number (onChange coerces via `parseInt || 10`), so no null guard.
-            const clamped = Math.min(60, Math.max(1, config.connectTimeout));
+            // Clamp the committed value into the SERVED bounds the input
+            // advertises (config-schema.js's clamp: [1, 60] descriptor,
+            // delivered via GET /api/config) — WARDEN-747's discipline, now
+            // derived instead of hand-copied (WARDEN-1331). connectTimeout is
+            // always a number (onChange coerces via `parseInt || 10`), so no
+            // null guard.
+            const clamped = clampToBounds(config.connectTimeout, timeoutBounds);
             if (clamped !== config.connectTimeout) {
               setConfig({ ...config, connectTimeout: clamped });
             }
           }}
         />
-        {(config.connectTimeout < 1 || config.connectTimeout > 60) && (
+        {isOutOfBounds(config.connectTimeout, timeoutBounds) && (
           <p className="text-xs text-destructive">
-            Must be between 1 and 60 seconds — capped to{' '}
-            {Math.min(60, Math.max(1, config.connectTimeout))} on blur.
+            Must be between {timeoutBounds.min} and {timeoutBounds.max} seconds — capped to{' '}
+            {clampToBounds(config.connectTimeout, timeoutBounds)} on blur.
           </p>
         )}
       </div>
