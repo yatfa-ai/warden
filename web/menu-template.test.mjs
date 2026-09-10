@@ -20,7 +20,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
-const { buildMenuTemplate, flattenMenuItems } = require('../electron/menu-template.cjs');
+const { buildMenuTemplate, flattenMenuItems, windowNeedsRestore, REACHABILITY_EXEMPT } = require('../electron/menu-template.cjs');
+const { readFileSync } = require('node:fs');
 
 const PLATFORMS = ['darwin', 'win32', 'linux'];
 
@@ -339,4 +340,130 @@ test('flattenMenuItems skips separators and descends into submenus', () => {
     { label: 'B', role: 'quit' },
   ]);
   assert.deepEqual(flat.map((i) => i.label), ['A1', 'A2', 'B']);
+});
+
+// ---------------------------------------------------------------------------
+// REACHABILITY, not just SHAPE (WARDEN-1333).
+//
+// With close-to-tray ON the window is HIDDEN but ALIVE (the close intercept
+// hide()s it and window-all-closed never fires), and on macOS the application
+// menu bar stays present and fully clickable in exactly that state. Every test
+// above proves a menu item HAS an executable action; none of them can see that
+// an action can run against an INVISIBLE window — Settings pushed into a
+// hidden window opens where nobody can see it, and a dialog parented to a
+// hidden window sits open awaiting a click with zero visible windows.
+//
+// The rule — an action that targets the main window must first ensure the
+// window is visible — lives in menu-template.cjs (electron-free, like the
+// template itself): buildMenuTemplate wraps every injected action so it runs
+// main's ensureMainWindowVisible() BEFORE acting, and openDataFolder is the
+// one deliberate exemption (its destination is the OS file manager, not the
+// app window). The tests below pin the ordering, the exemption, and — because
+// main.cjs cannot be required under node --test — main.cjs's actual wiring of
+// the guard, so a revert to the unwired behaviour of any one of them turns the
+// suite RED rather than shipping a menu that is usable only in the states the
+// owner is never in.
+// ---------------------------------------------------------------------------
+
+/** buildWithSpies + an ensureMainWindowVisible spy recording its position in the click order. */
+function buildWithOrder(platform) {
+  const order = [];
+  const template = buildMenuTemplate({
+    platform,
+    appName: 'Yatfa Warden',
+    handlers: {
+      ensureMainWindowVisible: () => order.push('ensure'),
+      openSettings: () => order.push('openSettings'),
+      showAbout: () => order.push('showAbout'),
+      showStallDiagnostics: () => order.push('showStallDiagnostics'),
+      openDataFolder: () => order.push('openDataFolder'),
+      toggleMaximize: () => order.push('toggleMaximize'),
+    },
+  });
+  return { template, order };
+}
+
+// [menu item label, injected handler, platforms the item exists on]
+const WINDOW_TARGETING_ITEMS = [
+  ['Settings…', 'openSettings', ['darwin', 'win32', 'linux']],
+  ['Stall Diagnostics…', 'showStallDiagnostics', ['darwin', 'win32', 'linux']],
+  ['About Yatfa Warden', 'showAbout', ['win32', 'linux']],
+  ['Maximize / Restore', 'toggleMaximize', ['win32', 'linux']],
+];
+
+for (const platform of PLATFORMS) {
+  test(`[${platform}] every window-targeting item ensures the window is visible BEFORE it acts`, () => {
+    const { template, order } = buildWithOrder(platform);
+    for (const [label, handler, platforms] of WINDOW_TARGETING_ITEMS) {
+      if (!platforms.includes(platform)) continue;
+      order.length = 0;
+      const item = findItem(template, label);
+      assert.ok(item, `${label} is missing from the template`);
+      item.click();
+      assert.deepEqual(
+        order,
+        ['ensure', handler],
+        `${label} acted without first ensuring the main window is visible — ` +
+          'while the window is hidden to the tray this click vanishes into an invisible window',
+      );
+    }
+  });
+
+  test(`[${platform}] Open Data Folder does NOT restore the window (deliberate exemption)`, () => {
+    const { template, order } = buildWithOrder(platform);
+    const folder = findItem(template, 'Open Data Folder');
+    assert.ok(folder, 'Open Data Folder is missing');
+    folder.click();
+    // Its destination is the OS file manager (shell.openPath), which is visible
+    // regardless of the app window's state — restoring the window would be a
+    // spurious raise the item never promised.
+    assert.deepEqual(order, ['openDataFolder'], 'Open Data Folder must stay exempt from the reachability guard');
+  });
+}
+
+test('the exemption list is exactly the one recorded decision (adding one must be a stated change)', () => {
+  assert.deepEqual(
+    [...REACHABILITY_EXEMPT.keys()],
+    ['openDataFolder'],
+    'REACHABILITY_EXEMPT changed — every exemption needs a recorded reason here and in the PR',
+  );
+});
+
+test('windowNeedsRestore: a hidden-but-alive window needs restoring; visible, destroyed, or absent does not', () => {
+  assert.equal(windowNeedsRestore({ isDestroyed: () => false, isVisible: () => false }), true, 'hidden window');
+  assert.equal(windowNeedsRestore({ isDestroyed: () => false, isVisible: () => true }), false, 'visible window — no raise, no focus steal');
+  assert.equal(windowNeedsRestore({ isDestroyed: () => true, isVisible: () => false }), false, 'destroyed window — nothing to restore');
+  assert.equal(windowNeedsRestore(null), false, 'no window');
+});
+
+// main.cjs cannot be required under node --test, so its half of the wiring is
+// pinned by source assertion. This is the mutation guard's second half: the
+// template tests above go RED if a wrap disappears from the template, this one
+// goes RED if main.cjs stops supplying the live guard the wrap calls.
+test('main.cjs actually wires ensureMainWindowVisible — visibility-gated, through showMainWindow', () => {
+  const src = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+
+  const wiring = src.match(/function ensureMainWindowVisible\(\) \{[\s\S]*?\n\}/);
+  assert.ok(wiring, 'main.cjs no longer defines ensureMainWindowVisible — the menu guard is unwired');
+  assert.match(
+    wiring[0],
+    /windowNeedsRestore\(win\)/,
+    'ensureMainWindowVisible must gate on the pure windowNeedsRestore(win) decision',
+  );
+  assert.match(
+    wiring[0],
+    /showMainWindow\(\)/,
+    'ensureMainWindowVisible must restore through showMainWindow() — the tray-proven restore path',
+  );
+
+  const install = src.slice(src.indexOf('function installApplicationMenu'));
+  assert.ok(install.length > 0, 'installApplicationMenu is gone from main.cjs');
+  const handlersIdx = install.indexOf('handlers: {');
+  assert.ok(handlersIdx !== -1, 'installApplicationMenu no longer passes a handlers object to buildMenuTemplate');
+  assert.match(
+    install.slice(handlersIdx, handlersIdx + 600),
+    /ensureMainWindowVisible/,
+    'installApplicationMenu must inject ensureMainWindowVisible into buildMenuTemplate — ' +
+      'without it the template has nothing to call and every click degrades to the unwired behaviour',
+  );
 });

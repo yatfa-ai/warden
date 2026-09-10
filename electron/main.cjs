@@ -61,7 +61,7 @@ const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('.
 // menu's shape is unit-tested in web/menu-template.test.mjs, and main injects the
 // live actions. The stall-journal reduction the Diagnostics item shows is pure
 // too (web/stall-summary.test.mjs).
-const { buildMenuTemplate } = require('./menu-template.cjs');
+const { buildMenuTemplate, windowNeedsRestore } = require('./menu-template.cjs');
 const { summarizeStalls, formatStallSummary } = require('./stall-summary.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
@@ -498,6 +498,11 @@ function installApplicationMenu() {
           platform: process.platform,
           appName: 'Yatfa Warden',
           handlers: {
+            // WARDEN-1333: the template wraps every window-targeting action
+            // below with this restore-first guard (Open Data Folder is the one
+            // deliberate exemption — its destination is the OS file manager,
+            // not the app window).
+            ensureMainWindowVisible,
             // The menu's Settings… item opens the SAME Settings page the gear
             // button opens: main pushes this, the renderer's one effect calls
             // setSettingsOpen(true). No preload (browser / smoke) → no
@@ -852,6 +857,21 @@ function showMainWindow() {
     win.show();
     win.focus();
   }
+}
+
+// WARDEN-1333 — the reachability guard the APPLICATION menu's window-targeting
+// actions run through (the template wraps every injected action with it; see
+// the REACHABILITY block in menu-template.cjs). With close-to-tray ON the
+// window is hidden but alive, and the menu bar stays clickable in exactly that
+// state — so a Settings push or a modal parented to the hidden window lands
+// where nobody can see it. This restores the window ONLY when it is hidden:
+// showMainWindow() is unconditional (that is what the tray's "Show" wants),
+// but a menu action must not raise or steal focus from a window that is
+// already visible. The pure decision lives in menu-template.cjs
+// (windowNeedsRestore), electron-free and unit-tested; this is the live
+// wiring the template's wrap calls before every window-targeting action.
+function ensureMainWindowVisible() {
+  if (windowNeedsRestore(win)) showMainWindow();
 }
 
 function buildTrayMenu() {
