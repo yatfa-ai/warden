@@ -11,6 +11,16 @@ import { EmptyState } from './EmptyState';
 import { loadObs, saveObs, resetObsPrefDefaults } from '@/lib/storage';
 import type { ObsResetKey } from '@/lib/storage';
 import { postJson } from '@/lib/api';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { Input } from '@/components/ui/input';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { fetchBounded } from '@/lib/api';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
@@ -101,6 +111,21 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Inline rename state (mirrors the shipped WorkspaceTabs twin, WARDEN-424/432):
+  // `editingId` is the session being renamed; `draft` is the in-flight name
+  // (committed on Enter/blur, reverted on Escape).
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  // WARDEN-1327 — the tab under a pending menu-Close confirm. The menu item is
+  // only the REQUEST; the destructive ConfirmDialog at the root is where
+  // closeTab (close = DELETE the {id}.json/{id}.md transcripts, WARDEN-792)
+  // actually fires — a transcript-destroying click buried in a 5-item menu is
+  // exactly the misclick profile the shared dialog exists for (the
+  // CollectionsSection delete-card shape). The × affordance and the idle-close
+  // tick are deliberately NOT routed through this; their instant behavior is
+  // unchanged.
+  const [pendingCloseId, setPendingCloseId] = useState<string | null>(null);
   const { prefs } = useNotificationPrefs();
   // `refresh` is memoized with [] deps and drives the boot effect; reading
   // prefs directly there would retrigger boot on every preference change. The
@@ -411,6 +436,70 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
     return label ? `@${label}` : `@${session.host}`;
   };
 
+  // WARDEN-1327 — the composed `container (project) @ host` string the tab's
+  // title tooltip builds. Composed ONCE here and consumed by BOTH the tooltip
+  // and the menu's "Copy agent@host" item so the two can never drift (the
+  // identical hover-only-and-therefore-uncopyable pain WARDEN-517 closed for
+  // DirectiveHistory).
+  const descriptor = (id: string) => {
+    const session = sessions.find((s) => s.id === id);
+    if (!session) return '';
+    return `${session.container || 'Unknown'}${session.project ? ` (${session.project})` : ''} @ ${hostLabelFor(session.host ?? '', hostLabels) || session.host || 'local'}`;
+  };
+
+  // Inline rename (mirrors WorkspaceTabs.tsx:53-60). The draft seeds from the
+  // RAW stored name — not nameOf's 6-hex fallback — so a rename always starts
+  // from what the server actually has.
+  const startRename = (id: string) => {
+    setEditingId(id);
+    setDraft(sessions.find((s) => s.id === id)?.name || '');
+  };
+  const cancelRename = () => setEditingId(null);
+  const commitRename = () => {
+    const id = editingId;
+    setEditingId(null);
+    if (id === null) return;
+    // An empty/whitespace-only draft is a CANCEL, never a commit: the PATCH
+    // endpoint does no validation (server.js:901 passes the string straight to
+    // renameSession, which writes it verbatim), so committing empty would
+    // destroy the stored name on disk and nameOf would silently fall back to
+    // the 6-hex id.
+    if (draft.trim() === '') return;
+    void renameSessionRemote(id, draft);
+  };
+
+  // PATCH /api/sessions/:id — the backend-complete, fully unit-tested endpoint
+  // no UI has ever called before this menu. Deliberately a plain fetch (there
+  // is no patchJson in lib/api.ts and adding one is out of scope), in the
+  // shape of CollectionsSection's collection rename. NON-optimistic: local
+  // state only moves on the server-confirmed body, so a rejected rename leaves
+  // the previous name in place and the error toast is the only feedback.
+  const renameSessionRemote = async (id: string, name: string) => {
+    if (name === sessions.find((s) => s.id === id)?.name) return; // unchanged — skip the pointless disk rewrite
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const s: SessionMeta = await r.json();
+      setSessions((p) => p.map((x) => (x.id === id ? { ...x, name: s.name } : x)));
+    } catch (err) {
+      toast.error(`Failed to rename session: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+
+  // Focus the rename input when it appears (controlled via ref, not a DOM
+  // query — WARDEN-68 Rule 4) and select-all so a fresh name is one keystroke
+  // away. Mirrors WorkspaceTabs.tsx:46-51.
+  useEffect(() => {
+    if (editingId) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editingId]);
+
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="flex items-center justify-between px-2 py-1.5 compact:py-1 border-b shrink-0">
@@ -473,21 +562,73 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
           )}
           <div className="flex items-center gap-1 px-2 py-1.5 compact:py-1 border-b shrink-0 overflow-x-auto">
             {openIds.map((id) => {
-              const session = sessions.find((s) => s.id === id);
               const hostLbl = hostLabel(id);
+              const editing = editingId === id;
               return (
-                <button
-                  key={id}
-                  onClick={() => setActiveId(id)}
-                  className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
-                  title={session ? `${session.container || 'Unknown'}${session.project ? ` (${session.project})` : ''} @ ${hostLabelFor(session.host ?? '', hostLabels) || session.host || 'local'}` : ''}
-                >
-                  {nameOf(id)}{hostLbl && <span className="ml-1 opacity-70">{hostLbl}</span>}
-                  <span
-                    className="ml-1.5 opacity-50 hover:opacity-100"
-                    onClick={(e) => { e.stopPropagation(); closeTab(id); }}
-                  >×</span>
-                </button>
+                // The React key MUST sit on the outermost rendered element. The
+                // ContextMenu root renders no DOM, so a key left on the inner
+                // <button> is lost across renders (WARDEN-926 Principle 3; the
+                // WorkspaceTabs.tsx:102 precedent).
+                <ContextMenu key={id}>
+                  <ContextMenuTrigger asChild disabled={editing}>
+                    {/*
+                      Stable shell carries the trigger; the interactive children
+                      live INSIDE it. While renaming, the shell holds the <Input>
+                      and `disabled={editing}` lets a right-click inside the input
+                      fall through to the NATIVE text-edit menu instead of this
+                      themed one (radix honors disabled on the trigger without
+                      disabling pointer events). No stopPropagation/preventDefault
+                      anywhere on the trigger — per WARDEN-926 that would kill the
+                      menu entirely; radix's innermost-trigger-wins needs no guard,
+                      and the × span is not a trigger.
+                    */}
+                    <span className="inline-flex items-center shrink-0 whitespace-nowrap">
+                      {editing ? (
+                        <Input
+                          ref={inputRef}
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onBlur={commitRename}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                            else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+                          }}
+                          className="h-6 w-28 text-xs px-1.5"
+                          aria-label="Session name"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => setActiveId(id)}
+                          className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+                          title={descriptor(id)}
+                        >
+                          {nameOf(id)}{hostLbl && <span className="ml-1 opacity-70">{hostLbl}</span>}
+                          <span
+                            className="ml-1.5 opacity-50 hover:opacity-100"
+                            onClick={(e) => { e.stopPropagation(); closeTab(id); }}
+                          >×</span>
+                        </button>
+                      )}
+                    </span>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    {/* Surfaces rename for the first time: PATCH /api/sessions/:id
+                        was backend-complete and unit-tested but never wired to any UI. */}
+                    <ContextMenuItem onSelect={() => startRename(id)}>Rename</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onSelect={() => void copyWithToast(nameOf(id))}>Copy session name</ContextMenuItem>
+                    {/* The full id is visible nowhere else in the UI (only as a 6-char
+                        truncation when unnamed), yet it addresses {id}.json/{id}.md
+                        on disk and every /api/sessions/:id call. */}
+                    <ContextMenuItem onSelect={() => void copyWithToast(id)}>Copy session id</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => void copyWithToast(descriptor(id))}>Copy agent@host</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    {/* Close = DELETE (WARDEN-792): this item only raises the
+                        destructive ConfirmDialog; closeTab fires on confirm. The ×
+                        keeps its instant behavior — the asymmetry is deliberate. */}
+                    <ContextMenuItem variant="destructive" onSelect={() => setPendingCloseId(id)}>Close</ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               );
             })}
           </div>
@@ -541,6 +682,23 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
           />
         </div>
       )}
+
+      {/* WARDEN-1327 — the destructive half of the tab menu's Close. Close =
+          delete (WARDEN-792): closeTab removes the session AND its
+          {id}.json/{id}.md transcripts from disk, so the menu item must not act
+          as a plain reversible "close". Mirrors the CollectionsSection
+          delete-card dialog: Cancel/Escape/overlay-click dismiss untouched;
+          only the destructive confirm destroys. Renders once at the root,
+          driven by pendingCloseId. */}
+      <ConfirmDialog
+        open={pendingCloseId !== null}
+        onOpenChange={(o) => { if (!o) setPendingCloseId(null); }}
+        title={pendingCloseId ? `Delete observer session "${nameOf(pendingCloseId)}"?` : ''}
+        description="Closing an observer tab deletes the session and its saved transcript from disk. This cannot be undone."
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => { if (pendingCloseId) closeTab(pendingCloseId); setPendingCloseId(null); }}
+      />
     </div>
   );
 }
