@@ -70,6 +70,11 @@ interface Props {
    *  series has ever arrived; a blip after a good poll keeps the last good
    *  matrix on screen rather than swapping it for an error. */
   error: Error | null;
+  /** Optional: opens an agent's chat. Threaded straight through to the shared
+   *  matrix scaffold's row-header context menu (its Open item). When absent,
+   *  that menu renders the three Copy items only — same opt-in shape as
+   *  FleetRecentCommits' onOpenFile?. */
+  onOpenChat?: (id: string) => void;
 }
 
 // Per-state Tailwind background classes (the render concern — kept OUT of the
@@ -99,7 +104,7 @@ function cellBg(state: string | null): string {
   return state != null ? (STATE_BG[state] ?? UNKNOWN_BG) : UNKNOWN_BG;
 }
 
-export function FleetStateTimeline({ series, agents, timestampFormat, loading, error }: Props) {
+export function FleetStateTimeline({ series, agents, timestampFormat, loading, error, onOpenChat }: Props) {
   // Memoized on the series + agents ONLY — refreshes on the 60s series cadence.
   const matrix = useMemo(() => selectStateCells(series, agents), [series, agents]);
 
@@ -113,6 +118,7 @@ export function FleetStateTimeline({ series, agents, timestampFormat, loading, e
       timestampFormat={timestampFormat}
       loading={loading}
       error={error}
+      onOpenChat={onOpenChat}
       hasSeries={series != null}
       loadingText="Loading fleet state…"
       errorText="Couldn't load fleet state"
