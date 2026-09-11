@@ -158,8 +158,11 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
   }
 
   // --- File -----------------------------------------------------------------
-  // NO "New Window" (see the header note — a second instance kills the first
-  // instance's backend). On Windows/Linux this is where Settings lives and where
+  // NO "New Window" (see the header note — since WARDEN-1346 a second
+  // Electron instance can't exist at all: the single-instance lock makes the
+  // second launch quit and raise the first instance instead, and a second
+  // window inside ONE process is still not a supported shape here). On
+  // Windows/Linux this is where Settings lives and where
   // Quit lives; on macOS both are in the app menu, leaving Close Window as the
   // one honest File action.
   template.push({

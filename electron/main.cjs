@@ -64,6 +64,40 @@ const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('.
 const { buildMenuTemplate, windowNeedsRestore } = require('./menu-template.cjs');
 const { summarizeStalls, formatStallSummary } = require('./stall-summary.cjs');
 
+// --- Single-instance lock (WARDEN-1346) ----------------------------------------
+// Warden is a SINGLE-INSTANCE app: every instance shares one backend port
+// (PORT below) and one ~/.yatfa-warden state dir (chats.json, activity,
+// stalls.jsonl), so two concurrent instances don't just collide — they
+// corrupt each other. Concretely: this module's killStalePort() runs on every
+// boot BEFORE forking its own backend and force-kills every PID LISTENING on
+// the port, with no way to tell a crashed previous run's stale backend from
+// the healthy backend of the instance running right now. Without a lock, a
+// double-launch (ordinary on Windows, the shipping platform) reaches
+// whenReady, taskkill /F's the LIVE instance's backend mid-request (a torn
+// write into the shared state WARDEN-988 serialized within-process only),
+// forks its own backend onto the same port, and opens a second window —
+// leaving window #1 silently served by a foreign process.
+//
+// requestSingleInstanceLock() makes the second launch a no-op: the losing
+// instance quits HERE, at module scope — before whenReady, before
+// installApplicationMenu(), before killStalePort(), before the backend fork,
+// before any window — and the 'second-instance' event below raises the
+// existing window instead. Crash-sentinel safety is unaffected: markers are
+// written inside whenReady (writeThisInstanceMarker) and cleared per-PID
+// (crash-sentinel-<pid>.json), so the losing instance writes none of A's.
+//
+// DELIBERATE CONSEQUENCE — multi-instance is now UNSUPPORTED, including
+// packaged + dev side-by-side and two different WARDEN_PORT instances. That
+// is the point: coexistence of two instances is precisely what corrupts the
+// shared state today. A bare `node scripts/dev.mjs server` (no Electron) is
+// untouched — the lock lives only in this Electron main process.
+//
+// killStalePort() itself stays UNCHANGED: with the lock held, any PID on the
+// port at boot is by construction a stale leftover from a crashed previous
+// run (the lock was released), which is exactly the case it was written for.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) app.quit();
+
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
 
@@ -1102,6 +1136,12 @@ ipcMain.on('telemetry:renderer-error', (_event, serialized) => {
 });
 
 app.whenReady().then(async () => {
+  // Single-instance belt-and-braces (WARDEN-1346): a losing instance already
+  // called app.quit() at module scope; this guards the quit-before-ready race
+  // so no lock-held-only work (menu install, killStalePort, backend fork,
+  // window) can ever run without the lock.
+  if (!gotTheLock) return;
+
   // Replace Electron's STOCK application menu (WARDEN-1280). Installed FIRST —
   // before the backend fork and the window — so the app never briefly shows the
   // stock template's "About Electron" / electronjs.org / New Window items, and so
@@ -1233,6 +1273,22 @@ function cleanup() {
 }
 
 app.on('window-all-closed', () => { cleanup(); app.quit(); });
+
+// Single-instance raise (WARDEN-1346): the ONE thing a second launch does
+// instead of booting — it asks the running instance to come forward. Covers
+// the two real hidden-alive states: close-to-tray (WARDEN-330) hides the
+// window but leaves it alive, and minimize. showMainWindow() (above) is the
+// unconditional show+focus gesture — correct here because a second launch IS
+// an explicit request to be raised, unlike the menu's
+// ensureMainWindowVisible(), which deliberately restores only when hidden.
+app.on('second-instance', () => {
+  if (win && !win.isDestroyed() && win.isMinimized()) win.restore();
+  showMainWindow();
+  // macOS: also bring the whole app forward (Dock behavior), like a Dock
+  // icon click would — Linux/Windows already focus via win.focus() above.
+  if (process.platform === 'darwin') app.focus({ steal: true });
+});
+
 app.on('before-quit', () => {
   // Mark a real quit BEFORE the window close events fire (app.quit() runs
   // before-quit, then closes each window) so the close-to-tray intercept does

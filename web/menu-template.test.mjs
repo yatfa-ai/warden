@@ -121,8 +121,10 @@ for (const platform of PLATFORMS) {
     const { template } = buildWithSpies(platform);
     const labels = flattenMenuItems(template).map((i) => String(i.label ?? ''));
     const roles = flattenMenuItems(template).map((i) => String(i.role ?? ''));
-    // File > New Window: Warden holds no single-instance lock, so a second
-    // instance's killStalePort() kills the FIRST instance's backend.
+    // File > New Window: since WARDEN-1346 the app holds a single-instance
+    // lock (a second Electron launch quits and raises the first instance), and
+    // a second window inside ONE process is still not a supported shape here —
+    // so New Window stays gone on its own merits.
     assert.ok(!labels.some((l) => /new window/i.test(l)), 'New Window is present');
     assert.ok(!roles.includes('newWindow'), 'the newWindow role is present');
     // "About Electron" — the stock About names the wrong application.
