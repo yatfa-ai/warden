@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { resolveChat, resolveChatWithRefresh, comparePinned, compareChats, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, discoverAll, capturePanes, DISCOVER_SCRIPT } from './chats.js';
 import { applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, _resetPaneDeltaStateForTests } from './companion.js';
-import { buildChat, parseActivityTimestamp } from './chatMeta.js';
+import { buildChat, windowActivityToMs } from './chatMeta.js';
 
 // ----------------------------- capturePanes routing -------------------------
 // WARDEN-276: under WARDEN_COMPANION_TRANSPORT=1, REMOTE hosts route capture-pane
@@ -619,12 +619,16 @@ describe('parseDiscoverRow', () => {
     assert.strictEqual(row.status, 'Up 3 hours (healthy)');
   });
 
-  it('rejoins a status that itself contains a tab', () => {
+  it('rejoins a status that itself contains a tab (WARDEN-1340 layout: name, 2-part status, cwd, activity, active)', () => {
     // Defensive: if docker's Status field ever embeds a tab, the middle columns
-    // between name and cwd are the status (rejoined), not split into cwd/active.
-    const row = parseDiscoverRow('c\tUp\tand\tmore\t/w\t1');
-    assert.strictEqual(row.status, 'Up\tand\tmore');
+    // between name and the cwd/activity tail are the status (rejoined), not split
+    // into cwd/activity. (Fixture updated from the pre-WARDEN-1340 4-field shape:
+    // the row now also carries the window_activity column, so a 2-part status
+    // makes the row 6 parts, and the tail anchor is cwd/activity/active.)
+    const row = parseDiscoverRow('c\tUp\tand\t/w\t1789088272\t1');
+    assert.strictEqual(row.status, 'Up\tand');
     assert.strictEqual(row.cwd, '/w');
+    assert.strictEqual(row.activitySecs, 1789088272);
     assert.strictEqual(row.active, true);
   });
 
@@ -643,6 +647,40 @@ describe('parseDiscoverRow', () => {
     assert.deepStrictEqual(parseDiscoverRow('c\tUp 1 hour\t1'), {
       name: 'c', status: 'Up 1 hour', cwd: '', active: true,
     });
+  });
+
+  // WARDEN-1340: the per-container display-message was widened to also yield
+  // tmux's #{window_activity} (epoch SECONDS of the window's last OUTPUT), so a
+  // live agent's row is 5 columns. The activity column sits second-to-last —
+  // between cwd and active — so `active` remains the LAST column and every
+  // existing tail-position parse above is unchanged.
+  it('parses a 5-column row: name, status, cwd, window_activity, active (WARDEN-1340)', () => {
+    assert.deepStrictEqual(
+      parseDiscoverRow('myproject-worker\tUp 2 hours\t/workspace\t1789088272\t1'),
+      { name: 'myproject-worker', status: 'Up 2 hours', cwd: '/workspace', activitySecs: 1789088272, active: true },
+    );
+  });
+
+  it('reads activitySecs=null for a 5-column row with an empty/garbage/non-positive activity column', () => {
+    // display-message failed or tmux predated window_activity → empty column;
+    // parseDiscoverRow degrades to null (lastActivity stays null downstream),
+    // never to a bogus value.
+    assert.strictEqual(parseDiscoverRow('c\tUp\t/w\t\t1').activitySecs, null);
+    assert.strictEqual(parseDiscoverRow('c\tUp\t/w\tgarbage\t1').activitySecs, null);
+    assert.strictEqual(parseDiscoverRow('c\tUp\t/w\t0\t1').activitySecs, null);
+    assert.strictEqual(parseDiscoverRow('c\tUp\t/w\t-5\t1').activitySecs, null);
+  });
+
+  it('5-column row with an empty cwd AND empty activity still parses (active stays last)', () => {
+    // Defensive tolerance: a 5-column row whose cwd and activity columns are
+    // both empty (only reachable via corner cases — e.g. a pane path that itself
+    // contains a tab shifts the column count) must still parse rather than drop
+    // the row or misread `active`, which stays pinned to the LAST column.
+    const row = parseDiscoverRow('c\tUp 5 min\t\t\t0');
+    assert.strictEqual(row.name, 'c');
+    assert.strictEqual(row.cwd, '');
+    assert.strictEqual(row.activitySecs, null);
+    assert.strictEqual(row.active, false);
   });
 
   it('returns null for blank / too-short / malformed rows', () => {
@@ -763,63 +801,106 @@ describe('discover() default path builds chats via buildChat (refactor is a no-o
   });
 });
 
-// WARDEN-376: the default SSH discover path's second-pass activity capture was
-// refactored to parse the leading pane line via the shared parseActivityTimestamp
-// (the SAME helper the companion path uses). Every existing discover test skips
-// this pass with { activity: false }, so this block exercises the capture path
-// itself — locking the refactor as a no-op and proving default<->companion
-// parity (both produce the same lastActivity for the same leading line). The raw
-// `run` the capture pass uses is injected via deps.run (defaults to the real run;
-// production behavior unchanged).
-describe('discover() default-path activity capture uses the shared helper (WARDEN-376)', () => {
-  it('populates lastActivity from the captured leading pane line (parity with companion)', async () => {
-    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1'; // one active agent
-    const pane = '[2024-01-15 10:30:00] worker: thinking';
+// WARDEN-1340: the default SSH discover path derives lastActivity from the
+// discover row's #{window_activity} column — tmux's own epoch-SECONDS record of
+// the window's last OUTPUT, read in the SAME per-container display-message that
+// already produced cwd (zero extra round-trips). The previous mechanism — a
+// second pass running `capture-pane -S - -E - | head -1` per active agent, then
+// parseActivityTimestamp on the FIRST line — read the OLDEST line of the
+// scrollback: a frozen clock that decayed continuously-working agents to
+// CRITICAL, a ring-buffer eviction edge once history-limit was hit, and usually
+// a bare shell prompt (silent null → UNKNOWN). These tests pin the new
+// mechanism. The raw `run` seam stays injectable so the tests can prove the
+// capture pass is GONE (runCalls === 0) — reverting the production change turns
+// the mutation-check test below RED.
+describe('discover() derives lastActivity from the discover row (WARDEN-1340)', () => {
+  // A plausible window_activity reading (epoch seconds — what tmux itself emits;
+  // ×1000 → ms is the lastActivity contract).
+  const FRESH_SECS = 1789088272;
+  const FRESH_MS = FRESH_SECS * 1000;
+
+  it('populates lastActivity from the row window_activity column (×1000 → ms) with NO capture round-trip', async () => {
+    const stdout = `myproject-worker\tUp 2 hours\t/work/myproject\t${FRESH_SECS}\t1`; // one active agent, live activity
     let runCalls = 0;
-    const res = await discover('prod', { connectTimeout: 10 }, { /* activity omitted -> capture runs */ }, {
+    const res = await discover('prod', { connectTimeout: 10 }, { /* activity flag irrelevant now */ }, {
       isCompanionTransportEnabled: () => false,
       runWithPool: async () => ({ ok: true, stdout }),
-      run: async () => { runCalls++; return { ok: true, stdout: pane }; },
+      run: async () => { runCalls++; return { ok: true, stdout: '' }; },
     });
-    assert.strictEqual(runCalls, 1, 'one capture-pane run per active agent');
+    assert.strictEqual(runCalls, 0,
+      'no per-agent run may fire — the row already carries the value from the SAME ssh round-trip');
     assert.strictEqual(res.ok, true);
     assert.strictEqual(res.chats.length, 1);
-    assert.strictEqual(res.chats[0].lastActivity, parseActivityTimestamp(pane),
-      'lastActivity parsed by the SAME helper the companion uses');
-    assert.ok(Number.isFinite(res.chats[0].lastActivity));
+    assert.strictEqual(res.chats[0].lastActivity, FRESH_MS,
+      'epoch seconds × 1000 — raw seconds would read as ~1970 and poison stampCatalogActivity');
   });
 
-  it('leaves lastActivity null when the captured line has no timestamp', async () => {
-    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1';
+  it('MUTATION CHECK — multi-line pane fixture: lastActivity follows the NEWEST signal, never the oldest scrollback line', async () => {
+    // The load-bearing fixture. The OLD code captured the full scrollback
+    // (`capture-pane -S - -E -`) and took its FIRST line (head -1, or the first
+    // unanchored regex match on the full capture) — on a long-lived pane line 1
+    // is pinned near session start, so this is what the old path would have
+    // consumed: first line 2020, last line fresh. The new code must NEVER call
+    // run() and must rest lastActivity on the row's window_activity. Reverting
+    // the production change turns this test RED twice over: runCalls > 0 and
+    // lastActivity would become 1577836801000 (the 2020 line) instead of FRESH_MS.
+    const OLD_PANE = [
+      '[2020-01-01 00:00:01] session banner — pinned here since the pane was created',
+      '... thousands of lines of scrollback the old capture would haul across ...',
+      '[2026-09-11 00:40:00] worker: latest output — what health SHOULD see',
+    ].join('\n');
+    const stdout = `myproject-worker\tUp 2 hours\t/work/myproject\t${FRESH_SECS}\t1`;
+    let runCalls = 0;
     const res = await discover('prod', {}, {}, {
       isCompanionTransportEnabled: () => false,
       runWithPool: async () => ({ ok: true, stdout }),
-      run: async () => ({ ok: true, stdout: 'agent output with no timestamp' }),
+      run: async () => { runCalls++; return { ok: true, stdout: OLD_PANE }; },
     });
-    assert.strictEqual(res.chats[0].lastActivity, null);
+    assert.strictEqual(runCalls, 0, 'the scrollback capture must be GONE from the activity path');
+    assert.strictEqual(res.chats[0].lastActivity, FRESH_MS,
+      'lastActivity rests on window_activity (the newest OUTPUT tmux itself tracks), not line 1 of scrollback');
+    assert.notStrictEqual(res.chats[0].lastActivity, 1577836801000,
+      'the 2020 first line must never leak into lastActivity');
   });
 
-  it('skips the capture pass entirely when lean (activity: false) — no per-agent run', async () => {
-    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1';
+  it('a legacy 4-column row (older script, or the docker-inspect cwd fallback) leaves lastActivity null', async () => {
+    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1'; // pre-WARDEN-1340 shape
+    const res = await discover('prod', {}, {}, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+    });
+    assert.strictEqual(res.chats[0].lastActivity, null,
+      'no activity column → null, never a stale or bogus value');
+  });
+
+  it('an empty/garbage window_activity column degrades to null (no bogus timestamp, row survives)', async () => {
+    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t\t1';
+    let runCalls = 0;
+    const res = await discover('prod', {}, {}, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+      run: async () => { runCalls++; return { ok: true, stdout: 'should not be called' }; },
+    });
+    assert.strictEqual(runCalls, 0);
+    assert.strictEqual(res.chats[0].lastActivity, null);
+    assert.strictEqual(res.chats[0].cwd, '/work/myproject', 'the row itself is not dropped');
+  });
+
+  it('the lean lifecycle poll gets the row value too — it rides the SAME round-trip for free', async () => {
+    // WARDEN-147/WARDEN-994 made lean mode skip the per-agent capture because it
+    // cost a fresh ssh per agent. The row column costs nothing, so lean mode no
+    // longer trades away lastActivity — the flag stays meaningful only for the
+    // discoverManual/local legs, which still run a per-session command.
+    const stdout = `myproject-worker\tUp 2 hours\t/work/myproject\t${FRESH_SECS}\t1`;
     let runCalls = 0;
     const res = await discover('prod', {}, { activity: false }, {
       isCompanionTransportEnabled: () => false,
       runWithPool: async () => ({ ok: true, stdout }),
       run: async () => { runCalls++; return { ok: true, stdout: '' }; },
     });
-    assert.strictEqual(runCalls, 0, 'lean mode skips the per-agent capture-pane run');
-    assert.strictEqual(res.chats[0].lastActivity, null);
-  });
-
-  it('a failed capture (run !ok) leaves lastActivity null without throwing (per-agent resilience)', async () => {
-    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1';
-    const res = await discover('prod', {}, {}, {
-      isCompanionTransportEnabled: () => false,
-      runWithPool: async () => ({ ok: true, stdout }),
-      run: async () => ({ ok: false, code: 1, stderr: 'capture failed' }),
-    });
-    assert.strictEqual(res.ok, true, 'discover itself still succeeds');
-    assert.strictEqual(res.chats[0].lastActivity, null);
+    assert.strictEqual(runCalls, 0, 'lean still runs no per-agent command');
+    assert.strictEqual(res.chats[0].lastActivity, FRESH_MS,
+      'the row value is applied even on the lean sweep — it was already paid for');
   });
 });
 
@@ -1121,7 +1202,11 @@ describe('discover() survives a failed docker stats (graceful N/A, WARDEN-309 #3
 // discover()'s, so no real ssh runs and no catalog file is written.
 describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
   const ENTRIES = [{ host: 'prod', session: 'sess-a', name: 'A', cwd: '/w', cmd: 'claude' }];
-  const PANE = '[2024-01-15 10:30:00] worker: thinking';
+  // WARDEN-1340: the non-lean activity probe is now `tmux display-message -p -t
+  // <session> '#{window_activity}'` — stdout is epoch SECONDS (trailing newline
+  // tolerated), not a pane line.
+  const WINDOW_ACTIVITY = '1789088272\n';
+  const WINDOW_ACTIVITY_MS = 1789088272000;
   // has-session probe: sess-a alive.
   const alive = { ok: true, stdout: '1 sess-a\n' };
 
@@ -1129,10 +1214,10 @@ describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
     let runCalls = 0, stamps = 0;
     const res = await discoverManual('prod', ENTRIES, {}, { activity: false }, {
       runWithPool: async () => alive,
-      run: async () => { runCalls++; return { ok: true, stdout: PANE }; },
+      run: async () => { runCalls++; return { ok: true, stdout: WINDOW_ACTIVITY }; },
       stampCatalogActivity: async () => { stamps++; },
     });
-    assert.strictEqual(runCalls, 0, 'lean mode skips the per-session capture-pane run');
+    assert.strictEqual(runCalls, 0, 'lean mode skips the per-session activity run');
     assert.strictEqual(stamps, 0, 'lean mode writes nothing to chats.json');
     // Liveness (the only thing the lifecycle diff needs) is still resolved.
     assert.strictEqual(res.length, 1);
@@ -1143,7 +1228,7 @@ describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
     const persisted = [{ ...ENTRIES[0], lastActivity: 1700000000000 }];
     const res = await discoverManual('prod', persisted, {}, { activity: false }, {
       runWithPool: async () => alive,
-      run: async () => { throw new Error('capture must not run in lean mode'); },
+      run: async () => { throw new Error('activity probe must not run in lean mode'); },
       stampCatalogActivity: async () => { throw new Error('stamp must not run in lean mode'); },
     });
     assert.strictEqual(res[0].lastActivity, 1700000000000,
@@ -1152,37 +1237,51 @@ describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
 
   // `opts` genuinely OMITTED (undefined → the `opts = {}` default fires). This is
   // byte-for-byte discoverHost's call shape (`discoverManual(host, entries, cfg)`,
-  // chats.js:529), which WARDEN-994 deliberately leaves un-gated — so this is the
-  // behavioral proof of criterion 3: /api/discover still captures and stamps.
-  it('opts omitted (discoverHost\'s call shape): still captures AND still stamps — WARDEN-245 untouched', async () => {
-    let runCalls = 0;
+  // chats.js), which WARDEN-994 deliberately leaves un-gated — so this is the
+  // behavioral proof of criterion 3: /api/discover still probes and stamps.
+  it('opts omitted (discoverHost\'s call shape): still probes window_activity AND still stamps — WARDEN-245 untouched', async () => {
+    let runCalls = 0, seenCmd = '';
     const stamped = [];
     const res = await discoverManual('prod', ENTRIES, {}, undefined, {
       runWithPool: async () => alive,
-      run: async () => { runCalls++; return { ok: true, stdout: PANE }; },
+      run: async (_host, cmd) => { runCalls++; seenCmd = cmd; return { ok: true, stdout: WINDOW_ACTIVITY }; },
       stampCatalogActivity: async (host, session, ts) => { stamped.push([host, session, ts]); },
     });
-    assert.strictEqual(runCalls, 1, 'one capture-pane run per active session');
-    assert.strictEqual(res[0].lastActivity, parseActivityTimestamp(PANE));
-    assert.deepStrictEqual(stamped, [['prod', 'sess-a', parseActivityTimestamp(PANE)]],
-      'the live value is persisted so it survives going inactive + a restart');
+    assert.strictEqual(runCalls, 1, 'one window_activity probe per active session');
+    assert.match(seenCmd, /display-message/, 'the probe is display-message, not a pane capture');
+    assert.match(seenCmd, /#\{window_activity\}/, 'it reads tmux\'s own window_activity (WARDEN-1340)');
+    assert.doesNotMatch(seenCmd, /capture-pane/, 'no scrollback capture on the activity path');
+    assert.strictEqual(res[0].lastActivity, WINDOW_ACTIVITY_MS,
+      'epoch seconds × 1000 → ms BEFORE the stamp (raw seconds would read as ~1970)');
+    assert.deepStrictEqual(stamped, [['prod', 'sess-a', WINDOW_ACTIVITY_MS]],
+      'the live ms value is persisted so it survives going inactive + a restart');
   });
 
-  it('non-lean ({ activity: true }) captures too — only `false` is lean', async () => {
+  it('non-lean ({ activity: true }) probes too — only `false` is lean', async () => {
     let runCalls = 0;
     await discoverManual('prod', ENTRIES, {}, { activity: true }, {
       runWithPool: async () => alive,
-      run: async () => { runCalls++; return { ok: true, stdout: PANE }; },
+      run: async () => { runCalls++; return { ok: true, stdout: WINDOW_ACTIVITY }; },
       stampCatalogActivity: async () => {},
     });
     assert.strictEqual(runCalls, 1);
   });
 
-  it('an INACTIVE session costs no capture in either mode', async () => {
+  it('a garbage window_activity readout leaves lastActivity null and stamps nothing', async () => {
+    const res = await discoverManual('prod', ENTRIES, {}, {}, {
+      runWithPool: async () => alive,
+      run: async () => ({ ok: true, stdout: '' }),
+      stampCatalogActivity: async () => { throw new Error('must not stamp a null value'); },
+    });
+    assert.strictEqual(res[0].active, true);
+    assert.strictEqual(res[0].lastActivity, null);
+  });
+
+  it('an INACTIVE session costs no probe in either mode', async () => {
     let runCalls = 0;
     const res = await discoverManual('prod', ENTRIES, {}, {}, {
       runWithPool: async () => ({ ok: true, stdout: '0 sess-a\n' }),
-      run: async () => { runCalls++; return { ok: true, stdout: PANE }; },
+      run: async () => { runCalls++; return { ok: true, stdout: WINDOW_ACTIVITY }; },
       stampCatalogActivity: async () => {},
     });
     assert.strictEqual(runCalls, 0);

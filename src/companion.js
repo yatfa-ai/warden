@@ -220,11 +220,21 @@ export function encodeRequest(id, method, params) {
 // tell the two paths apart by field. Both paths build the literal via the shared
 // chatMeta.buildChat(), so parity is structural (WARDEN-272 review #5).
 // lastActivity is parsed here from each ACTIVE container's host-side-captured
-// leading pane line (containerInfo.Pane) via the SAME parseActivityTimestamp
-// helper the default path uses — one regex, both paths agree by construction
-// (WARDEN-376 closed the slice-1 gap where the companion left lastActivity null
-// and active agents classified UNKNOWN in Fleet Health). Inactive containers,
-// lean-mode (no Pane captured), and garbage/empty lines leave lastActivity null.
+// leading pane line (containerInfo.Pane) via parseActivityTimestamp.
+//
+// WARDEN-1340 NOTE — this is now the ONE path still on the old mechanism. The
+// default SSH path derives lastActivity from #{window_activity} (tmux's own
+// epoch-seconds record of the window's last OUTPUT); this companion leg still
+// reads the leading pane line, whose first timestamp can be the OLDEST line of
+// the scrollback (the frozen-clock defect WARDEN-1340 fixes). It stays this way
+// deliberately: moving the Go side to #{window_activity} means editing
+// companion/main.go and rebuilding all six companion/dist/ binaries +
+// manifest.json, and this sandbox has no Go toolchain — shipping a main.go edit
+// with stale binaries would leave hosts serving the old behavior while their
+// ping reports the expected version (the WARDEN-376 lesson). Deferred to a
+// follow-up slice; once it lands, parseActivityTimestamp retires entirely.
+// Inactive containers, lean-mode (no Pane captured), and garbage/empty lines
+// leave lastActivity null.
 export function mapCompanionContainers(host, containers, session = 'agent') {
   const chats = [];
   for (const c of containers || []) {

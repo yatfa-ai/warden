@@ -5,7 +5,7 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog, stampCatalogActivity } from './config.js';
-import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, agentTarget, paneTarget } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, windowActivityToMs, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
 import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
@@ -25,33 +25,45 @@ const STATS_SENTINEL = '___WARDEN_STATS___';
 
 // One SSH round-trip: list containers AND test each for the `agent` tmux session,
 // then ONE `docker stats --no-stream` pass for per-container CPU/memory.
-// Emits a TSV row per container:  name \t status \t cwd \t active
+// Emits a TSV row per container:  name \t status \t cwd \t window_activity \t active
 // followed by a sentinel-opened docker-stats block (see STATS_SENTINEL).
 //
-// `cwd` is derived per-container INSIDE this same loop (no extra round-trip —
-// the loop already `docker exec`s each container for has-session). When the
-// `agent` session is live we capture the pane's current path (the dir the
-// agent's shell is actually in) via `tmux display-message -p '#{pane_current_path}'`;
-// otherwise (and as a fallback when display-message yields nothing) we read the
-// image's WorkingDir via `docker inspect`. Both resolve to an in-container path
-// the host can't reach directly — the git routes wrap git in `docker exec` for
-// these chats (WARDEN-235). `active` stays the LAST column so the existing
-// `parts.at(-1) === '1'` parse is unchanged; `cwd` is the second-to-last.
+// `cwd` AND `window_activity` are derived per-container INSIDE this same loop (no
+// extra round-trip — the loop already `docker exec`s each container for
+// has-session). When the `agent` session is live, ONE `tmux display-message -p`
+// yields BOTH the pane's current path (the dir the agent's shell is actually in)
+// and `#{window_activity}` — tmux's own epoch-SECONDS record of the window's last
+// OUTPUT, which lastActivity now rests on (WARDEN-1340: the previous source, line
+// 1 of a full-scrollback capture, was the OLDEST line of the pane — a frozen
+// clock that decayed continuously-working agents to CRITICAL). The two format
+// fields are separated by a LITERAL TAB character (the single-character gap in
+// `#{pane_current_path}<TAB>#{window_activity}` below — a JS template-literal `\t`
+// escape): tmux does NOT expand `\t` escapes in format strings (verified on tmux
+// 3.5a), and the tab can never collide with `#{window_activity}` (pure digits) —
+// a tab inside a real pane path is pathological and would at worst fail the
+// activitySecs parse → null, never a wrong value. Otherwise (and as a fallback
+// when display-message yields nothing) `info` falls back to the image's
+// WorkingDir via `docker inspect`, producing a 4-column legacy row
+// parseDiscoverRow still accepts (no activity column → lastActivity null).
+// Both resolve to an in-container path the host can't reach directly — the git
+// routes wrap git in `docker exec` for these chats (WARDEN-235). `active` stays
+// the LAST column so the existing `parts.at(-1) === '1'` parse is unchanged;
+// `cwd` is the third-from-last and `window_activity` the second-to-last.
 //
-// `tr -d '\r'` on the pane path tolerates a CRLF that can sneak in over an SSH
-// pty; any residual whitespace is trimmed in JS.
+// `tr -d '\r'` on the display-message output tolerates a CRLF that can sneak in
+// over an SSH pty; any residual whitespace is trimmed in JS.
 export const DISCOVER_SCRIPT = `
 docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '\\t') read -r name status; do
   [ -z "$name" ] && continue
-  cwd=''
+  info=''
   if docker exec "$name" tmux has-session -t agent >/dev/null 2>&1; then
     a=1
-    cwd=$(docker exec "$name" tmux display-message -p -t agent '#{pane_current_path}' 2>/dev/null | tr -d '\\r')
+    info=$(docker exec "$name" tmux display-message -p -t agent '#{pane_current_path}	#{window_activity}' 2>/dev/null | tr -d '\\r')
   else
     a=0
   fi
-  [ -z "$cwd" ] && cwd=$(docker inspect "$name" --format '{{.Config.WorkingDir}}' 2>/dev/null | tr -d '\\r')
-  printf '%s\\t%s\\t%s\\t%s\\n' "$name" "$status" "$cwd" "$a"
+  [ -z "$info" ] && info=$(docker inspect "$name" --format '{{.Config.WorkingDir}}' 2>/dev/null | tr -d '\\r')
+  printf '%s\\t%s\\t%s\\t%s\\n' "$name" "$status" "$info" "$a"
 done
 # Per-container resource usage (WARDEN-309): ONE \`docker stats --no-stream\`
 # collection for every container on this host, appended so it rides the SAME SSH
@@ -77,23 +89,43 @@ docker stats --no-stream --format '{{.Name}}\\t{{.CPUPerc}}\\t{{.MemPerc}}\\t{{.
 `;
 
 // Parse one TSV row emitted by DISCOVER_SCRIPT into the fields discover() needs.
-// Row layout:  name \t status \t cwd \t active
+// Row layout:  name \t status \t cwd \t window_activity \t active
 // `active` is the LAST column (parsing it last means reordering the middle never
-// shifts it); `cwd` is the second-to-last. Tolerates a legacy 3-column row (no
-// cwd) — cwd then reads ''. `status` is everything between `name` and `cwd`,
-// rejoined on `\t` in case docker's Status field ever contains a tab. Returns
-// null for a blank or too-short row. Pure (no docker, no ssh) so the 4-column
-// parse + cwd extraction are unit-testable in CI, which cannot run real
-// containers. See WARDEN-235.
+// shifts it); `window_activity` (WARDEN-1340) is the second-to-last — tmux's
+// epoch-SECONDS record of the window's last OUTPUT, parsed here to the raw
+// `activitySecs` number and converted to ms by the caller (windowActivityToMs,
+// chatMeta.js) so this parser stays a pure column reader; `cwd` is the
+// third-from-last. Tolerates the legacy shapes: a 4-column row (no activity —
+// pre-WARDEN-1340 script, or the docker-inspect cwd fallback firing) and a
+// 3-column row (no cwd) — the returned object then carries EXACTLY the old keys
+// (no `activitySecs` key at all), so legacy rows stay byte-identical for every
+// existing consumer. `status` is everything between `name` and `cwd`, rejoined
+// on `\t` in case docker's Status field ever contains a tab. Returns null for a
+// blank or too-short row. Pure (no docker, no ssh) so the row parse + cwd
+// extraction are unit-testable in CI, which cannot run real containers. See
+// WARDEN-235.
 export function parseDiscoverRow(line) {
   if (!line || !line.trim()) return null;
   const parts = line.split('\t');
   if (parts.length < 3) return null;
   const name = parts[0];
   const active = parts[parts.length - 1] === '1';
-  const cwd = parts.length >= 4 ? parts[parts.length - 2] : '';
-  const status = parts.slice(1, parts.length >= 4 ? -2 : -1).join('\t');
-  return { name, status, cwd, active };
+  const row = { name, status: '', cwd: '', active };
+  if (parts.length >= 5) {
+    // 5 columns: name \t status \t cwd \t window_activity \t active
+    row.status = parts.slice(1, -3).join('\t');
+    row.cwd = parts[parts.length - 3];
+    const secs = Number.parseInt(parts[parts.length - 2], 10);
+    row.activitySecs = Number.isFinite(secs) && secs > 0 ? secs : null;
+  } else if (parts.length === 4) {
+    // Legacy 4 columns: name \t status \t cwd \t active (no activity column)
+    row.status = parts.slice(1, -2).join('\t');
+    row.cwd = parts[parts.length - 2];
+  } else {
+    // Legacy 3 columns: name \t status \t active (no cwd, no activity)
+    row.status = parts.slice(1, -1).join('\t');
+  }
+  return row;
 }
 
 // Split DISCOVER_SCRIPT stdout into the discover-row region and the docker-stats
@@ -231,12 +263,6 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
   }
 
   const runWithPoolFn = deps.runWithPool ?? runWithPool;
-  // The second-pass activity capture uses the raw `run` (one fresh ssh per
-  // active agent). Injectable via deps.run so the capture path — which every
-  // existing discover test skips with { activity: false } — can be exercised
-  // end-to-end and the shared-helper refactor locked as a no-op. Defaults to
-  // the real run, so production behavior is unchanged. (WARDEN-376)
-  const runFn = deps.run ?? run;
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
   const res = await runWithPoolFn(host, DISCOVER_SCRIPT, { timeout }, cfg);
   if (!res.ok) {
@@ -244,18 +270,32 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
   }
   const session = cfg.tmuxSession || 'agent';
   const chats = [];
-  const activeAgents = [];
 
   // Split the docker-stats block (WARDEN-309) off the discover rows. The stats
   // ride the SAME SSH round-trip as the discover loop but are parsed into a
-  // separate name→stats map so the tested 4-column parseDiscoverRow is never fed
-  // a stats row. An absent block (older host / `docker stats` unavailable) yields
-  // an empty map → chats simply omit cpuPct/memPct/memUsage → UI renders nothing.
+  // separate name→stats map so parseDiscoverRow is never fed a stats row. An
+  // absent block (older host / `docker stats` unavailable) yields an empty map →
+  // chats simply omit cpuPct/memPct/memUsage → UI renders nothing.
   const { rows, statsBlock } = splitDiscoverOutput(res.stdout);
   const stats = parseDockerStats(statsBlock);
 
-  // First pass: parse all agents and collect active ones (parseDiscoverRow
-  // handles the name \t status \t cwd \t active layout + legacy 3-column rows).
+  // Single pass: parse all agents (parseDiscoverRow handles the
+  // name \t status \t cwd \t window_activity \t active layout + the legacy
+  // 4/3-column rows). WARDEN-1340: lastActivity now comes from the row's
+  // #{window_activity} column — tmux's own epoch-SECONDS record of the window's
+  // last OUTPUT, read in the SAME display-message the loop already ran for cwd.
+  // The former second pass (one fresh ssh per active agent running
+  // `capture-pane -S - -E - | head -1` + parseActivityTimestamp) is GONE: it read
+  // the OLDEST line of the scrollback (a frozen clock that decayed
+  // continuously-working agents to CRITICAL, a ring-buffer position once
+  // history-limit evictions began, or usually a bare prompt → silent null →
+  // UNKNOWN), cost a non-pooled ssh per agent, and made the lean flag
+  // load-bearing. windowActivityToMs does the ×1000 → ms conversion BEFORE
+  // anything downstream (stampCatalogActivity is ms-since-epoch; raw seconds
+  // would read as ~1970 and its only-when-fresher guard would then reject real
+  // updates forever). The companion transport keeps its own leading-line parse
+  // (unchanged Go binary — no Go toolchain here to rebuild its dist/ artifacts;
+  // WARDEN-376) until its slice lands.
   for (const line of rows.split('\n')) {
     const row = parseDiscoverRow(line);
     if (!row) continue;
@@ -264,6 +304,10 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
     // The chat literal is shared with the companion path via buildChat(), so the
     // two discovery paths cannot drift on shape (WARDEN-272 review #5).
     const chat = buildChat(host, name, status, cwd, active, session);
+
+    if (row.activitySecs != null) {
+      chat.lastActivity = windowActivityToMs(row.activitySecs);
+    }
 
     // Attach per-container CPU/memory from the docker-stats block (WARDEN-309).
     // Attached HERE in discover() ONLY — NEVER in buildChat, whose literal is
@@ -278,38 +322,6 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
     }
 
     chats.push(chat);
-    if (active) {
-      activeAgents.push(chat);
-    }
-  }
-
-  // Second pass: capture activity timestamps concurrently for all active agents.
-  // Skipped in the "lean" path (opts.activity === false, used by the lifecycle
-  // poll): that diff needs only alive/dead transitions, and this block spawns one
-  // fresh ssh per active agent — on Windows (no SSH ControlMaster multiplexing)
-  // the bulk of the unconditional 60s fleet sweep's cost. WARDEN-147 regression.
-  if (opts.activity !== false && activeAgents.length > 0) {
-    const activityResults = await Promise.all(
-      activeAgents.map(chat =>
-        runFn(host, `docker exec ${chat.container} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
-          .then(activityRes => {
-            if (activityRes.ok) {
-              // Shared timestamp parse (chatMeta.parseActivityTimestamp) — the
-              // SAME helper the companion path uses, so lastActivity is parsed
-              // identically by both discovery paths. (WARDEN-376)
-              const ts = parseActivityTimestamp(activityRes.stdout);
-              if (ts != null) {
-                chat.lastActivity = ts;
-              }
-            }
-            return chat;
-          })
-          .catch(err => {
-            console.warn(`Failed to capture activity for ${chat.container}:`, err instanceof Error ? err.message : String(err));
-            return chat;
-          })
-      )
-    );
   }
 
   sortChats(chats);
@@ -361,12 +373,21 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   if (opts.activity !== false && activeEntries.length > 0) {
     await Promise.all(
       activeEntries.map(entry =>
-        runFn(host, `tmux capture-pane -t ${entry.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
+        // WARDEN-1340: tmux's own #{window_activity} — the window's last OUTPUT
+        // in epoch seconds — replaces the `capture-pane -S - -E - | head -1` this
+        // leg used to run. The old command read the OLDEST line of the
+        // scrollback (a frozen clock) and cost the same ssh round-trip; the new
+        // one is strictly cheaper AND correct. Lean (opts.activity === false,
+        // the lifecycle poll) still skips this pass entirely, exactly as before
+        // (WARDEN-994).
+        runFn(host, `tmux display-message -p -t ${entry.session} '#{window_activity}'`, { timeout: 1000 })
           .then(async activityRes => {
             if (activityRes.ok) {
-              // Shared timestamp parse — same helper the companion + yatfa path
-              // use (WARDEN-376).
-              const ts = parseActivityTimestamp(activityRes.stdout);
+              // windowActivityToMs converts epoch SECONDS → the ms lastActivity
+              // contract BEFORE stampCatalogActivity (ms-since-epoch; raw
+              // seconds would read as ~1970 and its only-when-fresher guard
+              // would then reject real updates forever).
+              const ts = windowActivityToMs(activityRes.stdout);
               if (ts != null) {
                 entry.lastActivity = ts;
                 // Persist while alive so the value survives the chat later going
@@ -437,15 +458,16 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
       if (opts.activity !== false && activeLocalSessions.length > 0) {
         await Promise.all(
           activeLocalSessions.map(obj =>
-            // runLocalTmux is async (WARDEN-440): each capture-pane runs as a
+            // runLocalTmux is async (WARDEN-440): each display-message runs as a
             // non-blocking concurrent spawn, so this per-active-session sweep
-            // never holds the event loop.
-            runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-'])
+            // never holds the event loop. WARDEN-1340: #{window_activity} (epoch
+            // seconds of the window's last OUTPUT) replaces the full-scrollback
+            // capture whose head-of-buffer read the OLDEST pane line.
+            runLocalTmux(['display-message', '-p', '-t', obj.session, '#{window_activity}'])
               .then(async activityRes => {
                 if (activityRes.ok) {
-                  // Shared timestamp parse — same helper the companion + remote
-                  // manual path use (WARDEN-376).
-                  const ts = parseActivityTimestamp(activityRes.stdout);
+                  // ×1000 → ms BEFORE stampCatalogActivity (see discoverManual).
+                  const ts = windowActivityToMs(activityRes.stdout);
                   if (ts != null) {
                     obj.lastActivity = ts;
                     // Persist while alive so lastActivity survives the chat going
@@ -515,13 +537,16 @@ export async function discoverHost(host, cfg) {
       e, o: toCatalogChat(LOCAL, e, alive.has(e.session), null),
     })).map((x) => x.o);
     await Promise.all(objs.filter((o) => o.active).map((o) =>
-      // runLocalTmux is async (WARDEN-440): concurrent, non-blocking captures.
-      runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-'])
+      // runLocalTmux is async (WARDEN-440): concurrent, non-blocking calls.
+      // WARDEN-1340: #{window_activity} (epoch seconds of the window's last
+      // OUTPUT) replaces the full-scrollback capture whose head-of-buffer read
+      // the OLDEST pane line (a frozen clock, or the ring buffer's eviction
+      // edge once history-limit was reached).
+      runLocalTmux(['display-message', '-p', '-t', o.session, '#{window_activity}'])
         .then(async (r) => {
           if (r.ok) {
-            // Shared timestamp parse — same helper every discovery path uses
-            // (WARDEN-376).
-            const ts = parseActivityTimestamp(r.stdout);
+            // ×1000 → ms BEFORE stampCatalogActivity (see discoverManual).
+            const ts = windowActivityToMs(r.stdout);
             if (ts != null) {
               o.lastActivity = ts;
               // Persist while alive so lastActivity survives the chat going
