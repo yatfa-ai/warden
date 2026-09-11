@@ -25,7 +25,8 @@ import {
   type ThreadMessageLike,
 } from '@assistant-ui/react';
 import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { copyText as clipboardCopy } from '@/lib/clipboard';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -94,9 +95,6 @@ interface Props {
   // session the agent is actively producing output to is never idle. Read through
   // a ref inside the memoized `connect` so adding it never resubscribes the WS.
   onActivity?: () => void;
-  // Timestamp format pref (WARDEN-213): routes each message's Clock time through
-  // the shared formatTimestamp helper. Pure client-side localStorage pref.
-  timestampFormat: TimestampFormat;
 }
 
 const MAX_COMPOSER_HEIGHT = 160; // px — must match the `max-h-40` class (10rem)
@@ -150,7 +148,7 @@ function convertMessage(item: Item): ThreadMessageLike {
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props) {
+export function ObserverPanel({ sessionId, onActivity }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -681,7 +679,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
                     if (!item) return null;
                     if (item.kind === 'user')
                       return (
-                        <UserRow key={message.id} text={item.text} ts={item.ts} timestampFormat={timestampFormat} notifySuccess={prefs.notifySuccess} />
+                        <UserRow key={message.id} text={item.text} ts={item.ts} notifySuccess={prefs.notifySuccess} />
                       );
                     if (item.kind === 'observer')
                       return (
@@ -692,7 +690,6 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
                             (!!message.isLast || !!item.failure) && !busy && !item.streaming && !pendingGate
                           }
                           onRegenerate={regenerate}
-                          timestampFormat={timestampFormat}
                           notifySuccess={prefs.notifySuccess}
                         />
                       );
@@ -828,12 +825,16 @@ function Avatar({ kind }: { kind: 'user' | 'observer' }) {
   );
 }
 
-function Clock({ ts, timestampFormat }: { ts: number; timestampFormat: TimestampFormat }) {
+// The leaf timestamp renderer subscribes to the shared pref (WARDEN-1342,
+// slice 4) — every path that shows a Clock (UserRow, ObserverEntry) inherits
+// the pref without threading it.
+function Clock({ ts }: { ts: number }) {
+  const timestampFormat = useTimestampFormat();
   if (!ts) return null;
   return <span className="tabular-nums">{formatTimestamp(ts, timestampFormat)}</span>;
 }
 
-function UserRow({ text, ts, timestampFormat, notifySuccess }: { text: string; ts: number; timestampFormat: TimestampFormat; notifySuccess: boolean }) {
+function UserRow({ text, ts, notifySuccess }: { text: string; ts: number; notifySuccess: boolean }) {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -842,7 +843,7 @@ function UserRow({ text, ts, timestampFormat, notifySuccess }: { text: string; t
           <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="font-medium text-foreground/70">You</span>
-              <Clock ts={ts} timestampFormat={timestampFormat} />
+              <Clock ts={ts} />
             </div>
             <div className="whitespace-pre-wrap break-words rounded-2xl rounded-tr-sm border border-primary/20 bg-primary/10 px-3 py-2 text-sm">
               {text}
@@ -866,13 +867,11 @@ function ObserverEntry({
   item,
   canRegenerate,
   onRegenerate,
-  timestampFormat,
   notifySuccess,
 }: {
   item: Extract<Item, { kind: 'observer' }>;
   canRegenerate: boolean;
   onRegenerate: () => void;
-  timestampFormat: TimestampFormat;
   notifySuccess: boolean;
 }) {
   return (
@@ -881,7 +880,7 @@ function ObserverEntry({
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground/70">Observer</span>
-          <Clock ts={item.ts} timestampFormat={timestampFormat} />
+          <Clock ts={item.ts} />
         </div>
         <ContextMenu>
           <ContextMenuTrigger asChild>

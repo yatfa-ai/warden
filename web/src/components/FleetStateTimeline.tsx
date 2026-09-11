@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
 import type { ActivitySeries, Chat } from '@/lib/types';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { cn } from '@/lib/utils';
 import { FleetMatrixPanel, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
@@ -60,8 +59,6 @@ interface Props {
   series: ActivitySeries | null;
   /** The fleet agents (healthData.agents) — the row set, in catalog order. */
   agents: readonly Chat[];
-  /** Routes the sparse column time-labels through the shared timestamp helper. */
-  timestampFormat: TimestampFormat;
   /** True only during the very first fetch, before any data has arrived. The
    *  ONLY honest source for "still loading" — `series == null` conflates it with
    *  a failed fetch (WARDEN-1078). */
@@ -104,7 +101,7 @@ function cellBg(state: string | null): string {
   return state != null ? (STATE_BG[state] ?? UNKNOWN_BG) : UNKNOWN_BG;
 }
 
-export function FleetStateTimeline({ series, agents, timestampFormat, loading, error, onOpenChat }: Props) {
+export function FleetStateTimeline({ series, agents, loading, error, onOpenChat }: Props) {
   // Memoized on the series + agents ONLY — refreshes on the 60s series cadence.
   const matrix = useMemo(() => selectStateCells(series, agents), [series, agents]);
 
@@ -115,7 +112,6 @@ export function FleetStateTimeline({ series, agents, timestampFormat, loading, e
       rows={matrix.rows}
       buckets={matrix.buckets}
       agents={agents}
-      timestampFormat={timestampFormat}
       loading={loading}
       error={error}
       onOpenChat={onOpenChat}

@@ -26,6 +26,7 @@ import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { formatTokens } from '@/lib/formatTokens';
 import { findTranscriptMatches, stepMatchIndex, activeMatchMessageIndex } from '@/lib/transcriptSearch';
 
@@ -45,9 +46,6 @@ interface SessionTranscriptViewerProps {
   onOpenChange: (open: boolean) => void;
   // The session to read. null keeps the dialog closed without firing a fetch.
   session: { id: string; host: string; label: string } | null;
-  // Timestamp format pref (WARDEN-213): routes each message's time through the
-  // shared formatTimestamp helper.
-  timestampFormat: TimestampFormat;
 }
 
 // Read-only transcript viewer for any past Claude session (WARDEN-233). Opens from
@@ -55,7 +53,7 @@ interface SessionTranscriptViewerProps {
 // (text via ObserverMarkdown) — a plain fetch, no process is spawned. Mirrors the
 // DiffViewer/FileViewer shape (Dialog + ScrollArea + loading/error/empty/ready),
 // since a capped transcript is bounded read-only content, not an unbounded surface.
-export function SessionTranscriptViewer({ open, onOpenChange, session, timestampFormat }: SessionTranscriptViewerProps) {
+export function SessionTranscriptViewer({ open, onOpenChange, session }: SessionTranscriptViewerProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error' | 'empty'>('loading');
   const hostLabels = useHostLabels();
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
@@ -508,7 +506,6 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
                   <MessageBubble
                     key={i}
                     message={m}
-                    timestampFormat={timestampFormat}
                     isActive={i === activeMatchIdx}
                     bubbleRef={(el) => {
                       if (el) bubbleRefs.current.set(i, el);
@@ -531,17 +528,18 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
 function MessageBubble({
   message,
-  timestampFormat,
   isActive,
   bubbleRef,
 }: {
   message: TranscriptMessage;
-  timestampFormat: TimestampFormat;
   // WARDEN-513: ring the active search match + register its node so ↑/↓ can scroll
   // it into view. Both optional so non-search callers render unchanged.
   isActive?: boolean;
   bubbleRef?: (el: HTMLDivElement | null) => void;
 }) {
+  // WARDEN-1342 (slice 4): the bubble subscribes to the shared timestamp pref;
+  // formatTs stays a pure (mode-explicit) function for testability.
+  const timestampFormat = useTimestampFormat();
   const isUser = message.role === 'user';
   const usage = message.usage;
   const usageLabel = usage ? formatTokens(usage.total) : '';

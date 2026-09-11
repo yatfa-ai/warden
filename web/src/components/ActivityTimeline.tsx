@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
 import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { copyText } from '@/lib/clipboard';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger, ContextMenuLabel } from '@/components/ui/context-menu';
 import { toast } from 'sonner';
@@ -37,12 +38,10 @@ async function copyToClipboard(text: string) {
 }
 
 export function ActivityTimeline({
-  timestampFormat,
   typeFilter, setTypeFilter,
   agentFilter, setAgentFilter,
   hostFilter, setHostFilter,
 }: {
-  timestampFormat: TimestampFormat;
   // WARDEN-879: the three filters are now OWNED by ObserverTabs (persisted across
   // restart via loadObs/saveObs) and passed in as controlled props. The Selects
   // and the row context menu already call these setters, so they keep working
@@ -56,6 +55,9 @@ export function ActivityTimeline({
 }) {
   const [filtered, setFiltered] = useState<ActivityEvent[]>([]);
   const hostLabels = useHostLabels();
+  // WARDEN-1342 (slice 4): subscribes to the shared pref instead of taking it
+  // as a prop from ObserverTabs (a proven-zero-use carrier).
+  const timestampFormat = useTimestampFormat();
   const [limit, setLimit] = useState(100);
   // Re-render once per second so the "Updated Ns ago" label stays fresh.
   const [now, setNow] = useState(() => Date.now());

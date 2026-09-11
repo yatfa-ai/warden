@@ -17,7 +17,8 @@ import { toast } from 'sonner';
 import { EmptyState } from './EmptyState';
 import { MarkdownBody } from './MarkdownBody';
 import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/timelinePacing';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 
@@ -36,11 +37,9 @@ const DIRECTIVE_POLL_MS = POLL_INTERVAL_MS; // directives change rarely, but a s
 const FETCH_OPTS = pollerFetchOptions(DIRECTIVE_POLL_MS);
 
 export function DirectiveHistory({
-  timestampFormat,
   agentFilter, setAgentFilter,
   hostFilter, setHostFilter,
 }: {
-  timestampFormat: TimestampFormat;
   // WARDEN-879: the two filters are now OWNED by ObserverTabs (persisted across
   // restart via loadObs/saveObs) and passed in as controlled props. The Selects
   // and DirectiveEntry's context menu already call these setters, so they keep
@@ -275,7 +274,6 @@ export function DirectiveHistory({
                     <DirectiveEntry
                       key={`${d.timestamp}-${i}`}
                       directive={d}
-                      timestampFormat={timestampFormat}
                       setAgentFilter={setAgentFilter}
                       setHostFilter={setHostFilter}
                     />
@@ -292,16 +290,17 @@ export function DirectiveHistory({
 
 function DirectiveEntry({
   directive,
-  timestampFormat,
   setAgentFilter,
   setHostFilter,
 }: {
   directive: Directive;
-  timestampFormat: TimestampFormat;
   setAgentFilter: (v: string) => void;
   setHostFilter: (v: string) => void;
 }) {
   const hostLabels = useHostLabels();
+  // WARDEN-1342 (slice 4): the leaf that renders the directive timestamps
+  // subscribes to the shared pref; DirectiveHistory no longer threads it.
+  const timestampFormat = useTimestampFormat();
   // `container` is null for legacy pre-WARDEN-642 local directives (WARDEN-733).
   // Hoist to a const so its truthiness narrows through the onSelect closures
   // below — a `directive.container` property access would widen back to

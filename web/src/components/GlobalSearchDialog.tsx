@@ -21,7 +21,8 @@ import { Label } from '@/components/ui/label';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
 import { fetchBounded, readErrorBody } from '@/lib/api';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 // A pane grep hit from /api/search-pane (the default, instant leg). Renamed from
@@ -63,9 +64,6 @@ interface Props {
   // dialog would unmount the instant the dialog closes. App's handler both sets
   // the viewing session and closes this dialog.
   onOpenSession: (id: string, host: string, label: string) => void;
-  // Routes the past-conversation row's recency through the shared formatTimestamp
-  // helper (WARDEN-213) so its times match the Open-Chat browser's session rows.
-  timestampFormat: TimestampFormat;
 }
 
 // WARDEN-488: a NATIVE <button> (not a <div onClick>) is required so
@@ -117,7 +115,10 @@ function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; o
 // pane-only "Copy matched line" / "Copy pane name" items don't apply and are
 // dropped. Its own component (not inlined) for the same single-child/asChild
 // reason the pane row is.
-function GlobalSearchSessionRow({ result, onOpen, timestampFormat }: { result: SessionSearchResult; onOpen: (r: SessionSearchResult) => void; timestampFormat: TimestampFormat }) {
+function GlobalSearchSessionRow({ result, onOpen }: { result: SessionSearchResult; onOpen: (r: SessionSearchResult) => void }) {
+  // WARDEN-1342 (slice 4): the row itself subscribes — its recency label honors
+  // the shared timestamp pref without GlobalSearchDialog threading it.
+  const timestampFormat = useTimestampFormat();
   // Mirror OpenChatBrowserPage's history-row label fallback: summary, else
   // "cwd · host", else a generic "session" so a row is never blank.
   const label = result.summary || result.cwd || 'session';
@@ -159,7 +160,7 @@ function GlobalSearchSessionRow({ result, onOpen, timestampFormat }: { result: S
 //
 // `onClose` (the existing prop wired at App.tsx) is mapped to the shadcn Dialog's
 // `onOpenChange` internally so App.tsx needs no change.
-export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJumpToMatch, onOpenSession, timestampFormat }: Props) {
+export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJumpToMatch, onOpenSession }: Props) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PaneSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -412,7 +413,6 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
                     key={`${s.host}:${s.sessionId}-${idx}`}
                     result={s}
                     onOpen={handleSessionClick}
-                    timestampFormat={timestampFormat}
                   />
                 ))}
               </div>

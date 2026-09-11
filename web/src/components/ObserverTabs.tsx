@@ -27,7 +27,6 @@ import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLif
 import { AttentionView } from './AttentionView';
 import type { AttentionListProps } from './AttentionList';
 import type { Chat, SessionMeta } from '@/lib/types';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
   externalViewMode?: 'sessions' | 'activity' | 'directives' | 'attention' | null;
@@ -69,10 +68,6 @@ interface Props {
   //   behavior change for every fresh install, NOT a regression to "fix".
   observerAutoStart?: boolean;
   observerSessionTimeout?: number | null;
-  // Timestamp format pref (WARDEN-213): threaded to ObserverPanel + ActivityTimeline
-  // so every observer/timeline time honors it via the shared formatTimestamp helper.
-  // Optional with a 'relative' default so this component's `= {}` default stays valid.
-  timestampFormat?: TimestampFormat;
   // WARDEN-880 — the Attention view's data + handlers, threaded from App's lifted
   // attentionRollup (the SAME values the header AttentionBadge consumes). When
   // provided, a 4th "Attention" tab renders as a persistent peer to Activity/Directives
@@ -85,7 +80,7 @@ interface Props {
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
@@ -635,7 +630,7 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (
               <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-                <ObserverPanel sessionId={id} onActivity={() => bumpActivity(id)} timestampFormat={timestampFormat} />
+                <ObserverPanel sessionId={id} onActivity={() => bumpActivity(id)} />
               </div>
             ))}
           </div>
@@ -646,7 +641,6 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
       {viewMode === 'activity' && (
         <div className="flex-1 min-h-0">
           <ActivityTimeline
-            timestampFormat={timestampFormat}
             typeFilter={actTypeFilter} setTypeFilter={setActTypeFilter}
             agentFilter={actAgentFilter} setAgentFilter={setActAgentFilter}
             hostFilter={actHostFilter} setHostFilter={setActHostFilter}
@@ -658,7 +652,6 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
       {viewMode === 'directives' && (
         <div className="flex-1 min-h-0">
           <DirectiveHistory
-            timestampFormat={timestampFormat}
             agentFilter={dirAgentFilter} setAgentFilter={setDirAgentFilter}
             hostFilter={dirHostFilter} setHostFilter={setDirHostFilter}
           />

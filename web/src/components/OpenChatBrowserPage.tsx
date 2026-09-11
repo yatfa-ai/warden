@@ -18,7 +18,8 @@ import type { Chat } from '@/lib/types';
 // page render identical labels (no drift in chat names between the two surfaces).
 import { THIS_MACHINE, basename, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { formatTokens } from '@/lib/formatTokens';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
@@ -55,7 +56,9 @@ interface DiscoverItem {
   tokenUsage?: TokenUsage | null; // history: per-session LLM token total (WARDEN-367)
 }
 
-function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, showHostTags, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; showHostTags?: boolean; isBudgetOffender?: boolean; }) {
+function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, showHostTags, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; showHostTags?: boolean; isBudgetOffender?: boolean; }) {
+  // WARDEN-1342 (slice 4): the row leaf subscribes to the shared timestamp pref.
+  const timestampFormat = useTimestampFormat();
   if (it.kind === 'live') {
     return (
       <ContextMenu>
@@ -179,9 +182,6 @@ interface Props {
   onResume: (id: string, description: string, cwd: string, host: string) => void;
   onDiscoverHost: (host: string) => void;
   hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
-  // Timestamp format pref (WARDEN-213): routes every row time + the transcript
-  // viewer's message times through the shared formatTimestamp helper.
-  timestampFormat: TimestampFormat;
   // Show host badges (local/hostname) pref (WARDEN-434). One showHostTags toggle
   // governs all three surfaces (sidebar, pane, this page). `!== false` semantics
   // so undefined/default → shown — mirrors the sibling surfaces.
@@ -209,7 +209,7 @@ interface Props {
 // sets chatBrowserOpen; the back button / Escape clears it. Per WARDEN-68 Rule 7
 // the browser is a real UI surface (unbounded list + search), so it must be a
 // page, not a blocking Dialog.
-export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat, showHostTags, budget, initialSortUsage, hideOfflineHosts }: Props) {
+export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, showHostTags, budget, initialSortUsage, hideOfflineHosts }: Props) {
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
@@ -746,7 +746,6 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 onOpen={() => { if (it.openId) { onOpenChat(it.openId); onClose(); } }}
                 onResume={() => handleResume(it)}
                 onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
-                timestampFormat={timestampFormat}
                 showHostTags={showHostTags}
                 isBudgetOffender={isBudgetOffenderRow(it)}
               />
@@ -822,7 +821,6 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         open={!!viewing}
         onOpenChange={(o) => { if (!o) setViewing(null); }}
         session={viewing}
-        timestampFormat={timestampFormat}
       />
     </div>
   );

@@ -22,7 +22,8 @@ import { StatusDot } from '@/components/StatusDot';
 import { cn } from '@/lib/utils';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
-import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import type { Chat, AgentStateRow } from '@/lib/types';
 import { currentWatchNeed } from '@/lib/chatWatch';
 import { watchStateLabel } from '@/lib/desktopAlerts';
@@ -322,7 +323,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, sh
 // the list mirrors the pane grid (no sidebar reorder) and hide/unhide is
 // abolished. Closing a row (× / "Close pane") is `onClose`, which removes the
 // pane and records it in the workspace's recently-closed recovery list.
-export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, onKill, note, onSetNote, timestampFormat, isWatched, watchState, onToggleWatch }: {
+export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, onKill, note, onSetNote, isWatched, watchState, onToggleWatch }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -334,9 +335,6 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
   note?: string;
   onSetNote?: (text: string) => void;
-  // Timestamp format pref (WARDEN-213): routes the last-activity time + its
-  // hover tooltip through the shared formatTimestamp / formatAbsoluteFull helpers.
-  timestampFormat: TimestampFormat;
   // WARDEN-378: per-chat "watch" toggle state + handler (mirrors ChatRow).
   isWatched?: boolean; onToggleWatch?: () => void;
   // WARDEN-514: the chat's CURRENT AgentStateRow (when watched) → state-aware indicator.
@@ -344,6 +342,8 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
 }) {
   const type = c ? chatType(c) : '?';
   const hostLabels = useHostLabels();
+  // WARDEN-1342 (slice 4): the row leaf subscribes to the shared timestamp pref.
+  const timestampFormat = useTimestampFormat();
   const hostTag = c ? hostTagOf(c.host, hostLabels) : '';
   const dead = !c || c.active === false;
   const canRename = !!c && c.kind === 'tmux';

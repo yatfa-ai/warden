@@ -21,7 +21,8 @@
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { AlertTriangle, Check, HelpCircle, X } from 'lucide-react';
-import { formatAbsoluteFull, formatRelative } from '@/lib/formatTimestamp';
+import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import {
   getTelemetryTransmissionLog,
   type TransmissionLogEntry,
@@ -40,6 +41,11 @@ import { useVisiblePoller } from '@/lib/useVisiblePoller';
 const REFRESH_MS = 5000;
 
 export function TelemetryTransmissionLog() {
+  // WARDEN-1342 (slice 4 — the reach fix): the per-send recency label used to
+  // call formatRelative + a literal " ago", hardcoding relative mode. It honors
+  // the shared pref now — withSuffix keeps the suffix in relative mode, and
+  // formatTimestamp never appends it in absolute mode.
+  const timestampFormat = useTimestampFormat();
   // null = the initial pull has not resolved yet (distinct from [] = the ring is
   // empty / the bridge is absent). Without the tri-state, a momentarily-empty
   // ring on mount would flash the "no sends" message before the first pull
@@ -172,7 +178,7 @@ export function TelemetryTransmissionLog() {
                   className="ml-auto text-muted-foreground/70"
                   title={formatAbsoluteFull(d.timestamp)}
                 >
-                  {formatRelative(d.timestamp)} ago
+                  {formatTimestamp(d.timestamp, timestampFormat, { withSuffix: true })}
                 </span>
               </li>
             );

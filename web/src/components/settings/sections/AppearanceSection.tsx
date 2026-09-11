@@ -13,6 +13,9 @@
 // PaneTile reads/writes, so a store subscription is what keeps ONE read
 // channel per pref. `terminalColorScheme` stays in the bag: it is read only by
 // App and Settings and never reaches PaneTile at all.
+//
+// WARDEN-1342 (slice 4): `timestampFormat` followed them out of the bag for the
+// same reason — it is the same fact a dozen timestamp-display surfaces read.
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -46,6 +49,8 @@ import {
   useSetCopyOnSelect,
   useOnExitBehavior,
   useSetOnExitBehavior,
+  useTimestampFormat,
+  useSetTimestampFormat,
 } from '@/lib/uiStore';
 import { type AppearancePrefs } from '../types';
 
@@ -56,7 +61,6 @@ export function AppearanceSection(props: AppearanceSectionProps) {
     theme, setTheme,
     terminalColorScheme, setTerminalColorScheme,
     density, setDensity,
-    timestampFormat, setTimestampFormat,
     paneLayout, setPaneLayout,
     autoFocusNewPane, setAutoFocusNewPane,
     restoreOnStartup, setRestoreOnStartup,
@@ -81,6 +85,10 @@ export function AppearanceSection(props: AppearanceSectionProps) {
   const setCopyOnSelect = useSetCopyOnSelect();
   const onExitBehavior = useOnExitBehavior();
   const setOnExitBehavior = useSetOnExitBehavior();
+  // WARDEN-1342 (slice 4): same keep-the-names pattern — the Select and the
+  // reset button below are textually unchanged.
+  const timestampFormat = useTimestampFormat();
+  const setTimestampFormat = useSetTimestampFormat();
 
   // Terminal font family Select: a curated font, or "Custom…" which reveals a
   // free-text input for any installed CSS font (e.g. a Nerd Font for glyphs).

@@ -179,7 +179,6 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
 
 import type { Theme, TerminalColorScheme } from '@/lib/theme';
 import type { Density } from '@/lib/density';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type {
   RestoreOnStartup,
   PaneLayout,
@@ -207,8 +206,6 @@ export interface AppearancePrefs {
   setRestoreOnStartup: (v: RestoreOnStartup) => void;
   terminalColorScheme: TerminalColorScheme;
   setTerminalColorScheme: (v: TerminalColorScheme) => void;
-  timestampFormat: TimestampFormat;
-  setTimestampFormat: (v: TimestampFormat) => void;
   rememberWindowBounds: boolean;
   setRememberWindowBounds: (v: boolean) => void;
   launchAtLogin: boolean;
