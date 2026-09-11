@@ -120,3 +120,51 @@ export async function deliverImagePaste(
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+/**
+ * Decide whether a NATIVE DOM paste event should be claimed and routed into
+ * the terminal's paste routine.
+ *
+ * WHY THIS EXISTS (WARDEN-1338): the application menu's Edit ▸ Paste item is
+ * the app's THIRD paste entry point and the only one that never reached
+ * `pasteIntoTerm`. It is `{ role: 'paste' }` in electron/menu-template.cjs,
+ * which Electron executes as `webContents.paste()` against the focused
+ * webContents — it never consults pasteIntoTerm, the Ctrl/Cmd+V key handler,
+ * or the themed context menu. On an image clipboard, xterm's own paste
+ * listener reads text/plain (='' there) and the gesture dies in silence.
+ *
+ * WHAT THE ROLE PATH GIVES THE RENDERER: exactly one signal — a native paste
+ * event dispatched at the focused element, with NO keydown (verified live
+ * under Electron 43; see the WARDEN-1338 probe notes). That event is
+ * interceptable ONLY in the capture phase: xterm's own paste listener calls
+ * stopPropagation(), so every bubble-phase observer is structurally blind on
+ * this path (also verified live — a document bubble listener never fires).
+ *
+ * The two claim conditions are both load-bearing:
+ *
+ *   - `target` must be THIS pane's xterm helper textarea. A paste event
+ *     always targets the focused element, so identity with `termTextarea` is
+ *     the precise "this terminal has keyboard focus" test. A paste aimed at a
+ *     Settings input targets that input and is NEVER claimed — the Edit roles
+ *     must keep pasting natively everywhere outside the terminal (the
+ *     constraint stated in electron/menu-template.cjs's Edit-submenu comment:
+ *     they exist for exactly those fields).
+ *
+ *   - `clipboardData` must carry files (an image). Text-only pastes stay on
+ *     xterm's native path byte-for-byte — the WARDEN-254 bracketed-paste
+ *     contract — and a mixed image+text clipboard claims exactly as
+ *     Ctrl/Cmd+V does, where IMAGE WINS is the documented rule above.
+ *
+ * Pure and structural on purpose: it is the unit-tested guard for the
+ * PaneTile capture wiring, and Node tests can exercise it with plain
+ * structurally-typed arguments (no DOM).
+ */
+export function shouldRouteNativePasteToTerminal(
+  target: unknown,
+  termTextarea: unknown,
+  clipboardData: { files?: ArrayLike<unknown> | null } | null | undefined,
+): boolean {
+  if (target !== termTextarea) return false;
+  const files = clipboardData?.files;
+  return !!files && files.length > 0;
+}
