@@ -42,7 +42,8 @@ import {
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
 import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, ChevronLeftIcon, EllipsisIcon } from 'lucide-react';
-import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
 // Pure breadcrumb geometry (splitPathSegments / ancestorDir) for the clickable
@@ -73,9 +74,6 @@ interface FileViewerProps {
   /** Optional 1-based line to scroll to and visually highlight (WARDEN-227: when
    *  opened by Ctrl/Cmd+clicking a `path:line` token in a live terminal pane). */
   line?: number;
-  // "Timestamp format" pref (WARDEN-422): honors the client-side relative vs
-  // absolute pref on blame author-dates, mirroring every other timestamp surface.
-  timestampFormat: TimestampFormat;
   // Rendered ⇄ Source view mode for markdown (WARDEN-480) is no longer a prop:
   // it is a SHARED client-state fact this component subscribes to directly via
   // useFileViewerViewMode()/useSetFileViewerViewMode() (WARDEN-1288, roadmap
@@ -194,7 +192,7 @@ function useGatedFetch<T>(opts: {
   }, deps);
 }
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
   // The Rendered ⇄ Source toggle (WARDEN-480), read and written straight off the
   // shared client-state store (WARDEN-1288) rather than drilled down from App.
   const viewMode = useFileViewerViewMode();
@@ -1017,7 +1015,6 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, onNa
                     blameError={blameError}
                     chatId={chatId}
                     filePath={filePath}
-                    timestampFormat={timestampFormat}
                   />
                 )}
 
@@ -1130,15 +1127,18 @@ function HighlightedLine({ leaves }: { leaves: Leaf[] }) {
 // wallpapered with repeated commit info. The hash opens a popover that fetches what
 // that commit did to THIS file (/api/git-show ?hash&path), reusing the same committed-
 // diff inspector as the sidebar's expanded commit (WARDEN-180) and DiffBlock.
-function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, filePath, timestampFormat }: {
+function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, filePath }: {
   content: string;
   blame: BlameLine[] | null;
   blameLoading: boolean;
   blameError: string | null;
   chatId: string;
   filePath: string;
-  timestampFormat: TimestampFormat;
 }) {
+  // WARDEN-1342 (slice 4): the blame author-dates honor the shared timestamp
+  // pref — AnnotatedContent subscribes for itself instead of receiving the
+  // value through FileViewer.
+  const timestampFormat = useTimestampFormat();
   // Drop a single phantom trailing element (content ending in "\n" splits to an extra
   // "") so line numbers align with blame's 1-based result lines.
   const lines = useMemo(() => {

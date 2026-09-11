@@ -28,7 +28,8 @@ import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
 import { cn } from '@/lib/utils';
 import { basename } from '@/lib/chatDisplay';
-import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
+import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
@@ -556,6 +557,10 @@ export function GitRepoSummary({ branch, clean, ahead, behind, inProgress, stash
   // an amber tint so a quiet repo pops; fresh stays muted.
   const headMs = typeof headDate === 'string' && headDate ? Date.parse(headDate) : NaN;
   const headFresh = Number.isFinite(headMs);
+  // WARDEN-1342 (slice 4 — the reach fix): this freshness marker used to call
+  // formatRelative directly, hardcoding relative mode on an always-visible row.
+  // It honors the pref like every other timestamp surface now.
+  const timestampFormat = useTimestampFormat();
   const headStale = headFresh && Date.now() - headMs > STALE_HEAD_AGE_MS;
   // WARDEN-243: a named branch with NO upstream tracking (never `push -u`'d) is
   // local-only work with no remote backup — a durability risk a human glancing at
@@ -601,7 +606,7 @@ export function GitRepoSummary({ branch, clean, ahead, behind, inProgress, stash
         <span className="min-w-0 wrap-anywhere">⎇ {branch}</span>
       )}
       {headFresh && (
-        <span className={cn('shrink-0', headStale ? 'text-amber-400' : 'text-muted-foreground')}>· {formatRelative(headMs)}</span>
+        <span className={cn('shrink-0', headStale ? 'text-amber-400' : 'text-muted-foreground')}>· {formatTimestamp(headMs, timestampFormat)}</span>
       )}
       {clean === false && (
         <span className="inline-flex shrink-0 items-center gap-0.5">
@@ -798,6 +803,9 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
   const behindCount = typeof behind === 'number' ? behind : 0;
+  // WARDEN-1342 (slice 4 — the reach fix): per-branch freshness used to call
+  // formatRelative directly, hardcoding relative mode. Honors the pref now.
+  const timestampFormat = useTimestampFormat();
   const stashN = typeof stashCount === 'number' ? stashCount : 0;
   const isDetached = detached === true;
   const sha = typeof headSha === 'string' ? headSha.trim() : '';
@@ -1622,7 +1630,7 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                           </span>
                         )}
                         {fresh && (
-                          <span className={stale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatRelative(ms)}</span>
+                          <span className={stale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatTimestamp(ms, timestampFormat)}</span>
                         )}
                         {b.ahead > 0 && <span className="text-amber-400">↑{b.ahead}</span>}
                         {b.behind > 0 && <span className="text-blue-400">↓{b.behind}</span>}

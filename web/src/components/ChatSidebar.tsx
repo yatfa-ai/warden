@@ -34,7 +34,8 @@ import { RECENTLY_CLOSED_PREVIEW, type RecentlyClosedEntry } from '@/lib/storage
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { parseLoadedPins, nextPins } from '@/lib/pinSync';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { formatTokens } from '@/lib/formatTokens';
 import {
   matchesAgentFilter, sortChats, findChat, displayNameFor,
@@ -93,9 +94,6 @@ interface Props {
   // Host connectivity statuses (polled at the App level so they stay live while
   // the full-page browser view — which replaces this sidebar — is open).
   hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
-  // Timestamp format pref (WARDEN-213): routes every sidebar time display through
-  // the shared formatTimestamp helper. Pure client-side localStorage pref.
-  timestampFormat: TimestampFormat;
   // Follow poll cadence (WARDEN-749): forwarded straight to the FileViewer, the
   // same resolved value PaneGrid's FileViewer receives, so Follow honors the
   // dashboard cadence regardless of which surface opened the file.
@@ -211,7 +209,7 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -224,6 +222,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // cross-host expansion state). Same shape as showAllClosed.
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  // WARDEN-1342 (slice 4): the pref is read here from the shared store — the
+  // surfaces this sidebar renders (rows, UpdatedAgo, its FileViewer) subscribe
+  // for themselves, so the pass-through prop is gone.
+  const timestampFormat = useTimestampFormat();
   const [collections, setCollections] = useState<Collection[]>([]);
   const [tabSearchQuery, setTabSearchQuery] = useState('');
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
@@ -1369,7 +1371,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             independent fleet git fan-out (FleetRecentCommits / useFleetGitStatus),
             which is explicitly out of scope. */}
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
-        <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
+        <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
           {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
         </button>
@@ -1434,7 +1436,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 showProjectBadges={showProjectBadges}
                 note={c ? agentNotes[c.id] : undefined}
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
-                timestampFormat={timestampFormat}
                 isWatched={watchedChats.has(id)}
                 watchState={watchedStates[id]}
                 onToggleWatch={() => onToggleWatch(id)}
@@ -1533,7 +1534,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         filePath={fileTarget?.path ?? ''}
         line={fileTarget?.line}
         open={!!fileTarget}
-        timestampFormat={timestampFormat}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}

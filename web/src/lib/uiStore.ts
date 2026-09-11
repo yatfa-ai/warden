@@ -53,6 +53,7 @@ import {
   type TerminalCursorStyle,
   type OnExitBehavior,
 } from '@/lib/storage';
+import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 /**
  * The shared client-state slice. One field + its setter per migrated pref.
@@ -139,6 +140,19 @@ export interface UiStoreState {
   onExitBehavior: OnExitBehavior;
   /** Set the on-exit behavior. The persisted write follows via App's snapshot. */
   setOnExitBehavior: (v: OnExitBehavior) => void;
+  /**
+   * The dashboard-wide Timestamp format (WARDEN-213) — Relative ("3h") vs
+   * Absolute ("2:13 PM") — migrated onto the store (WARDEN-1342, roadmap
+   * WARDEN-1204 slice 4). Read by every surface that renders a human-facing
+   * timestamp (ActivityTimeline, the sidebar chat rows, DirectiveHistory,
+   * FileViewer blame, FleetMatrixPanel buckets, GlobalSearchDialog,
+   * HealthDashboard, ObserverPanel, OpenChatBrowserPage,
+   * SessionTranscriptViewer, UpdatedAgo) and written by Settings'
+   * AppearanceSection. Default 'relative'.
+   */
+  timestampFormat: TimestampFormat;
+  /** Set the timestamp format. The persisted write follows via App's snapshot. */
+  setTimestampFormat: (v: TimestampFormat) => void;
 }
 
 /**
@@ -161,6 +175,7 @@ export type UiStoreSeed = Partial<
     | 'terminalCursorStyle'
     | 'copyOnSelect'
     | 'onExitBehavior'
+    | 'timestampFormat'
   >
 >;
 
@@ -201,6 +216,11 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setCopyOnSelect: (copyOnSelect) => set({ copyOnSelect }),
     onExitBehavior: seed.onExitBehavior ?? persisted.onExitBehavior ?? 'keep',
     setOnExitBehavior: (onExitBehavior) => set({ onExitBehavior }),
+    // WARDEN-1342 (roadmap WARDEN-1204 slice 4): ??-only shape — DEFAULT_UI
+    // .timestampFormat is 'relative' (a non-empty literal), so this is NOT the
+    // terminalFontFamily truthiness exception.
+    timestampFormat: seed.timestampFormat ?? persisted.timestampFormat ?? 'relative',
+    setTimestampFormat: (timestampFormat) => set({ timestampFormat }),
   }));
 }
 
@@ -332,4 +352,20 @@ export function useOnExitBehavior(): OnExitBehavior {
 /** The on-exit-behavior setter (AppearanceSection). Stable across renders. */
 export function useSetOnExitBehavior(): (v: OnExitBehavior) => void {
   return useUiStore((s) => s.setOnExitBehavior);
+}
+
+/**
+ * The dashboard-wide Timestamp format (WARDEN-213, WARDEN-1342 — roadmap
+ * WARDEN-1204 slice 4). Every timestamp-display surface subscribes here instead
+ * of receiving the pref through pass-through ancestors; it is also the channel
+ * that let the three `formatRelative` call sites (GitBadges ×2,
+ * TelemetryTransmissionLog) stop hardcoding relative mode.
+ */
+export function useTimestampFormat(): TimestampFormat {
+  return useUiStore((s) => s.timestampFormat);
+}
+
+/** The timestamp-format setter (AppearanceSection). Stable across renders. */
+export function useSetTimestampFormat(): (v: TimestampFormat) => void {
+  return useUiStore((s) => s.setTimestampFormat);
 }

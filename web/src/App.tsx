@@ -8,7 +8,6 @@ import { HostLabelsContext } from '@/lib/hostLabels';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
-import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
@@ -22,7 +21,7 @@ import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } 
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -380,7 +379,11 @@ function App() {
   // pref (like copyOnSelect/density): persisted by the saveUi effect below,
   // threaded to every timestamp display via the shared formatTimestamp helper,
   // and never sent to the backend.
-  const [timestampFormat, setTimestampFormat] = useState<TimestampFormat>(() => uiState.timestampFormat ?? 'relative');
+  // WARDEN-1342 (slice 4): the pref lives on the shared uiStore — same plain-value
+  // signatures, so the persistedSnapshot field and the resetSetters entry below
+  // are untouched (the slice-3 pattern).
+  const timestampFormat = useTimestampFormat();
+  const setTimestampFormat = useSetTimestampFormat();
   // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
   // WARDEN-91. These were ChatSidebar-local useState with their own save effect,
   // which App's saveUi spread (which omits both keys) then clobbered on every
@@ -1912,7 +1915,6 @@ function App() {
             // store instead (lib/uiStore.ts). terminalColorScheme STAYS: App is
             // its only runtime reader (it derives terminalThemeId below).
             terminalColorScheme, setTerminalColorScheme,
-            timestampFormat, setTimestampFormat,
             rememberWindowBounds, setRememberWindowBounds,
             launchAtLogin, setLaunchAtLogin,
             closeToTray, setCloseToTray,
@@ -1944,7 +1946,6 @@ function App() {
           onResume={resumeSession}
           onDiscoverHost={discoverHost}
           hostStatuses={hostStatuses}
-          timestampFormat={timestampFormat}
           hideOfflineHosts={displaySettings.hideOfflineHosts}
           showHostTags={displaySettings.showHostTags}
           budget={tokenBudget}
@@ -2019,7 +2020,6 @@ function App() {
               hideOfflineHosts={displaySettings.hideOfflineHosts}
               onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
-              timestampFormat={timestampFormat}
               pollIntervalMs={pollIntervalMs}
               watchedChats={watchedChatSet}
               watchedStates={watchedStateByKey}
@@ -2066,7 +2066,6 @@ function App() {
             onPaneRowRatiosChange={setPaneRowRatios}
             terminalThemeId={terminalThemeId}
             showHostTags={displaySettings.showHostTags}
-            timestampFormat={timestampFormat}
             pollIntervalMs={pollIntervalMs}
             onReorderPanes={reorderPanes}
           />
@@ -2079,7 +2078,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
+            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
@@ -2087,7 +2086,6 @@ function App() {
           <HealthDashboard
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}
-            timestampFormat={timestampFormat}
             pollIntervalMs={pollIntervalMs}
             groupBy={healthGroupBy}
             onGroupByChange={setHealthGroupBy}
@@ -2112,13 +2110,11 @@ function App() {
           setViewingSession({ id, host, label });
           setShowGlobalSearch(false);
         }}
-        timestampFormat={timestampFormat}
       />
       <SessionTranscriptViewer
         open={!!viewingSession}
         onOpenChange={(o) => { if (!o) setViewingSession(null); }}
         session={viewingSession}
-        timestampFormat={timestampFormat}
       />
       <ConfirmDialog
         open={killTarget !== null}

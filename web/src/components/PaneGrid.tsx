@@ -30,7 +30,6 @@ import {
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { resolveActingChat } from '@/lib/actingChat';
 import type { ThemeId } from '@/lib/theme';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 export interface OpenTile { id: string }
 
@@ -129,10 +128,6 @@ interface Props {
   // Settings toggle live-updates already-open pane headers, mirroring the
   // sidebar's live update.
   showHostTags?: boolean;
-  // "Timestamp format" pref (WARDEN-422): pure pass-through to PaneTile and to
-  // this grid's own FileViewer — App owns the persisted pref; the FileViewer's
-  // blame view formats author-dates per the pref, mirroring every other surface.
-  timestampFormat: TimestampFormat;
   // Follow poll cadence (WARDEN-749): pure pass-through to PaneTile and to this
   // grid's own FileViewer — App owns the resolved value (the same one the catalog
   // poll uses), so Follow shares the dashboard cadence instead of hardcoding one.
@@ -145,7 +140,7 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, timestampFormat, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, pollIntervalMs, onReorderPanes }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -785,7 +780,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     terminalThemeId={terminalThemeId}
                     showHostTags={showHostTags}
                     onSpawned={onSpawned}
-                    timestampFormat={timestampFormat}
                     pollIntervalMs={pollIntervalMs}
                   />
                 </div>
@@ -867,7 +861,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           filePath={filePath}
           line={fileLine}
           open={fileOpen}
-          timestampFormat={timestampFormat}
           onNavigate={(p) => { setFilePath(p); setFileLine(undefined); }}
           pollIntervalMs={pollIntervalMs}
           onOpenChange={(open) => {

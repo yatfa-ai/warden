@@ -93,6 +93,8 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     terminalCursorStyle: s.terminalCursorStyle,
     copyOnSelect: s.copyOnSelect,
     onExitBehavior: s.onExitBehavior,
+    // WARDEN-1342 (slice 4): same compile-locked snapshot field.
+    timestampFormat: s.timestampFormat,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -609,6 +611,120 @@ test('mutating a factory store\'s terminal prefs leaves the APP-LEVEL singleton 
   const before = uiStore.getState().terminalFontSize;
   createUiStore().getState().setTerminalFontSize(23);
   assert.equal(uiStore.getState().terminalFontSize, before);
+});
+
+// ─── timestampFormat (WARDEN-1342, roadmap WARDEN-1204 slice 4) ──────────────
+//
+// The dashboard-wide Timestamp format (WARDEN-213), the fourth fact migrated
+// onto the store — and the one that closed a REACH gap while it moved: three
+// surfaces (GitBadges ×2, TelemetryTransmissionLog) called the relative-mode
+// primitive `formatRelative` directly and ignored the pref outright; every one
+// of them now subscribes here. Same invariants as the slices before it: the
+// persistence boundary is unbroken, the factory really isolates.
+
+console.log('\ncreateUiStore — timestampFormat seeds from storage.ts, never from a re-declared default');
+test('a fresh store seeds \'relative\' on a clean install (the DEFAULT_UI value, not a local literal)', () => {
+  reset();
+  assert.equal(createUiStore().getState().timestampFormat, 'relative');
+  assert.equal(createUiStore().getState().timestampFormat, DEFAULT_UI.timestampFormat);
+});
+test('a fresh store seeds from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({ ...loadUi(), timestampFormat: 'absolute' });
+  assert.equal(createUiStore().getState().timestampFormat, 'absolute');
+});
+test('the seed runs through loadUi\'s sanitizer (a bogus persisted value falls back to \'relative\')', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], timestampFormat: 'bogus' }));
+  assert.equal(createUiStore().getState().timestampFormat, 'relative');
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage)', () => {
+  reset();
+  saveUi({ ...loadUi(), timestampFormat: 'relative' });
+  assert.equal(createUiStore({ timestampFormat: 'absolute' }).getState().timestampFormat, 'absolute');
+});
+
+console.log('\nsetTimestampFormat — the Settings Select\'s write, and it does NOT touch localStorage');
+test('setTimestampFormat replaces the value', () => {
+  reset();
+  const store = createUiStore({ timestampFormat: 'relative' });
+  store.getState().setTimestampFormat('absolute');
+  assert.equal(store.getState().timestampFormat, 'absolute');
+  store.getState().setTimestampFormat('relative');
+  assert.equal(store.getState().timestampFormat, 'relative');
+});
+test('a subscriber is notified with the new mode (the SHARING channel every timestamp surface reads)', () => {
+  reset();
+  const store = createUiStore({ timestampFormat: 'relative' });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push(s.timestampFormat));
+  store.getState().setTimestampFormat('absolute');
+  unsubscribe();
+  assert.deepEqual(seen, ['absolute']);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setTimestampFormat('relative');
+  assert.equal(seen.length, 1);
+});
+test('setTimestampFormat alone writes NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ timestampFormat: 'relative' });
+  store.getState().setTimestampFormat('absolute');
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the action identity is stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore({ timestampFormat: 'relative' });
+  const before = store.getState().setTimestampFormat;
+  before('absolute');
+  assert.equal(store.getState().setTimestampFormat, before);
+});
+
+console.log('\nround trip: Settings Select → store → App snapshot → the saveUi effect → loadUi');
+test('a format picked in Settings survives a restart', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().timestampFormat, 'relative');
+  store.getState().setTimestampFormat('absolute');    // the Settings Select
+  flushSnapshotToDisk(store);                         // App snapshot → saveUi effect
+  assert.equal(loadUi().timestampFormat, 'absolute'); // next launch
+  // And the next launch's store seeds from exactly that.
+  assert.equal(createUiStore().getState().timestampFormat, 'absolute');
+});
+test('the reset path restores \'relative\' through the store-backed setter', () => {
+  reset();
+  const store = createUiStore({ timestampFormat: 'absolute' });
+  // Exactly what App's "Reset appearance & UI preferences" does: resetUiPrefDefaults
+  // returns the pref block, then the resetSetters entry (App.tsx) writes it back
+  // through the same plain-value store setter the Settings Select uses.
+  const defaults = resetUiPrefDefaults();
+  store.getState().setTimestampFormat(defaults.timestampFormat);
+  assert.equal(store.getState().timestampFormat, DEFAULT_UI.timestampFormat);
+});
+
+console.log('\nfactory isolation + fact independence — timestampFormat');
+test('two stores do not share the timestamp format', () => {
+  reset();
+  const a = createUiStore({ timestampFormat: 'relative' });
+  const b = createUiStore({ timestampFormat: 'relative' });
+  a.getState().setTimestampFormat('absolute');
+  assert.equal(a.getState().timestampFormat, 'absolute');
+  assert.equal(b.getState().timestampFormat, 'relative');
+});
+test("mutating a factory store's timestampFormat leaves the APP-LEVEL singleton untouched", () => {
+  reset();
+  const before = uiStore.getState().timestampFormat;
+  createUiStore().getState().setTimestampFormat('absolute');
+  assert.equal(uiStore.getState().timestampFormat, before);
+});
+test('the migrated facts are independent — writing timestampFormat does not disturb the others', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setTimestampFormat('absolute');
+  assert.equal(store.getState().fileViewerViewMode, 'rendered');
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().terminalFontSize, DEFAULT_UI.terminalFontSize);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

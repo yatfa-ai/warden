@@ -27,7 +27,8 @@ import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
 import { FleetStateTimeline } from '@/components/FleetStateTimeline';
 import { FleetRecentCommits } from '@/components/FleetRecentCommits';
 import { FileViewer } from '@/components/FileViewer';
-import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
@@ -64,9 +65,6 @@ const HEALTH_FETCH_OPTS = pollerFetchOptions(HEALTH_POLL_MS);
 interface Props {
   onOpenChat: (id: string) => void;
   onClose: () => void;
-  // Timestamp format pref (WARDEN-213): routes the fleet last-activity + "Last
-  // updated" times through the shared formatTimestamp helper. Pure client-side.
-  timestampFormat: TimestampFormat;
   // Follow live-update cadence for the fleet FileViewer (WARDEN-749). The SAME
   // already-resolved web-safe interval App owns for ChatSidebar's FileViewer
   // (resolvePollIntervalMs at the source) so Follow shares the dashboard's
@@ -652,11 +650,15 @@ const FLEET_GIT_AXES: FleetGitAxis[] = [
   },
 ];
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hostLabels = useHostLabels();
+  // WARDEN-1342 (slice 4): the dashboard's own timestamps (last-activity, "Last
+  // updated") read the shared pref; the fleet panels + FileViewer below
+  // subscribe for themselves, so the pass-through prop is gone.
+  const timestampFormat = useTimestampFormat();
   // Closed-section expansion (WARDEN-245): collapsed shows the 5 most-recent dead
   // sessions; expanded shows up to 20. The true total is always surfaced so the
   // cap is never silent.
@@ -1296,7 +1298,6 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollInte
             <FleetActivityHeatmap
               series={activitySeries}
               agents={healthData.agents}
-              timestampFormat={timestampFormat}
               loading={activityLoading}
               error={activityError}
               onOpenChat={onOpenChat}
@@ -1316,7 +1317,6 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollInte
             <FleetStateTimeline
               series={activitySeries}
               agents={healthData.agents}
-              timestampFormat={timestampFormat}
               loading={activityLoading}
               error={activityError}
               onOpenChat={onOpenChat}
@@ -1794,7 +1794,6 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, pollInte
         chatId={fileTarget?.chatId ?? ''}
         filePath={fileTarget?.path ?? ''}
         open={!!fileTarget}
-        timestampFormat={timestampFormat}
         pollIntervalMs={pollIntervalMs}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}

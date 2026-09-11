@@ -1,7 +1,7 @@
 import { useState, useMemo, type ReactNode } from 'react';
 import type { Chat } from '@/lib/types';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTimestamp } from '@/lib/formatTimestamp';
+import { useTimestampFormat } from '@/lib/uiStore';
 import { displayName } from '@/lib/chatDisplay';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
@@ -88,8 +88,6 @@ export interface FleetMatrixPanelProps<TCell> {
   buckets: readonly number[];
   /** The fleet agents — the display-name source for each row header. */
   agents: readonly Chat[];
-  /** Routes the sparse column time-labels through the shared timestamp helper. */
-  timestampFormat: TimestampFormat;
   /** True only during the very first fetch, before any data has arrived. The
    *  ONLY honest source for "still loading" (WARDEN-1078). */
   loading: boolean;
@@ -139,7 +137,6 @@ export function FleetMatrixPanel<TCell>({
   rows,
   buckets,
   agents,
-  timestampFormat,
   loading,
   error,
   hasSeries,
@@ -183,6 +180,9 @@ export function FleetMatrixPanel<TCell>({
 
   // The "now" edge (rightmost column) is labelled literally rather than by its
   // bucket-start time (which is up to an hour old and would read as e.g. "23m").
+  // WARDEN-1342 (slice 4): subscribes to the shared pref — its two callers
+  // (FleetActivityHeatmap / FleetStateTimeline) used to be pure carriers of it.
+  const timestampFormat = useTimestampFormat();
   const columnLabel = (bucket: number, i: number): string => {
     if (i === colCount - 1) return 'now';
     return formatTimestamp(bucket, timestampFormat);

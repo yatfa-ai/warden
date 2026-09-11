@@ -27,7 +27,6 @@ import {
 } from '@/lib/uiStore';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
@@ -236,15 +235,11 @@ interface Props {
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
   onSpawned: (chat: Chat) => void;
-  // "Timestamp format" pref (WARDEN-422): pure pass-through to this pane's
-  // FileViewer — App owns the persisted pref; the blame view formats author-dates
-  // per the pref, mirroring every other timestamp surface.
-  timestampFormat: TimestampFormat;
   // Follow poll cadence (WARDEN-749): pure pass-through to this pane's FileViewer.
   pollIntervalMs: number;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, onSpawned, timestampFormat, pollIntervalMs }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, onSpawned, pollIntervalMs }: Props) {
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
   // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
@@ -1348,7 +1343,6 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           filePath={viewerPath}
           line={viewerLine}
           open={viewerOpen}
-          timestampFormat={timestampFormat}
           onNavigate={(p) => { setViewerPath(p); setViewerLine(undefined); }}
           pollIntervalMs={pollIntervalMs}
           onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}

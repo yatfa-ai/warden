@@ -1,5 +1,4 @@
 import type { ActivitySeries, Chat } from '@/lib/types';
-import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { cn } from '@/lib/utils';
 import { FleetMatrixPanel, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
@@ -58,8 +57,6 @@ interface Props {
   series: ActivitySeries | null;
   /** The fleet agents (healthData.agents) — the row set, in catalog order. */
   agents: readonly Chat[];
-  /** Routes the sparse column time-labels through the shared timestamp helper. */
-  timestampFormat: TimestampFormat;
   /** True only during the very first fetch, before any data has arrived. The
    *  ONLY honest source for "still loading" — `series == null` conflates it with
    *  a failed fetch (WARDEN-1078). */
@@ -84,7 +81,7 @@ function intensityOpacity(intensity: number): number {
   return OPACITY_FLOOR + OPACITY_RANGE * intensity;
 }
 
-export function FleetActivityHeatmap({ series, agents, timestampFormat, loading, error, onOpenChat }: Props) {
+export function FleetActivityHeatmap({ series, agents, loading, error, onOpenChat }: Props) {
   // The matrix is memoized on the series + agents ONLY — it refreshes on the
   // 60s series cadence, never on the 10s /api/health tick.
   const matrix = useMemo(() => selectHeatmapCells(series, agents), [series, agents]);
@@ -96,7 +93,6 @@ export function FleetActivityHeatmap({ series, agents, timestampFormat, loading,
       rows={matrix.rows}
       buckets={matrix.buckets}
       agents={agents}
-      timestampFormat={timestampFormat}
       loading={loading}
       error={error}
       onOpenChat={onOpenChat}
