@@ -33,6 +33,7 @@ import {
 import { type ConfigData, type ConfigBounds } from './types';
 import { isBackendConfigDirty, type BackendConfigDraft } from './configDirty';
 import { normalizeLoadedConfig } from './normalizeLoadedConfig';
+import { buildConfigPutPayload } from './configPutPayload';
 
 /**
  * The initial `config` state, held before the GET /api/config load resolves.
@@ -404,7 +405,11 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
       const telemetryExtra: { telemetryAuthToken?: string | null } = {};
       if (telemetryAuthTokenPendingClear) telemetryExtra.telemetryAuthToken = null;
       else if (telemetryAuthToken) telemetryExtra.telemetryAuthToken = telemetryAuthToken;
-      const { ok, error, data } = await putJson<{ ok: boolean; refused?: Record<string, unknown> }>('/api/config', { ...config, llm, ...webhookExtra, ...telemetryExtra });
+      // WARDEN-1343 — the body is built by buildConfigPutPayload, which
+      // materializes a cleared tokenBudgetWindowHours draft to the derived
+      // default (the server's nullable:false flooredNumber guard refuses
+      // null; see that module for the full contract).
+      const { ok, error, data } = await putJson<{ ok: boolean; refused?: Record<string, unknown> }>('/api/config', buildConfigPutPayload(config, llm, webhookExtra, telemetryExtra));
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
       }
