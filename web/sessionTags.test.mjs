@@ -9,6 +9,9 @@
 //   · filterSessionsByTags is a union (ANY active tag) and a no-op when unfiltered
 //   · addTag trims + case-insensitive-dedupes; removeTag is exact-match
 //   · MAX_TAGS_PER_SESSION mirrors the server's count cap (WARDEN-1241)
+//   · parseLoadedTags gates the load on a verified body — a failed/error GET is
+//     "unknown", never "no tags", so a write can never wipe the stored list
+//     (WARDEN-1345)
 //
 // Run: node sessionTags.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -27,7 +30,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-sessiontags-test-'));
 const tmpFile = join(tmpDir, 'sessionTags.mjs');
 writeFileSync(tmpFile, code);
-const { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION } = await import(tmpFile);
+const { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION, parseLoadedTags } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -155,6 +158,56 @@ test('addTag itself does NOT enforce the count cap — the check belongs at the 
   const out = addTag(eight, 'i');
   assert.deepStrictEqual(out, [...eight, 'i'], 'a 9th add is NOT silently dropped here');
   assert.notStrictEqual(out, eight, 'always a new array, so reference comparison cannot detect rejection');
+});
+
+// ---------------------------------------------------------------------------
+// parseLoadedTags (WARDEN-1345): the load gate for the tag sidecar. The
+// /api/session-tags PUT REPLACES the stored list for a key, so a failed or
+// error-bodied GET must parse to null ("unknown", never adopted), never to a
+// verified {} — otherwise the first add wipes that session's real tags on disk.
+// ---------------------------------------------------------------------------
+console.log('parseLoadedTags (WARDEN-1345 load gate):');
+test('a real tags map → parsed record', () => {
+  assert.deepStrictEqual(
+    parseLoadedTags({ sessionTags: { 's1': ['shipped', 'needs-review'], 's2': ['demo'] } }),
+    { 's1': ['shipped', 'needs-review'], 's2': ['demo'] },
+  );
+});
+test('{"sessionTags":{}} → {} (a VERIFIED empty — a real answer, safe to adopt)', () => {
+  const parsed = parseLoadedTags({ sessionTags: {} });
+  assert.notStrictEqual(parsed, null, 'verified empty is NOT unknown');
+  assert.deepStrictEqual(parsed, {});
+});
+test('error body → null (a parseable error response is a failure, not "no tags")', () => {
+  assert.strictEqual(parseLoadedTags({ error: 'bad request' }), null);
+});
+test('sessionTags missing → null (unknown)', () => {
+  assert.strictEqual(parseLoadedTags({}), null);
+});
+test('sessionTags an array / a string / null → null (unknown, not empty)', () => {
+  assert.strictEqual(parseLoadedTags({ sessionTags: [] }), null);
+  assert.strictEqual(parseLoadedTags({ sessionTags: 'nope' }), null);
+  assert.strictEqual(parseLoadedTags({ sessionTags: null }), null);
+});
+test('null body and non-object bodies → null', () => {
+  assert.strictEqual(parseLoadedTags(null), null);
+  assert.strictEqual(parseLoadedTags(undefined), null);
+  assert.strictEqual(parseLoadedTags('ok'), null);
+  assert.strictEqual(parseLoadedTags(42), null);
+});
+test('non-string / empty-string entries are dropped inside each list', () => {
+  assert.deepStrictEqual(
+    parseLoadedTags({ sessionTags: { s1: ['a', 42, null, '', 'b'] } }),
+    { s1: ['a', 'b'] },
+  );
+});
+test('a key holding a non-array value is skipped without throwing (per-key leniency)', () => {
+  const parsed = parseLoadedTags({ sessionTags: { good: ['a'], bad: 'not-an-array', alsoBad: 7 } });
+  assert.deepStrictEqual(parsed, { good: ['a'] });
+});
+test('empty-string tags are dropped; a list emptied by the drop still persists the key', () => {
+  const parsed = parseLoadedTags({ sessionTags: { s1: [''] } });
+  assert.deepStrictEqual(parsed, { s1: [] }, 'the key survives with a cleaned list');
 });
 
 console.log(`\n${passed} passed`);

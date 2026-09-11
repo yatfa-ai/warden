@@ -78,3 +78,25 @@ export function addTag(existing: readonly string[], tag: string): string[] {
 export function removeTag(existing: readonly string[], tag: string): string[] {
   return existing.filter((t) => t !== tag);
 }
+
+// Parse a GET /api/session-tags response body into a tags map, or null when it is
+// NOT a trustworthy tags map (an error body, or a missing/malformed `sessionTags`
+// field). Callers must treat null as "unknown", never as "empty" (WARDEN-1345):
+// the PUT /api/session-tags contract REPLACES the stored list for a key, so a
+// failed load adopted as a verified {} would make the first add wipe that
+// session's real tags on disk. `{"sessionTags":{}}` parses to {} — a VERIFIED
+// empty, a real answer and safe to adopt. Per-key leniency mirrors
+// computeTagsInUse: a key holding a non-array value is skipped (never thrown
+// on), and within an array non-string / empty entries are dropped — the same
+// cleanup the server applies on write.
+export function parseLoadedTags(body: unknown): Record<string, string[]> | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const raw = (body as { sessionTags?: unknown }).sessionTags;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const tags: Record<string, string[]> = {};
+  for (const [id, value] of Object.entries(raw)) {
+    if (!Array.isArray(value)) continue;
+    tags[id] = value.filter((t): t is string => typeof t === 'string' && t.length > 0);
+  }
+  return tags;
+}

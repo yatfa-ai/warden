@@ -52,7 +52,7 @@ import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import type { SourceControlGitInfo } from './sidebar/SourceControlPanel';
 import { useGitStatus, useInvalidateGitStatus } from '@/lib/gitStatusHooks';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
-import { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION } from '@/lib/sessionTags';
+import { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION, parseLoadedTags } from '@/lib/sessionTags';
 import { fetchBounded, readListBody, readListResponse, readResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
@@ -244,6 +244,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // (local sidecar). activeTagFilters scopes the ☁ sessions list to sessions bearing
   // any of the selected tags (union semantics).
   const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
+  // WARDEN-1345: tag persistence bookkeeping (mirrors the pins refs above). PUT
+  // /api/session-tags REPLACES the stored list for the key, so the client must
+  // never write from an unverified snapshot: `tagsRef` mirrors the state so
+  // serialized writes always build on the last confirmed map (rapid adds to one
+  // session no longer race the same stale array); `tagsLoadedRef` gates writes
+  // on a verified load — a failed or error-bodied GET is "unknown", never "no
+  // tags", so the first add can never wipe a session's real tags on disk.
+  const tagsRef = useRef<Record<string, string[]>>({});
+  const tagsLoadedRef = useRef(false);
+  const tagWriteChainRef = useRef<Promise<void>>(Promise.resolve());
   const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
   // WARDEN-1196: `error` is the per-host failure reason (null/absent = the last fetch
   // succeeded). Written by fetchHostSessions from readResponse, so it is non-null for
@@ -404,6 +414,32 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // Outgoing (ahead/unpushed, @{u}..HEAD) via range=outgoing (WARDEN-252); limit hardcoded at 50.
   const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setError: setGitLogOutgoingError, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', label: 'outgoing commits', buildParams: buildOutgoingParams });
 
+  // WARDEN-1345: fetch + verify the tag sidecar. ONE loader shared by the mount
+  // effect and the write gate (which retries the load once before refusing to
+  // write) — factored rather than hand-copied so the two paths can never drift.
+  // A response is adopted only when it is ok AND parses (parseLoadedTags); any
+  // other outcome leaves the load gate closed — the client holds "unknown"
+  // (rendered as no chips) rather than believing "no tags", which could then be
+  // written back over the stored list by the first PUT.
+  const loadSessionTags = async (): Promise<boolean> => {
+    try {
+      const r = await fetch('/api/session-tags');
+      const j = await r.json();
+      const tags = r.ok ? parseLoadedTags(j) : null;
+      if (!tags) {
+        console.error('[session-tags] Load failed: unverified response', { ok: r.ok, body: j });
+        return false;
+      }
+      tagsLoadedRef.current = true;
+      tagsRef.current = tags;
+      setSessionTags(tags);
+      return true;
+    } catch (error) {
+      console.error('[session-tags] Failed:', error);
+      return false;
+    }
+  };
+
   // Load pinned chat ids + per-agent notes from the backend on mount.
   // WARDEN-1240: a pins response is only adopted when it is ok AND actually a
   // pin list (parseLoadedPins). A failure leaves the load gate closed — the
@@ -436,18 +472,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         console.error('[agent-notes] Failed:', error);
       }
     };
-    const fetchSessionTags = async () => {
-      try {
-        const r = await fetch('/api/session-tags');
-        const j = await r.json();
-        setSessionTags(j.sessionTags || {});
-      } catch (error) {
-        console.error('[session-tags] Failed:', error);
-      }
-    };
     fetchPins();
     fetchNotes();
-    fetchSessionTags();
+    loadSessionTags();
   }, []);
 
   // Toggle a chat's pinned state and persist it (WARDEN-1240). Every write is
@@ -520,27 +547,49 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   };
 
   // WARDEN-342: set a past session's tags and persist the whole list (local sidecar
-  // keyed by claude-session id). The server cleans/dedupes/caps; on success we mirror
-  // its returned list into local state (and drop the key when it's empty).
-  const updateSessionTags = async (id: string, tags: string[]) => {
-    try {
-      const r = await fetch('/api/session-tags', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, tags }),
-      });
-      if (r.ok) {
-        const j = await r.json();
-        setSessionTags((prev) => {
-          const next = { ...prev };
-          if (Array.isArray(j.tags) && j.tags.length) next[id] = j.tags;
-          else delete next[id];
-          return next;
-        });
+  // keyed by claude-session id). WARDEN-1345: the server cleans/dedupes/caps and
+  // REPLACES the stored list for the key, so — exactly like the pins path
+  // (WARDEN-1240) — every write is serialized through `tagWriteChainRef` and its
+  // payload is built INSIDE the chain from `tagsRef` (the last confirmed map, not
+  // the React snapshot), so rapid adds to one session each land their own change
+  // instead of racing the same stale array. `nextTags` maps the session's
+  // confirmed list to the list to persist, or null to abort (nothing to write).
+  // If the mount load never verified, the write re-attempts the load ONCE and
+  // refuses when it still fails: an unknown tag state is never written back over
+  // the stored list. On success we adopt the server's returned list into
+  // `tagsRef` and local state (and drop the key when it's empty).
+  const updateSessionTags = (id: string, nextTags: (current: readonly string[]) => string[] | null) => {
+    const attempt = async () => {
+      if (!tagsLoadedRef.current) {
+        const loaded = await loadSessionTags();
+        if (!loaded) {
+          console.error('[session-tags-save] Aborted: tag state unverified, refusing to overwrite stored list');
+          return;
+        }
       }
-    } catch (error) {
-      console.error('[session-tags-save] Failed:', error);
-    }
+      const tags = nextTags(tagsRef.current[id] || []);
+      if (tags === null) return;
+      try {
+        const r = await fetch('/api/session-tags', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, tags }),
+        });
+        if (!r.ok) {
+          console.error('[session-tags-save] Failed: non-ok response', r.status);
+          return;
+        }
+        const j = await r.json();
+        const next = { ...tagsRef.current };
+        if (Array.isArray(j.tags) && j.tags.length) next[id] = j.tags;
+        else delete next[id];
+        tagsRef.current = next;
+        setSessionTags(next);
+      } catch (error) {
+        console.error('[session-tags-save] Failed:', error);
+      }
+    };
+    tagWriteChainRef.current = tagWriteChainRef.current.then(attempt, attempt);
   };
   const addSessionTag = (id: string, tag: string) => {
     // Explicit count-cap check — NOT a reference comparison: addTag returns a NEW
@@ -550,11 +599,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     // to consume (WARDEN-1241). SessionTagChips already swaps its affordance for a
     // visible "max" note at the cap; this backstop also covers the in-flight race
     // (a PUT landing while the inline Input is open) and any future add path.
-    if ((sessionTags[id] || []).length >= MAX_TAGS_PER_SESSION) return;
-    updateSessionTags(id, addTag(sessionTags[id] || [], tag));
+    // WARDEN-1345: it reads the CONFIRMED map (`tagsRef`) inside the serialized
+    // chain, not the render snapshot, so the cap decision sees what earlier
+    // in-flight writes will have persisted.
+    updateSessionTags(id, (current) => {
+      if (current.length >= MAX_TAGS_PER_SESSION) return null;
+      return addTag(current, tag);
+    });
   };
   const removeSessionTag = (id: string, tag: string) => {
-    updateSessionTags(id, removeTag(sessionTags[id] || [], tag));
+    updateSessionTags(id, (current) => removeTag(current, tag));
   };
   const toggleTagFilter = (tag: string) => {
     setActiveTagFilters((prev) => {

@@ -29,8 +29,11 @@ import { fileURLToPath } from 'node:url';
  *      BEFORE the PUT. addTag always returns a NEW array (even for a rejected add),
  *      so a caller cannot detect rejection by comparing references — the check must
  *      exist at the point of adding, ahead of the updateSessionTags call. This also
- *      backstops the in-flight race a UI gate alone cannot cover.
- *
+ *      backstops the in-flight race a UI gate alone cannot cover. (WARDEN-1345 note:
+ *      the payload is now built INSIDE the serialized write chain — a mutator
+ *      addSessionTag hands to updateSessionTags, reading the last CONFIRMED map —
+ *      so the check lives in that mutator and returns null to abort. The invariant
+ *      is unchanged: a cap-rejected add never issues a PUT.)
  * Like dialogMaxWidth, these assertions deliberately pin presence + ordering (the
  * defect class), not exact spelling: renames and rewordings stay green, and only
  * reintroducing the silent-discard class fails.
@@ -101,18 +104,38 @@ describe('addSessionTag explicit cap check (WARDEN-1241)', () => {
   it('checks the count cap explicitly, before the PUT', () => {
     // Slice out the addSessionTag body so the ordering assertion is about THIS
     // function, not a coincidental constant elsewhere in a 1500-line file.
+    // WARDEN-1345 moved payload construction inside the serialized write chain, so
+    // the cap check lives in the mutator addSessionTag passes to updateSessionTags;
+    // the defect class is unchanged — the invariant below pins: (a) the explicit
+    // cap check still exists in addSessionTag, (b) the add still routes through the
+    // gated updateSessionTags PUT path, and (c) a rejected add (the mutator's null)
+    // returns OUT of the write attempt BEFORE the PUT fetch is issued. Reordering
+    // (c), or dropping the check, reintroduces the silent-discard class.
     const start = sidebarSrc.indexOf('const addSessionTag');
     const end = sidebarSrc.indexOf('const removeSessionTag', start);
     assert.ok(start !== -1 && end > start, 'addSessionTag must exist beside removeSessionTag');
     const fn = sidebarSrc.slice(start, end);
 
     const checkIdx = fn.indexOf('.length >= MAX_TAGS_PER_SESSION');
-    const putIdx = fn.indexOf('updateSessionTags(id, addTag(');
     assert.ok(checkIdx !== -1, 'addSessionTag must check the cap against the shared constant');
-    assert.ok(putIdx !== -1, 'addSessionTag must still PUT via updateSessionTags(id, addTag(...))');
+    assert.match(
+      fn,
+      /updateSessionTags\(id,/,
+      'addSessionTag must still write via updateSessionTags (the gated, serialized PUT path)',
+    );
+
+    // The PUT itself is guarded inside updateSessionTags: a mutator returning null
+    // (the cap-rejected add) aborts ahead of the fetch.
+    const updateStart = sidebarSrc.lastIndexOf('const updateSessionTags', start);
+    assert.ok(updateStart !== -1 && updateStart < start, 'updateSessionTags must be defined beside addSessionTag');
+    const updateFn = sidebarSrc.slice(updateStart, start);
+    const abortIdx = updateFn.indexOf('=== null');
+    const putIdx = updateFn.indexOf("fetch('/api/session-tags'");
+    assert.ok(abortIdx !== -1, 'the null abort (a cap-rejected add) must exist in updateSessionTags');
+    assert.ok(putIdx !== -1, 'updateSessionTags must still PUT to /api/session-tags');
     assert.ok(
-      checkIdx < putIdx,
-      'the explicit cap check must come BEFORE the PUT — the point of adding is the only place a rejected add is detectable (addTag returns a new array, so references cannot signal it)',
+      abortIdx < putIdx,
+      'a rejected add (null mutator result) must abort BEFORE the PUT is issued — the point of adding is the only place a rejected add is detectable (addTag returns a new array, so references cannot signal it)',
     );
   });
 });
