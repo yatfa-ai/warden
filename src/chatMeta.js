@@ -28,11 +28,13 @@ export function parseContainerName(name) {
 // `active` is normalized with `!!` (the default path already passes a boolean;
 // the companion passes a possibly-truthy flag), and `cwd`/`status` are coerced
 // so a missing/empty cwd -> undefined and a missing status -> '' exactly as
-// both paths did inline. lastActivity starts at null: both discovery paths may
-// fill it in via a follow-up activity-capture pass that parses the leading pane
-// line's timestamp with the shared parseActivityTimestamp() below (WARDEN-376
-// closed the companion's read-parity gap — it now captures that line host-side
-// too, where slice 1 had left it null).
+// both paths did inline. lastActivity starts at null: the discovery paths fill
+// it in AFTER this literal is built — the default SSH path from the discover
+// row's #{window_activity} column (windowActivityToMs, WARDEN-1340), the
+// companion transport by parsing the host-side-captured leading pane line with
+// parseActivityTimestamp() below until its Go side moves to window_activity too
+// (WARDEN-376 closed the companion's read-parity gap — it now captures that
+// line host-side too, where slice 1 had left it null).
 export function buildChat(host, name, status, cwd, active, session) {
   const { project, role } = parseContainerName(name);
   return {
@@ -47,16 +49,21 @@ export function buildChat(host, name, status, cwd, active, session) {
 }
 
 // Parse a leading pane line's timestamp into epoch ms, or null when the line
-// carries no parseable timestamp. This is the SINGLE timestamp regex BOTH
-// discovery paths use: the default SSH path (src/chats.js) captures the leading
-// pane line per active agent and calls this, and the companion transport
-// (src/companion.js) captures the same leading line host-side and calls this
-// SAME helper on it — so lastActivity is parsed identically by construction
-// (the same single-source-of-truth philosophy that motivated centralizing
-// buildChat). Mirrors the regex the default path accepted inline: an optional
-// `[`/`]` around a `YYYY-MM-DD[space|T]HH:MM:SS` timestamp. Returns null for
-// empty/non-matching input OR a syntactically-matching but invalid calendar
-// date so callers leave lastActivity null rather than stamping NaN. (WARDEN-376)
+// carries no parseable timestamp. This is the timestamp regex the COMPANION
+// transport path uses (src/companion.js mapCompanionContainers): until the Go
+// side (companion/main.go) is widened to supply #{window_activity} too, the
+// companion's `Pane` field is still the host-side-captured leading pane line, and
+// this helper parses it. The default SSH path (src/chats.js) NO LONGER parses
+// pane text at all — every one of its legs derives lastActivity from
+// #{window_activity} via windowActivityToMs() below (WARDEN-1340: the leading
+// line of a full-scrollback capture is the OLDEST line of the pane, a frozen
+// clock). Kept for the companion leg only — removing it would break the
+// (unchanged) Go binary's contract, whose dist/ binaries cannot be rebuilt in
+// this sandbox (no Go toolchain; WARDEN-376 lesson). Mirrors the regex the
+// default path accepted inline: an optional `[`/`]` around a
+// `YYYY-MM-DD[space|T]HH:MM:SS` timestamp. Returns null for empty/non-matching
+// input OR a syntactically-matching but invalid calendar date so callers leave
+// lastActivity null rather than stamping NaN. (WARDEN-376)
 export function parseActivityTimestamp(line) {
   const s = line == null ? '' : String(line);
   if (!s.trim()) return null;
@@ -64,6 +71,28 @@ export function parseActivityTimestamp(line) {
   if (!m) return null;
   const ms = new Date(m[1]).getTime();
   return Number.isNaN(ms) ? null : ms;
+}
+
+// WARDEN-1340: the ONLY reader of tmux's `#{window_activity}` for lastActivity.
+// window_activity is epoch SECONDS (tmux's own record of the window's last
+// OUTPUT — output, not input; stable while quiet; unperturbed by observation);
+// lastActivity is ms-since-epoch everywhere downstream — getHealthState's bands
+// and stampCatalogActivity's only-when-fresher guard both assume ms, and a raw
+// seconds value would read as ~1970 and be REJECTED by that guard forever (every
+// real update would look older than the stored 1970-era stamp). One shared
+// definition for all four JS legs (the discover row in chats.js discover(),
+// discoverManual, and the two local-tmux legs) so none can drift onto seconds.
+// Accepts the raw display-message stdout (trailing newline tolerated). Returns
+// null for empty/garbage/non-positive input so callers leave lastActivity null
+// rather than stamping a bogus value.
+export function windowActivityToMs(stdout) {
+  // Strict: the WHOLE trimmed payload must be digits — display-message's
+  // window_activity readout is exactly that, and anything else is a failed read,
+  // not an activity time to truncate to.
+  const m = String(stdout == null ? '' : stdout).trim().match(/^(\d+)$/);
+  if (!m) return null;
+  const secs = Number(m[1]);
+  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : null;
 }
 
 // Shared discovery ordering: active chats first, then by key. Both discovery

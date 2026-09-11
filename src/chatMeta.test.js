@@ -9,7 +9,7 @@
 // shared sortChats() ordering both paths use.
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, paneTarget } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, windowActivityToMs, paneTarget } from './chatMeta.js';
 
 describe('parseContainerName', () => {
   it('splits "{project}-{role}" on the LAST hyphen', () => {
@@ -143,13 +143,16 @@ describe('sortChats (shared ordering: active first, then by key)', () => {
   });
 });
 
-// parseActivityTimestamp is the SINGLE timestamp regex BOTH discovery paths use
-// (WARDEN-376): the default SSH path (chats.js) and the companion transport
-// (companion.js) both call it on the leading pane line, so lastActivity is
-// parsed identically by construction. This locks the exact behavior extracted
-// from chats.js's former inline parse — the bracketed/unbracketed,
-// space/T-separated YYYY-MM-DD HH:MM:SS forms the default path accepted.
-describe('parseActivityTimestamp (the shared leading-line timestamp parse)', () => {
+// parseActivityTimestamp is the timestamp regex the COMPANION transport path
+// uses (companion.js mapCompanionContainers) on the leading pane line. It was
+// once shared with the default SSH path too (WARDEN-376), but WARDEN-1340 moved
+// every default-path leg onto #{window_activity} (windowActivityToMs below) —
+// the leading line of a full-scrollback capture is the OLDEST line of the pane,
+// a frozen clock. It stays ONLY until the companion's Go side (companion/
+// main.go) is widened to window_activity too; these tests keep its exact
+// behavior locked in the meantime — the bracketed/unbracketed, space/T-separated
+// YYYY-MM-DD HH:MM:SS forms the default path once accepted.
+describe('parseActivityTimestamp (the companion transport\'s leading-line timestamp parse)', () => {
   // For every valid form, the helper must return the SAME epoch ms that
   // `new Date(<extracted substring>)` yields — proving it extracts the
   // timestamp substring (stripping any brackets) and parses it, without
@@ -197,6 +200,40 @@ describe('parseActivityTimestamp (the shared leading-line timestamp parse)', () 
     // an ISO date-time with no zone rejects it as Invalid Date. The helper must
     // return null rather than stamping NaN into lastActivity.
     assert.strictEqual(parseActivityTimestamp('2024-13-01T10:00:00'), null);
+  });
+});
+
+// windowActivityToMs is the ONLY reader of tmux's #{window_activity} for
+// lastActivity (WARDEN-1340): all four default-path JS legs funnel through it, so
+// none can drift onto raw seconds. window_activity is epoch SECONDS; lastActivity
+// is ms-since-epoch everywhere downstream (getHealthState bands, and
+// stampCatalogActivity's only-when-fresher guard — which a raw-seconds value
+// would poison forever, reading as ~1970).
+describe('windowActivityToMs (the #{window_activity} reader, WARDEN-1340)', () => {
+  it('converts epoch seconds to ms (×1000)', () => {
+    assert.strictEqual(windowActivityToMs('1789088272'), 1789088272000);
+    assert.strictEqual(windowActivityToMs(1789088272), 1789088272000, 'a pre-parsed number works too');
+  });
+
+  it('tolerates display-message stdout artifacts (trailing newline / CRLF / spaces)', () => {
+    assert.strictEqual(windowActivityToMs('1789088272\n'), 1789088272000);
+    assert.strictEqual(windowActivityToMs('1789088272\r\n'), 1789088272000);
+    assert.strictEqual(windowActivityToMs('  1789088272  '), 1789088272000);
+  });
+
+  it('returns null for empty / null / undefined input', () => {
+    assert.strictEqual(windowActivityToMs(''), null);
+    assert.strictEqual(windowActivityToMs('\n'), null);
+    assert.strictEqual(windowActivityToMs(null), null);
+    assert.strictEqual(windowActivityToMs(undefined), null);
+  });
+
+  it('returns null for garbage / non-positive readings (never a bogus timestamp)', () => {
+    assert.strictEqual(windowActivityToMs('garbage'), null);
+    assert.strictEqual(windowActivityToMs('12abc34'), null, 'parseInt prefix junk is not an activity');
+    assert.strictEqual(windowActivityToMs('0'), null, 'epoch 0 is ~1970 — not a real reading');
+    assert.strictEqual(windowActivityToMs('-5'), null);
+    assert.strictEqual(windowActivityToMs(NaN), null);
   });
 });
 
