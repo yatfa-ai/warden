@@ -60,7 +60,6 @@ export function DirectiveHistory({
   // Re-render once per second so the "Updated Ns ago" label stays fresh.
   const [now, setNow] = useState(() => Date.now());
 
-  const loadedRef = useRef(false);
   const isHiddenRef = useRef(isHidden);
   isHiddenRef.current = isHidden;
 
@@ -82,7 +81,6 @@ export function DirectiveHistory({
       } finally {
         if (background) setRefreshing(false);
         else setLoading(false);
-        loadedRef.current = true;
       }
     },
     [limit],
@@ -90,7 +88,6 @@ export function DirectiveHistory({
 
   // Initial + on-limit-change fetch.
   useEffect(() => {
-    loadedRef.current = false;
     setLoading(true);
     fetchDirectives();
   }, [fetchDirectives]);
