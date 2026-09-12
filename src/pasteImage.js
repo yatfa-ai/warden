@@ -22,6 +22,15 @@
 //   local  + container → docker exec -i <c> sh -c '<script>' (no ssh hop)
 //   local, no container → a direct fs write (no child at all)
 //
+// WARDEN-1350 — under the companion transport the two REMOTE shapes stop
+// spawning ssh per paste (this module was created on the raw-ssh pattern five
+// days AFTER the generic exec RPC landed, un-pooled, one full handshake per
+// paste): they ride the persistent channel's byte-carrying `writeFile` RPC
+// instead, via companion.js writeFileToHost. The receive script is carried
+// INTACT — same mkdir, same failure-isolated WARDEN-1320 prune, same `cat >` —
+// so a paste is byte-identical across the toggle. Companion-or-fail, like every
+// migrated sibling; the ssh legs below remain the default (toggle off).
+//
 // What ACCUMULATES in the destination is bounded (WARDEN-1320). A pasted
 // screenshot is the densest privacy artifact a person can hand over — before
 // this bound, every paste on every host and container lived forever,
@@ -41,6 +50,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn as defaultSpawn } from 'node:child_process';
 import { buildSshArgv, shellQuote, SSH_BIN } from './ssh.js';
+import { isCompanionTransportEnabled, writeFileToHost } from './companion.js';
 
 const LOCAL = '(local)';
 
@@ -403,6 +413,34 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
   }
 
   const dest = `${PASTE_DIR}/${name}`;
+  // WARDEN-1350 — the REMOTE legs (with or without a container) route through the
+  // companion channel when the transport is on, exactly as chats.js/tmux.js gate
+  // their remote branches: companion-or-fail, NEVER a silent raw-ssh fallback
+  // (the error surfaces; a marker is only ever shown when ok is true). This is
+  // the one leg that needed a NEW channel capability — exec has no stdin, so it
+  // structurally cannot carry a payload — served by the writeFile RPC. The
+  // receive script rides intact, so the WARDEN-1320 prune is byte-identical on
+  // both transports, and the op becomes visible in the companion tally (an op
+  // that never calls channel.call is not counted, not failed, not shown).
+  //
+  // The LOCAL legs below stay untouched — a local docker exec is not a reach to
+  // another machine, and the roadmap governs reaches between hosts. The ssh path
+  // remains the DEFAULT (toggle off) and is byte-identical to what shipped in
+  // WARDEN-1282.
+  if (!isLocal && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
+    const r = await (deps.writeFileToHost ?? writeFileToHost)(
+      chat.host,
+      { script: buildReceiveScript(dest), container, buf },
+      cfg,
+      { timeout: DELIVER_TIMEOUT_MS },
+    );
+    if (!r.ok) {
+      // The same degrading idiom the ssh legs use: prefer the far side's own
+      // words, fall back to the exit code when it said nothing.
+      return { ok: false, error: (r.stderr || '').trim() || `delivery failed (exit ${r.code})` };
+    }
+    return { ok: true, path: dest, marker: buildMarker(dest, info), info };
+  }
   const [bin, argv] = isLocal
     ? [deps.dockerBin ?? DOCKER_BIN, buildContainerExecArgv(container, dest)]
     : [deps.sshBin ?? SSH_BIN, buildPasteSshArgv(chat.host, container, dest, cfg)];

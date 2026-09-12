@@ -39,6 +39,7 @@ import {
   resize as companionResize,
   send as companionSend, sendKey as companionSendKey,
   execInContext as companionExec,
+  writeFileToHost as companionWriteFile,
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
   applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
   subscribePanes, unsubscribePanes,
@@ -3384,6 +3385,114 @@ describe('send() / sendKey() via companion (companion-or-fail + stale-binary deg
 // graceful degradation: a live channel whose binary predates `exec` gets the
 // ACTIONABLE too-old error instead (the git surface is a polled fan; a silent
 // per-op fallback would quietly re-pay every handshake this slice removes).
+
+describe('writeFileToHost() via companion (WARDEN-1350 — the byte-carrying RPC; companion-or-fail, NO degrade)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x0a]);
+
+  it('delivers {script, container, dataB64, timeoutMs}; dataB64 round-trips the payload byte-exact', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'writeFile'] } };
+      if (req.method === 'writeFile') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const script = "mkdir -p '/tmp/warden/paste' && cat > '/tmp/warden/paste/p.png'";
+    const res = await companionWriteFile('prod', { script, container: 'p-worker', buf: PNG }, {}, {}, deps);
+    assert.strictEqual(res.host, 'prod');
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.code, 0);
+    assert.deepStrictEqual(sent, {
+      script,
+      container: 'p-worker',
+      dataB64: PNG.toString('base64'),
+      timeoutMs: 60000,
+    });
+    assert.deepStrictEqual(Buffer.from(sent.dataB64, 'base64'), PNG, 'base64 → decode == the original bytes');
+  });
+
+  it('a multi-MB payload encodes intact and defaults container to null', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'writeFile'] } };
+      if (req.method === 'writeFile') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const big = Buffer.alloc(2 * 1024 * 1024);
+    for (let i = 0; i < big.length; i++) big[i] = (i * 131 + (i >> 7)) & 0xff;
+    const res = await companionWriteFile('prod', { script: "cat > '/tmp/x'", buf: big }, {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(sent.container, null, 'no container -> null (the bare-tmux host leg)');
+    assert.deepStrictEqual(Buffer.from(sent.dataB64, 'base64'), big, 'multi-MB payload survives the base64 leg byte-identical');
+  });
+
+  it('forwards opts.timeout as timeoutMs (the DELIVER_TIMEOUT_MS contract)', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'writeFile'] } };
+      if (req.method === 'writeFile') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await companionWriteFile('prod', { script: 'x', buf: PNG }, {}, { timeout: 45000 }, deps);
+    assert.strictEqual(sent.timeoutMs, 45000);
+  });
+
+  it('a STALE binary (no writeFile in methods) surfaces the actionable too-old error — never a silent ssh fallback', async () => {
+    const seen = [];
+    const stale = fakeTransport((req) => {
+      seen.push(req.method);
+      // A binary predating WARDEN-1350 advertises every op EXCEPT writeFile.
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'exec'] } };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    const res = await companionWriteFile('prod', { script: 'x', buf: PNG }, {}, {}, deps);
+    assert.strictEqual(res.ok, false, 'there is deliberately NO {unsupported:true} degradation — a paste has no second transport');
+    assert.strictEqual(res.code, -1);
+    assert.match(res.stderr, /too old/);
+    assert.match(res.stderr, /writeFile/);
+    assert.match(res.stderr, /Remove ~\/\.warden\/companion-/);
+    assert.match(res.stderr, /and retry/);
+    assert.match(res.stderr, /WARDEN_COMPANION_TRANSPORT=0/);
+    assert.ok(!seen.includes('writeFile'), 'never sent writeFile to a stale binary');
+  });
+
+  it('companion-or-fail: a dead channel surfaces {ok:false, code:-1} with the companion error', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    const res = await companionWriteFile('prod', { script: 'x', buf: PNG }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.ok(res.stderr.includes('companion'), `error names the companion: ${res.stderr}`);
+    assert.ok(res.stderr.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.stderr}`);
+  });
+
+  it('an RPC-level error ({ok:false} reply) propagates as {ok:false} without fallback', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'writeFile'] } }
+          : req.method === 'writeFile'
+            ? { id: req.id, ok: false, error: 'writeFile: /tmp/warden/paste: No space left on device' }
+            : null),
+    });
+    const res = await companionWriteFile('prod', { script: 'x', container: 'c', buf: PNG }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.match(res.stderr, /No space left on device/);
+  });
+
+  it('(local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await companionWriteFile('(local)', { script: 'x', buf: PNG }, {});
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.stderr));
+  });
+});
 
 describe('execInContext() via companion (companion-or-fail, raw result shape)', () => {
   beforeEach(() => _resetChannelCacheForTests());

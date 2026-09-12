@@ -19,6 +19,7 @@ import {
   PASTE_RETENTION_MS,
   MAX_RETAINED_PASTES,
   CLOSE_GRACE_MS,
+  DELIVER_TIMEOUT_MS,
 } from './pasteImage.js';
 import { SSH_BASE_OPTS } from './ssh.js';
 
@@ -728,5 +729,118 @@ describe('no image bytes ever reach a command line', () => {
     assert.ok(!argv.join(' ').includes('SENTINEL-IMAGE-BYTES'));
     assert.ok(!r.marker.includes('SENTINEL-IMAGE-BYTES'));
     assert.equal(child.written, buf);
+  });
+});
+
+// ------------------- WARDEN-1350 — the companion routing -------------------
+// The remote legs, under the transport toggle, ride the companion channel's
+// byte-carrying writeFile RPC instead of spawning ssh. Companion-or-fail (no
+// silent raw-ssh fallback); the toggle-off path stays byte-identical to what
+// WARDEN-1282 shipped; the LOCAL legs are never companion business.
+describe('deliverPastedImage — companion transport routing (WARDEN-1350)', () => {
+  const NOW = Date.parse('2026-09-03T00:00:00Z');
+  const NAME = 'paste-2026-09-03T00-00-00-000.png';
+  const spawnThatFailsTheTest = () => { throw new Error('ssh must not spawn under the companion toggle'); };
+
+  it('routes a remote chat through writeFileToHost — the receive script rides intact, no ssh spawn', async () => {
+    const buf = pngHeader();
+    let seen = null;
+    const r = await deliverPastedImage({ host: 'box', container: 'agent-1' }, { someCfg: 1 }, buf, {
+      now: NOW,
+      spawn: spawnThatFailsTheTest,
+      isCompanionTransportEnabled: () => true,
+      writeFileToHost: (host, args, cfg, opts) => {
+        seen = { host, args, cfg, opts };
+        return { host, ok: true, code: 0, stdout: '', stderr: '' };
+      },
+    });
+    assert.ok(r.ok, `delivery failed: ${r.error}`);
+    const dest = `${PASTE_DIR}/${NAME}`;
+    assert.equal(seen.host, 'box');
+    assert.equal(seen.args.container, 'agent-1');
+    assert.equal(seen.args.buf, buf, 'the payload is passed by reference, never copied into a string');
+    assert.equal(seen.args.script, buildReceiveScript(dest), 'the WARDEN-1320 receive script rides byte-identical');
+    assert.equal(seen.cfg.someCfg, 1, 'cfg threads to the companion client (bootstrap reads host config)');
+    assert.equal(seen.opts.timeout, DELIVER_TIMEOUT_MS, 'the host-side kill deadline matches the ssh child killer');
+    assert.equal(r.path, dest);
+    assert.equal(r.marker, buildMarker(dest, describeImage(buf)));
+    assert.deepEqual(r.info, describeImage(buf));
+  });
+
+  it('a remote chat with NO container passes container: null (bare-tmux host leg)', async () => {
+    let seen = null;
+    await deliverPastedImage({ host: 'box' }, {}, pngHeader(), {
+      now: NOW,
+      spawn: spawnThatFailsTheTest,
+      isCompanionTransportEnabled: () => true,
+      writeFileToHost: (host, args) => { seen = args; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    });
+    assert.strictEqual(seen.container, null);
+  });
+
+  it('companion-or-fail: a companion failure returns {ok:false, error} and NEVER falls back to ssh', async () => {
+    const r = await deliverPastedImage({ host: 'box', container: 'c' }, {}, pngHeader(), {
+      now: NOW,
+      spawn: spawnThatFailsTheTest,
+      isCompanionTransportEnabled: () => true,
+      writeFileToHost: async () => ({
+        host: 'box', ok: false, code: -1, stdout: '',
+        stderr: "companion binary on box is too old: it does not advertise the 'writeFile' RPC (ping methods: ping). Remove ~/.warden/companion-abc123 on the host and retry so the bootstrap re-uploads the current binary, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.",
+      }),
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /too old/);
+    assert.match(r.error, /writeFile/);
+    assert.ok(!r.marker, 'a failed delivery never earns a marker — NO-MARKER-WITHOUT-A-FILE');
+  });
+
+  it('a far-side refused write surfaces the remote stderr, not a bare exit code', async () => {
+    const r = await deliverPastedImage({ host: 'box', container: 'c' }, {}, pngHeader(), {
+      now: NOW,
+      spawn: spawnThatFailsTheTest,
+      isCompanionTransportEnabled: () => true,
+      writeFileToHost: async () => ({ host: 'box', ok: false, code: 1, stdout: '', stderr: 'No space left on device\n' }),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'No space left on device');
+  });
+
+  it('toggle OFF → the ssh leg is byte-identical to what WARDEN-1282 shipped', async () => {
+    let seen = null;
+    let companionCalls = 0;
+    const child = fakeChild();
+    const buf = pngHeader();
+    const p = deliverPastedImage({ host: 'box', container: 'agent-1' }, { connectTimeout: 7 }, buf, {
+      now: NOW,
+      spawn: (bin, argv) => { seen = { bin, argv }; return child; },
+      isCompanionTransportEnabled: () => false,
+      writeFileToHost: () => { companionCalls++; return { ok: true }; },
+    });
+    child.emit('close', 0);
+    const r = await p;
+    assert.match(seen.bin, /^ssh(\.exe)?$/);
+    assert.deepStrictEqual(
+      seen.argv,
+      buildPasteSshArgv('box', 'agent-1', `${PASTE_DIR}/${NAME}`, { connectTimeout: 7 }),
+    );
+    assert.equal(companionCalls, 0, 'the companion client is not consulted when the toggle is off');
+    assert.equal(r.ok, true);
+    assert.equal(child.written, buf);
+  });
+
+  it('a LOCAL container chat never routes through the companion (not a reach to another machine)', async () => {
+    let companionCalls = 0;
+    const child = fakeChild();
+    const buf = pngHeader();
+    const p = deliverPastedImage({ host: '(local)', container: 'agent-7' }, {}, buf, {
+      now: NOW,
+      spawn: () => child,
+      isCompanionTransportEnabled: () => true,
+      writeFileToHost: () => { companionCalls++; return { ok: true }; },
+    });
+    child.emit('close', 0);
+    const r = await p;
+    assert.equal(r.ok, true);
+    assert.equal(companionCalls, 0, 'the local docker leg stays a local docker leg');
   });
 });
