@@ -1575,6 +1575,83 @@ export async function deliverRemoteScript(host, fullScript, { innerScript, conta
   return runFn(host, fullScript, { timeout }, cfg);
 }
 
+// ------------------------------ writeFileToHost ------------------------------
+// WARDEN-1350 (the byte-carrying slice of roadmap WARDEN-270). Every migrated
+// leg to date moved a COMMAND — exec runs a script and captures two output
+// streams, and has NO stdin, so there is no way to hand it bytes. The image-paste
+// delivery moves a PAYLOAD: a clipboard screenshot that must reach the agent's
+// container as a file, byte-identical, or the marker the user is shown names
+// something that is not there. The companion's `writeFile` RPC (companion/
+// main.go) is the channel's first byte-carrying op: base64-decode `dataB64`
+// host-side, run the caller's receive script with those bytes on stdin.
+//
+// `script` is the JS-assembled RECEIVE script (pasteImage.js buildReceiveScript:
+// `mkdir -p` + the WARDEN-1320 prune + `cat >` the destination) — executed
+// verbatim, the same "the client assembles, the companion executes, never
+// rebuilds" contract exec holds. Carrying the script intact is what keeps the
+// prune policy byte-identical across the toggle: the age/count encodings are
+// derived in ONE place (pasteImage.js) and the Go side never re-derives them.
+//
+// `container` selects the delivery shape HOST-side (main.go buildWriteScript):
+// `docker exec -i <c> sh -c <script>` when set — byte-identical to
+// buildRemoteCommand's container branch (Go's shellQuote == ssh.js's), `-i`
+// never `-it`, `sh` not bash (a minimal agent image may not ship it) — else the
+// script runs bare under the companion's own `bash -lc`.
+//
+// Passing through companionOp → getChannel → channel.call is what makes the op
+// appear in the WARDEN-1312 tally (recordCompanionOp counts inside call) — the
+// paste becomes a VISIBLE transport op instead of the invisible raw-ssh leg it
+// was. Companion-or-fail, matching every sibling: a dead channel or a stale
+// binary surfaces the actionable error; it NEVER silently falls back to raw ssh
+// (that would keep the parallel transport alive on the exact leg this slice
+// exists to remove). There is deliberately NO {unsupported:true} degradation
+// like send/sendKey: a paste has no acceptable second choice, so a binary that
+// predates writeFile gets execInContext's too-old error (naming the remove-and-
+// retry recovery), not a quiet detour back over ssh.
+//
+// `buf` is the payload (Buffer); it rides as base64 — the attachInput idiom, an
+// established shipped shape (a 25MB body inflates to ~33MB encoded, inside the
+// channel's 64MB per-line scanner cap; the route's `express.raw` 25MB bound is
+// the real ceiling and must not be raised).
+//
+// `opts.timeout` (ms, default 60000 — pasteImage.js's DELIVER_TIMEOUT_MS, the
+// bound the raw-ssh child killer enforced) is forwarded as `timeoutMs` so the
+// HOST side kills a wedged receive, with the same +5s channel margin
+// execInContext uses (the channel's own timeout must arm strictly later, or a
+// lost race surfaces a transport envelope instead of the far side's stderr).
+export async function writeFileToHost(host, { script, container, buf } = {}, cfg = {}, opts = {}, deps = {}) {
+  return companionOp(host, cfg, deps, {
+    // Raw-shape family: the refusal rides stderr (the run() envelope), NOT an
+    // `error` field.
+    refuse: () => mapCmdLocalRefusal(host),
+    run: async (channel) => {
+      const methods = await channelMethods(channel, opts);
+      if (!methods.includes('writeFile')) {
+        // Stale binary (channel alive, binary predates the writeFile RPC):
+        // surface the actionable too-old error — companion-or-fail, never a
+        // silent raw-SSH fallback (paste has no acceptable second transport).
+        const ver = deps.manifest?.version ?? loadManifest().version;
+        return {
+          host,
+          ok: false,
+          code: -1,
+          stdout: '',
+          stderr: `companion binary on ${host} is too old: it does not advertise the 'writeFile' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.`,
+        };
+      }
+      const timeoutMs = opts.timeout ?? 60000;
+      const payload = Buffer.isBuffer(buf) ? buf : Buffer.from(buf ?? '');
+      const result = await channel.call('writeFile', {
+        script,
+        container: container || null,
+        dataB64: payload.toString('base64'),
+        timeoutMs,
+      }, { timeout: timeoutMs + EXEC_CALL_TIMEOUT_MARGIN_MS });
+      return mapCmdResult(host, result);
+    },
+    fail: (e) => mapCmdError(host, e),
+  });
+}
 // ------------------------------- attachSession -------------------------------
 // WARDEN-1295 (the streaming slice of roadmap WARDEN-270). The LIVE WEB PANE was
 // the last runtime path still spawning raw SSH: every open of a remote pane

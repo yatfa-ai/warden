@@ -11,7 +11,7 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"send"|"sendKeys"|"subscribePanes"|"unsubscribePanes"|"attachStart"|"attachInput"|"attachResize"|"attachKill","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"send"|"sendKeys"|"subscribePanes"|"unsubscribePanes"|"attachStart"|"attachInput"|"attachResize"|"attachKill"|"writeFile","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
 //	event   : {"event":"paneDelta","panes":{key:content,…}}       // UNSOLICITED — no id
@@ -41,6 +41,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -119,6 +120,7 @@ type hasSessionParams struct {
 var baseMethods = []string{
 	"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession",
 	"resize", "send", "sendKeys", "subscribePanes", "unsubscribePanes", "exec",
+	"writeFile",
 }
 
 // attachMethods is the streaming attach family (WARDEN-1295).
@@ -248,6 +250,19 @@ func main() {
 			// timeoutMs is honored HOST-SIDE via exec.CommandContext so a timed-
 			// out probe dies on the host, not just in the JS caller.
 			write(Response{ID: req.ID, OK: true, Result: execScript(req.Params)})
+		case "writeFile":
+			// writeFile is the BYTE-CARRYING RPC (WARDEN-1350): delivers a payload
+			// the channel could not carry before — base64-decoded host-side and fed
+			// to the JS-assembled receive script on stdin. exec structurally cannot
+			// do this (runScriptCtx assigns no Stdin — it moves a COMMAND, this
+			// moves a PAYLOAD). The receive script is built JS-side (pasteImage.js
+			// buildReceiveScript: mkdir -p, the WARDEN-1320 prune, then `cat >` the
+			// destination) and executed verbatim — the Go side executes, never
+			// rebuilds, exactly the exec contract; a container param selects the
+			// docker-exec delivery shape (byte-identical to the raw-ssh paste leg
+			// it replaces). Returns the raw cmdResult — a non-zero exit (a refused
+			// write) is data, never an RPC error.
+			write(Response{ID: req.ID, OK: true, Result: writeFileRPC(req.Params)})
 		case "subscribePanes":
 			// WARDEN-413: start (or replace) a background watcher that re-captures
 			// the pane set on a short interval and pushes paneDelta events for ONLY
@@ -1024,8 +1039,23 @@ func killSession(params json.RawMessage) error {
 // shapes this domain actually delivers, so killing only the direct bash child
 // orphaned the forks and stalled the serial dispatch loop until they exited).
 // runTmuxRaw (no deadline) and execScript (the caller's timeoutMs) are the two
-// faces of this one core.
+// faces of this one core; writeFileRPC (WARDEN-1350) reaches the same core one
+// rung deeper, through runScriptCtxStdin below — same group-kill + WaitDelay +
+// stream-capture disciplines, plus the payload on stdin.
 func runScriptCtx(ctx context.Context, script string) cmdResult {
+	return runScriptCtxStdin(ctx, script, nil)
+}
+
+// runScriptCtxStdin is the ONE-RUNG-DEEPER core, carrying a PAYLOAD: the decoded
+// bytes become the script's stdin (WARDEN-1350, the writeFile RPC). This is the
+// capability exec structurally lacks — runScriptCtx (above) assigns no cmd.Stdin,
+// because every leg it serves moves a COMMAND; the paste delivery moves a
+// PAYLOAD, which reaches the far side as `cat >` reading stdin exactly as it
+// read ssh's stdin before the migration. A far side that exits before the whole
+// payload is written surfaces through cmd.Run() as an EPIPE-family error (code
+// -1, the kill shape) — the same diagnostic streamFileToHost gets from its
+// 'error' listener.
+func runScriptCtxStdin(ctx context.Context, script string, stdin []byte) cmdResult {
 	cmd := exec.CommandContext(ctx, "bash", "-lc", script)
 	// Own process group + kill(-pgid) on ctx cancel — see procgroup_unix.go.
 	armProcessGroupKill(cmd)
@@ -1039,6 +1069,12 @@ func runScriptCtx(ctx context.Context, script string) cmdResult {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if stdin != nil {
+		// The payload rides stdin (nil = the plain no-stdin callers). A bytes.Reader
+		// — not the process's own stdin — so the channel's scanner is never left
+		// sharing a pipe with a child.
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	err := cmd.Run()
 	code := 0
 	if err != nil {
@@ -1315,4 +1351,60 @@ func execScript(params json.RawMessage) cmdResult {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 	return runScriptCtx(ctx, buildExecScript(p.Container, p.Script))
+}
+
+// writeFileParams is the writeFile RPC params (WARDEN-1350). Script is the
+// JS-ASSEMBLED receive script (pasteImage.js buildReceiveScript: mkdir -p, the
+// WARDEN-1320 prune, then `cat >` the destination) — executed verbatim, the same
+// "the Go side executes, never rebuilds" contract exec holds; Container selects
+// the docker-exec delivery shape when set (byte-identical to the raw-ssh paste
+// leg this RPC replaces — `sh -c` and `-i`, never `-it`: a minimal agent image
+// may not ship bash, and a tty would line-discipline the binary); DataB64 is
+// base64 of the raw payload (the attachInput idiom — base64-over-the-channel is
+// an established, shipped shape here); TimeoutMs is the host-side kill deadline.
+type writeFileParams struct {
+	Script    string `json:"script"`
+	Container string `json:"container"`
+	DataB64   string `json:"dataB64"`
+	TimeoutMs int    `json:"timeoutMs"`
+}
+
+// buildWriteScript assembles the host-side command the writeFile RPC runs: the
+// docker-exec delivery shape when a container is set — byte-identical to
+// buildRemoteCommand's container branch in src/pasteImage.js (Go's shellQuote ==
+// ssh.js's) — else the receive script verbatim, which runScriptCtxStdin wraps in
+// the same `bash -lc` level buildRemoteCommand's host branch spells. Exposed +
+// tested directly, mirroring buildExecScript.
+func buildWriteScript(container, script string) string {
+	if container != "" {
+		return "docker exec -i " + shellQuote(container) + " sh -c " + shellQuote(script)
+	}
+	return script
+}
+
+// writeFile delivers one byte payload through the channel (WARDEN-1350): decode
+// DataB64, then run the receive script with those bytes on stdin. Bad params are
+// handled like every sibling RPC's tolerance (absent params → empty script, a
+// benign no-op), EXCEPT undecodable base64, which is a caller contract violation
+// — surfaced as the kill-shaped cmdResult {ok:false, code:-1} with the reason on
+// stderr rather than silently writing nothing (a silent success here would tell
+// warden to paste a marker for a file that never landed). A non-positive
+// timeoutMs defaults to 60000ms — pasteImage.js's DELIVER_TIMEOUT_MS, the bound
+// the raw-ssh leg's child killer enforced.
+func writeFileRPC(params json.RawMessage) cmdResult {
+	var p writeFileParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → empty script → benign no-op
+	}
+	data, err := base64.StdEncoding.DecodeString(p.DataB64)
+	if err != nil {
+		return cmdResult{OK: false, Code: -1, Stderr: fmt.Sprintf("writeFile: data is not valid base64: %s", err)}
+	}
+	timeoutMs := p.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 60000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+	return runScriptCtxStdin(ctx, buildWriteScript(p.Container, p.Script), data)
 }

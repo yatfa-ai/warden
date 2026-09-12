@@ -387,6 +387,45 @@ function printSendProjection(hosts, ticks) {
   console.log();
 }
 
+// WARDEN-1350: the IMAGE-PASTE delivery leg — the channel's first BYTE-CARRYING
+// op. src/pasteImage.js was created on the raw-SSH pattern five days AFTER the
+// generic exec RPC landed, and exec structurally cannot carry it: exec has no
+// stdin, so there is no way to hand it bytes — every earlier leg moved a
+// COMMAND, this one moves a PAYLOAD. The writeFile RPC (base64 over the channel,
+// decoded host-side, run through the same receive script with the bytes on
+// stdin) closes it. Each remote paste today pays a full UN-POOLED ssh handshake
+// (pasteImage spawns its own ssh child; no ControlMaster, no pool) — on Windows
+// that is the ~30s-per-action founding cost of this roadmap, sitting between
+// Ctrl+V and anything appearing in the pane.
+function printPasteProjection(hosts, ticks) {
+  const pastes = Math.max(0, ticks);
+  // 1 un-pooled ssh spawn per remote paste (full handshake; streamToChild calls
+  // spawn(SSH_BIN, …) directly — no runWithPool, no ControlPath).
+  const before = hosts * pastes;
+  console.log('━'.repeat(72));
+  console.log(`Part 1.p — image-paste delivery (writeFile): handshake projection  (${hosts} host(s), ${pastes} paste(s))`);
+  console.log('━'.repeat(72));
+  console.log('A clipboard IMAGE pasted into a remote pane travels as a FILE beside the');
+  console.log('terminal. On the default path that is one UN-POOLED ssh child per paste:');
+  console.log();
+  console.log('  DEFAULT path (pasteImage streamToChild — raw ssh, no pool):');
+  console.log(`    1 handshake / remote paste  →  ${hosts} × ${pastes} = ${before} handshakes`);
+  console.log('  COMPANION path (writeFile over the persistent channel):');
+  console.log('    reuses slice 1\'s bootstrapped channel — 0 handshakes/paste');
+  console.log('    (the receive script rides intact: same mkdir, same failure-isolated');
+  console.log('     WARDEN-1320 prune, same cat > — byte-identical across the toggle)');
+  console.log();
+  console.log(`  ▶ handshakes saved over ${pastes} paste(s): ${before} → 0  (−${before})`);
+  console.log('  ▶ per Ctrl+V: a full handshake of dead time → rides the live channel.');
+  console.log('  ▶ the op now shows in the host row\'s companion tally (an op that never');
+  console.log('    called channel.call was never counted, failed, or shown).');
+  console.log();
+  console.log('This is the roadmap\'s "the channel speaks every op warden asks of a host"');
+  console.log('leg: with a byte-carrying RPC served, no remaining remote op structurally');
+  console.log('requires a second transport.');
+  console.log();
+}
+
 // WARDEN-1295: the LIVE-ATTACH leg — the LAST raw-SSH path in the runtime, and
 // the one this whole roadmap was gated on. Every earlier leg removed a
 // request/response handshake; this one removes a long-lived `ssh -tt` CHILD.
@@ -1454,6 +1493,7 @@ async function main() {
   printScriptDeliveryProjection(args.hosts, args.ticks);
   printDepthCaptureProjection(args.hosts, args.ticks);
   printAttachProjection(args.hosts, args.ticks);
+  printPasteProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');

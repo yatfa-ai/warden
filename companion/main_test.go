@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -847,6 +848,178 @@ func TestExecScript(t *testing.T) {
 		res := execScript(nil)
 		if !res.OK {
 			t.Fatalf("empty params must be a benign no-op; got %+v", res)
+		}
+	})
+}
+
+// TestBuildWriteScript pins the host-side assembly the writeFile RPC runs
+// (WARDEN-1350): the container branch must be BYTE-IDENTICAL to
+// buildRemoteCommand's container branch in src/pasteImage.js — `docker exec -i`
+// (`-i`, never `-it`: the exec's stdin IS the transport, and a tty would
+// line-discipline the binary) with `sh -c` (a minimal agent image may not ship
+// bash) — and the bare branch must hand the receive script through verbatim,
+// exactly as buildExecScript does for exec.
+func TestBuildWriteScript(t *testing.T) {
+	t.Run("container set → the docker-exec delivery shape, byte-exact vs pasteImage's buildRemoteCommand", func(t *testing.T) {
+		got := buildWriteScript("agent-1", "mkdir -p '/tmp/warden/paste' && cat > '/tmp/warden/paste/p.png'")
+		want := "docker exec -i 'agent-1' sh -c 'mkdir -p '\\''/tmp/warden/paste'\\'' && cat > '\\''/tmp/warden/paste/p.png'\\'''"
+		if got != want {
+			t.Fatalf("buildWriteScript mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("container empty → the receive script verbatim (no rebuild)", func(t *testing.T) {
+		script := "mkdir -p '/tmp/warden/paste' && cat > '/tmp/warden/paste/p.png'"
+		if got := buildWriteScript("", script); got != script {
+			t.Fatalf("empty container must return the script verbatim; got: %s", got)
+		}
+	})
+
+	t.Run("container with an apostrophe is shellQuoted", func(t *testing.T) {
+		got := buildWriteScript("c'x", "cat > '/tmp/p'")
+		if !strings.Contains(got, "docker exec -i 'c'\\''x' sh -c") {
+			t.Fatalf("expected shellQuoted container; got: %s", got)
+		}
+	})
+}
+
+// TestWriteFile runs the real writeFileRPC end-to-end (WARDEN-1350): byte-exact
+// payload delivery through base64 → decode → stdin → `cat >` file, round-trip
+// fidelity on a multi-MB BINARY payload (a screenshot is arbitrary bytes, not
+// text), the prune's failure isolation surviving the stdin piping, undecodable
+// base64 surfacing as the kill shape rather than a silent success, the host-side
+// timeoutMs deadline actually killing a wedged receive, and absent params being
+// the same benign no-op exec's absent params are.
+func TestWriteFile(t *testing.T) {
+	t.Run("writes the decoded payload to the destination byte-exact", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "paste.png")
+		payload := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF}
+		params, _ := json.Marshal(map[string]any{
+			"script": "mkdir -p '" + dir + "' && cat > '" + dest + "'",
+			"dataB64": base64.StdEncoding.EncodeToString(payload),
+		})
+		res := writeFileRPC(params)
+		if !res.OK || res.Code != 0 {
+			t.Fatalf("expected ok:true code:0; got ok=%v code=%d stderr=%q", res.OK, res.Code, res.Stderr)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("destination not written: %v", err)
+		}
+		if string(got) != string(payload) {
+			t.Fatalf("payload corrupted: got %d bytes want %d", len(got), len(payload))
+		}
+	})
+
+	t.Run("multi-MB binary payload round-trips byte-identical (not just small text)", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "big.bin")
+		// 3MB deterministic pseudo-binary covering every byte value — a
+		// screenshot's size class, and adversarial for any line-discipline or
+		// encoding bug (0x00, 0x0A, 0xFF everywhere).
+		payload := make([]byte, 3*1024*1024)
+		for i := range payload {
+			payload[i] = byte(i*131 + i>>7)
+		}
+		params, _ := json.Marshal(map[string]any{
+			"script":  "mkdir -p '" + dir + "' && cat > '" + dest + "'",
+			"dataB64": base64.StdEncoding.EncodeToString(payload),
+		})
+		res := writeFileRPC(params)
+		if !res.OK {
+			t.Fatalf("expected ok:true; got code=%d stderr=%q", res.Code, res.Stderr)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("destination not written: %v", err)
+		}
+		if len(got) != len(payload) {
+			t.Fatalf("length mismatch: got %d want %d", len(got), len(payload))
+		}
+		for i := range payload {
+			if got[i] != payload[i] {
+				t.Fatalf("first byte divergence at %d: got %d want %d", i, got[i], payload[i])
+			}
+		}
+	})
+
+	t.Run("a failing prune prefix never costs the payload (WARDEN-1320 isolation rides stdin too)", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "p.png")
+		payload := []byte("survives")
+		// The receive script's prune group is failure-isolated (`|| true`); stub
+		// `find` to exit 127 exactly as the JS test does and assert the payload
+		// still lands byte-exact.
+		script := "find() { return 127; }; ls() { return 127; }; mkdir -p '" + dir + "' && { find x 2>/dev/null || true; } 2>/dev/null || true; cat > '" + dest + "'"
+		params, _ := json.Marshal(map[string]any{
+			"script":  script,
+			"dataB64": base64.StdEncoding.EncodeToString(payload),
+		})
+		res := writeFileRPC(params)
+		if !res.OK {
+			t.Fatalf("prune failure must not fail the delivery; got code=%d stderr=%q", res.Code, res.Stderr)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil || string(got) != string(payload) {
+			t.Fatalf("payload did not land byte-exact (err=%v, got=%q)", err, got)
+		}
+	})
+
+	t.Run("undecodable base64 → kill shape with the reason on stderr, NEVER a silent success", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{
+			"script":  "cat > '/tmp/warden-writefile-must-not-exist'",
+			"dataB64": "not!base64!",
+		})
+		res := writeFileRPC(params)
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape; got ok=%v code=%d", res.OK, res.Code)
+		}
+		if !strings.Contains(res.Stderr, "base64") {
+			t.Fatalf("stderr must name the base64 failure; got %q", res.Stderr)
+		}
+		if _, err := os.Stat("/tmp/warden-writefile-must-not-exist"); err == nil {
+			t.Fatalf("a refused payload must not create the destination")
+		}
+	})
+
+	t.Run("timeoutMs kills a wedged receive host-side (the DELIVER_TIMEOUT_MS contract)", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "never.png")
+		params, _ := json.Marshal(map[string]any{
+			"script":    "sleep 30; cat > '" + dest + "'",
+			"dataB64":   base64.StdEncoding.EncodeToString([]byte("x")),
+			"timeoutMs": 150,
+		})
+		start := time.Now()
+		res := writeFileRPC(params)
+		if res.OK || res.Code != -1 {
+			t.Fatalf("expected the kill shape; got ok=%v code=%d", res.OK, res.Code)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("kill took too long: %v", elapsed)
+		}
+	})
+
+	t.Run("absent params → benign no-op (ok:true)", func(t *testing.T) {
+		res := writeFileRPC(nil)
+		if !res.OK {
+			t.Fatalf("empty params must be a benign no-op; got %+v", res)
+		}
+	})
+
+	t.Run("the 25MB route ceiling stays inside the 64MB line cap — asserted, not assumed", func(t *testing.T) {
+		// src/server.js bounds the paste body at 25MB (express.raw); base64
+		// inflates 4/3; companion/main.go's scanner.Buffer caps a request LINE at
+		// 64MB. The whole design rests on the encoded request fitting — assert
+		// the arithmetic so a future bump of either bound re-checks it.
+		const routeLimit = 25 * 1024 * 1024
+		const lineCap = 64 * 1024 * 1024
+		encoded := base64.StdEncoding.EncodedLen(routeLimit)
+		// The JSON envelope adds the script + param names — a few hundred bytes,
+		// noise next to 33.5MB, but accounted rather than waved away.
+		if encoded >= lineCap-4096 {
+			t.Fatalf("encoded %d-byte payload = %d must fit the %d line cap with headroom", routeLimit, encoded, lineCap)
 		}
 	})
 }
