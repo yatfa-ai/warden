@@ -1,7 +1,7 @@
 import { describe, it, mock, afterEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { load } from './config.js';
+import { load, loadCatalog } from './config.js';
 
 // `load()` reads `~/.yatfa-warden/config.json` via fs.readFileSync. We mock that
 // call to drive the merge/default behavior deterministically (no real file I/O).
@@ -222,3 +222,90 @@ describe('config telemetry consent (WARDEN-457 / WARDEN-1116)', () => {
   });
 });
 
+// WARDEN-1351: pin `reviveCatalog` — the revive hook loadCatalog() passes to
+// readJsonDefensive for chats.json. All three behaviors were mutation-tested
+// unpinned: replacing the hook body with `return v` left the FULL suite green
+// (2515/2515), because the ~26 catalog-seeding suites all write the MODERN
+// shape, which takes no branch in the hook. These legs pin:
+//   1. the array-shape guard — a syntactically-valid-but-wrong-typed root is
+//      RECOVERED (fallback [] + corrupt-file backup), never propagated;
+//   2/3. the two legacy migrations — kind:'local' → kind:'tmux' + host default,
+//      and cmd+args[] folded into one cmd line — which keep chats created by an
+//      OLDER warden build openable after an upgrade (upgrade/corruption paths a
+//      developer never exercises locally, exactly where the suite drifted away).
+// I/O is mocked at the fs.promises layer (the same object persist.js holds as
+// `fsp`), matching this file's no-real-I/O house style — loadCatalog still runs
+// the REAL loadCatalog → readJsonDefensive → reviveCatalog → backupCorrupt chain.
+describe('chats.json revive hook (reviveCatalog via loadCatalog — WARDEN-1351)', () => {
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  // Serve chats.json as `text` through the mocked async layer; the real
+  // defensive-read + revive machinery runs on top of it.
+  const seedChats = (text) => mock.method(fs.promises, 'readFile', async () => text);
+  const absorbBackupWrite = () => mock.method(fs.promises, 'writeFile', async () => {});
+  const backupWrite = (writes) =>
+    writes.mock.calls.find((c) => /\.corrupt-[0-9a-f]{12}\.json\.bak$/.test(String(c.arguments[0])));
+
+  it('recovers a wrong-typed OBJECT root to [] AND quarantines the file (both halves of the contract)', async () => {
+    const corrupt = JSON.stringify({ oops: true });
+    seedChats(corrupt);
+    const writes = absorbBackupWrite();
+    const cats = await loadCatalog();
+    assert.deepStrictEqual(cats, [], 'fallback — the request path must never see the raw object');
+    const backup = backupWrite(writes);
+    assert.ok(backup, 'the wrong-typed file must be backed up, not silently discarded');
+    assert.strictEqual(backup.arguments[1], corrupt, 'the backup preserves the original payload verbatim');
+  });
+
+  it('same recovery for other wrong-typed roots (JSON string, number) — Array.isArray, not a typeof shortcut', async () => {
+    for (const text of [JSON.stringify('hello'), JSON.stringify(42)]) {
+      mock.restoreAll();
+      seedChats(text);
+      const writes = absorbBackupWrite();
+      const cats = await loadCatalog();
+      assert.deepStrictEqual(cats, [], `fallback for root ${text}`);
+      assert.ok(backupWrite(writes), `backup written for root ${text}`);
+    }
+  });
+
+  it("migrates legacy kind:'local' to kind:'tmux' and defaults host to '(local)'", async () => {
+    seedChats(JSON.stringify([{ kind: 'local', session: 's1', cmd: 'claude' }]));
+    const [e] = await loadCatalog();
+    assert.strictEqual(e.kind, 'tmux', "legacy direct-PTY chats must come back as tmux chats");
+    assert.strictEqual(e.host, '(local)', "host defaults to '(local)' when the legacy entry carries none");
+    assert.strictEqual(e.session, 's1', 'unrelated keys pass through untouched');
+  });
+
+  it("migrating kind:'local' PRESERVES an explicit host — `|| '(local)'` is a default, not an assign", async () => {
+    seedChats(JSON.stringify([{ kind: 'local', host: 'myhost', session: 's2', cmd: 'claude' }]));
+    const [e] = await loadCatalog();
+    assert.strictEqual(e.kind, 'tmux');
+    assert.strictEqual(e.host, 'myhost', 'an explicit host must survive the migration');
+  });
+
+  it('folds legacy cmd+args[] into one cmd line, deletes args, and drops an empty cmd via filter(Boolean)', async () => {
+    seedChats(JSON.stringify([
+      { kind: 'tmux', host: '(local)', session: 's3', cmd: 'claude', args: ['--resume', 'abc'] },
+      { kind: 'tmux', host: '(local)', session: 's4', cmd: '', args: ['--foo'] },
+    ]));
+    const [joined, emptyCmd] = await loadCatalog();
+    assert.strictEqual(joined.cmd, 'claude --resume abc', 'cmd and args joined with single spaces');
+    assert.ok(!('args' in joined), 'args must be deleted after the fold, not left as a stale key');
+    assert.strictEqual(emptyCmd.cmd, '--foo', 'a falsy cmd is dropped from the join (no leading space)');
+  });
+
+  it('both migrations COMPOSE on one legacy entry (kind + host default + args fold)', async () => {
+    seedChats(JSON.stringify([{ kind: 'local', session: 's1', cmd: 'claude', args: ['--resume', 'abc'] }]));
+    const [e] = await loadCatalog();
+    assert.deepStrictEqual(e, { kind: 'tmux', host: '(local)', session: 's1', cmd: 'claude --resume abc' });
+  });
+
+  it('returns a MODERN entry byte-identical — the hook is a no-op on today\u2019s shape', async () => {
+    const modern = { host: '(local)', session: 's9', cwd: '/tmp/proj', cmd: 'claude', name: 's9' };
+    seedChats(JSON.stringify([modern]));
+    const [e] = await loadCatalog();
+    assert.deepStrictEqual(e, modern, 'no key added, removed, or rewritten — the hook must not be simplifiable into a lossy one');
+  });
+});
