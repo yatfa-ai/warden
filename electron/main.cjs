@@ -558,6 +558,15 @@ function installApplicationMenu() {
               if (target.isMaximized()) target.unmaximize();
               else target.maximize();
             },
+            // WARDEN-1356: Edit ▸ Select All is a wired click item (the bare
+            // role is inert on the agent-pane surface — xterm's helper textarea
+            // is empty and webContents.selectAll() fires no DOM event the pane
+            // could intercept). This push is the item's whole implementation:
+            // the renderer routes by REAL DOM focus — the focused pane's
+            // term.selectAll(), or document.execCommand('selectAll') for a
+            // focused field (Settings), which is what keeps Select All working
+            // there. See web/src/lib/terminalEdit.ts for the routing decision.
+            selectAll: () => sendToRenderer('menu:select-all'),
           },
         }),
       ),
