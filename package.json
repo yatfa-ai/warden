@@ -1,6 +1,6 @@
 {
   "name": "warden",
-  "version": "0.1.63",
+  "version": "0.1.64",
   "description": "Yatfa Warden — dashboard for AI agent chats",
   "type": "module",
   "bin": {
