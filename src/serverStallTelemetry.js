@@ -38,6 +38,7 @@
 // is inert on the wire.
 
 import { createStallAggregator } from './telemetry-stalls.cjs';
+import { createConsentGatedWindow } from './telemetryProducer.js';
 
 // Default flush cadence — the SAME 5-minute window the file-exists metrics
 // producer uses, so the two channels close on one rhythm. An idle window (no
@@ -64,8 +65,23 @@ export function createServerStallTelemetry({
   knownSegments,
   aggregator = createStallAggregator({ knownSegments }),
 } = {}) {
-  const isEnabled = () => (typeof consent === 'function' ? consent() === true : false);
-  const forward = typeof send === 'function' ? send : () => {};
+  // The consent gate, the IPC forward, the flushNow control flow and the
+  // unref'd start() are the SHARED scaffold in src/telemetryProducer.js
+  // (WARDEN-1352). This factory contributes only the stall-specific parts: the
+  // recorder below and the hasAnything predicate — this producer's window shape
+  // is the scalar-count aggregate, so a window is worth sending when ANY stall
+  // folded or anything was rejected. A window with no stalls is the healthy
+  // case and is the overwhelming majority — sending it would be pure noise on
+  // the wire and in the store.
+  const gated = createConsentGatedWindow({
+    consent,
+    send,
+    intervalMs,
+    setIntervalImpl,
+    aggregator,
+    hasAnything: (snapshot) => snapshot.count > 0 || snapshot.rejected > 0,
+  });
+  const isEnabled = gated.isEnabled;
 
   // Fold ONE stall record — the exact object src/loop-monitor.js's
   // buildStallRecord produces, handed straight from the setOnStall callback.
@@ -77,33 +93,7 @@ export function createServerStallTelemetry({
     return aggregator.record(record);
   }
 
-  // Close the window. Consent ON → forward a non-empty snapshot; consent OFF →
-  // DROP the window without sending (and drop anything a mid-window consent
-  // flip may have left behind — nothing out-of-consent is retained, let alone
-  // transmitted). Returns the snapshot when one was forwarded, else null.
-  function flushNow() {
-    if (!isEnabled()) {
-      aggregator.flush(); // discard, keep the next window's start fresh
-      return null;
-    }
-    const snapshot = aggregator.flush();
-    // A window with no stalls is the healthy case and is the overwhelming
-    // majority — sending it would be pure noise on the wire and in the store.
-    const hasAnything = snapshot.count > 0 || snapshot.rejected > 0;
-    if (!hasAnything) return null;
-    forward(snapshot);
-    return snapshot;
-  }
-
-  // Arm the periodic flush. UNREF'd so a library import (every test that loads
-  // server.js) never keeps the event loop alive on this timer alone.
-  function start() {
-    const t = setIntervalImpl(flushNow, intervalMs);
-    if (t && typeof t.unref === 'function') t.unref();
-    return t;
-  }
-
-  return { recordStall, flushNow, start };
+  return { recordStall, flushNow: gated.flushNow, start: gated.start };
 }
 
 /**

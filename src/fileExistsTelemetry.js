@@ -35,6 +35,7 @@
 // flush cadence, and the IPC forward.
 
 import { createMetricAggregator } from './telemetry-metrics.cjs';
+import { createConsentGatedWindow } from './telemetryProducer.js';
 
 // The closed operation set — constant literals by the aggregator's caller
 // contract. NOTE the names are lowercase kebab-case ONLY: the schema validator
@@ -77,8 +78,21 @@ export function createFileExistsTelemetry({
   setIntervalImpl = setInterval,
   aggregator = createMetricAggregator(),
 } = {}) {
-  const isEnabled = () => (typeof consent === 'function' ? consent() === true : false);
-  const forward = typeof send === 'function' ? send : () => {};
+  // The consent gate, the IPC forward, the flushNow control flow and the
+  // unref'd start() are the SHARED scaffold in src/telemetryProducer.js
+  // (WARDEN-1352). This factory contributes only the probe-specific parts: the
+  // operation set, the recorders below, and the hasAnything predicate — this
+  // producer's window shape is the operations[] aggregate, so a window is
+  // worth sending when ANY operation folded or anything was rejected.
+  const gated = createConsentGatedWindow({
+    consent,
+    send,
+    intervalMs,
+    setIntervalImpl,
+    aggregator,
+    hasAnything: (snapshot) => snapshot.operations.length > 0 || snapshot.rejected > 0,
+  });
+  const isEnabled = gated.isEnabled;
 
   // Fold ONE probe observation. `kind` is 'local' | 'remote'; `ok` is the
   // exists:true/false verdict; `durationMs` the wall-clock cost of resolving
@@ -107,29 +121,5 @@ export function createFileExistsTelemetry({
     return folded;
   }
 
-  // Close the window. Consent ON → forward a non-empty snapshot; consent OFF →
-  // DROP the window without sending (and drop anything a mid-window consent
-  // flip may have left behind — nothing out-of-consent is retained, let alone
-  // transmitted). Returns the snapshot when one was forwarded, else null.
-  function flushNow() {
-    if (!isEnabled()) {
-      aggregator.flush(); // discard, keep the next window's start fresh
-      return null;
-    }
-    const snapshot = aggregator.flush();
-    const hasAnything = snapshot.operations.length > 0 || snapshot.rejected > 0;
-    if (!hasAnything) return null;
-    forward(snapshot);
-    return snapshot;
-  }
-
-  // Arm the periodic flush. UNREF'd so a library import (every test that loads
-  // server.js) never keeps the event loop alive on this timer alone.
-  function start() {
-    const t = setIntervalImpl(flushNow, intervalMs);
-    if (t && typeof t.unref === 'function') t.unref();
-    return t;
-  }
-
-  return { recordProbe, recordCacheHits, flushNow, start };
+  return { recordProbe, recordCacheHits, flushNow: gated.flushNow, start: gated.start };
 }
