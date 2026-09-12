@@ -54,6 +54,19 @@ contextBridge.exposeInMainWorld('wardenWindow', {
     ipcRenderer.on('menu:open-settings', listener);
     return () => ipcRenderer.removeListener('menu:open-settings', listener);
   },
+  // WARDEN-1356 — the application menu's Edit ▸ Select All item. The item is a
+  // wired click (the bare role is inert on the agent-pane surface), main pushes
+  // 'menu:select-all' on the click, and the web bundle's one effect routes by
+  // real DOM focus — the focused pane's term.selectAll() or, for a focused
+  // field, document.execCommand('selectAll'), which is what keeps Select All
+  // working in Settings. Same shape and guarantees as onOpenSettings above.
+  onSelectAll: (cb) => {
+    const listener = () => {
+      try { cb(); } catch { /* a renderer callback must never crash main */ }
+    };
+    ipcRenderer.on('menu:select-all', listener);
+    return () => ipcRenderer.removeListener('menu:select-all', listener);
+  },
 });
 
 // Telemetry runtime-status bridge (WARDEN-631). The drift flag lives in MAIN (the

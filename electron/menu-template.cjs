@@ -45,6 +45,8 @@
  *   - openDataFolder()     shell.openPath on ~/.yatfa-warden/
  *   - toggleMaximize()     maximize/restore the live window (Windows/Linux Window menu;
  *                          macOS uses role:'zoom', which AppKit handles natively)
+ *   - selectAll()          push 'menu:select-all' to the renderer (Edit ▸ Select All —
+ *                          see the Edit-submenu comment for why it is not a role)
  * @returns {Array<object>} a Menu.buildFromTemplate-compatible template
  */
 
@@ -114,6 +116,7 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
   const showStallDiagnostics = reach('showStallDiagnostics', handlers.showStallDiagnostics);
   const openDataFolder = reach('openDataFolder', handlers.openDataFolder);
   const toggleMaximize = reach('toggleMaximize', handlers.toggleMaximize);
+  const selectAll = reach('selectAll', handlers.selectAll);
 
   // The Settings item. On macOS the platform convention puts Preferences in the
   // APP menu (Cmd+,); on Windows/Linux it belongs in File (Ctrl+,). Same handler,
@@ -173,9 +176,46 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
   });
 
   // --- Edit / View / Window -------------------------------------------------
-  // Reproduced from the stock template. These are why Copy/Paste/Select All work
-  // inside Settings text fields and why Reload reloads the app view; dropping any
-  // of them would be a regression introduced by this ticket, not a cleanup.
+  // Reproduced from the stock template, with ONE deliberate divergence
+  // (WARDEN-1356): Select All is a WIRED click item, not `role: 'selectAll'`.
+  //
+  // The stock roles are why Copy/Paste/Cut/Undo/Redo work inside Settings text
+  // fields and why Reload reloads the app view; dropping any of them would be a
+  // regression introduced by this ticket, not a cleanup. But the agent pane —
+  // the surface this product mostly is — defeats two of them, and the two need
+  // OPPOSITE fixes:
+  //
+  //   - Cut keeps `role: 'cut'`. webContents.cut() DOES reach the renderer as
+  //     a native DOM cut event at the focused element, so the pane can claim it
+  //     in the capture phase (web/src/components/PaneTile.tsx, the WARDEN-1338
+  //     paste shape) and perform the one honest terminal reading — copy the
+  //     selection to the clipboard, then clear it; a pane's scrollback cannot
+  //     be excised. Settings fields are never claimed and keep the native cut.
+  //
+  //   - Select All CANNOT be intercepted: webContents.selectAll() fires no DOM
+  //     event at all (verified live — zero events at the pane while a real
+  //     <input> in the same run emitted selectionchange/selectstart), and
+  //     xterm's helper textarea is EMPTY, so the browser-native select-all
+  //     selects nothing: the item rendered enabled and changed nothing. The
+  //     renderer is structurally blind to the role path, so the item is wired
+  //     instead: main pushes 'menu:select-all' (the WARDEN-1280 Settings bridge
+  //     shape) and the renderer routes by REAL DOM focus — the focused pane's
+  //     term.selectAll(), or document.execCommand('selectAll') for the focused
+  //     field, which is what keeps Settings working (web/src/lib/
+  //     terminalEdit.ts holds the routing decision).
+  //
+  // The accelerator is kept explicitly because leaving the role took its
+  // CmdOrCtrl+A label with it — the menu must still SHOW the shortcut users
+  // know. Measured at ticket-creation time: with the role replaced by a click
+  // item carrying this accelerator, Ctrl+A still reaches the PTY as 0x01
+  // (readline beginning-of-line) with the pane focused, and the handler fires
+  // zero times on the keypress — the accelerator does not steal the key from
+  // either surface.
+  const selectAllItem = {
+    label: 'Select All',
+    accelerator: 'CmdOrCtrl+A',
+    click: () => selectAll(),
+  };
   template.push({
     label: 'Edit',
     submenu: [
@@ -186,8 +226,8 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
       { role: 'copy' },
       { role: 'paste' },
       ...(isMac
-        ? [{ role: 'pasteAndMatchStyle' }, { role: 'delete' }, { role: 'selectAll' }]
-        : [{ role: 'delete' }, { type: 'separator' }, { role: 'selectAll' }]),
+        ? [{ role: 'pasteAndMatchStyle' }, { role: 'delete' }, selectAllItem]
+        : [{ role: 'delete' }, { type: 'separator' }, selectAllItem]),
     ],
   });
 

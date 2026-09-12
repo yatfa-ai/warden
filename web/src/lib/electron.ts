@@ -35,6 +35,11 @@ interface WardenWindowBridge {
   // that predates the menu simply lacks it, and the helper below degrades to a
   // no-op unsubscribe rather than throwing.
   onOpenSettings?: (cb: () => void) => () => void;
+  // WARDEN-1356 — subscribe to the application menu's Edit ▸ Select All click,
+  // pushed from main ('menu:select-all'). Optional for the same reason: an
+  // older preload lacks it and the helper below degrades to a no-op
+  // unsubscribe.
+  onSelectAll?: (cb: () => void) => () => void;
 }
 
 interface WindowWithWarden extends Window {
@@ -211,6 +216,27 @@ export function onOpenSettings(cb: () => void): () => void {
     return b.onOpenSettings(cb) ?? (() => {});
   } catch (e) {
     console.warn('[warden:electron] onOpenSettings failed', e);
+    return () => {};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WARDEN-1356 — subscribe to the application menu's Edit ▸ Select All item.
+// The item is a wired click (the bare role is inert on the agent-pane surface),
+// so this is the renderer's door into it. App.tsx installs ONE effect that
+// routes by real DOM focus: the focused pane's term.selectAll(), or
+// document.execCommand('selectAll') for a focused field (Settings) — which is
+// what keeps Select All working there. Same three-context story as
+// onOpenSettings: no preload (browser / smoke) means no subscription at all,
+// and this returns a no-op unsubscribe so the caller's cleanup stays safe.
+// ---------------------------------------------------------------------------
+export function onSelectAll(cb: () => void): () => void {
+  const b = bridge();
+  if (!b || typeof b.onSelectAll !== 'function') return () => {};
+  try {
+    return b.onSelectAll(cb) ?? (() => {});
+  } catch (e) {
+    console.warn('[warden:electron] onSelectAll failed', e);
     return () => {};
   }
 }

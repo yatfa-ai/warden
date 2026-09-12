@@ -12,6 +12,7 @@ import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { handleOsc52, copyText } from '@/lib/clipboard';
 import { readClipboardImage, deliverImagePaste, shouldRouteNativePasteToTerminal } from '@/lib/pasteImage';
+import { shouldRouteNativeCutToTerminal, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type Snippet } from '@/lib/storage';
@@ -575,6 +576,68 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     };
     document.addEventListener('paste', onNativePasteCapture, true);
 
+    // --- WARDEN-1356: Edit ▸ Cut — copy-then-clear on the read-only pane ------
+    // The Edit menu's { role: 'cut' } executes as webContents.cut() against the
+    // focused webContents. That DOES reach the renderer — as a native DOM cut
+    // event at the focused element — but xterm registers no cut listener (0 in
+    // the installed dist) and its helper textarea is EMPTY, so the native cut
+    // acts on an empty element: the clipboard keeps its old contents and the
+    // gesture dies in silence. Same blind spot as the image paste WARDEN-1338
+    // fixed, and the same shape fixes it: claim the event in the CAPTURE phase,
+    // gated by the unit-tested predicate.
+    //
+    // The honest terminal reading of "cut" is COPY-THEN-CLEAR: a pane's
+    // scrollback cannot be excised — there is no deleting the past out of a
+    // terminal buffer — so the item copies the selection to the clipboard
+    // and clears the selection. Both halves are observable: the clipboard
+    // gains the text; the selection visibly goes away.
+    //
+    // The clipboard write rides the EVENT ITSELF (e.clipboardData.setData — the
+    // canonical custom-copy pattern, the same mechanism xterm's own copy
+    // listener relies on), NOT document.execCommand('copy'): the cut gesture
+    // originates in MAIN (a menu role execution), and a renderer execCommand
+    // issued from that event has no user activation to stand on — measured
+    // live: execCommand returned without writing anything while the same
+    // gesture's clipboardData.setData carried the selection through. The event
+    // handler is also synchronous, so this stays on the pane's no-async rule.
+    //
+    // Settings safety is the target-identity test, exactly as for paste: a cut
+    // aimed at a Settings input targets THAT input, is never claimed, and the
+    // native cut proceeds byte-for-byte. And with nothing selected the event
+    // falls through too — cut-with-no-selection is a no-op on every surface.
+    const onNativeCutCapture = (e: ClipboardEvent) => {
+      const term = termRef.current;
+      if (!term) return;
+      if (!e.clipboardData) return; // no clipboard to write — do not claim
+      if (!shouldRouteNativeCutToTerminal(e.target, term.textarea, term.hasSelection())) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.clipboardData.setData('text/plain', term.getSelection());
+      term.clearSelection();
+    };
+    document.addEventListener('cut', onNativeCutCapture, true);
+
+    // --- WARDEN-1356: Edit ▸ Select All — the pane claims the renderer push ---
+    // The Select All item cannot be intercepted like cut: webContents.selectAll()
+    // fires NO DOM event at all (verified live — zero events at the pane while a
+    // real <input> in the same run emitted selectionchange/selectstart), so the
+    // template item is a wired click instead and App.tsx broadcasts
+    // TERMINAL_SELECT_ALL_EVENT after routeMenuSelectAll saw a terminal textarea
+    // as document.activeElement. THIS side's identity check is the load-bearing
+    // half: only the pane whose helper textarea IS the active element responds,
+    // so exactly the focused pane selects (multi-pane layouts included), and a
+    // broadcast that races a focus change to a field finds no claimant. xterm
+    // has the capability: term.selectAll() moves the selection 0 → N on the
+    // buffer; term.clearSelection() on a later focus/click is xterm's normal
+    // selection lifecycle.
+    const onMenuSelectAll = () => {
+      const term = termRef.current;
+      if (!term) return;
+      if (document.activeElement !== term.textarea) return;
+      term.selectAll();
+    };
+    window.addEventListener(TERMINAL_SELECT_ALL_EVENT, onMenuSelectAll);
+
     // --- WARDEN-227: Ctrl/Cmd-clickable file paths in the live terminal --------
     // Reset the per-chat existence cache for this term instance — a different `id`
     // means a different cwd, so prior results must not carry over.
@@ -790,6 +853,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       osc52.dispose();
       linkProvider.dispose(); hideTooltip();
       document.removeEventListener('paste', onNativePasteCapture, true);
+      window.removeEventListener(TERMINAL_SELECT_ALL_EVENT, onMenuSelectAll);
+      document.removeEventListener('cut', onNativeCutCapture, true);
       if (tooltipElRef.current) tooltipElRef.current = null;
       term.dispose(); termRef.current = null;
     };

@@ -19,7 +19,8 @@ import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
+import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat } from '@/lib/uiStore';
 
@@ -1631,6 +1632,31 @@ function App() {
   // `node web/smoke.cjs` are byte-unaffected — neither has an application menu
   // to fire it.
   useEffect(() => onOpenSettings(() => setSettingsOpen(true)), []);
+  // WARDEN-1356 — the application menu's Edit ▸ Select All item. The item is a
+  // wired click (the bare role is inert on the agent-pane surface: xterm's
+  // helper textarea is empty and webContents.selectAll() fires no DOM event the
+  // pane could intercept), so main pushes 'menu:select-all' — the same bridge
+  // shape as Settings above — and this effect routes by REAL DOM focus:
+  //   terminal → broadcast to the panes; the one whose textarea is the active
+  //              element claims it and calls term.selectAll();
+  //   editable → a Settings (or other) field has focus;
+  //              document.execCommand('selectAll') reproduces the role's
+  //              native behaviour there, which is what keeps the item honest
+  //              off the pane surface;
+  //   none     → nothing editable has focus; a no-op, same as the role's
+  //              select-nothing today.
+  // DOM focus, not the focusedChat state, decides — focusedChat can still name
+  // a pane while a Settings search field actually holds the keyboard, and the
+  // role this replaces acted on real focus too. Runs once; outside the
+  // Electron app onSelectAll finds no bridge and returns a no-op unsubscribe.
+  useEffect(() => onSelectAll(() => {
+    const route = routeMenuSelectAll(document.activeElement);
+    if (route === 'terminal') {
+      window.dispatchEvent(new CustomEvent(TERMINAL_SELECT_ALL_EVENT));
+    } else if (route === 'editable') {
+      document.execCommand('selectAll');
+    }
+  }), []);
   // Full-page "Open chat" browser view (WARDEN-216). Mirrors settingsOpen: an
   // App-level boolean toggled by the sidebar's "Open chat…" button; when true the
   // view-switch ternary below swaps the workspace for the browser page. Formerly a

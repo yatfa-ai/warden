@@ -64,6 +64,7 @@ function buildWithSpies(platform) {
       showStallDiagnostics: spy('showStallDiagnostics'),
       openDataFolder: spy('openDataFolder'),
       toggleMaximize: spy('toggleMaximize'),
+      selectAll: spy('selectAll'),
     },
   });
   return { template, calls };
@@ -139,10 +140,14 @@ for (const platform of PLATFORMS) {
   test(`[${platform}] the platform-standard roles the stock template provided are kept`, () => {
     const { template } = buildWithSpies(platform);
     const roles = new Set(flattenMenuItems(template).map((i) => i.role).filter(Boolean));
-    // Edit — why Copy/Paste/Select All work inside Settings text fields.
-    for (const r of ['undo', 'redo', 'cut', 'copy', 'paste', 'selectAll']) {
+    // Edit — why Copy/Paste/Cut/Undo/Redo work inside Settings text fields.
+    // Select All is deliberately ABSENT from this list: since WARDEN-1356 it is
+    // a wired click item, not a role (the role is inert on the agent-pane
+    // surface) — asserted by the EFFECT rung below.
+    for (const r of ['undo', 'redo', 'cut', 'copy', 'paste']) {
       assert.ok(roles.has(r), `edit role '${r}' missing`);
     }
+    assert.ok(!roles.has('selectAll'), "edit Select All must stay a wired click item, not the role:'selectAll' that is inert on the agent-pane surface");
     // View — why Reload reloads the app view.
     for (const r of ['reload', 'forceReload', 'toggleDevTools', 'resetZoom', 'zoomIn', 'zoomOut', 'togglefullscreen']) {
       assert.ok(roles.has(r), `view role '${r}' missing`);
@@ -380,6 +385,7 @@ function buildWithOrder(platform) {
       showStallDiagnostics: () => order.push('showStallDiagnostics'),
       openDataFolder: () => order.push('openDataFolder'),
       toggleMaximize: () => order.push('toggleMaximize'),
+      selectAll: () => order.push('selectAll'),
     },
   });
   return { template, order };
@@ -391,6 +397,13 @@ const WINDOW_TARGETING_ITEMS = [
   ['Stall Diagnostics…', 'showStallDiagnostics', ['darwin', 'win32', 'linux']],
   ['About Yatfa Warden', 'showAbout', ['win32', 'linux']],
   ['Maximize / Restore', 'toggleMaximize', ['win32', 'linux']],
+  // WARDEN-1356 — Select All acts on the renderer's focus, so it inherits the
+  // reach wrap like every other window-targeting item. This is the STATED
+  // decision the ticket asked for: the wrap is not a silent inheritance of
+  // WARDEN-1333 plumbing, it is asserted here on every platform — restoring
+  // the window first is what makes a select-all click reach a visible surface
+  // when the app sits hidden to the tray.
+  ['Select All', 'selectAll', ['darwin', 'win32', 'linux']],
 ];
 
 for (const platform of PLATFORMS) {
@@ -467,5 +480,160 @@ test('main.cjs actually wires ensureMainWindowVisible — visibility-gated, thro
     /ensureMainWindowVisible/,
     'installApplicationMenu must inject ensureMainWindowVisible into buildMenuTemplate — ' +
       'without it the template has nothing to call and every click degrades to the unwired behaviour',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// EFFECT, not just EXECUTABILITY (WARDEN-1356) — the fourth rung of the ladder.
+//
+// Rung 1 asked whether the item EXISTS and points somewhere (WARDEN-1280).
+// Rung 2 asked whether the role EXECUTES at all (WARDEN-1311/1313 — INERT_ROLES).
+// Rung 3 asked whether the action REACHES a visible window (WARDEN-1333).
+// All three judge the TEMPLATE OBJECT. None can see the SURFACE — and the
+// agent pane (xterm) defeats two stock roles that execute flawlessly: xterm
+// registers clipboard listeners for copy and paste ONLY (0 `cut`, 0
+// `selectall` in web/node_modules/@xterm/xterm/lib/xterm.js) and its helper
+// textarea is EMPTY, so webContents.selectAll() and webContents.cut() act on
+// an empty element and change nothing. From inside the template, a role that
+// executes against a webContents that ignores it is indistinguishable from
+// one that works. That is why all 45 pre-WARDEN-1356 tests passed a live
+// defect.
+//
+// The fix cannot live in the template alone — a claim about SURFACE behaviour
+// is a live-app fact, and this repo has no front-end DOM runner. So the rung
+// pins the WIRING the effect depends on, exactly the WARDEN-1333 pattern of
+// source-asserting main.cjs's half:
+//
+//   Select All — a bare role fires NO DOM event (verified live: zero events
+//   at the pane while a real <input> emitted selectionchange/selectstart), so
+//   the renderer is structurally blind to the role path. The item is a WIRED
+//   click instead: main pushes 'menu:select-all' (the WARDEN-1280 bridge
+//   shape) and the renderer routes by REAL DOM focus — the focused pane's
+//   term.selectAll(), or document.execCommand('selectAll') for a focused
+//   field, which is what keeps Settings working. The template-side half is
+//   mutation-checked by construction: reverting the item to a bare
+//   `role: 'selectAll'` turns the assertion below RED.
+//
+//   Cut — the role DOES reach the renderer, as a native DOM cut event at the
+//   focused element, so it keeps `role: 'cut'` and the pane claims it in the
+//   capture phase (the WARDEN-1338 paste shape), performing the one honest
+//   terminal reading: copy the selection to the clipboard, then clear it.
+//   That half is pinned by source assertion over PaneTile.tsx and by the pure
+//   predicate's own suite (web/terminalEdit.test.mjs).
+//
+// The Settings constraint is the reason both fixes are gated on target
+// identity / real DOM focus (the load-bearing half of the predicate suite):
+// these Edit items exist FOR the fields as much as for the pane, and the
+// probes showed they work there today.
+// ---------------------------------------------------------------------------
+
+for (const platform of PLATFORMS) {
+  test(`[${platform}] EFFECT — Edit ▸ Select All is a wired click, not the inert-on-pane bare role`, () => {
+    const { template, calls } = buildWithSpies(platform);
+    const edit = template.find((m) => m.label === 'Edit');
+    assert.ok(edit, 'Edit menu missing');
+    const selectAll = flattenMenuItems(edit.submenu).find((i) => i.label === 'Select All');
+    assert.ok(
+      selectAll,
+      'Edit ▸ Select All is missing — the stock role was removed without wiring the replacement',
+    );
+    // The mutation check the EFFECT rung exists for: a bare `role: 'selectAll'`
+    // executes as webContents.selectAll() against xterm's empty helper textarea
+    // and changes nothing — selection 0 → 0, verified live three times. The
+    // item must carry its own handler so the renderer can route by real focus.
+    assert.equal(
+      selectAll.role,
+      undefined,
+      "Edit ▸ Select All reverted to a bare role — role:'selectAll' is inert on the agent-pane surface (xterm's helper textarea is empty; no DOM event fires), so the item must stay WIRED",
+    );
+    assert.equal(typeof selectAll.click, 'function', 'Select All carries no click handler');
+    assert.equal(selectAll.accelerator, 'CmdOrCtrl+A', 'Select All lost the platform accelerator label');
+    calls.length = 0;
+    selectAll.click();
+    assert.deepEqual(
+      calls,
+      ['selectAll'],
+      'Select All must route through the injected handler (main pushes menu:select-all; the renderer routes by real DOM focus)',
+    );
+  });
+
+  test(`[${platform}] EFFECT — Edit ▸ Cut keeps the role whose DOM event the pane intercepts`, () => {
+    const { template } = buildWithSpies(platform);
+    const edit = template.find((m) => m.label === 'Edit');
+    const cut = flattenMenuItems(edit.submenu).find((i) => i.role === 'cut');
+    assert.ok(cut, "Edit ▸ Cut must stay role:'cut' — webContents.cut() dispatches the native cut event the pane claims");
+    assert.equal(typeof cut.click, 'undefined', 'Cut must not grow a click handler — its effect is the capture-phase interception');
+  });
+}
+
+// The renderer half of the EFFECT rung, pinned by source assertion (main.cjs
+// cannot be required under node --test, and neither can PaneTile/App — the
+// wiring itself is what the mutation check guards).
+test('EFFECT — the renderer wiring that gives Select All and Cut their pane effect is present', () => {
+  const pane = readFileSync(new URL('./src/components/PaneTile.tsx', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('./src/App.tsx', import.meta.url), 'utf8');
+
+  // CUT: the capture-phase claim, the shared predicate, and the honest
+  // copy-then-clear route. (web/terminalEdit.test.mjs holds the predicate's
+  // truth table; this pins that PaneTile actually consults it.)
+  const cutHandler = pane.match(/const onNativeCutCapture = \(e: ClipboardEvent\) => \{[\s\S]*?\n    \};/);
+  assert.ok(cutHandler, "the WARDEN-1356 cut capture handler is gone from PaneTile — role:'cut' is inert on the pane again");
+  assert.match(
+    cutHandler[0],
+    /shouldRouteNativeCutToTerminal\(/,
+    'the cut claim decision bypasses the unit-tested routing helper',
+  );
+  assert.match(
+    cutHandler[0],
+    /clipboardData\.setData\('text\/plain', term\.getSelection\(\)\)/,
+    "the cut route must write the selection through the event's own clipboardData — the gesture originates in MAIN, so an execCommand('copy') issued from it has no user activation (measured live: it returns without writing)",
+  );
+  assert.match(
+    cutHandler[0],
+    /term\.clearSelection\(\)/,
+    'the cut route must clear the selection after copying — copy-then-clear is the honest terminal reading',
+  );
+  assert.match(
+    pane,
+    /document\.addEventListener\('cut', onNativeCutCapture, true\)/,
+    "the cut listener must be CAPTURE-phase (the role's event targets the focused element; the pane must see it first)",
+  );
+
+  // SELECT ALL: the pane claims the broadcast behind an identity check.
+  const selectAllHandler = pane.match(/const onMenuSelectAll = \(\) => \{[\s\S]*?\n    \};/);
+  assert.ok(selectAllHandler, 'the WARDEN-1356 select-all claim handler is gone from PaneTile — Edit ▸ Select All is inert on the pane again');
+  assert.match(
+    selectAllHandler[0],
+    /document\.activeElement !== term\.textarea/,
+    'the pane must claim the select-all broadcast ONLY when its own textarea holds real DOM focus — this identity test is what protects Settings',
+  );
+  assert.match(
+    selectAllHandler[0],
+    /term\.selectAll\(\)/,
+    'the claim must select the pane buffer (term.selectAll) — the capability the bare role never reached',
+  );
+  assert.match(
+    pane,
+    /window\.addEventListener\(TERMINAL_SELECT_ALL_EVENT, onMenuSelectAll\)/,
+    'PaneTile no longer listens for the menu select-all broadcast',
+  );
+
+  // SELECT ALL: App routes the pushed event by real DOM focus.
+  const routeEffect = app.match(/useEffect\(\(\) => onSelectAll\(\(\) => \{[\s\S]*?\n  \}\), \[\]\);/);
+  assert.ok(routeEffect, 'App.tsx no longer subscribes to the menu select-all push');
+  assert.match(
+    routeEffect[0],
+    /routeMenuSelectAll\(document\.activeElement\)/,
+    'the route decision must read REAL DOM focus, not the focusedChat state (a Settings field can hold the keyboard while focusedChat still names a pane)',
+  );
+  assert.match(
+    routeEffect[0],
+    /TERMINAL_SELECT_ALL_EVENT/,
+    'the terminal route must broadcast to the panes',
+  );
+  assert.match(
+    routeEffect[0],
+    /execCommand\('selectAll'\)/,
+    "the editable route must keep native Select All working in fields — the Settings constraint the role used to satisfy",
   );
 });
