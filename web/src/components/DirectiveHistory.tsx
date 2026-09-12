@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import type { Directive } from '@/lib/types';
@@ -19,22 +19,33 @@ import { MarkdownBody } from './MarkdownBody';
 import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
-import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/timelinePacing';
-import { fetchBounded, pollerFetchOptions } from '@/lib/api';
+import { useLiveTimeline } from '@/lib/useLiveTimeline';
 
 // Read-only history of every directive that reached an agent (full text + target
 // + time), sourced from the append-only directives.md via GET /api/directives.
-// Mirrors ActivityTimeline's filter row (agent + host + limit) and its live/poll
-// cadence (same tested timelinePacing helpers), so the two views read as one
-// system. The directive text is the FULL body (not a 60-char snippet) in a
-// scrollable MarkdownBody block — the whole point of this tab (see WARDEN-359).
+// Mirrors ActivityTimeline's filter row (agent + host + limit) and shares its
+// whole live-feed wiring through the same useLiveTimeline hook (path/select
+// options, WARDEN-1353), so the two views read as one system and the wiring
+// exists exactly once. The directive text is the FULL body (not a 60-char
+// snippet) in a scrollable MarkdownBody block — the whole point of this tab
+// (see WARDEN-359).
 
-const DIRECTIVE_POLL_MS = POLL_INTERVAL_MS; // directives change rarely, but a sent directive should appear live.
-// WARDEN-1144: the read gates `loading` (first fetch) and `refreshing` (every
-// background tick + the manual Refresh button), so it is bounded by the shared
-// deadline on the POLLER policy — no retries, deadline < the poll period. The
-// next tick IS the retry, so a stalled tick must not stack attempts.
-const FETCH_OPTS = pollerFetchOptions(DIRECTIVE_POLL_MS);
+// Pull the row array out of GET /api/directives' JSON. `Array.isArray` is
+// deliberately STRICTER than the hook's default `json.events || []`: a
+// malformed non-array body must degrade to [] rather than reach `.map()` in
+// the filter derivations below and throw.
+const selectDirectives = (json: any): Directive[] =>
+  Array.isArray(json.directives) ? json.directives : [];
+
+// Feed config for useLiveTimeline. Module-level constant: the hook reads
+// options through a ref (see the options-stability note in useLiveTimeline.ts),
+// so identity is irrelevant to correctness — a stable constant simply makes
+// that contract visible at the call site.
+const DIRECTIVES_FEED = {
+  path: '/api/directives',
+  select: selectDirectives,
+  label: 'directives',
+};
 
 export function DirectiveHistory({
   agentFilter, setAgentFilter,
@@ -49,74 +60,33 @@ export function DirectiveHistory({
   hostFilter: string;
   setHostFilter: (v: string) => void;
 }) {
-  const [directives, setDirectives] = useState<Directive[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [isLive, setIsLive] = useState(true);
-  const [isHidden, setIsHidden] = useState<boolean>(typeof document !== 'undefined' ? document.hidden : false);
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState(100);
   // Re-render once per second so the "Updated Ns ago" label stays fresh.
   const [now, setNow] = useState(() => Date.now());
 
-  const isHiddenRef = useRef(isHidden);
-  isHiddenRef.current = isHidden;
-
-  const fetchDirectives = useCallback(
-    async (opts?: { background?: boolean }) => {
-      const background = opts?.background === true;
-      if (background) setRefreshing(true);
-      try {
-        const res = await fetchBounded(`/api/directives?limit=${limit}`, FETCH_OPTS);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const j = await res.json();
-        setDirectives(Array.isArray(j.directives) ? j.directives : []);
-        setLastUpdated(Date.now());
-        setError(null);
-      } catch (e) {
-        // Stale data is retained on a transient fetch error — never wipe a feed
-        // the user is reading. Surface the error inline instead.
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (background) setRefreshing(false);
-        else setLoading(false);
-      }
-    },
-    [limit],
-  );
-
-  // Initial + on-limit-change fetch.
-  useEffect(() => {
-    setLoading(true);
-    fetchDirectives();
-  }, [fetchDirectives]);
-
-  const refresh = useCallback(() => fetchDirectives({ background: true }), [fetchDirectives]);
+  // The whole live-feed wiring — state cluster, bounded fetch, initial/limit
+  // effect, visibility refresh, poll cadence, Refresh — lives in the shared
+  // useLiveTimeline hook (WARDEN-1353); this component keeps only the
+  // per-second re-render tick above and the directive-specific filter/grouping
+  // below. Destructure rename: the hook's result key is `events` (shared with
+  // ActivityTimeline, whose call site must not change); locally the rows stay
+  // `directives`.
+  const {
+    events: directives,
+    loading,
+    refreshing,
+    isLive,
+    setIsLive,
+    lastUpdated,
+    error,
+    refresh,
+  } = useLiveTimeline<Directive>(limit, DIRECTIVES_FEED);
 
   // Re-render tick for the relative "Updated Ns ago" label.
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-
-  // Visibility tracking — pause polling while hidden, refresh on return (when Live).
-  useEffect(() => {
-    const onVisibility = () => {
-      const nextHidden = typeof document !== 'undefined' ? document.hidden : false;
-      if (shouldRefreshOnVisibility(isHiddenRef.current, nextHidden, isLive)) refresh();
-      setIsHidden(nextHidden);
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [isLive, refresh]);
-
-  // Live polling cadence.
-  useEffect(() => {
-    if (!shouldPoll(isLive, !isHidden)) return;
-    const id = setInterval(() => fetchDirectives({ background: true }), DIRECTIVE_POLL_MS);
-    return () => clearInterval(id);
-  }, [isLive, isHidden, fetchDirectives]);
 
   // Unique filter options derived from loaded directives. Sorted (not feed
   // order) so the menus don't reshuffle under the cursor on every poll —
@@ -224,25 +194,27 @@ export function DirectiveHistory({
       </div>
 
       {/* Fetch-failure strip. This feed RETAINS stale directives on a failed
-          fetch (:73-76) — without this, a feed that already had rows and then
-          started failing would keep presenting stale state as live with no
-          indicator at all, since the error arm below is unreachable while the
-          list is non-empty. Non-blocking by design: the rows stay on screen.
-          Gate on the RAW `directives`, never `filtered` — an active filter
-          matching nothing during a healthy fetch must not be dressed up as a
-          failure. `error` is a `string` here (unlike ActivityTimeline, whose
-          hook stores an `Error` instance and must render `error.message`). */}
+          fetch (the hook's catch clause keeps the previous rows in place —
+          useLiveTimeline.ts:124-128) — without this, a feed that already had
+          rows and then started failing would keep presenting stale state as
+          live with no indicator at all, since the error arm below is
+          unreachable while the list is non-empty. Non-blocking by design: the
+          rows stay on screen. Gate on the RAW `directives`, never `filtered` —
+          an active filter matching nothing during a healthy fetch must not be
+          dressed up as a failure. Both feeds share the hook since WARDEN-1353,
+          so `error` is an `Error` instance here too: render `error.message` —
+          an Error object as a React child throws. */}
       {!loading && error && directives.length > 0 && (
         <div
           role="status"
-          title={`Live updates failed: ${error}`}
+          title={`Live updates failed: ${error.message}`}
           className="flex-shrink-0 flex items-start gap-2 px-3 py-1.5 border-b border-destructive/30 bg-destructive/10 text-destructive text-sm leading-snug"
         >
           <span aria-hidden="true">⚠</span>
           {/* No `truncate`: the panel is narrow, and clipping the message would
               hide the one diagnostic part of the strip (e.g. "HTTP 503"). */}
           <span className="min-w-0">
-            Live updates failed ({error}) — showing last known directives.
+            Live updates failed ({error.message}) — showing last known directives.
           </span>
         </div>
       )}
@@ -254,7 +226,7 @@ export function DirectiveHistory({
             Loading directives...
           </div>
         ) : error && directives.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-destructive text-sm">⚠ {error}</div>
+          <div className="flex items-center justify-center h-full text-destructive text-sm">⚠ {error.message}</div>
         ) : filtered.length === 0 ? (
           <div className="flex items-center justify-center h-full p-4">
             <EmptyState type="no-data" message="No directives sent yet" />

@@ -424,15 +424,15 @@ export function ActivityTimeline({
       </div>
 
       {/* Fetch-failure strip. The hook RETAINS stale events on a failed poll
-          (useLiveTimeline.ts:70-74) — without this, a feed that already had rows
+          (useLiveTimeline.ts:124-128) — without this, a feed that already had rows
           and then started failing would keep presenting stale state as live with
           no indicator at all, since the error arm below is unreachable while the
           list is non-empty. Non-blocking by design: the rows stay on screen.
           Gate on the RAW `events`, never `filtered` — an active filter matching
           nothing during a healthy fetch must not be dressed up as a failure.
-          Render `error.message`: the hook stores an `Error` instance (unlike
-          DirectiveHistory's `string`), and an Error object as a React child
-          throws. */}
+          Render `error.message`: the hook stores an `Error` instance, and an
+          Error object as a React child throws (DirectiveHistory now shares this
+          hook and shape too — WARDEN-1353). */}
       {!loading && error && events.length > 0 && (
         <div
           role="status"
@@ -455,11 +455,11 @@ export function ActivityTimeline({
             Loading activity...
           </div>
         ) : error && events.length === 0 ? (
-          // Mirrors DirectiveHistory.tsx:234 — gate on the RAW list, not `filtered`,
+          // Mirrors DirectiveHistory.tsx:222 — gate on the RAW list, not `filtered`,
           // so an active filter matching nothing during a healthy fetch still shows
           // the normal empty state. Render `error.message`: the hook stores an
-          // `Error` instance (unlike DirectiveHistory's `string`), and an Error
-          // object as a React child throws.
+          // `Error` instance, and an Error object as a React child throws (both
+          // feeds share the hook and shape since WARDEN-1353).
           <div className="flex items-center justify-center h-full text-destructive text-sm">
             ⚠ {error.message}
           </div>
