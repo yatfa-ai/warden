@@ -61,10 +61,15 @@ const emit = (relPath, outName, rewrite = (c) => c) => {
 await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
+// WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
+// erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
+// here too. The rewrite is a defensive no-op kept for shape parity with the above.
+await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore } = await import(join(tmpDir, 'uiStore.mjs'));
+const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -725,6 +730,27 @@ test('the migrated facts are independent — writing timestampFormat does not di
   assert.equal(store.getState().fileViewerViewMode, 'rendered');
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
   assert.equal(store.getState().terminalFontSize, DEFAULT_UI.terminalFontSize);
+});
+
+console.log('\nWARDEN-1362 — the supply side QuickReply reads now that the last snippets prop is retired');
+test('a store seeded with two snippets renders them through the replySnippetPreview seam (the store is the only supply channel left)', () => {
+  reset();
+  const mine = [
+    { name: 'Deploy', text: 'ship it' },
+    { name: 'Retest', text: 'rerun the suite' },
+  ];
+  const store = createUiStore({ snippets: mine });
+  // The exact per-render expression QuickReply.tsx evaluates since WARDEN-1362
+  // deleted the last prop override: `useSnippets()` → `replySnippetPreview(snippets)`.
+  // No prop re-covers this seam — the attention surfaces pass nothing, so the
+  // store subscription is the ONLY way one-click fills can arrive.
+  assert.deepEqual(replySnippetPreview(store.getState().snippets), mine);
+  // And the supply stays reactive through the same seam: a Settings-CRUD write
+  // (Settings → Snippets) updates the store, the subscription re-renders, and the
+  // previews follow — no prop threading involved at either hop.
+  const next = [{ name: 'Rollback', text: 'revert it' }];
+  store.getState().setSnippets(next);
+  assert.deepEqual(replySnippetPreview(store.getState().snippets), next);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

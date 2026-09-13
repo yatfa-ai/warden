@@ -2007,7 +2007,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} snippets={snippets} onReplyResult={handleReplyResult} />
+          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} onReplyResult={handleReplyResult} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
@@ -2104,7 +2104,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
+            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey, onReplyResult: handleReplyResult }} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
