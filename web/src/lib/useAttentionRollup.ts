@@ -456,21 +456,6 @@ export function useAttentionRollup(
           // signal a returning human needs). An agent that finished (active→idle) is a
           // transition like any other, so its done row gets the finish time as its
           // enteredAt for free — the same stamp doneRecentRef records.
-          // WARDEN-587: stamp when this key ENTERED its current state, so the badge row
-          // can show a live "stuck 2h 14m" duration. Covers EVERY open row (watched
-          // panes that are also open appear in the badge and need durations too), so it
-          // runs BEFORE the watched done-ping `continue`. prevOpen holds each key's prior
-          // state from the last poll; computeEnteredAt is the pure stamp/reset/keep rule
-          // (null → keep the existing stamp):
-          //   - first observation (no prev)            → stamp `now` as a baseline;
-          //   - genuine transition (prev !== state)    → reset the stamp to `now`;
-          //   - unchanged                              → keep the stamp (keeps growing).
-          // The formatter (formatStateDuration) suppresses the sub-minute window, so a
-          // first-observation baseline never reads as a false "0s"/"<1m" — the suffix
-          // appears only once the state has held ≥1m (the languishing-vs-just-flipped
-          // signal a returning human needs). An agent that finished (active→idle) is a
-          // transition like any other, so its done row gets the finish time as its
-          // enteredAt for free — the same stamp doneRecentRef records.
           //
           // WARDEN-1360: a row in a retired guess state (erroring/waiting/blocked)
           // reaches no badge section, so its stamp is skipped — but `prevOpen` still
