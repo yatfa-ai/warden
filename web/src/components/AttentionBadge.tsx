@@ -12,16 +12,17 @@ export { dotForState } from '@/components/AttentionList';
 
 /**
  * Always-visible header rollup of things that need a human's eye (WARDEN-228),
- * extended in WARDEN-344 to surface agents that are STUCK / ERRORING / WAITING-ON-YOU
- * / BLOCKED — the cases /api/health's inactivity-only classification reads as Healthy.
+ * extended in WARDEN-344 to surface agents that are STUCK — the cases /api/health's
+ * inactivity-only classification reads as Healthy.
  *
  * Aggregates — via the `rollup` prop (WARDEN-436 lifted useAttentionRollup up to App,
  * so the same rollup feeds this badge, the return banner, AND the persistent Attention
- * view with no duplicate polling) — critical + warning fleet-health agents,
- * stuck/erroring/waiting/blocked pane states, pending directives, and recent errors into
- * one glanceable count. Renders nothing when there is nothing to act on (total === 0), so
- * a healthy fleet shows no badge. Clicking opens a popover whose rows deep-link into the
- * existing agent pane and Activity tab via the handlers passed from App (no new routing).
+ * view with no duplicate polling) — critical + warning fleet-health agents, the stuck
+ * pane state, watch-pattern matches, recently-finished agents, pending directives, and
+ * recent errors into one glanceable count. Renders nothing when there is nothing to act
+ * on (total === 0), so a healthy fleet shows no badge. Clicking opens a popover whose
+ * rows deep-link into the existing agent pane and Activity tab via the handlers passed
+ * from App (no new routing).
  *
  * WARDEN-880: the popover's ranked "where am I needed, because X" rundown is now the
  * SHARED `<AttentionList>` — the identical rendering the persistent Attention view

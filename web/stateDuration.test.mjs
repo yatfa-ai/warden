@@ -197,7 +197,7 @@ test('first observation WITH an existing (persisted) stamp → KEEP (restart doe
 });
 test('a genuine transition (prev !== cur) → RESET to now (the new state starts fresh)', () => {
   assert.equal(computeEnteredAt('active', 'stuck', true, NOW), NOW);
-  assert.equal(computeEnteredAt('stuck', 'erroring', false, NOW), NOW);
+  assert.equal(computeEnteredAt('active', 'idle', false, NOW), NOW);
   assert.equal(computeEnteredAt('active', 'idle', true, NOW), NOW, 'the active→idle finish is a transition too');
 });
 test('unchanged state (prev === cur) → KEEP (the duration keeps growing)', () => {
@@ -211,7 +211,7 @@ test('the reset is what makes the duration restart on a state change', () => {
   const t2 = NOW + 60_000;
   assert.equal(computeEnteredAt(null, 'stuck', false, t0), t0, 'poll 1: baseline');
   assert.equal(computeEnteredAt('stuck', 'stuck', true, t1), null, 'poll 2: unchanged → keep t0');
-  assert.equal(computeEnteredAt('stuck', 'erroring', true, t2), t2, 'poll 3: transition → reset to t2');
+  assert.equal(computeEnteredAt('stuck', 'active', true, t2), t2, 'poll 3: transition → reset to t2');
 });
 
 // ---------------------------------------------------------------------------

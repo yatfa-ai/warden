@@ -274,8 +274,10 @@ export interface DesktopAlertPrefs {
   // retired channel ONLY, and went with it.
   attentionDesktopAlerts: boolean;
   setAttentionDesktopAlerts: (v: boolean) => void;
-  attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
-  setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean }) => void;
+  // WARDEN-1360: only the observable states remain — erroring/waiting/blocked and
+  // their setters' fields went with the unsubstantiated buckets.
+  attentionStates: { stuck?: boolean; done?: boolean };
+  setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
 }
 
 /** Re-exported so sections that take a hostLabels pref share one type. */

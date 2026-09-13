@@ -1,6 +1,5 @@
-// Pure helpers behind the inline quick-reply affordance on the attention surfaces
-// (WARDEN-770): the AttentionBadge popover's waiting/blocked rows, the return-banner
-// callout, and the WatchCatchup rows.
+// Pure helpers behind the inline quick-reply affordance (WARDEN-770): the return-banner
+// callout and the WatchCatchup rows.
 //
 // WARDEN-770 closes the "last mile" of the human-in-the-loop: every attention surface
 // already ROUTES the human to a needy agent (detection is exhaustively built), but
@@ -8,6 +7,12 @@
 // helpers decide WHICH agents are replyable and gate the send, so the human can answer
 // a "press enter" / "needs approval" agent from the surface that surfaced it, with zero
 // pane/workspace switches.
+//
+// WARDEN-1360: the AttentionBadge popover's waiting/blocked reply rows are gone with
+// their unsubstantiated buckets, so the LIVE consumers are the watch lanes
+// (WatchCatchup rows, and App's return-banner callout whose ranked top can still carry
+// a watch-classified state). The state set itself is unchanged — waiting/blocked are
+// still genuinely one-line-replyable wherever a watch classification surfaces them.
 //
 // Scope discipline (from the WARDEN-770 proposal): only the two states that resolve
 // with a short one-line human input get the affordance — `waiting` (parked at a
@@ -30,11 +35,9 @@ const REPLYABLE_STATES: ReadonlySet<string> = new Set(['waiting', 'blocked']);
 /**
  * Whether an attention item in `state` should show the inline quick-reply control.
  *
- * The gating decision for all three WARDEN-770 surfaces:
- *  - AttentionBadge popover rows — passed `replyable` explicitly from the waiting +
- *    blocked Sections (the section IS the state, so the call site knows).
+ * The gating decision for the surviving WARDEN-770 surfaces:
  *  - Return-banner callout — called with `attentionTop.state` (a ranked AttentionItem
- *    can be any state; only waiting/blocked earn the reply affordance).
+ *    can be several states; only waiting/blocked earn the reply affordance).
  *  - WatchCatchup rows — called with the miss's `reason` (a WatchReason, which is a
  *    string subtype, so it flows through unchanged).
  *

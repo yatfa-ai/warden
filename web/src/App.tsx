@@ -330,11 +330,12 @@ function App() {
   // So it is NOT a no-op knob — it gates working channels. Its Settings copy names
   // those, not the removed attention alerts.
   const [attentionDesktopAlerts, setAttentionDesktopAlerts] = useState(() => uiState.attentionDesktopAlerts ?? false);
-  // Per-state Attention toggle (WARDEN-344): which pane states (stuck/erroring/
-  // waiting/blocked) raise the badge. Each defaults ON; persisted by the saveUi
-  // effect below and forwarded to the AttentionBadge's useAttentionRollup. Purely a
-  // DISPLAY filter on the passive readout since WARDEN-1274 retired the alert.
-  const [attentionStates, setAttentionStates] = useState(() => uiState.attentionStates ?? { stuck: true, erroring: true, waiting: true, blocked: true });
+  // Per-state Attention toggle (WARDEN-344): which pane states raise the badge.
+  // Each defaults ON; persisted by the saveUi effect below and forwarded to the
+  // AttentionBadge's useAttentionRollup. Purely a DISPLAY filter on the passive
+  // readout since WARDEN-1274 retired the alert. WARDEN-1360: only the observable
+  // states (stuck/done) remain.
+  const [attentionStates, setAttentionStates] = useState(() => uiState.attentionStates ?? { stuck: true, done: true });
   // Per-chat watch state + single/bulk toggles + the derived O(1) lookup Set live
   // in useWatchState (WARDEN-696 slice 2). watchedChats is still persisted by the
   // saveUi effect below and wired into the attention rollup (composition root).
@@ -2007,7 +2008,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} snippets={snippets} onReplyResult={handleReplyResult} />
+          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
@@ -2104,7 +2105,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
+            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"

@@ -328,10 +328,9 @@ const SHIPPED_LABELS = [
   ['notifications', 'Webhook URL'],
   ['notifications', 'Shared secret (optional)'],
   // Pane-state switches — authored as an inline data array in the section file.
-  ['notifications', 'Erroring'],
+  // WARDEN-1360: 'Erroring' / 'Waiting on you' / 'Blocked' are gone with the
+  // unsubstantiated buckets they gated; only the observable states remain.
   ['notifications', 'Stuck'],
-  ['notifications', 'Waiting on you'],
-  ['notifications', 'Blocked'],
   ['notifications', 'Finished'],
 ];
 
@@ -545,13 +544,14 @@ function literalIds(source) {
 const DYNAMIC_ANCHOR_SOURCES = [
   {
     // NotificationsSection: `id={`attention-state-${k}`}` over the inline
-    // pane-state array (`{ k: 'erroring', label: 'Erroring', … }`).
+    // pane-state array (`{ k: 'stuck', label: 'Stuck', … }`).
+    // WARDEN-1360: the array holds only the observable states (stuck, done).
     section: 'notifications',
     requires: /id=\{`attention-state-\$\{k\}`\}/,
     keysFrom: 'section',
     keyPattern: /\bk:\s*'([^']+)'/g,
     idFor: (k) => `attention-state-${k}`,
-    minKeys: 5,
+    minKeys: 2,
   },
   {
     // TelemetrySection: `id={cat.configKey}` over the consent REGISTRY

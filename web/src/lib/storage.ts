@@ -496,14 +496,20 @@ export interface UiState {
   // hidden-tab poll relaxation the WATCH ping needs. The key is unchanged for
   // persistence compatibility.
   attentionDesktopAlerts?: boolean;
-  // Per-state toggle for the Attention badge (WARDEN-344): which pane states
-  // (stuck/erroring/waiting/blocked) raise attention. Each defaults to ON so every
-  // state surfaces; a human can hide a noisy "waiting" without losing "erroring".
-  // Pure client-side pref; never sent to the backend / /api/config.
-  // WARDEN-575: `done` gates the POSITIVE "finished" bucket (same default-ON
-  // discipline). WARDEN-1274: these are now purely DISPLAY filters on the passive
-  // readout — the desktop alert they also gated is retired.
-  attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
+  // Per-state toggle for the Attention badge (WARDEN-344): which pane states raise
+  // attention. Each defaults to ON so every state surfaces; a human can hide one
+  // without losing the others. Pure client-side pref; never sent to the backend /
+  // /api/config. WARDEN-575: `done` gates the POSITIVE "finished" bucket (same
+  // default-ON discipline). WARDEN-1274: these are purely DISPLAY filters on the
+  // passive readout — the desktop alert they also gated is retired.
+  // WARDEN-1360 — REMOVED, and deliberately not migrated: the `erroring` / `waiting` /
+  // `blocked` entries. Their buckets were substring guesses the badge could not
+  // substantiate, and a knob that gates a removed surface is a visible lie. A legacy
+  // localStorage payload may still carry these keys — they are structurally IGNORED
+  // (loadUi reads only stuck/done), and the next saveUi drops them from the stored
+  // payload. One-way cleanup by design: no migration, mirroring the retired alert prefs
+  // below.
+  attentionStates?: { stuck?: boolean; done?: boolean };
   // WARDEN-1274 — REMOVED, and deliberately not migrated: `alertCritical` /
   // `alertWarning` / `alertDirective` / `alertError` (per-severity routing) and
   // `mutedAlertKeys` / `snoozedAlertKeys` (per-agent permanent mute + time-boxed
@@ -1027,7 +1033,7 @@ export const DEFAULT_UI: UiState = {
   sourceControlCollapsed: false,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
-  attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
+  attentionStates: { stuck: true, done: true },
   // WARDEN-378: no chats watched by default (opt-in per chat).
   watchedChats: [],
   terminalScrollback: 10000, terminalFontFamily: '',
@@ -1172,7 +1178,7 @@ export function resetUiPrefDefaults(): ResetUiDefaults {
     defaultShellByHost: {},
     // Attention / desktop alerts
     attentionDesktopAlerts: false,
-    attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
+    attentionStates: { stuck: true, done: true },
     watchedChats: [],
   };
 }
@@ -1229,11 +1235,10 @@ export function loadUi(): UiState {
         // Per-state toggle: each state defaults ON (only an explicit false silences
         // it), so a partial/legacy payload never drops a state silently. Matches
         // buildAttentionRollup's `enabledStates[k] !== false` semantics.
+        // WARDEN-1360: the removed erroring/waiting/blocked keys in a legacy payload
+        // are structurally ignored (never read back, dropped on the next save).
         attentionStates: {
           stuck: v.attentionStates?.stuck !== false,
-          erroring: v.attentionStates?.erroring !== false,
-          waiting: v.attentionStates?.waiting !== false,
-          blocked: v.attentionStates?.blocked !== false,
           // WARDEN-575: done defaults ON (only an explicit false silences it), so a
           // partial/legacy payload never drops the finished signal silently.
           done: v.attentionStates?.done !== false,

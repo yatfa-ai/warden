@@ -192,18 +192,18 @@ export function NotificationsSection(props: NotificationsSectionProps) {
         </div>
 
         {/* Per-state toggle (WARDEN-344): which pane states raise the
-            Attention badge. Each defaults ON; a human can hide a noisy
-            "waiting" without losing "erroring". Same client-side persistence as
-            the master toggle above. WARDEN-1274: these are now purely DISPLAY
-            filters on the passive badge/rundown — the desktop alert they also
-            gated is retired, so nothing here interrupts the human. */}
+            Attention badge. Each defaults ON; a human can hide one without
+            losing the others. Same client-side persistence as the master
+            toggle above. WARDEN-1274: these are purely DISPLAY filters on the
+            passive badge/rundown — the desktop alert they also gated is
+            retired, so nothing here interrupts the human. WARDEN-1360: only
+            the OBSERVABLE states remain — erroring/waiting/blocked were
+            substring guesses the badge could not substantiate, so their
+            toggles (and the sections they gated) are gone. */}
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap gap-x-4 gap-y-2">
             {([
-              { k: 'erroring', label: 'Erroring', hint: 'errors / stack traces' },
               { k: 'stuck', label: 'Stuck', hint: 'repeating-output loops' },
-              { k: 'waiting', label: 'Waiting on you', hint: 'human-input prompts' },
-              { k: 'blocked', label: 'Blocked', hint: 'coordination / dependency' },
               // WARDEN-575: the POSITIVE "finished" state — a recently-working
               // agent going idle. Surfaces the green Finished section. (Its done
               // desktop ping went with WARDEN-1274: active→idle is inferred from

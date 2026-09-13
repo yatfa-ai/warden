@@ -1,7 +1,9 @@
 // useAttentionRollup — the live, visibility-gated data source for the header
 // AttentionBadge (WARDEN-228), extended in WARDEN-344 to also poll each open pane's
-// CLASSIFIED STATE (stuck / erroring / waiting / blocked) so an agent actively
-// emitting a loop / stack trace / "press enter" prompt no longer reads "Healthy".
+// CLASSIFIED STATE so an agent actively stuck in a repeating-output loop no longer
+// reads "Healthy". WARDEN-1360: only the observable state (stuck) feeds the badge —
+// the erroring/waiting/blocked guesses left with their buckets (the watch lanes still
+// consume the full classifier output on the same poll).
 //
 // Three signals are folded into one AttentionRollup via the pure buildAttentionRollup:
 //   - /api/health        (inactivity-based critical/warning)   — 10s cadence
@@ -193,7 +195,7 @@ export function useAttentionRollup(
   // exposed for the catch-up's return-time reconciliation. See AttentionRollupState.
   const [watchedStates, setWatchedStates] = useState<AgentStateRow[]>([]);
   const [loading, setLoading] = useState(true);
-  // WARDEN-571: the hidden-fleet sweep rows (stuck/erroring/waiting/blocked agents that
+  // WARDEN-571: the hidden-fleet sweep rows (stuck / watch-matched agents that
   // are NEITHER open NOR watched). Folded into the SAME rollup below so a hidden agent
   // needing attention surfaces in the badge. `sweep_skipped`
   // rows (non-companion / LOCAL hosts the cost gate never probes) are present here too
@@ -448,11 +450,21 @@ export function useAttentionRollup(
           // signal a returning human needs). An agent that finished (active→idle) is a
           // transition like any other, so its done row gets the finish time as its
           // enteredAt for free — the same stamp doneRecentRef records.
+          //
+          // WARDEN-1360: only rows the readout can still DISPLAY get a stamp — stuck
+          // rows, watch-pattern rows (any underlying state — the custom section renders
+          // a duration), and idle rows (the done section's "finished Nm ago" needs the
+          // finish time). The removed guess states (erroring/waiting/blocked) render
+          // nowhere, so tracking their enteredAt would be write-only state. A key later
+          // re-entering a displayed state still stamps correctly: computeEnteredAt sees
+          // prev !== cur and resets.
           const prev = prevOpen[key];
-          const nextEnteredAt = computeEnteredAt(prev ?? null, r.state, enteredAt.has(key), now);
-          if (nextEnteredAt !== null && enteredAt.get(key) !== nextEnteredAt) {
-            enteredAt.set(key, nextEnteredAt);
-            enteredAtDirtyRef.current = true;
+          if (r.customMatch || r.state === 'stuck' || r.state === 'idle') {
+            const nextEnteredAt = computeEnteredAt(prev ?? null, r.state, enteredAt.has(key), now);
+            if (nextEnteredAt !== null && enteredAt.get(key) !== nextEnteredAt) {
+              enteredAt.set(key, nextEnteredAt);
+              enteredAtDirtyRef.current = true;
+            }
           }
           if (watchedSetForDone.has(key)) continue; // watched → the watch ping handles it
           if (isDoneTransition(prev ?? null, r.state)) {
@@ -492,8 +504,8 @@ export function useAttentionRollup(
   }, []);
 
   // WARDEN-571: the hidden-fleet sweep fetch. Classifies every active chat that is
-  // NEITHER open NOR watched, so a hidden agent stuck-looping / waiting for input /
-  // error-spamming surfaces in the badge instead of reading HEALTHY forever. The sweep
+  // NEITHER open NOR watched, so a hidden agent stuck-looping or matching a watch
+  // pattern surfaces in the badge instead of reading HEALTHY forever. The sweep
   // is companion-backed (no SSH sweep — one batched companion RPC per hidden host per
   // sweep); non-companion / LOCAL hosts come back `sweep_skipped` and never inflate the
   // count. The result folds into the SAME rollup (see the useMemo below), so the existing
@@ -526,9 +538,13 @@ export function useAttentionRollup(
         // stamped (prior sweep, or persisted across restart) keeps its stamp. sweep_skipped
         // rows match no attention bucket and never render, but stamping them is harmless
         // (they carry no row into the rollup) and keeps the map bounded to real keys.
+        // WARDEN-1360: only DISPLAYED states get a baseline — stuck rows and
+        // watch-pattern rows (sweep rows never reach the done section, which is
+        // open-pane-only); the removed guess states are write-only state.
         const enteredAt = enteredAtRef.current as Map<string, number>;
         const sweepNow = Date.now();
         for (const r of sweptRows) {
+          if (!(r.customMatch || r.state === 'stuck')) continue;
           const key = r.key ?? r.id;
           if (!enteredAt.has(key)) { enteredAt.set(key, sweepNow); enteredAtDirtyRef.current = true; }
         }
@@ -625,8 +641,8 @@ export function useAttentionRollup(
   // toggle change re-aggregates without a refetch, and so the badge only re-renders
   // when something that affects the count actually changed.
   // WARDEN-571: the hidden-fleet sweep rows are folded in HERE — alongside the open-
-  // pane agentStates — so a hidden agent needing attention (stuck/erroring/waiting/
-  // blocked/custom) appears as a needs-attention row. sweep_skipped rows match no
+  // pane agentStates — so a hidden agent needing attention (stuck / watch-matched)
+  // appears as a needs-attention row. sweep_skipped rows match no
   // bucket and never count. buildAttentionRollup is unchanged (it buckets by state);
   // the fold is purely the concatenation here.
   //

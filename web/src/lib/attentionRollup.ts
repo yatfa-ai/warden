@@ -1,14 +1,23 @@
 // Pure aggregator behind the always-visible header "Attention" badge (WARDEN-228),
-// extended in WARDEN-344 to also fold in rich pane states (stuck / erroring /
-// waiting / blocked) from /api/agent-states — the cases /api/health's inactivity-only
-// classification reads as "Healthy" — and in WARDEN-384 to RANK those buckets into a
-// single directed answer (rankAttention) so the badge promotes "you're needed HERE,
-// because X" instead of a flat rundown the human must scan.
+// extended in WARDEN-344 to also fold in rich pane states (stuck) from
+// /api/agent-states — the cases /api/health's inactivity-only classification reads as
+// "Healthy" — and in WARDEN-384 to RANK those buckets into a single directed answer
+// (rankAttention) so the badge promotes "you're needed HERE, because X" instead of a
+// flat rundown the human must scan.
 //
-// The badge surfaces — in one zero-click place — signals that already exist but are
-// scattered/buried: critical + warning fleet health, stuck/erroring/waiting/blocked
-// pane states, pending directives, and recent errors from the activity log. This
-// module only AGGREGATES (+ ranks); the fetching, cadence, and visibility-gating
+// WARDEN-1360: the badge surfaces ONLY states a machine pass can SUBSTANTIATE. The
+// erroring / waiting / blocked buckets (substring guesses over pane text) are removed:
+// `classifyPane` raised "Erroring" for a passing test-suite line ("✓ 42 tests passed,
+// 0 errors") while a genuine `npm ERR!` crash read idle, "Waiting" matched coordination
+// prose, and "Blocked" matched an agent DESCRIBING a resolved block — the badge claimed
+// states it could not substantiate, in both directions. The classifier itself (src/
+// agentState.js) is untouched — the watch lanes still consume it — but nothing that
+// stays may report a state it cannot observe. What survives: stuck (mechanical
+// repetition — genuinely observed), custom (user-taught literals), done (an observed
+// active→idle transition), health critical/warning, directives, and recent journal
+// errors (written only on real attach/LLM failures).
+//
+// This module only AGGREGATES (+ ranks); the fetching, cadence, and visibility-gating
 // live in useAttentionRollup. Keeping aggregation pure + dependency-free is what
 // lets attentionRollup.test.mjs load it directly (TS -> ESM via Vite's OXC
 // transform) and exercise the formula with plain objects.
@@ -24,12 +33,6 @@ export interface AttentionRollup {
   warning: Chat[];
   /** Agents in a repeating-output loop — red tone (deep-link to the agent pane). */
   stuck: AgentStateRow[];
-  /** Agents emitting errors / stack traces — red tone (deep-link to the agent pane). */
-  erroring: AgentStateRow[];
-  /** Agents parked at a human-input prompt — amber tone (deep-link to the agent pane). */
-  waiting: AgentStateRow[];
-  /** Agents blocked on another agent / dependency — amber tone (deep-link to the agent pane). */
-  blocked: AgentStateRow[];
   /** Agents whose output matched a user-authored watch pattern (WARDEN-540) — amber tone
    *  (deep-link to the agent pane). The row carries `customMatch` { pattern, line }. */
   custom: AgentStateRow[];
@@ -51,18 +54,18 @@ export interface AttentionRollup {
 }
 
 /**
- * Which pane states raise the Attention badge + desktop alert (WARDEN-344 per-state
- * toggle). Each defaults to ON (enabled) unless explicitly `false`, so omitting the
- * option surfaces every state while a human can silence a noisy "waiting" without
- * losing "erroring". A silenced state contributes NEITHER to the badge sections NOR
- * to `total` (so it can't fire a desktop alert either).
+ * Which pane states raise the Attention badge (WARDEN-344 per-state toggle). Each
+ * defaults to ON (enabled) unless explicitly `false`, so omitting the option surfaces
+ * every state while a human can silence a noisy one without losing the others. A
+ * silenced state contributes NEITHER to the badge sections NOR to `total`.
+ *
+ * WARDEN-1360: only the observable states remain toggleable. The erroring / waiting /
+ * blocked entries (and their Settings toggles) went with the buckets — a knob that
+ * gates a removed surface is a visible lie.
  */
 export interface AttentionRollupOptions {
   enabledStates?: {
     stuck?: boolean;
-    erroring?: boolean;
-    waiting?: boolean;
-    blocked?: boolean;
     /** WARDEN-575: surface the positive "finished" bucket. Defaults ON (enabled !==
      *  false), like the problem states, so a finished agent surfaces by default; a
      *  human can silence it without losing the problem states. */
@@ -79,9 +82,6 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
   critical: [],
   warning: [],
   stuck: [],
-  erroring: [],
-  waiting: [],
-  blocked: [],
   custom: [],
   done: [],
   directives: 0,
@@ -93,7 +93,7 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
  * The one finalize step every rollup PRODUCER ends with: sum the problem buckets into
  * `total` and assemble the AttentionRollup. Two producers converge here —
  * `buildAttentionRollup` (build from raw endpoints) and `filterAttentionRollup` (narrow
- * to a host/agent) — each having independently computed the same 10 inputs. (A third,
+ * to a host/agent) — each having independently computed the same 8 inputs. (A third,
  * `desktopAlerts.applySeverityPrefs`, went with the retired attention alert in
  * WARDEN-1274; it was that module's only runtime import of this one.)
  *
@@ -105,18 +105,18 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
  * bucket added since (WARDEN-540's `custom`, WARDEN-575's `done`) cost an identical
  * lockstep edit in each then-existing copy. One home, one edit.
  *
- * `directives`/`errors` are event COUNTS (added as numbers); the other eight are row
+ * `directives`/`errors` are event COUNTS (added as numbers); the other five are row
  * arrays (added as lengths). Pure and dependency-free like the rest of this module.
  *
  * NOT used by EMPTY_ATTENTION_ROLLUP above: that is a static constant with nothing to
  * compute, so routing it through here would add indirection for zero dedup.
  */
 export function finalizeRollup(parts: Omit<AttentionRollup, 'total'>): AttentionRollup {
-  const { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors } = parts;
+  const { critical, warning, stuck, custom, done, directives, errors } = parts;
   const total =
     critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+    stuck.length + custom.length;
+  return { critical, warning, stuck, custom, done, directives, errors, total };
 }
 
 /**
@@ -149,14 +149,17 @@ export function isDoneTransition(prevState: string | null, curState: string): bo
  * Roll up already-fetched health + activity-stats + pane states into the header
  * attention count.
  *
- * Formula: critical + warning health agents + stuck/erroring/waiting/blocked pane
- * states + pending directives + recent errors.
+ * Formula: critical + warning health agents + stuck pane states + pending directives
+ * + recent errors.
  *
  *  - `critical`/`warning` are the GROUP ARRAYS from /api/health (not the summary
  *    numbers) so each item can deep-link to its agent pane via onOpenChat.
  *  - `agentStates` is the per-agent classified state list from /api/agent-states;
- *    only the four attention-worthy states (stuck/erroring/waiting/blocked) are
- *    bucketed. capture_failed is intentionally excluded (see AgentStateRow).
+ *    only the observable attention-worthy state (stuck) is bucketed.
+ *    WARDEN-1360: the erroring/waiting/blocked states the classifier may still
+ *    return are deliberately NOT bucketed — substring guesses cannot substantiate
+ *    a "needs you" claim (the module header has the measured counter-examples).
+ *    capture_failed is intentionally excluded too (see AgentStateRow).
  *  - `directives`/`errors` are raw event counts from /api/activity/stats over a
  *    bounded recent window. There is NO server-side "unresolved"/"pending" flag,
  *    so a windowed count is the accepted proxy for "needs your eye" — the caller
@@ -183,7 +186,7 @@ export function buildAttentionRollup(
   // Per-state toggle: default ON (enabled !== false), so omitting the option keeps
   // today's "every state surfaces" behavior while a human can silence one.
   const en = opts.enabledStates ?? {};
-  const on = (k: 'stuck' | 'erroring' | 'waiting' | 'blocked') => en[k] !== false;
+  const on = (k: 'stuck') => en[k] !== false;
 
   const rows = Array.isArray(agentStates) ? agentStates : [];
   // WARDEN-540: a row whose output matched a user-authored pattern is its own
@@ -198,9 +201,6 @@ export function buildAttentionRollup(
   const customKeys = new Set(customRows.map((a) => a.key ?? a.id));
   const bucket = (state: string) => rows.filter((a) => a && a.state === state && !customKeys.has(a.key ?? a.id));
   const stuck = on('stuck') ? bucket('stuck') : [];
-  const erroring = on('erroring') ? bucket('erroring') : [];
-  const waiting = on('waiting') ? bucket('waiting') : [];
-  const blocked = on('blocked') ? bucket('blocked') : [];
   const custom = customRows;
 
   // WARDEN-575: the positive "finished" bucket — open panes that transitioned
@@ -216,7 +216,7 @@ export function buildAttentionRollup(
     ? rows.filter((a) => a && !customKeys.has(a.key ?? a.id) && doneKeys.has(a.key ?? a.id))
     : [];
 
-  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
+  return finalizeRollup({ critical, warning, stuck, custom, done, directives, errors });
 }
 
 // ─── Host / agent narrowing (WARDEN-971) ──────────────────────────────────────
@@ -266,7 +266,7 @@ function attentionAgentIdentity(a: FilterableAttentionRow): string {
 export function attentionFilterOptions(rollup: AttentionRollup): { hosts: string[]; agents: string[] } {
   const rows: FilterableAttentionRow[] = [
     ...rollup.critical, ...rollup.warning,
-    ...rollup.stuck, ...rollup.erroring, ...rollup.waiting, ...rollup.blocked,
+    ...rollup.stuck,
     ...rollup.custom, ...rollup.done,
   ];
   const hosts = new Set<string>();
@@ -323,14 +323,11 @@ export function filterAttentionRollup(
   const critical = rollup.critical.filter(keep);
   const warning = rollup.warning.filter(keep);
   const stuck = rollup.stuck.filter(keep);
-  const erroring = rollup.erroring.filter(keep);
-  const waiting = rollup.waiting.filter(keep);
-  const blocked = rollup.blocked.filter(keep);
   const custom = rollup.custom.filter(keep);
   const done = rollup.done.filter(keep);
   const { directives, errors } = rollup;
 
-  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
+  return finalizeRollup({ critical, warning, stuck, custom, done, directives, errors });
 }
 
 // ─── Directed ranking (Observer Intelligence roadmap WARDEN-8, Job #2) ────────
@@ -384,26 +381,18 @@ export interface AttentionItem {
 /**
  * Urgency precedence for the directed callout — higher weight is picked first.
  *
- * The pane-state precedence already encoded in `agentState.js`'s `classifyPane` is
- * `erroring > stuck > blocked > waiting` — but that decides which SINGLE state wins
- * when ONE pane matches several. "Which of MANY panes to go to first" is a
- * different question, so we start from that order and BIAS it: a pane WAITING on
- * the human is the unique case where ONLY the human can unblock, so it is promoted
- * to the very top — above even a live error/loop. That is the strongest "you're
- * needed HERE" signal (a `waiting`-on-you pane ranks above a merely `stuck` one).
- * `blocked` sinks: the agent depends on OTHER agents, so the human is not the sole
- * unblocker. `critical`/`warning` health sit alongside, severe-but-less-actionable
- * than a live failure with a visible signal. `custom` (WARDEN-540) sits just below a
- * live error: the human EXPLICITLY opted into "tell me when X prints", a strong
- * actionable signal — but a live error/loop is at least as pressing.
+ * The pane-state precedence already encoded in `agentState.js`'s `classifyPane` ranked
+ * the substring-guessed states above the others; with those buckets retired
+ * (WARDEN-1360) the remaining scale orders what a machine can actually observe:
+ * `custom` (WARDEN-540) sits at the top — the human EXPLICITLY opted into "tell me
+ * when X prints", the strongest actionable signal. `stuck` follows: a live loop is a
+ * mechanical fact. `critical`/`warning` health sit alongside, severe-but-less-
+ * actionable than an observed loop with a visible signal.
  */
 const ATTENTION_RANK: Record<string, number> = {
-  waiting: 100,
-  erroring: 90,
   custom: 88,
   stuck: 80,
   critical: 70,
-  blocked: 60,
   warning: 50,
 };
 
@@ -420,7 +409,7 @@ const ATTENTION_RANK: Record<string, number> = {
  *
  * `enabledStates` is already honored upstream by `buildAttentionRollup` (a silenced
  * state's bucket is empty), so a silenced state can never become `top`. Same-precedence
- * ties (e.g. several `waiting` panes) break oldest-entered-first by `enteredAt` ASC
+ * ties (e.g. several `stuck` panes) break oldest-entered-first by `enteredAt` ASC
  * (WARDEN-890), matching the sectioned rundown's per-section order — so the directed
  * Callout's single pick never contradicts the rundown beneath it. Rows with no
  * `enteredAt` (health-group agents, or unstamped panes) sink to +∞ and keep stable input
@@ -476,12 +465,9 @@ export function rankAttention(rollup: AttentionRollup): {
   // Items are seeded in precedence order so the stable sort below keeps same-tier
   // ties deterministic even if a caller ever reorders the rollup's buckets.
   const items: AttentionItem[] = [
-    ...rollup.waiting.map(fromRow),
-    ...rollup.erroring.map(fromRow),
     ...rollup.custom.map(fromCustom),
     ...rollup.stuck.map(fromRow),
     ...rollup.critical.map(fromChat('critical')),
-    ...rollup.blocked.map(fromRow),
     ...rollup.warning.map(fromChat('warning')),
   ];
 
@@ -490,7 +476,7 @@ export function rankAttention(rollup: AttentionRollup): {
   // rundown beneath it, which already sorts each section oldest-entered-first
   // (sortOldestEnteredAtFirst, AttentionBadge.tsx). Without this tiebreak, same-tier
   // panes resolved in arbitrary server-return order — so the callout could promote the
-  // NEWEST-waiting pane while its own section listed the OLDEST-waiting first. Mirrors
+  // NEWEST-same-tier pane while its own section listed the OLDEST first. Mirrors
   // the exact comparator discipline of sortOldestEnteredAtFirst (stateDuration.ts):
   // `?? Infinity` sinks unstamped rows (notably health-group critical/warning agents,
   // which carry no enteredAt — duration is a pane-state concept) last within their tier,
@@ -552,12 +538,9 @@ export function pickCalloutTop(
 // by the popover Callout (AttentionBadge) and the return-banner callout (App) so
 // the "because X" wording is identical wherever the ranked answer is shown.
 const ATTENTION_REASON_FALLBACK: Record<string, string> = {
-  waiting: 'waiting for your input',
-  erroring: 'emitting errors',
   stuck: 'stuck in a loop',
   custom: 'matched a watch pattern',
   critical: 'critical health',
-  blocked: 'blocked on another agent',
   warning: 'needs attention',
 };
 
@@ -597,8 +580,8 @@ export type AttentionSeverity = 'positive' | 'red' | 'amber';
  *    it is distinct from a truly idle fleet (total === 0 AND done === 0) which is the
  *    empty/zero state.
  *  - `severity` — 'positive' when onlyDone; 'red' when something is broken
- *    (a critical/stuck/erroring agent or a recent error); otherwise 'amber' (warnings,
- *    waiting, blocked, pending directives).
+ *    (a critical/stuck agent or a recent error); otherwise 'amber' (warnings,
+ *    pending directives).
  *
  * The badge's header + trigger and the persistent Attention view consume this so the
  * severity-to-rollup mapping stays in one tested place (each maps `severity` to a tone
@@ -611,7 +594,7 @@ export function rollupSeverity(rollup: AttentionRollup): {
   const onlyDone = rollup.total === 0 && rollup.done.length > 0;
   const severity: AttentionSeverity = onlyDone
     ? 'positive'
-    : rollup.critical.length > 0 || rollup.stuck.length > 0 || rollup.erroring.length > 0 || rollup.errors > 0
+    : rollup.critical.length > 0 || rollup.stuck.length > 0 || rollup.errors > 0
       ? 'red'
       : 'amber';
   return { onlyDone, severity };
@@ -625,7 +608,7 @@ export function rollupSeverity(rollup: AttentionRollup): {
  * WARDEN-436 broadened the banner's visibility beyond the original "activity events
  * since close" gate (`total > 0`). The ranked `top` reflects CURRENT pane/health
  * state, which is INDEPENDENT of the since-close event tally — e.g. an agent that
- * became stuck / waiting / critical with ZERO directives or errors since close
+ * became stuck / critical with ZERO directives or errors since close
  * produces a non-null `top` but `activityTotal === 0`, so under the old gate the
  * banner (and the callout inside it) would never render. This predicate fires on
  * EITHER, satisfying the roadmap's "where am I needed — across everything" goal.

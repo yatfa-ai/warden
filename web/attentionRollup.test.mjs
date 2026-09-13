@@ -15,6 +15,9 @@
 //
 // Run: node attentionRollup.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
+// WARDEN-1360 litmus: the REAL pane classifier (dependency-free) so the test can
+// prove a row classifyPane labels `erroring` contributes NOTHING to the readout.
+import { classifyPane } from '../src/agentState.js';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -156,7 +159,8 @@ test('EMPTY_ATTENTION_ROLLUP has total 0 and empty arrays', () => {
   assert.deepEqual(EMPTY_ATTENTION_ROLLUP.critical, []);
   assert.deepEqual(EMPTY_ATTENTION_ROLLUP.warning, []);
   assert.deepEqual(EMPTY_ATTENTION_ROLLUP.stuck, []);
-  assert.deepEqual(EMPTY_ATTENTION_ROLLUP.waiting, []);
+  assert.deepEqual(EMPTY_ATTENTION_ROLLUP.custom, []);
+  assert.deepEqual(EMPTY_ATTENTION_ROLLUP.done, []);
 });
 
 console.log('\npane-state buckets (WARDEN-344): stuck/erroring/waiting/blocked fold into the rollup');
@@ -164,7 +168,7 @@ test('the two-arg call shape still works (no agentStates) — backward compatibl
   const r = buildAttentionRollup(health({ critical: [agent('c1')] }), stats());
   assert.equal(r.total, 1);
   assert.deepEqual(r.stuck, []);
-  assert.deepEqual(r.waiting, []);
+  assert.deepEqual(r.custom, []);
 });
 test('a stuck agent → total 1 and a stuck bucket row', () => {
   const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
@@ -172,16 +176,16 @@ test('a stuck agent → total 1 and a stuck bucket row', () => {
   assert.equal(r.stuck.length, 1);
   assert.equal(r.stuck[0].id, 's1');
 });
-test('each pane state lands in its own bucket', () => {
+test('the removed guess states land in NO bucket and count nothing (WARDEN-1360)', () => {
+  // The classifier still emits erroring/waiting/blocked (the watch lanes consume it),
+  // but the passive readout no longer buckets them — substring guesses cannot
+  // substantiate a "needs you" claim. The section header + litmus below pin this.
   const r = roll(health(), stats(), [
     stateRow('s1', 'stuck'), stateRow('e1', 'erroring'),
     stateRow('w1', 'waiting'), stateRow('b1', 'blocked'),
   ]);
-  assert.equal(r.stuck.length, 1);
-  assert.equal(r.erroring.length, 1);
-  assert.equal(r.waiting.length, 1);
-  assert.equal(r.blocked.length, 1);
-  assert.equal(r.total, 4);
+  assert.equal(r.stuck.length, 1, 'stuck is the surviving observable pane bucket');
+  assert.equal(r.total, 1, 'only the stuck row counts');
 });
 test('capture_failed rows are NOT counted (already surfaced as CRITICAL/CLOSED by /api/health)', () => {
   const r = roll(health(), stats(), [stateRow('d1', 'capture_failed')]);
@@ -205,47 +209,47 @@ test('active/idle rows are NOT counted (no attention needed)', () => {
   const r = roll(health(), stats(), [stateRow('a1', 'active'), stateRow('i1', 'idle')]);
   assert.equal(r.total, 0);
 });
-test('stuck/erroring contribute to total ALONGSIDE critical/warning/directives/errors', () => {
+test('stuck contributes to total ALONGSIDE critical/warning/directives/errors', () => {
   const r = roll(
     health({ critical: [agent('c1')], warning: [agent('w1')] }),
     stats({ directive_proposed: 2, error: 1 }),
-    [stateRow('s1', 'stuck'), stateRow('e1', 'erroring')],
+    [stateRow('s1', 'stuck')],
   );
-  assert.equal(r.total, 1 + 1 + 2 + 1 + 1 + 1);
+  assert.equal(r.total, 1 + 1 + 2 + 1 + 1);
 });
 test('null agentStates degrades to empty buckets (no crash)', () => {
   const r = roll(health({ critical: [agent('c1')] }), stats(), null);
   assert.equal(r.total, 1);
   assert.deepEqual(r.stuck, []);
 });
-test('stuck/erroring rows carry their signal for the badge detail row', () => {
+test('stuck rows carry their signal for the badge detail row', () => {
   const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: 'repeating line' })]);
   assert.equal(r.stuck[0].signal, 'repeating line');
 });
 
 console.log('\nper-state toggle (WARDEN-344): a silenced state contributes neither rows nor total');
-test('silencing "waiting" drops it from the bucket and the total', () => {
+test('silencing "stuck" drops it from the bucket and the total (watch matches still surface)', () => {
   const r = roll(health(), stats(),
-    [stateRow('w1', 'waiting'), stateRow('e1', 'erroring')],
-    { enabledStates: { waiting: false } });
-  assert.equal(r.waiting.length, 0, 'waiting silenced → empty bucket');
-  assert.equal(r.erroring.length, 1, 'erroring still surfaces');
-  assert.equal(r.total, 1, 'only erroring counts');
+    [stateRow('s1', 'stuck'), stateRow('d1', 'idle', { customMatch: { pattern: 'Deploy', line: 'deploy failed' } })],
+    { enabledStates: { stuck: false } });
+  assert.equal(r.stuck.length, 0, 'stuck silenced → empty bucket');
+  assert.equal(r.custom.length, 1, 'watch matches still surface');
+  assert.equal(r.total, 1, 'only the custom row counts');
 });
-test('silencing "waiting" keeps "erroring" (a noisy waiting does not mask errors)', () => {
-  const r = roll(health(), stats(),
-    [stateRow('w1', 'waiting'), stateRow('e1', 'erroring')],
-    { enabledStates: { waiting: false, erroring: true } });
+test('silencing "stuck" keeps critical health (a noisy state does not mask a broken agent)', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('s1', 'stuck')],
+    { enabledStates: { stuck: false, done: true } });
   assert.equal(r.total, 1);
+  assert.equal(r.critical.length, 1);
 });
 test('omitting enabledStates surfaces every state (default ON)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
-  assert.equal(r.waiting.length, 1);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
+  assert.equal(r.stuck.length, 1);
   assert.equal(r.total, 1);
 });
 test('enabledStates does not touch the inactivity buckets (critical/warning unaffected)', () => {
   const r = roll(health({ critical: [agent('c1')] }), stats(), [],
-    { enabledStates: { stuck: false, erroring: false, waiting: false, blocked: false } });
+    { enabledStates: { stuck: false, done: false } });
   assert.equal(r.critical.length, 1);
   assert.equal(r.total, 1);
 });
@@ -253,23 +257,22 @@ test('enabledStates does not touch the inactivity buckets (critical/warning unaf
 console.log('\nrankAttention (WARDEN-384): flatten the rollup into ONE directed "you\'re needed HERE, because X" answer');
 test('top is the highest-urgency pane, ranked follows urgency', () => {
   const r = roll(health(), stats(), [
-    stateRow('w1', 'waiting', { signal: 'press enter' }),
+    stateRow('c1', 'idle', { customMatch: { pattern: 'Deploy', line: 'deploy failed' } }),
     stateRow('s1', 'stuck', { signal: 'repeating line' }),
   ]);
   const { top, ranked } = rankAttention(r);
-  assert.equal(top.id, 'w1', 'waiting is highest urgency → top');
-  assert.equal(top.state, 'waiting');
-  assert.equal(top.signal, 'press enter', 'the concrete "because X" is carried through');
-  assert.deepEqual(ranked.map((x) => x.id), ['w1', 's1']);
+  assert.equal(top.id, 'c1', 'the user-authored watch match is highest urgency → top');
+  assert.equal(top.state, 'custom');
+  assert.match(top.signal, /deploy failed/, 'the concrete "because X" is carried through');
+  assert.deepEqual(ranked.map((x) => x.id), ['c1', 's1']);
 });
-test('a waiting-on-you pane ranks above a merely stuck one (even when stuck is listed first)', () => {
-  const r = roll(health(), stats(), [
+test('a stuck pane ranks above a critical-health agent (an observed loop is the more actionable signal)', () => {
+  const r = roll(health({ critical: [agent('h1')] }), stats(), [
     stateRow('s1', 'stuck', { signal: 'repeating line' }),
-    stateRow('w1', 'waiting', { signal: 'please respond' }),
   ]);
   const { top } = rankAttention(r);
-  assert.equal(top.id, 'w1', 'waiting outranks stuck');
-  assert.notEqual(top.state, 'stuck');
+  assert.equal(top.id, 's1', 'stuck outranks critical health');
+  assert.equal(top.state, 'stuck');
 });
 test('an empty rollup (total 0) has no directed top', () => {
   const { top, ranked } = rankAttention(roll(health(), stats()));
@@ -280,28 +283,27 @@ test('EMPTY_ATTENTION_ROLLUP has no directed top', () => {
   const { top } = rankAttention(EMPTY_ATTENTION_ROLLUP);
   assert.equal(top, null);
 });
-test('a silenced state can never become top (silenced waiting → next-highest wins)', () => {
-  // waiting would normally win, but buildAttentionRollup silences it upstream (empty
-  // bucket), so the next-highest pane becomes the directed answer.
-  const r = roll(health(), stats(),
-    [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')],
-    { enabledStates: { waiting: false } });
+test('a silenced state can never become top (silenced stuck → next-highest wins)', () => {
+  // stuck would normally win over health, but buildAttentionRollup silences it upstream
+  // (empty bucket), so the next-highest pane becomes the directed answer.
+  const r = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('s1', 'stuck')],
+    { enabledStates: { stuck: false } });
   const { top } = rankAttention(r);
-  assert.equal(r.waiting.length, 0, 'waiting silenced upstream → empty bucket');
-  assert.notEqual(top.state, 'waiting');
-  assert.equal(top.id, 's1');
+  assert.equal(r.stuck.length, 0, 'stuck silenced upstream → empty bucket');
+  assert.notEqual(top.state, 'stuck');
+  assert.equal(top.id, 'c1');
 });
 test('unstamped same-tier rows (no enteredAt) keep input order + are stable across calls', () => {
   // WARDEN-890: with no enteredAt, all rows are +∞ so the duration tieback is a no-op —
   // the stable sort preserves input order. This is the case for any pane row that was
   // never stamped (and would be the case for health-group agents, which carry no
   // enteredAt at all).
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('w2', 'waiting'), stateRow('w3', 'waiting')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck'), stateRow('s3', 'stuck')]);
   const a = rankAttention(r);
   const b = rankAttention(r);
-  assert.deepEqual(a.ranked.map((x) => x.id), ['w1', 'w2', 'w3'], 'unstamped → input order preserved');
+  assert.deepEqual(a.ranked.map((x) => x.id), ['s1', 's2', 's3'], 'unstamped → input order preserved');
   assert.deepEqual(a.ranked, b.ranked, 'stable across calls');
-  assert.equal(a.top.id, 'w1');
+  assert.equal(a.top.id, 's1');
 });
 test('same-tier ties break oldest-entered-first regardless of input order (WARDEN-890)', () => {
   // The directed Callout picks ranked[0] (after focus exclusion); the sectioned rundown
@@ -309,24 +311,24 @@ test('same-tier ties break oldest-entered-first regardless of input order (WARDE
   // so a newest-waiting pane returned first by the server must NOT be promoted above an
   // older, more languishing one. Fixed epoch values keep this deterministic.
   const r = roll(health(), stats(), [
-    stateRow('w_newer', 'waiting', { enteredAt: 3000 }),
-    stateRow('w_oldest', 'waiting', { enteredAt: 1000 }),
-    stateRow('w_mid', 'waiting', { enteredAt: 2000 }),
+    stateRow('s_newer', 'stuck', { enteredAt: 3000 }),
+    stateRow('s_oldest', 'stuck', { enteredAt: 1000 }),
+    stateRow('s_mid', 'stuck', { enteredAt: 2000 }),
   ]);
   const { top, ranked } = rankAttention(r);
-  assert.deepEqual(ranked.map((x) => x.id), ['w_oldest', 'w_mid', 'w_newer'], 'oldest-entered first within the tier');
-  assert.equal(top.id, 'w_oldest', 'the most languishing pane is the directed answer');
+  assert.deepEqual(ranked.map((x) => x.id), ['s_oldest', 's_mid', 's_newer'], 'oldest-entered first within the tier');
+  assert.equal(top.id, 's_oldest', 'the most languishing pane is the directed answer');
 });
 test('cross-tier: urgency precedence still dominates over enteredAt (WARDEN-890)', () => {
   // A higher-urgency pane with a NEWER enteredAt still outranks a lower-urgency pane with
   // an OLDER enteredAt — the duration tiebreak only applies WITHIN a tier, never across.
   const r = roll(health(), stats(), [
-    stateRow('stuck_old', 'stuck', { enteredAt: 1000 }),
-    stateRow('waiting_new', 'waiting', { enteredAt: 9000 }),
+    stateRow('critical_old', 'idle', { enteredAt: 1000, customMatch: { pattern: 'Deploy', line: 'deploy failed' } }),
+    stateRow('stuck_new', 'stuck', { enteredAt: 9000 }),
   ]);
   const { top, ranked } = rankAttention(r);
-  assert.deepEqual(ranked.map((x) => x.id), ['waiting_new', 'stuck_old'], 'waiting outranks stuck despite newer enteredAt');
-  assert.equal(top.id, 'waiting_new');
+  assert.deepEqual(ranked.map((x) => x.id), ['critical_old', 'stuck_new'], 'custom outranks stuck despite newer enteredAt');
+  assert.equal(top.id, 'critical_old');
 });
 test('unstamped rows sink to +∞ (last within their tier) when mixed with stamped rows (WARDEN-890)', () => {
   // Health-group agents (critical/warning) carry no enteredAt, and any pane row that was
@@ -334,32 +336,34 @@ test('unstamped rows sink to +∞ (last within their tier) when mixed with stamp
   // crash the comparator (no Infinity - NaN). This is the "graceful no-op where it
   // shouldn't apply" guarantee.
   const r = roll(health(), stats(), [
-    stateRow('w_unstamped_a', 'waiting'),
-    stateRow('w_stamped', 'waiting', { enteredAt: 2000 }),
-    stateRow('w_unstamped_b', 'waiting'),
+    stateRow('s_unstamped_a', 'stuck'),
+    stateRow('s_stamped', 'stuck', { enteredAt: 2000 }),
+    stateRow('s_unstamped_b', 'stuck'),
   ]);
   const { ranked } = rankAttention(r);
   assert.deepEqual(
     ranked.map((x) => x.id),
-    ['w_stamped', 'w_unstamped_a', 'w_unstamped_b'],
+    ['s_stamped', 's_unstamped_a', 's_unstamped_b'],
     'stamped first, then unstamped in stable input order',
   );
 });
-test('below the waiting bias, the encoded precedence holds (erroring > stuck > blocked)', () => {
-  const r = roll(health(), stats(), [
-    stateRow('b1', 'blocked'), stateRow('s1', 'stuck'), stateRow('e1', 'erroring'),
-  ]);
-  const { ranked } = rankAttention(r);
-  assert.deepEqual(ranked.map((x) => x.state), ['erroring', 'stuck', 'blocked']);
-});
-test('health agents rank alongside pane states (stuck > critical > blocked > warning)', () => {
+test('the encoded precedence holds (custom > stuck > critical > warning)', () => {
   const r = roll(
     health({ critical: [agent('c1')], warning: [agent('warn1')] }),
     stats(),
-    [stateRow('b1', 'blocked'), stateRow('s1', 'stuck')],
+    [stateRow('s1', 'stuck'), stateRow('d1', 'idle', { customMatch: { pattern: 'Deploy', line: 'deploy failed' } })],
   );
   const { ranked } = rankAttention(r);
-  assert.deepEqual(ranked.map((x) => x.id), ['s1', 'c1', 'b1', 'warn1']);
+  assert.deepEqual(ranked.map((x) => x.state), ['custom', 'stuck', 'critical', 'warning']);
+});
+test('health agents rank alongside pane states (stuck > critical > warning)', () => {
+  const r = roll(
+    health({ critical: [agent('c1')], warning: [agent('warn1')] }),
+    stats(),
+    [stateRow('s1', 'stuck')],
+  );
+  const { ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['s1', 'c1', 'warn1']);
 });
 test('only directives/errors counts (no pane) → no directed top (counts have no pane to deep-link)', () => {
   const r = roll(health(), stats({ directive_proposed: 3, error: 2 }));
@@ -370,7 +374,7 @@ test('only directives/errors counts (no pane) → no directed top (counts have n
 });
 test('top identity uses key || id so the deep-link opens the correct pane', () => {
   const r = roll(health(), stats(), [
-    stateRow('raw-id', 'waiting', { key: 'pane-key', name: 'My Agent', signal: 'hi' }),
+    stateRow('raw-id', 'stuck', { key: 'pane-key', name: 'My Agent', signal: 'hi' }),
   ]);
   const { top } = rankAttention(r);
   assert.equal(top.id, 'pane-key', 'id is the key when present (matches the badge row keying)');
@@ -383,26 +387,26 @@ console.log('\npickCalloutTop (WARDEN-482): the directed callout never promotes 
 // (`ranked`) still lists the focused pane — only the PROMOTED answer changes. Applied
 // locally here (NOT in shared rankAttention, which also feeds the ungated return banner).
 test('focusedPaneKey null → returns ranked[0] (bit-for-bit the old `top`)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck')]);
   const { ranked } = rankAttention(r);
-  assert.deepEqual(ranked.map((x) => x.id), ['w1', 's1']);
-  assert.equal(pickCalloutTop(ranked, null)?.id, 'w1', 'no focus → promote the top');
-  assert.equal(pickCalloutTop(ranked, undefined)?.id, 'w1', 'undefined focus → promote the top');
+  assert.deepEqual(ranked.map((x) => x.id), ['s1', 's2']);
+  assert.equal(pickCalloutTop(ranked, null)?.id, 's1', 'no focus → promote the top');
+  assert.equal(pickCalloutTop(ranked, undefined)?.id, 's1', 'undefined focus → promote the top');
 });
 test('focused on the TOP-ranked pane → callout promotes the NEXT needful pane (not the one being read)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck')]);
   const { ranked } = rankAttention(r);
-  assert.equal(pickCalloutTop(ranked, 'w1')?.id, 's1', 'w1 is focused → promote s1');
+  assert.equal(pickCalloutTop(ranked, 's1')?.id, 's2', 's1 is focused → promote s2');
 });
 test('focused on a NON-top ranked pane → the top is still promoted (focus elsewhere does not demote it)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck')]);
   const { ranked } = rankAttention(r);
-  assert.equal(pickCalloutTop(ranked, 's1')?.id, 'w1', 's1 focused but w1 is top → still w1');
+  assert.equal(pickCalloutTop(ranked, 's2')?.id, 's1', 's2 focused but s1 is top → still s1');
 });
 test('focused on a pane NOT in the ranked list → returns ranked[0] (nothing to exclude)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck')]);
   const { ranked } = rankAttention(r);
-  assert.equal(pickCalloutTop(ranked, 'some-other-pane')?.id, 'w1');
+  assert.equal(pickCalloutTop(ranked, 'some-other-pane')?.id, 's1');
 });
 test('an empty ranked list → null (no eligible callout target)', () => {
   assert.equal(pickCalloutTop([], null), null);
@@ -411,22 +415,22 @@ test('an empty ranked list → null (no eligible callout target)', () => {
 test('only ONE ranked item and it is the focused pane → null (callout hides; rundown-only)', () => {
   // In the badge this is also gated by `ranked.length >= 2`, so the callout hides either
   // way — but pickCalloutTop alone correctly yields null when exclusion empties the list.
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
   const { ranked } = rankAttention(r);
   assert.equal(ranked.length, 1);
-  assert.equal(pickCalloutTop(ranked, 'w1'), null);
+  assert.equal(pickCalloutTop(ranked, 's1'), null);
 });
 test('the rundown is UNCHANGED by pickCalloutTop (the focused pane still lists; no information loss)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck'), stateRow('e1', 'erroring')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck'), stateRow('s3', 'stuck')]);
   const { ranked } = rankAttention(r);
   const snapshot = ranked.map((x) => x.id);
-  pickCalloutTop(ranked, 'w1'); // focus on the top
+  pickCalloutTop(ranked, 's1'); // focus on the top
   assert.deepEqual(ranked.map((x) => x.id), snapshot, 'ranked array is not mutated/filtered');
-  assert.ok(snapshot.includes('w1'), 'the focused pane is still listed in the rundown');
+  assert.ok(snapshot.includes('s1'), 'the focused pane is still listed in the rundown');
 });
 test('identity is the SAME key || id space as rankAttention (a keyed row is excluded by its key)', () => {
   const r = roll(health(), stats(), [
-    stateRow('raw-id', 'waiting', { key: 'pane-key', name: 'My Agent' }),
+    stateRow('raw-id', 'stuck', { key: 'pane-key', name: 'My Agent' }),
     stateRow('s1', 'stuck'),
   ]);
   const { ranked } = rankAttention(r);
@@ -440,13 +444,18 @@ console.log('\nattentionReason (WARDEN-436): the "because X" line, shared by the
 // name is irrelevant to these cases.
 const item = (state, extra = {}) => ({ id: 'x', state, ...extra });
 test('a concrete signal is the reason (the triggering line / matched prompt)', () => {
-  assert.equal(attentionReason(item('waiting', { signal: 'press enter to continue' })), 'press enter to continue');
+  assert.equal(attentionReason(item('stuck', { signal: 'repeating the same 3 lines' })), 'repeating the same 3 lines');
 });
 test('no signal → state-keyed fallback phrased as "why it needs you"', () => {
-  assert.equal(attentionReason(item('waiting')), 'waiting for your input');
-  assert.equal(attentionReason(item('erroring')), 'emitting errors');
   assert.equal(attentionReason(item('stuck')), 'stuck in a loop');
-  assert.equal(attentionReason(item('blocked')), 'blocked on another agent');
+  assert.equal(attentionReason(item('custom')), 'matched a watch pattern');
+});
+test('removed guess states have NO fallback phrasing — they degrade to the generic default (WARDEN-1360)', () => {
+  // A ranked item can no longer carry these states (the buckets are gone); if one ever
+  // did, the reason must be the honest generic default, not a resurrected guess phrase.
+  assert.equal(attentionReason(item('waiting')), 'needs attention');
+  assert.equal(attentionReason(item('erroring')), 'needs attention');
+  assert.equal(attentionReason(item('blocked')), 'needs attention');
 });
 test('health-group agents (critical/warning, no signal of their own) get their fallback', () => {
   assert.equal(attentionReason(item('critical')), 'critical health');
@@ -459,9 +468,9 @@ test('unknown state + no signal → generic default', () => {
   assert.equal(attentionReason(item('mystery')), 'needs attention');
 });
 test('a real ranked top carries its signal through attentionReason (integration)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting', { signal: 'awaiting your decision' })]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: 'the same 3 lines repeat' })]);
   const { top } = rankAttention(r);
-  assert.equal(attentionReason(top), 'awaiting your decision');
+  assert.equal(attentionReason(top), 'the same 3 lines repeat');
 });
 
 console.log('\nhasReturnContent (WARDEN-436): the return banner fires on activity OR a ranked top');
@@ -472,7 +481,7 @@ test('activity events since close → surface (the original total>0 gate)', () =
   assert.equal(hasReturnContent(5, null), true);
 });
 test('no activity but a ranked top → surface (the broadened gate — agent needs you NOW)', () => {
-  assert.equal(hasReturnContent(0, item('waiting')), true);
+  assert.equal(hasReturnContent(0, item('stuck')), true);
 });
 test('both activity and a ranked top → surface', () => {
   assert.equal(hasReturnContent(3, item('stuck')), true);
@@ -498,21 +507,21 @@ test('a row with customMatch lands in the custom bucket', () => {
   assert.equal(r.custom[0].id, 'd1');
 });
 test('a customMatch row is EXCLUDED from the state buckets (each pane counted once)', () => {
-  // This pane is BOTH erroring AND matches a custom pattern. It must appear in the
-  // custom bucket ONLY — not also in erroring — so total and ranked stay correct.
-  const r = roll(health(), stats(), [stateRow('d1', 'erroring', { signal: 'err', customMatch: cm('Deploy', 'deploy failed') })]);
+  // This pane is BOTH stuck AND matches a custom pattern. It must appear in the
+  // custom bucket ONLY — not also in stuck — so total and ranked stay correct.
+  const r = roll(health(), stats(), [stateRow('d1', 'stuck', { signal: 'loop', customMatch: cm('Deploy', 'deploy failed') })]);
   assert.equal(r.custom.length, 1);
-  assert.equal(r.erroring.length, 0, 'the custom-matched pane is not also counted as erroring');
+  assert.equal(r.stuck.length, 0, 'the custom-matched pane is not also counted as stuck');
   assert.equal(r.total, 1, 'total counts the pane exactly once');
 });
-test('a non-custom erroring pane is unaffected (still in erroring)', () => {
+test('a non-custom stuck pane is unaffected (still in stuck)', () => {
   // Regression guard: the custom exclusion must not bleed into ordinary state rows.
-  const r = roll(health(), stats(), [stateRow('e1', 'erroring', { signal: 'boom' })]);
-  assert.equal(r.erroring.length, 1);
+  const r = roll(health(), stats(), [stateRow('e1', 'stuck', { signal: 'loop' })]);
+  assert.equal(r.stuck.length, 1);
   assert.equal(r.custom.length, 0);
 });
 test('no customMatch anywhere → custom bucket empty (identical to today)', () => {
-  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('e1', 'erroring')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('s2', 'stuck')]);
   assert.equal(r.custom.length, 0);
   assert.equal(r.total, 2);
 });
@@ -618,12 +627,10 @@ console.log('\nenteredAt threading (WARDEN-587): the duration stamp rides the ro
 test('buildAttentionRollup preserves enteredAt on the bucketed rows (sections read it there)', () => {
   const r = roll(health(), stats(), [
     stateRow('s1', 'stuck', { enteredAt: 100 }),
-    stateRow('e1', 'erroring', { enteredAt: 200 }),
-    stateRow('w1', 'waiting', { enteredAt: 300 }),
+    stateRow('d1', 'idle', { enteredAt: 250, customMatch: cm('Deploy', 'deploy failed') }),
   ]);
   assert.equal(r.stuck[0].enteredAt, 100);
-  assert.equal(r.erroring[0].enteredAt, 200);
-  assert.equal(r.waiting[0].enteredAt, 300);
+  assert.equal(r.custom[0].enteredAt, 250);
 });
 test('a done row carries its enteredAt (the finish time, for "finished Nm ago")', () => {
   const r = roll(health(), stats(), [stateRow('w1', 'idle', { enteredAt: 500 })], { doneKeys: new Set(['w1']) });
@@ -632,12 +639,12 @@ test('a done row carries its enteredAt (the finish time, for "finished Nm ago")'
 test('rankAttention copies enteredAt onto the ranked AttentionItem (the callout shows duration)', () => {
   const r = roll(health(), stats(), [
     stateRow('s1', 'stuck', { enteredAt: 100, signal: 'loop' }),
-    stateRow('w1', 'waiting', { enteredAt: 300, signal: 'hi' }),
+    stateRow('d1', 'idle', { enteredAt: 300, customMatch: cm('Deploy', 'deploy failed') }),
   ]);
   const { ranked } = rankAttention(r);
   const byId = Object.fromEntries(ranked.map((x) => [x.id, x]));
   assert.equal(byId.s1.enteredAt, 100);
-  assert.equal(byId.w1.enteredAt, 300);
+  assert.equal(byId.d1.enteredAt, 300);
 });
 test('a custom (WARDEN-540) ranked item carries enteredAt too', () => {
   const r = roll(health(), stats(), [stateRow('d1', 'idle', { enteredAt: 250, customMatch: cm('Deploy', 'deploy failed') })]);
@@ -664,8 +671,8 @@ test('a truly idle fleet (total 0, no done) → amber (the empty/zero state is n
   assert.equal(rollupSeverity(r).severity, 'amber');
   assert.equal(rollupSeverity(r).onlyDone, false);
 });
-test('a waiting pane → amber (the milder needs-your-eye case, not red)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+test('a watch-matched pane → amber (the milder needs-your-eye case, not red)', () => {
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed') })]);
   assert.equal(rollupSeverity(r).severity, 'amber');
   assert.equal(rollupSeverity(r).onlyDone, false);
 });
@@ -681,16 +688,12 @@ test('a stuck pane → red', () => {
   const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
   assert.equal(rollupSeverity(r).severity, 'red');
 });
-test('an erroring pane → red', () => {
-  const r = roll(health(), stats(), [stateRow('e1', 'erroring')]);
-  assert.equal(rollupSeverity(r).severity, 'red');
-});
 test('recent errors → red', () => {
   const r = roll(health(), stats({ error: 1 }));
   assert.equal(rollupSeverity(r).severity, 'red');
 });
-test('a red signal beats amber: critical + waiting → red', () => {
-  const r = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('w1', 'waiting')]);
+test('a red signal beats amber: critical health + a watch match → red', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed') })]);
   assert.equal(rollupSeverity(r).severity, 'red');
 });
 test('only-finished agents (total 0, done > 0) → positive (the green review cue), not amber/red', () => {
@@ -704,11 +707,11 @@ test('only-finished agents (total 0, done > 0) → positive (the green review cu
 test('a problem alongside finished agents → red/amber (onlyDone requires total === 0)', () => {
   const r = roll(health(), stats(), [
     stateRow('d1', 'idle'),
-    stateRow('w1', 'waiting'),
+    stateRow('s1', 'stuck'),
   ], { doneKeys: new Set(['d1']) });
   assert.equal(r.total, 1);
   assert.equal(rollupSeverity(r).onlyDone, false);
-  assert.equal(rollupSeverity(r).severity, 'amber');
+  assert.equal(rollupSeverity(r).severity, 'red');
 });
 
 console.log('\nanchor threading (WARDEN-877): the deep-link line that jumps scrollback to the trigger');
@@ -719,12 +722,10 @@ console.log('\nanchor threading (WARDEN-877): the deep-link line that jumps scro
 // (so openChat(id) is byte-for-byte the old focus-only behavior).
 test('a pane-state row carries anchor === its signal (the triggering line)', () => {
   const r = roll(health(), stats(), [
-    stateRow('w1', 'waiting', { signal: 'press enter to continue' }),
-    stateRow('e1', 'erroring', { signal: 'TypeError: undefined is not a function' }),
+    stateRow('s1', 'stuck', { signal: 'TypeError: undefined is not a function' }),
   ]);
   const byId = Object.fromEntries(rankAttention(r).ranked.map((x) => [x.id, x]));
-  assert.equal(byId.w1.anchor, 'press enter to continue');
-  assert.equal(byId.e1.anchor, 'TypeError: undefined is not a function');
+  assert.equal(byId.s1.anchor, 'TypeError: undefined is not a function');
 });
 test('a custom row carries anchor === the EXACT matched line (NOT the formatted signal)', () => {
   // This is the case that requires a separate field: signal is wrapped in quotes + a
@@ -738,7 +739,7 @@ test('a custom row carries anchor === the EXACT matched line (NOT the formatted 
   assert.match(ranked[0].signal, /Deploy/);
 });
 test('a pane row with NO signal carries NO anchor (focus-only — graceful no-op)', () => {
-  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
   const { ranked } = rankAttention(r);
   assert.equal('anchor' in ranked[0], false, 'no signal → no anchor field at all');
 });
@@ -768,9 +769,7 @@ const mixed = () => roll(
   stats({ directive_proposed: 2, error: 3 }),
   [
     stateRow('s1', 'stuck', { host: 'h1' }),
-    stateRow('e1', 'erroring', { host: 'h2' }),
-    stateRow('wt1', 'waiting', { host: 'h1' }),
-    stateRow('b1', 'blocked', { host: 'h2' }),
+    stateRow('s2', 'stuck', { host: 'h2' }),
     stateRow('cu1', 'idle', { host: 'h1', customMatch: cm('Deploy', 'deploy failed') }),
     stateRow('dn1', 'idle', { host: 'h2' }),
   ],
@@ -786,24 +785,21 @@ test('a host filter narrows the Chat buckets (critical/warning) AND the AgentSta
   const f = filterAttentionRollup(mixed(), 'h1', 'all');
   assert.deepEqual(f.critical.map((a) => a.id), ['c1'], 'h1 critical kept');
   assert.deepEqual(f.warning.map((a) => a.id), [], 'h2 warning dropped');
-  assert.deepEqual(f.stuck.map((a) => a.id), ['s1']);
-  assert.deepEqual(f.erroring.map((a) => a.id), [], 'h2 erroring dropped');
-  assert.deepEqual(f.waiting.map((a) => a.id), ['wt1']);
-  assert.deepEqual(f.blocked.map((a) => a.id), [], 'h2 blocked dropped');
+  assert.deepEqual(f.stuck.map((a) => a.id), ['s1'], 'h2 stuck dropped');
   assert.deepEqual(f.custom.map((a) => a.id), ['cu1']);
   assert.deepEqual(f.done.map((a) => a.id), [], 'h2 done dropped — Finished narrows too');
 });
 test('total is recomputed over the FILTERED problem buckets (the header can never contradict the list)', () => {
   const f = filterAttentionRollup(mixed(), 'h1', 'all');
-  // critical 1 + warning 0 + stuck 1 + waiting 1 + custom 1 + directives 2 + errors 3
-  assert.equal(f.total, 9);
+  // critical 1 + warning 0 + stuck 1 + custom 1 + directives 2 + errors 3
+  assert.equal(f.total, 8);
   assert.notEqual(f.total, mixed().total, 'the unfiltered total must not survive filtering');
 });
 test('done stays EXCLUDED from total after filtering (the WARDEN-575 invariant holds)', () => {
   const f = filterAttentionRollup(mixed(), 'h2', 'all');
   assert.deepEqual(f.done.map((a) => a.id), ['dn1'], 'the h2 finished row is kept');
-  // warning 1 + erroring 1 + blocked 1 + directives 2 + errors 3 — dn1 contributes 0.
-  assert.equal(f.total, 8, 'a finished agent is a review cue, not an alarm');
+  // warning 1 + stuck 1 + directives 2 + errors 3 — dn1 contributes 0.
+  assert.equal(f.total, 7, 'a finished agent is a review cue, not an alarm');
 });
 test('directives/errors are event COUNTS with no host — passed through untouched, never zeroed or attributed', () => {
   const f = filterAttentionRollup(mixed(), 'nosuchhost', 'all');
@@ -831,13 +827,13 @@ test('an agent filter matches the row LABEL identity (name || key || id) — the
   const r = roll(health({ critical: [agent('c1', { host: 'h1', name: 'planner-1' })] }), stats(), [
     stateRow('s1', 'stuck', { host: 'h1', name: 'worker-1' }),
     stateRow('s2', 'stuck', { host: 'h1', name: 'worker-2' }),
-    { id: 'k1', key: 'keyed-agent', state: 'waiting', host: 'h1' }, // no name → key
-    { id: 'bare-id', state: 'waiting', host: 'h1' },                // no name/key → id
+    { id: 'k1', key: 'keyed-agent', state: 'stuck', host: 'h1' }, // no name → key
+    { id: 'bare-id', state: 'stuck', host: 'h1' },                // no name/key → id
   ]);
   assert.deepEqual(filterAttentionRollup(r, 'all', 'worker-1').stuck.map((a) => a.id), ['s1']);
   assert.deepEqual(filterAttentionRollup(r, 'all', 'planner-1').critical.map((a) => a.id), ['c1']);
-  assert.deepEqual(filterAttentionRollup(r, 'all', 'keyed-agent').waiting.map((a) => a.id), ['k1']);
-  assert.deepEqual(filterAttentionRollup(r, 'all', 'bare-id').waiting.map((a) => a.id), ['bare-id']);
+  assert.deepEqual(filterAttentionRollup(r, 'all', 'keyed-agent').stuck.map((a) => a.id), ['k1']);
+  assert.deepEqual(filterAttentionRollup(r, 'all', 'bare-id').stuck.map((a) => a.id), ['bare-id']);
 });
 test('host + agent compose as AND (an agent on another host is excluded)', () => {
   const r = roll(health(), stats(), [
@@ -851,10 +847,10 @@ test('the directed callout over a filtered rollup never names a filtered-OUT pan
   // The reason to filter upstream of ranking: rankAttention/pickCalloutTop are untouched,
   // so the promoted "you're needed HERE" target is drawn from the narrowed set only.
   const r = roll(health(), stats(), [
-    stateRow('wt-other', 'waiting', { host: 'h2' }), // outranks everything on h1
-    stateRow('st-mine', 'stuck', { host: 'h1' }),
+    stateRow('st-other', 'stuck', { host: 'h2', enteredAt: 1000 }), // longest-held on h2 → top unfiltered
+    stateRow('st-mine', 'stuck', { host: 'h1', enteredAt: 2000 }),
   ]);
-  assert.equal(rankAttention(r).top.id, 'wt-other', 'unfiltered, the h2 waiting pane wins');
+  assert.equal(rankAttention(r).top.id, 'st-other', 'unfiltered, the oldest-held h2 pane wins');
   const { top, ranked } = rankAttention(filterAttentionRollup(r, 'h1', 'all'));
   assert.equal(top.id, 'st-mine');
   assert.deepEqual(ranked.map((x) => x.id), ['st-mine'], 'no filtered-out pane survives into the rundown');
@@ -869,7 +865,7 @@ console.log('\nattentionFilterOptions — the dropdown option lists (WARDEN-971)
 test('options are collected from EVERY per-agent bucket (problem buckets AND the positive done bucket)', () => {
   const { hosts, agents } = attentionFilterOptions(mixed());
   assert.deepEqual(hosts, ['h1', 'h2']);
-  assert.deepEqual(agents, ['b1', 'c1', 'cu1', 'dn1', 'e1', 's1', 'w1', 'wt1']);
+  assert.deepEqual(agents, ['c1', 'cu1', 'dn1', 's1', 's2', 'w1']);
 });
 test('hosts are deduped and sorted; empty/undefined hosts are skipped (not selectable)', () => {
   const r = roll(health({ critical: [agent('c1', { host: 'zeta' })] }), stats(), [
@@ -888,8 +884,8 @@ test('every offered option selects at least one row (options + filter share ONE 
   }
   for (const a of agents) {
     const f = filterAttentionRollup(r, 'all', a);
-    const rows = f.critical.length + f.warning.length + f.stuck.length + f.erroring.length
-      + f.waiting.length + f.blocked.length + f.custom.length + f.done.length;
+    const rows = f.critical.length + f.warning.length + f.stuck.length
+      + f.custom.length + f.done.length;
     assert.ok(rows > 0, `agent option ${a} must match a row`);
   }
 });
@@ -901,20 +897,17 @@ test('an empty rollup offers no options (the Selects show only their All sentine
 console.log('\nfinalizeRollup — the one finalize step all three rollup producers share (WARDEN-1115)');
 // The 10-field input shape, defaulted so each case reads as "which parts differ".
 const parts = (p = {}) => ({
-  critical: [], warning: [], stuck: [], erroring: [], waiting: [], blocked: [],
+  critical: [], warning: [], stuck: [],
   custom: [], done: [], directives: 0, errors: 0, ...p,
 });
-test('sums the eight problem row-buckets by LENGTH', () => {
+test('sums the problem row-buckets by LENGTH', () => {
   const r = finalizeRollup(parts({
     critical: [agent('c1'), agent('c2')],
     warning: [agent('w1')],
     stuck: [agent('s1')],
-    erroring: [agent('e1')],
-    waiting: [agent('t1')],
-    blocked: [agent('b1')],
     custom: [agent('x1')],
   }));
-  assert.equal(r.total, 8);
+  assert.equal(r.total, 5);
 });
 test('directives/errors add as NUMBERS, not as lengths', () => {
   // The trap this pins: `.length` on a number is undefined, and treating these two
@@ -964,6 +957,72 @@ test('all three producers agree with the helper on the same buckets (no copy dri
   assert.deepEqual(viaHelper, built);
   // filterAttentionRollup is the second producer — unfiltered it must finalize the same.
   assert.deepEqual(filterAttentionRollup(built, 'all', 'all'), built);
+});
+
+
+// ─── WARDEN-1360 litmus: what the REAL classifier labels `erroring` must weigh nothing ───
+// The defect this slice removes was measured against the REAL shipped classifier, so the
+// guard runs against it too — not a hand-written stand-in row. classifyPane on the
+// passing-suite line ("… 42 tests passed, 0 errors") returns state 'erroring' (the
+// substring "errors"), which the OLD readout promoted into an "Erroring" badge entry.
+// MUTATION CHECK: re-adding the bucket anywhere along the pipeline —
+// `const erroring = bucket('erroring')` + its `total` term in finalizeRollup, OR its
+// `items` seeding in rankAttention — turns BOTH asserts in the first test red
+// (total === 0 pins the count, top === null pins the ranking).
+console.log('\nWARDEN-1360 litmus: a row the real classifyPane labels \'erroring\' contributes NOTHING');
+test('classifyPane itself still labels the passing-suite line erroring (premise holds on the real module)', () => {
+  const pane = Array(6).fill('agent-7 ✓ 42 tests passed, 0 errors').join('\n');
+  assert.equal(classifyPane(pane).state, 'erroring', 'the classifier is untouched — the guess still fires there');
+  assert.equal(classifyPane(pane).signal, 'agent-7 ✓ 42 tests passed, 0 errors');
+});
+test('that real-erroring row contributes NOTHING to total / ranked / sections', () => {
+  const pane = Array(6).fill('agent-7 ✓ 42 tests passed, 0 errors').join('\n');
+  const classified = classifyPane(pane);
+  // Shaped exactly as /api/agent-states returns it (agentState.js → server serializer).
+  const row = stateRow('agent-7', classified.state, { signal: classified.signal });
+  const r = roll(health(), stats(), [row]);
+  assert.equal(r.total, 0, 'a real-erroring row must not count toward the badge total');
+  assert.deepEqual(r.stuck, [], '…must not surface in any surviving section');
+  assert.equal(r.erroring, undefined, 'the bucket itself is gone from the rollup shape');
+  const { top, ranked } = rankAttention(r);
+  assert.equal(top, null, 'a real-erroring row must never become the directed answer');
+  assert.deepEqual(ranked, [], '…and must not appear in the ranked rundown');
+  assert.equal(rollupSeverity(r).severity, 'amber', 'an empty fleet is the calm zero state, not an alarm');
+});
+test('the INVERTED live case too: a genuine npm crash reads idle and rightly weighs nothing', () => {
+  // The old badge was inverted on this input class: the real failure read idle (no
+  // "needs you" claim) while the passing suite raised Erroring. Both directions now
+  // weigh nothing — the readout no longer claims what a substring cannot substantiate.
+  const pane = ['ok', 'ok', 'ok', 'ok', 'ok', 'npm ERR! code ELIFECYCLE'].join('\n');
+  const classified = classifyPane(pane);
+  assert.equal(classified.state, 'idle', 'the classifier is untouched — a crash still reads idle');
+  const row = stateRow('crasher', classified.state, { signal: classified.signal });
+  const r = roll(health(), stats(), [row]);
+  assert.equal(r.total, 0);
+  const { top } = rankAttention(r);
+  assert.equal(top, null);
+});
+test('POSITIVE CONTROL: the surviving observable signals still surface (the litmus cannot pass vacuously)', () => {
+  const loopPane = Array(6).fill('Deploying to production environment now, please wait for confirmation before continuing the rollout process as agreed').join('\n');
+  const stuckClassified = classifyPane(loopPane);
+  assert.equal(stuckClassified.state, 'stuck', 'premise: the real classifier still detects a genuine loop');
+  const r = roll(
+    health({ critical: [agent('h1')] }),
+    stats(),
+    [
+      stateRow('looper', stuckClassified.state, { signal: stuckClassified.signal, enteredAt: 1000 }),
+      stateRow('watcher', 'idle', { customMatch: { pattern: 'Deploy', line: 'deploy failed' } }),
+      stateRow('finisher', 'idle'),
+    ],
+    { doneKeys: new Set(['finisher']) },
+  );
+  assert.equal(r.total, 3, 'stuck + critical health + the watch match still count');
+  assert.equal(r.stuck.length, 1);
+  assert.equal(r.custom.length, 1);
+  assert.equal(r.done.length, 1, 'the green Finished section still renders');
+  assert.deepEqual(r.critical.map((a) => a.id), ['h1']);
+  const { top } = rankAttention(r);
+  assert.equal(top.state, 'custom', 'the directed answer comes from the observable buckets');
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

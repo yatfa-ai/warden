@@ -20,12 +20,18 @@
 // attention ALERT. Both went with that channel — this list is a PASSIVE readout the
 // human chooses to open, so it interrupts nobody and there is nothing to silence.
 //
+// WARDEN-1360: the Erroring / Waiting on you / Blocked sections are gone — those
+// buckets were substring guesses the badge could not substantiate (the module header
+// in attentionRollup.ts carries the measured counter-examples). The inline reply
+// affordance went with them (it lived only on those two amber sections); QuickReply
+// itself survives for App's return-banner + session-ops use, and WatchCatchup keeps
+// its own reply rows on the watch lane.
+//
 // This component renders ONLY the directed callout + the sectioned rundown. The caller
 // owns the zero-state decision (the badge hides entirely; the persistent view shows an
 // EmptyState) and the scroll geometry (the popover caps height at max-h-72; the
 // persistent view fills the panel) via the `className` / `scrollClassName` props.
-import { useState, type ReactNode } from 'react';
-import { Reply } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
@@ -46,11 +52,7 @@ import {
 } from '@/lib/attentionRollup';
 import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
-import type { Snippet } from '@/lib/storage';
 import { cn } from '@/lib/utils';
-// WARDEN-770 — the inline reply affordance shared by every attention surface. Rendered
-// (conditionally, only for replyable rows) inside AgentRow below.
-import { QuickReply } from '@/components/QuickReply';
 
 /**
  * The shared prop set every attention surface consumes. This is exactly the set App
@@ -58,6 +60,9 @@ import { QuickReply } from '@/components/QuickReply';
  * focus context up to App so the badge, the return banner, and the persistent view
  * all share one rollup with no duplicate polling). The persistent Attention view
  * receives the SAME values, threaded through ObserverTabs.
+ *
+ * WARDEN-1360: the `snippets` / `onReplyResult` props went with the waiting/blocked
+ * sections that were this list's only reply rows.
  */
 export interface AttentionListProps {
   /** The live, already-aggregated attention rollup (App's single source of truth). */
@@ -73,10 +78,6 @@ export interface AttentionListProps {
    *  human is already reading (the "trains the human to ignore it" product-killer). The
    *  sectioned rundown still lists it unchanged — no information loss. */
   focusedPaneKey?: string | null;
-  /** WARDEN-770 — saved instruction snippets for the inline reply control's one-click fills. */
-  snippets?: Snippet[];
-  /** WARDEN-770 — surface the reply send outcome so App can toast it. */
-  onReplyResult?: (ok: boolean, error?: string) => void;
 }
 
 // WARDEN-587: the duration suffix's supplementary color escalates the longer an agent
@@ -111,8 +112,8 @@ export function severityToneClass(rollup: AttentionRollup): string {
  * The shared ranked "where am I needed, because X" rundown: the directed callout (the
  * ONE pane to act on first, focus-excluded, gated to ≥2 deep-linkable items so it never
  * just duplicates the lone row beneath it) + the sectioned rundown in severity order
- * (critical → stuck → erroring → warnings → waiting → blocked → watch patterns →
- * finished → pending directives → recent errors). Every row deep-links into the pane or
+ * (critical → stuck → warnings → watch patterns → finished → pending directives →
+ * recent errors). Every row deep-links into the pane or
  * the Activity tab via the handlers from App.
  *
  * `className` is applied to the root column; `scrollClassName` to the rundown's scroll
@@ -125,8 +126,6 @@ export function AttentionList({
   onOpenChat,
   onOpenActivity,
   focusedPaneKey,
-  snippets,
-  onReplyResult,
   className,
   scrollClassName = 'max-h-72 overflow-y-auto',
 }: AttentionListProps & { className?: string; scrollClassName?: string }) {
@@ -148,7 +147,7 @@ export function AttentionList({
   const { ranked } = rankAttention(rollup);
   const calloutTop = pickCalloutTop(ranked, focusedPaneKey);
 
-  const { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors } = rollup;
+  const { critical, warning, stuck, custom, done, directives, errors } = rollup;
 
   return (
     <div className={cn('flex flex-col', className)}>
@@ -171,8 +170,8 @@ export function AttentionList({
         <div className="p-1.5 flex flex-col gap-2">
           {/*
             Section order is severity: red first (critical health, then the red pane
-            states stuck/erroring), then amber (warning health, then waiting/blocked),
-            then the event-count sections. Each row deep-links straight into the pane.
+            state stuck), then amber (warning health), then the event-count sections.
+            Each row deep-links straight into the pane.
           */}
           {critical.length > 0 && (
             <Section title="Critical" count={critical.length} tone="text-red-500">
@@ -208,24 +207,6 @@ export function AttentionList({
               })}
             </Section>
           )}
-          {erroring.length > 0 && (
-            <Section title="Erroring" count={erroring.length} tone="text-red-500">
-              {sortOldestEnteredAtFirst(erroring).map((a) => {
-                const key = a.key || a.id;
-                return (
-                  <AgentRow
-                    key={key}
-                    agent={a}
-                    dot="bg-red-500"
-                    detail={a.signal}
-                    enteredAt={a.enteredAt}
-                    durationStateLabel="erroring"
-                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
-                  />
-                );
-              })}
-            </Section>
-          )}
           {warning.length > 0 && (
             <Section title="Warnings" count={warning.length} tone="text-yellow-500">
               {warning.map((a) => {
@@ -236,53 +217,6 @@ export function AttentionList({
                     agent={a}
                     dot="bg-yellow-500"
                     onClick={() => onOpenChat(key)}
-                  />
-                );
-              })}
-            </Section>
-          )}
-          {waiting.length > 0 && (
-            <Section title="Waiting on you" count={waiting.length} tone="text-yellow-500">
-              {sortOldestEnteredAtFirst(waiting).map((a) => {
-                const key = a.key || a.id;
-                return (
-                  <AgentRow
-                    key={key}
-                    agent={a}
-                    dot="bg-yellow-500"
-                    detail={a.signal}
-                    enteredAt={a.enteredAt}
-                    durationStateLabel="waiting"
-                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
-                    // WARDEN-770: the two states that resolve with a one-line human
-                    // input earn the inline reply affordance. waiting (parked at a
-                    // "press enter"/"needs input" prompt) is the headline case.
-                    replyable
-                    snippets={snippets}
-                    onReplyResult={onReplyResult}
-                  />
-                );
-              })}
-            </Section>
-          )}
-          {blocked.length > 0 && (
-            <Section title="Blocked" count={blocked.length} tone="text-yellow-500">
-              {sortOldestEnteredAtFirst(blocked).map((a) => {
-                const key = a.key || a.id;
-                return (
-                  <AgentRow
-                    key={key}
-                    agent={a}
-                    dot="bg-yellow-500"
-                    detail={a.signal}
-                    enteredAt={a.enteredAt}
-                    durationStateLabel="blocked"
-                    onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
-                    // WARDEN-770: blocked (waiting on approval/dependency) is the
-                    // second replyable state — the human can unblock inline.
-                    replyable
-                    snippets={snippets}
-                    onReplyResult={onReplyResult}
                   />
                 );
               })}
@@ -375,9 +309,6 @@ function AgentRow({
   enteredAt,
   durationStateLabel,
   durationTense = 'ongoing',
-  replyable = false,
-  snippets,
-  onReplyResult,
 }: {
   agent: AttentionAgent;
   dot: string;
@@ -395,24 +326,8 @@ function AgentRow({
   /** WARDEN-587: 'ago' reads the duration as elapsed SINCE a completion (the green
    * "Finished" section: "3m ago"); 'ongoing' (default) reads it as a held state. */
   durationTense?: 'ongoing' | 'ago';
-  /** WARDEN-770 — show the inline reply affordance. Passed ONLY from the waiting +
-   * blocked sections (the two states that resolve with a one-line human input);
-   * every other section omits it so critical/stuck/erroring/warning/custom/done rows
-   * are untouched (preserves the existing deep-link + severity ordering). */
-  replyable?: boolean;
-  /** WARDEN-770 — the snippet library for the reply control's one-click fills. */
-  snippets?: Snippet[];
-  /** WARDEN-770 — surface the reply send outcome so App can toast it. */
-  onReplyResult?: (ok: boolean, error?: string) => void;
 }) {
   const label = agent.name || agent.key || agent.id;
-  // The row's pane identity — the SAME key onOpenChat deep-links and QuickReply
-  // sends to.
-  const rowKey = agent.key || agent.id;
-  // WARDEN-770: the inline reply panel's expand/collapse state. Off by default so the
-  // row stays compact; the Reply toggle reveals the QuickReply control below the row.
-  // Collapses automatically on a successful send (QuickReply.onDismiss).
-  const [replyOpen, setReplyOpen] = useState(false);
   // Read the clock once per render; the badge/view re-renders on the rollup cadence.
   const now = Date.now();
   // WARDEN-587: the live duration suffix + its supplementary tone + verbose tooltip.
@@ -505,50 +420,7 @@ function AgentRow({
           )}
         </ContextMenuContent>
       </ContextMenu>
-      {/*
-        WARDEN-770 — the inline reply toggle (waiting/blocked rows only). A distinct
-        affordance from the row's onClick deep-link (which still opens the pane): this
-        reveals the QuickReply control below the row so the human can answer a "press
-        enter"/"needs approval" agent WITHOUT leaving the surface. stopPropagation on
-        the trigger so tapping it never also opens the chat pane (mirrors the mute bell
-        below). Uses the library <Button> (variant=ghost size=icon-xs) — WARDEN-68
-        Rule 1: no raw <button>. aria-expanded reflects the panel state for screen
-        readers.
-      */}
-      {replyable && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          onClick={(e) => { e.stopPropagation(); setReplyOpen((v) => !v); }}
-          aria-haspopup="dialog"
-          aria-expanded={replyOpen}
-          aria-label={replyOpen ? `Hide reply to ${label}` : `Reply to ${label} without opening the pane`}
-          title={replyOpen ? 'Hide reply' : 'Reply without opening the pane'}
-          className="shrink-0 self-center text-muted-foreground hover:text-foreground"
-        >
-          <Reply className="size-3.5" />
-        </Button>
-      )}
       </div>
-      {/*
-        WARDEN-770 — the expanded inline reply control (waiting/blocked rows only).
-        Rendered below the row when the Reply toggle is open, so the human can type a
-        reply / pick a snippet / press Enter and send straight to this agent's tmux
-        session via /api/send + /api/key — zero pane switches. The control owns its
-        textarea + the confirm gate; on a successful send it collapses itself via
-        onDismiss. The target id is the row's pane identity (agent.key || agent.id),
-        the SAME key onOpenChat would deep-link — so the reply lands in the correct pane.
-      */}
-      {replyable && replyOpen && (
-        <QuickReply
-          targetId={rowKey}
-          targetLabel={label}
-          snippets={snippets ?? []}
-          onReplyResult={onReplyResult}
-          onDismiss={() => setReplyOpen(false)}
-        />
-      )}
     </div>
   );
 }
@@ -642,8 +514,10 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
 // return-banner callout — which presents the SAME ranked `top` — reuses the exact
 // state→color mapping and the surfaces stay visually consistent. WARDEN-880: also
 // re-exported from AttentionBadge so App's existing import path is unchanged.
+// WARDEN-1360: 'erroring' left the mapping with its bucket — a ranked top can no
+// longer carry that state.
 export function dotForState(state: string): string {
-  return state === 'erroring' || state === 'stuck' || state === 'critical'
+  return state === 'stuck' || state === 'critical'
     ? 'bg-red-500'
     : 'bg-yellow-500';
 }

@@ -1,12 +1,17 @@
 // stateDuration — pure logic for "how long has each agent been in its current
 // attention state?" (WARDEN-587).
 //
-// The header AttentionBadge already shows WHICH agents need attention (stuck /
-// erroring / waiting / blocked / done), but a returning rare-visitor human cannot
-// tell an agent stuck for 90s from one stuck for 4h — they render identically. This
-// adds the missing TIME dimension: a live, monotonically increasing duration on each
-// row ("stuck 2h 14m", "waiting 47m", "finished 3m ago") so the human can triage the
-// LANGUISHING agents from the just-flipped ones.
+// The header AttentionBadge already shows WHICH agents need attention, but a
+// returning rare-visitor human cannot tell an agent stuck for 90s from one stuck for
+// 4h — they render identically. This adds the missing TIME dimension: a live,
+// monotonically increasing duration on each row ("stuck 2h 14m", "finished 3m ago")
+// so the human can triage the LANGUISHING agents from the just-flipped ones.
+//
+// WARDEN-1360: durations are tracked only for the states the passive readout still
+// displays — stuck (the surviving observable pane state), watch-pattern rows (which
+// render a duration whatever their underlying state), and done (whose "finished Nm
+// ago" IS the signal). The erroring/waiting/blocked states left the readout with
+// their buckets, so useAttentionRollup no longer stamps them.
 //
 // The transition is already detected client-side in useAttentionRollup (the
 // fetchAgentStates open-pane loop compares each key's prior state to its current
