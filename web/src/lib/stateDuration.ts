@@ -2,10 +2,11 @@
 // attention state?" (WARDEN-587).
 //
 // The header AttentionBadge already shows WHICH agents need attention (stuck /
-// erroring / waiting / blocked / done), but a returning rare-visitor human cannot
+// watch-pattern matches / done — WARDEN-1360 retired the erroring / waiting / blocked
+// guess buckets), but a returning rare-visitor human cannot
 // tell an agent stuck for 90s from one stuck for 4h — they render identically. This
 // adds the missing TIME dimension: a live, monotonically increasing duration on each
-// row ("stuck 2h 14m", "waiting 47m", "finished 3m ago") so the human can triage the
+// row ("stuck 2h 14m", "finished 3m ago") so the human can triage the
 // LANGUISHING agents from the just-flipped ones.
 //
 // The transition is already detected client-side in useAttentionRollup (the

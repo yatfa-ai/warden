@@ -1,7 +1,7 @@
 // useAttentionRollup — the live, visibility-gated data source for the header
 // AttentionBadge (WARDEN-228), extended in WARDEN-344 to also poll each open pane's
-// CLASSIFIED STATE (stuck / erroring / waiting / blocked) so an agent actively
-// emitting a loop / stack trace / "press enter" prompt no longer reads "Healthy".
+// CLASSIFIED STATE (stuck — and, until WARDEN-1360, the erroring/waiting/blocked
+// guesses) so an agent actively emitting a loop no longer reads "Healthy".
 //
 // Three signals are folded into one AttentionRollup via the pure buildAttentionRollup:
 //   - /api/health        (inactivity-based critical/warning)   — 10s cadence
@@ -48,6 +48,14 @@ import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '
 // (The "While you were away" startup banner keeps its own since-last-close window;
 // this is the live, always-on rollup, so it uses a fixed rolling window instead.)
 export const ATTENTION_RECENT_WINDOW_MS = 15 * 60 * 1000;
+
+// WARDEN-1360: the classifier states the passive readout no longer reports. Their
+// SUMM_* regexes are substring guesses (a passing suite's "0 errors" line classifies
+// as erroring; coordination prose reads waiting), so buildAttentionRollup no longer
+// buckets them — and a stamp for a state that can never reach a badge section is
+// write-without-reader. Stamping (below) skips these; every other state — including
+// 'idle' (done rows) and any state carrying a customMatch — still stamps.
+const RETIRED_GUESS_STATES: ReadonlySet<string> = new Set(['erroring', 'waiting', 'blocked']);
 
 // WARDEN-575: how long a finished agent stays in the badge's green "Finished"
 // section. A completion is a transient "just stopped" cue — long enough to notice
@@ -193,9 +201,9 @@ export function useAttentionRollup(
   // exposed for the catch-up's return-time reconciliation. See AttentionRollupState.
   const [watchedStates, setWatchedStates] = useState<AgentStateRow[]>([]);
   const [loading, setLoading] = useState(true);
-  // WARDEN-571: the hidden-fleet sweep rows (stuck/erroring/waiting/blocked agents that
-  // are NEITHER open NOR watched). Folded into the SAME rollup below so a hidden agent
-  // needing attention surfaces in the badge. `sweep_skipped`
+  // WARDEN-571: the hidden-fleet sweep rows (stuck / watch-pattern-matched agents
+  // that are NEITHER open NOR watched). Folded into the SAME rollup below so a hidden
+  // agent needing attention surfaces in the badge. `sweep_skipped`
   // rows (non-companion / LOCAL hosts the cost gate never probes) are present here too
   // but match no rollup bucket, so they never count. Preserved (not blanked) on a
   // transient fetch failure, mirroring agentStates.
@@ -448,11 +456,33 @@ export function useAttentionRollup(
           // signal a returning human needs). An agent that finished (active→idle) is a
           // transition like any other, so its done row gets the finish time as its
           // enteredAt for free — the same stamp doneRecentRef records.
+          // WARDEN-587: stamp when this key ENTERED its current state, so the badge row
+          // can show a live "stuck 2h 14m" duration. Covers EVERY open row (watched
+          // panes that are also open appear in the badge and need durations too), so it
+          // runs BEFORE the watched done-ping `continue`. prevOpen holds each key's prior
+          // state from the last poll; computeEnteredAt is the pure stamp/reset/keep rule
+          // (null → keep the existing stamp):
+          //   - first observation (no prev)            → stamp `now` as a baseline;
+          //   - genuine transition (prev !== state)    → reset the stamp to `now`;
+          //   - unchanged                              → keep the stamp (keeps growing).
+          // The formatter (formatStateDuration) suppresses the sub-minute window, so a
+          // first-observation baseline never reads as a false "0s"/"<1m" — the suffix
+          // appears only once the state has held ≥1m (the languishing-vs-just-flipped
+          // signal a returning human needs). An agent that finished (active→idle) is a
+          // transition like any other, so its done row gets the finish time as its
+          // enteredAt for free — the same stamp doneRecentRef records.
+          //
+          // WARDEN-1360: a row in a retired guess state (erroring/waiting/blocked)
+          // reaches no badge section, so its stamp is skipped — but `prevOpen` still
+          // advances (the state-change detector below reads it), so a later transition
+          // INTO a visible state (e.g. erroring → stuck) correctly stamps fresh.
           const prev = prevOpen[key];
-          const nextEnteredAt = computeEnteredAt(prev ?? null, r.state, enteredAt.has(key), now);
-          if (nextEnteredAt !== null && enteredAt.get(key) !== nextEnteredAt) {
-            enteredAt.set(key, nextEnteredAt);
-            enteredAtDirtyRef.current = true;
+          if (!RETIRED_GUESS_STATES.has(r.state)) {
+            const nextEnteredAt = computeEnteredAt(prev ?? null, r.state, enteredAt.has(key), now);
+            if (nextEnteredAt !== null && enteredAt.get(key) !== nextEnteredAt) {
+              enteredAt.set(key, nextEnteredAt);
+              enteredAtDirtyRef.current = true;
+            }
           }
           if (watchedSetForDone.has(key)) continue; // watched → the watch ping handles it
           if (isDoneTransition(prev ?? null, r.state)) {
@@ -529,6 +559,8 @@ export function useAttentionRollup(
         const enteredAt = enteredAtRef.current as Map<string, number>;
         const sweepNow = Date.now();
         for (const r of sweptRows) {
+          // WARDEN-1360: a retired guess state reaches no badge section — no stamp.
+          if (RETIRED_GUESS_STATES.has(r.state)) continue;
           const key = r.key ?? r.id;
           if (!enteredAt.has(key)) { enteredAt.set(key, sweepNow); enteredAtDirtyRef.current = true; }
         }
@@ -625,8 +657,8 @@ export function useAttentionRollup(
   // toggle change re-aggregates without a refetch, and so the badge only re-renders
   // when something that affects the count actually changed.
   // WARDEN-571: the hidden-fleet sweep rows are folded in HERE — alongside the open-
-  // pane agentStates — so a hidden agent needing attention (stuck/erroring/waiting/
-  // blocked/custom) appears as a needs-attention row. sweep_skipped rows match no
+  // pane agentStates — so a hidden agent needing attention (stuck / watch-pattern
+  // matched) appears as a needs-attention row. sweep_skipped rows match no
   // bucket and never count. buildAttentionRollup is unchanged (it buckets by state);
   // the fold is purely the concatenation here.
   //

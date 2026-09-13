@@ -2167,6 +2167,9 @@ const overTunedLive = () => {
     timestampFormat: 'absolute',
     terminalFontSize: 20,
     attentionDesktopAlerts: true,
+    // WARDEN-1360: the over-tuned payload still carries the REMOVED
+    // erroring/waiting/blocked keys (a legacy localStorage payload may too) —
+    // reset/load must ignore them and round-trip only the surviving keys.
     attentionStates: { stuck: false, erroring: false, waiting: false, blocked: false },
     watchedChats: ['watch-1'],
     terminalScrollback: 5000,
@@ -2253,7 +2256,9 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(r.defaultShellByHost, {});
   // Prefs added by tickets that landed after WARDEN-346 branched reset too.
   assert.equal(r.timestampFormat, 'relative');
-  assert.deepEqual(r.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true, done: true });
+  // WARDEN-1360: only the surviving keys round-trip; removed erroring/waiting/blocked
+  // entries in a stored payload are structurally ignored by loadUi.
+  assert.deepEqual(r.attentionStates, { stuck: true, done: true });
   assert.deepEqual(r.watchedChats, []);
   assert.deepEqual(r.defaultNewChatPresetByHost, {});
   assert.deepEqual(r.defaultNewChatCwdByHost, {});
@@ -2320,7 +2325,7 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   assert.deepEqual(after.defaultShellByHost, {});
   // Prefs added after WARDEN-346 round-trip to their defaults through loadUi too.
   assert.equal(after.timestampFormat, 'relative');
-  assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true, done: true });
+  assert.deepEqual(after.attentionStates, { stuck: true, done: true });
   assert.deepEqual(after.watchedChats, []);
   assert.deepEqual(after.snippets, STARTER_SNIPPETS);
   // Workspace + layout survive the same reload — the core "reset is
