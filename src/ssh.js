@@ -902,6 +902,27 @@ export async function detectClaude(host, deps = {}) {
   return null;
 }
 
+// The CLI attach command, remote branch: `tmux attach -t <session>; <shell>` —
+// the WARDEN-81 detach-to-shell semantics (after tmux exits, the user lands in a
+// shell). ONE builder so the default `bash -lc` delivery (attach()) and the
+// companion attach path (composed with buildAttachRemoteScript) hand the host a
+// BYTE-FOR-BYTE identical command — the WARDEN-1364 parity contract, provable by
+// construction rather than by two hand-kept-in-sync string literals.
+//
+// The prefix and quoting follow buildAttachCommand (docker chats get `-it` —
+// attach needs a tty — and the WARDEN-140 POSIX quoting); the post-tmux shell is
+// `docker exec -it <c> bash` for a container chat (host cwd does not exist inside
+// the container), and for a bare host `cd <cwd> && exec bash` under `bash -lc`
+// when a cwd is known, else a bare `bash`.
+export function buildAttachInteractiveCommand(chat, args) {
+  const prefix = chat.container ? `docker exec -it ${shellQuote(chat.container)} ` : '';
+  const tmuxCmd = prefix + 'tmux ' + args.map(shellQuote).join(' ');
+  const shellCmd = chat.container
+    ? `docker exec -it ${shellQuote(chat.container)} bash`
+    : (chat.cwd ? `bash -lc ${shellQuote(`cd ${shellQuote(chat.cwd)} && exec bash`)}` : `bash`);
+  return `${tmuxCmd}; ${shellCmd}`;
+}
+
 export function attachInteractiveTmux(chat, args) {
   // CLI: stdio-inherit. Local spawns tmux directly; remote goes over ssh.
   if (chat.host === '(local)') {
@@ -922,17 +943,8 @@ export function attachInteractiveTmux(chat, args) {
   }
   // For remote: after tmux exits (detached), continue to an interactive shell.
   // This keeps the SSH session open and drops the user at a shell prompt.
-  // Command structure: tmux attach -t agent; <shell>
-  const prefix = chat.container ? `docker exec -it ${shellQuote(chat.container)} ` : '';
-  const tmuxCmd = prefix + 'tmux ' + args.map(shellQuote).join(' ');
-
-  // Build the shell command that runs after tmux exits.
-  // For docker: skip cwd (host path doesn't exist in container), just start bash.
-  // For bare: use cwd if available (it's a valid host path).
-  const shellCmd = chat.container
-    ? `docker exec -it ${shellQuote(chat.container)} bash`
-    : (chat.cwd ? `bash -lc ${shellQuote(`cd ${shellQuote(chat.cwd)} && exec bash`)}` : `bash`);
-
-  const cmd = `${tmuxCmd}; ${shellCmd}`;
-  return attach(chat.host, cmd);
+  // Command structure: tmux attach -t agent; <shell> — composed by
+  // buildAttachInteractiveCommand (ONE builder shared with the companion attach
+  // path, so the delivered string is byte-identical by construction).
+  return attach(chat.host, buildAttachInteractiveCommand(chat, args));
 }

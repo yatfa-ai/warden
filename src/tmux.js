@@ -2,7 +2,7 @@
 // container; manual: a host/local tmux session). This module builds tmux argv and
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
-import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd, buildAttachCommand, buildAttachRemoteScript, buildRunCommand } from './ssh.js';
+import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd, buildAttachCommand, buildAttachRemoteScript, buildAttachInteractiveCommand, buildRunCommand } from './ssh.js';
 import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey, attachSession as companionAttachSession, execInContext } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
@@ -433,7 +433,131 @@ export function attachStream(chat, cfg, { cols = 100, rows = 30 } = {}, deps = {
   return (deps.attachTmux ?? attachTmux)(chat, attachArgs(chat, cfg), { cols, rows });
 }
 
+// The CLI interactive TTY bridge over the companion channel (WARDEN-1364): the
+// companion attach handle (an IPty-compatible CompanionAttachSession) wired to
+// THIS process's terminal, the streaming sibling's handle made interactive for
+// the CLI. The four bridges, mapped one-to-one onto the PTY family:
+//   keystrokes: rawMode stdin 'data' → session.write() → attachInput
+//   rendering:  attachData → process.stdout.write
+//   resize:     SIGWINCH (plus one sizing call up front) → attachResize
+//   exit:       attachExit / startup failure → resolve(exitCode)
+//
+// The promise ALWAYS resolves (WARDEN-464) — sync-throw and async failure
+// included — so `process.exit(code)` in the CLI sees a number, never a
+// rejection. Companion-or-fail: a sync-visible failure (attachPreflight's
+// stale-binary / no-PTY / LOCAL verdicts) prints the actionable message on
+// STDERR and resolves 1 — never a silent raw-SSH fallback (same call as exec
+// and attachStream: a quiet fallback would re-pay the handshake this slice
+// removes while the toggle reads "on"). An async startup failure settles as an
+// onExit({exitCode:-1}) carrying the message on _exitError — surfaced on
+// stderr here, exit code non-zero.
+//
+// `script` is the FULLY-ASSEMBLED host-side command (the attachSession
+// contract): callers compose it through buildAttachRemoteScript ∘
+// buildAttachInteractiveCommand so it is byte-for-byte the default path's.
+//
+// `deps.stdin` / `deps.stdout` / `deps.stderr` / `deps.companionAttachSession`
+// are optional test seams (production callers omit them) so the terminal
+// bridge is drivable without a real TTY.
+export function attachInteractiveCompanion(host, script, cfg = {}, deps = {}) {
+  return new Promise((resolve) => {
+    const stdin = deps.stdin ?? process.stdin;
+    const stdout = deps.stdout ?? process.stdout;
+    const stderr = deps.stderr ?? process.stderr;
+    const cols = stdout.columns ?? 100;
+    const rows = stdout.rows ?? 30;
+
+    let session;
+    try {
+      session = (deps.companionAttachSession ?? companionAttachSession)(host, { script, cols, rows }, cfg, {});
+    } catch (e) {
+      // Sync-visible companion failure (stale binary, host without a PTY, LOCAL
+      // — attachPreflight's verdicts): actionable stderr + non-zero exit.
+      stderr.write(`warden: companion attach on ${host} failed: ${e && e.message ? e.message : e}\n`);
+      resolve(1);
+      return;
+    }
+
+    let settled = false;
+    const wasRaw = stdin.isTTY ? stdin.isRaw : false;
+    let onStdin = null;
+    const onWinch = () => {
+      // Best-effort, like node-pty's resize (attachStream's sibling semantics).
+      try { session.resize(stdout.columns || cols, stdout.rows || rows); } catch { /* noop */ }
+    };
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      // Restore the terminal exactly as it was found, in reverse order.
+      if (onStdin) stdin.removeListener('data', onStdin);
+      if (stdin.isTTY) { try { stdin.setRawMode(wasRaw); } catch { /* noop */ } }
+      try { stdin.pause(); } catch { /* noop */ }
+      process.removeListener('SIGWINCH', onWinch);
+      resolve(typeof code === 'number' ? code : -1);
+    };
+
+    session.onData((d) => stdout.write(d));
+    session.onExit((x) => {
+      if (x && x.exitCode === -1 && session._exitError) {
+        // Async startup failure (bootstrap failed, binary too old): the
+        // actionable message the handle carried on _exitError, on stderr.
+        stderr.write(`warden: companion attach on ${host} failed: ${session._exitError && session._exitError.message ? session._exitError.message : session._exitError}\n`);
+      } else if (x && x.exitCode === -1) {
+        // Exit -1 with no stored error is the channel-death settlement
+        // (CompanionAttachSession wires channel.onDead → _settleExit(-1)). The
+        // pane did not end of its own accord — say so, and name the recovery,
+        // rather than leaving the user with a bare non-zero exit.
+        stderr.write(`warden: companion attach on ${host} ended abnormally (the channel may have died). Retry, or set WARDEN_COMPANION_TRANSPORT=0 to attach over the default SSH path.\n`);
+      }
+      finish(x && typeof x.exitCode === 'number' ? x.exitCode : -1);
+    });
+    if (stdin.isTTY) { try { stdin.setRawMode(true); } catch { /* noop */ } }
+    onStdin = (d) => session.write(d);
+    stdin.on('data', onStdin);
+    try { stdin.resume(); } catch { /* noop */ }
+    onWinch(); // size the host PTY to the terminal we found
+    process.on('SIGWINCH', onWinch);
+  });
+}
+
 // CLI interactive attach (stdio inherit). Returns exit code.
-export function attachInteractive(chat, cfg) {
-  return attachInteractiveTmux(chat, attachArgs(chat, cfg));
+//
+// Companion routing (WARDEN-1364, roadmap WARDEN-270): today `warden attach
+// <remote-id>` runs attachInteractiveTmux, whose remote branch ends in
+// `attach()` — a FRESH `SSH_BIN` child per attach (`stdio:'inherit'`). For a
+// REMOTE host under WARDEN_COMPANION_TRANSPORT=1 the interactive session
+// instead rides the attachSession PTY family
+// (attachStart/attachInput/attachResize/attachKill + attachData/attachExit):
+// the PTY is allocated on the HOST and streamed over the persistent channel —
+// zero ssh spawns per attach. This is the CLI mirror of attachStream's
+// WARDEN-1295 gate; the terminal bridge is attachInteractiveCompanion.
+//
+// PARITY: the delivered host-side command is
+// buildAttachRemoteScript(buildAttachInteractiveCommand(chat, args)) — the SAME
+// two builders as attachStream — so the composed `tmux attach …; <shell>` string
+// is byte-for-byte what attachInteractiveTmux composes today (docker-exec -it
+// prefix, WARDEN-140 quoting, WARDEN-81 detach-to-shell tail), delivered under
+// the same LANG/LC_ALL export + `bash -lc` wrapper the web pane uses. One
+// builder per layer, both paths.
+//
+// LOCAL and toggle-off take attachInteractiveTmux byte-for-byte unchanged.
+// Companion-or-fail: a stale binary / dead channel surfaces the actionable
+// error on stderr and resolves a NON-ZERO exit code — never a silent raw-SSH
+// fallback. The promise ALWAYS resolves (WARDEN-464) — never rejects — so
+// cmdAttach's `process.exit(code)` sees a number either way.
+//
+// `deps` is the optional test seam its nine gated siblings carry
+// (isCompanionTransportEnabled / attachInteractiveCompanion /
+// attachInteractiveTmux); production callers omit it.
+export function attachInteractive(chat, cfg, deps = {}) {
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (chat.host !== '(local)' && isEnabled()) {
+    return (deps.attachInteractiveCompanion ?? attachInteractiveCompanion)(
+      chat.host,
+      buildAttachRemoteScript(buildAttachInteractiveCommand(chat, attachArgs(chat, cfg))),
+      cfg,
+      deps,
+    );
+  }
+  return (deps.attachInteractiveTmux ?? attachInteractiveTmux)(chat, attachArgs(chat, cfg));
 }
