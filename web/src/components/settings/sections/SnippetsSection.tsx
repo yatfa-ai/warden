@@ -25,6 +25,7 @@ import {
   validateSnippetName,
 } from '@/lib/storage';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { nonCollidingCopyName } from '@/lib/copyName';
 import { SnippetRow } from '../rows/SnippetRow';
 import { SettingsSection } from '../SettingsSection';
 import { useSnippets, useSetSnippets } from '@/lib/uiStore';
@@ -113,6 +114,30 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     setSnippets(snippets.filter((s) => s.name !== name));
   };
 
+  // Duplicate a snippet via the right-click menu (WARDEN-1359), mirroring
+  // duplicatePattern (PatternsSection, WARDEN-898) against the snippet
+  // contracts. The cap guard carries addSnippet's exact toast wording: at the
+  // SNIPPET_MAX_COUNT bound a 51st entry is exactly the one parseSnippets
+  // discards on the next reload (WARDEN-1247), so duplicating into it would
+  // be silent data loss. The copy's name comes from the shared
+  // nonCollidingCopyName loop (lib/copyName) — "Name (copy)" / "Name (copy 2)"
+  // …, truncated to the SNIPPET_NAME_MAX cap — validated through the same
+  // contract add/rename use, so the persisted copy always survives reload.
+  const duplicateSnippet = (name: string) => {
+    const src = snippets.find((s) => s.name === name);
+    if (!src) return;
+    if (snippets.length >= SNIPPET_MAX_COUNT) {
+      toast.error(`You can have at most ${SNIPPET_MAX_COUNT} instruction snippets.`);
+      return;
+    }
+    const copyName = nonCollidingCopyName(
+      src.name,
+      (candidate) => validateSnippetName(candidate, snippets) === 'duplicate',
+      SNIPPET_NAME_MAX,
+    );
+    setSnippets([...snippets, { name: copyName, text: src.text }]);
+  };
+
   return (
     <>
     <SettingsSection title="Instruction snippets" className={hidden ? 'hidden' : undefined}>
@@ -132,6 +157,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
                 snippet={s}
                 onRename={renameSnippet}
                 onTextChange={updateSnippetText}
+                onDuplicate={duplicateSnippet}
                 onDelete={(name) => setPendingDelete(name)}
               />
             ))}

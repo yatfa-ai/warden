@@ -6,12 +6,24 @@
  *  the body (instructions are multi-line free text up to SNIPPET_TEXT_MAX chars,
  *  not a single spawn command).
  *
+ *  WARDEN-1359: the whole row is wrapped in a themed right-click ContextMenu —
+ *  Copy name · Copy instruction text · Duplicate · Delete — the menu PatternRow
+ *  has shipped since WARDEN-898.
+ *
  *  Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged. */
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Trash2 } from 'lucide-react';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { type Snippet, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX } from '@/lib/storage';
 import { decideDraftNameCommit, decideDraftValueCommit } from './draftCommit';
 
@@ -19,11 +31,13 @@ export function SnippetRow({
   snippet,
   onRename,
   onTextChange,
+  onDuplicate,
   onDelete,
 }: {
   snippet: Snippet;
   onRename: (oldName: string, newName: string) => boolean;
   onTextChange: (name: string, text: string) => void;
+  onDuplicate: (name: string) => void;
   onDelete: (name: string) => void;
 }) {
   const [nameDraft, setNameDraft] = useState(snippet.name);
@@ -59,45 +73,66 @@ export function SnippetRow({
     }
   };
 
+  // Themed right-click menu (WARDEN-1359): Copy name · Copy instruction text ·
+  // Duplicate · Delete — the exact shape PatternRow has shipped since WARDEN-898.
+  // Copy goes through the shared copyWithToast helper (lib/clipboardToast) with
+  // the RAW stored values, so the instruction body — which right-click used to
+  // leave in total silence (this app registers no context-menu handler, so
+  // Electron pops no default menu) — is finally copyable. Right-click moves
+  // focus to the menu the same way clicking elsewhere does, so an in-flight
+  // name/text edit still commits on blur (commitName/commitText above).
+  // Delete reuses the same onDelete prop as the trash button, so the menu
+  // cannot bypass the section's WARDEN-942 ConfirmDialog.
   return (
-    <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
-      <div className="flex items-center gap-2">
-        <Input
-          value={nameDraft}
-          onChange={(e) => setNameDraft(e.target.value)}
-          onBlur={commitName}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur();
-            if (e.key === 'Escape') setNameDraft(snippet.name);
-          }}
-          className="h-8 flex-1"
-          placeholder="name"
-          aria-label="Snippet name"
-          maxLength={SNIPPET_NAME_MAX}
-        />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => onDelete(snippet.name)}
-          aria-label={`Delete ${snippet.name} snippet`}
-        >
-          <Trash2 />
-        </Button>
-      </div>
-      <Textarea
-        value={textDraft}
-        onChange={(e) => setTextDraft(e.target.value)}
-        onBlur={commitText}
-        onKeyDown={(e) => {
-          // Enter inserts a newline in a Textarea; ⌘/Ctrl+Enter commits.
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.blur(); }
-          if (e.key === 'Escape') setTextDraft(snippet.text);
-        }}
-        className="min-h-[60px] text-sm"
-        placeholder="the instruction to send"
-        aria-label={`${snippet.name} instruction text`}
-        maxLength={SNIPPET_TEXT_MAX}
-      />
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+          <div className="flex items-center gap-2">
+            <Input
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={commitName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') setNameDraft(snippet.name);
+              }}
+              className="h-8 flex-1"
+              placeholder="name"
+              aria-label="Snippet name"
+              maxLength={SNIPPET_NAME_MAX}
+            />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => onDelete(snippet.name)}
+              aria-label={`Delete ${snippet.name} snippet`}
+            >
+              <Trash2 />
+            </Button>
+          </div>
+          <Textarea
+            value={textDraft}
+            onChange={(e) => setTextDraft(e.target.value)}
+            onBlur={commitText}
+            onKeyDown={(e) => {
+              // Enter inserts a newline in a Textarea; ⌘/Ctrl+Enter commits.
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.blur(); }
+              if (e.key === 'Escape') setTextDraft(snippet.text);
+            }}
+            className="min-h-[60px] text-sm"
+            placeholder="the instruction to send"
+            aria-label={`${snippet.name} instruction text`}
+            maxLength={SNIPPET_TEXT_MAX}
+          />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => copyWithToast(snippet.name)}>Copy name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(snippet.text)}>Copy instruction text</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onDuplicate(snippet.name)}>Duplicate</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem variant="destructive" onSelect={() => onDelete(snippet.name)}>Delete</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

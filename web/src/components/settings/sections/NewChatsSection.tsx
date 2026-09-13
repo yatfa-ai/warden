@@ -22,6 +22,7 @@ import {
   validatePresetName,
 } from '@/lib/storage';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { nonCollidingCopyName } from '@/lib/copyName';
 import { PresetRow } from '../rows/PresetRow';
 import { SettingsSection } from '../SettingsSection';
 import { ClientPrefResetToDefaultButton } from '../rows/ResetToDefaultButton';
@@ -125,6 +126,27 @@ export function NewChatsSection(props: NewChatsSectionProps) {
         Object.entries(defaultNewChatPresetByHost).filter(([, p]) => p !== name),
       ));
     }
+  };
+
+  // Duplicate a preset via the right-click menu (WARDEN-1359), mirroring
+  // duplicatePattern (PatternsSection, WARDEN-898) against the preset
+  // contracts. Presets carry no count cap (unlike snippets/patterns — the only
+  // bound is the name contract), so there is no cap guard here; the copy's
+  // name comes from the shared nonCollidingCopyName loop (lib/copyName) —
+  // "Name (copy)" / "Name (copy 2)" …, truncated to the PRESET_NAME_MAX cap —
+  // validated through the same contract add/rename use. A suffixed copy can
+  // never collide with a reserved built-in ("claude (copy)" ≠ "claude"), and
+  // the copy is NOT made the default: duplicating the current default must
+  // leave the default pointing where it did.
+  const duplicatePreset = (name: string) => {
+    const src = customPresets.find((p) => p.name === name);
+    if (!src) return;
+    const copyName = nonCollidingCopyName(
+      src.name,
+      (candidate) => validatePresetName(candidate, customPresets) === 'duplicate',
+      PRESET_NAME_MAX,
+    );
+    setCustomPresets([...customPresets, { name: copyName, cmd: src.cmd }]);
   };
 
   // Write a per-host cwd override (WARDEN-336). An empty/whitespace value means
@@ -254,6 +276,7 @@ export function NewChatsSection(props: NewChatsSectionProps) {
                 isDefault={defaultNewChatPreset === p.name}
                 onRename={renamePreset}
                 onCmdChange={updatePresetCmd}
+                onDuplicate={duplicatePreset}
                 onDelete={(name) => setPendingDelete(name)}
               />
             ))}
