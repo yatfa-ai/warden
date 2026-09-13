@@ -109,6 +109,37 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     setSnippets(snippets.map((s) => (s.name === name ? { ...s, text: trimmed } : s)));
   };
 
+  // Duplicate a snippet via the right-click menu (WARDEN-1359). Mirrors the proven
+  // duplicatePattern path in PatternsSection (WARDEN-898); only the name is
+  // synthesized. The copy gets a non-colliding "Name (copy)" / "Name (copy 2)" …
+  // suffix, truncated so a source name already at the SNIPPET_NAME_MAX cap
+  // doesn't overflow once suffixed. validateSnippetName only loops on 'duplicate'
+  // (a suffixed copy of a valid name can never be empty, and truncation caps the
+  // length), so the loop always terminates on a free slot. The cap guard comes
+  // FIRST and reuses addSnippet's exact refusal — the loader keeps the FIRST
+  // fifty valid entries (WARDEN-1247), so a duplicated 51st would be silently
+  // dropped on the next reload.
+  const duplicateSnippet = (name: string) => {
+    const src = snippets.find((s) => s.name === name);
+    if (!src) return;
+    if (snippets.length >= SNIPPET_MAX_COUNT) {
+      toast.error(`You can have at most ${SNIPPET_MAX_COUNT} instruction snippets.`);
+      return;
+    }
+    const makeName = (n: number) => {
+      const suffix = n === 1 ? ' (copy)' : ` (copy ${n})`;
+      const base = src.name.slice(0, SNIPPET_NAME_MAX - suffix.length);
+      return `${base}${suffix}`;
+    };
+    let n = 1;
+    let copyName = makeName(n);
+    while (validateSnippetName(copyName, snippets) === 'duplicate') {
+      n++;
+      copyName = makeName(n);
+    }
+    setSnippets([...snippets, { name: copyName, text: src.text }]);
+  };
+
   const deleteSnippet = (name: string) => {
     setSnippets(snippets.filter((s) => s.name !== name));
   };
@@ -132,6 +163,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
                 snippet={s}
                 onRename={renameSnippet}
                 onTextChange={updateSnippetText}
+                onDuplicate={duplicateSnippet}
                 onDelete={(name) => setPendingDelete(name)}
               />
             ))}

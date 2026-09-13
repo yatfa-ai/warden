@@ -113,6 +113,32 @@ export function NewChatsSection(props: NewChatsSectionProps) {
     setCustomPresets(customPresets.map((p) => (p.name === name ? { ...p, cmd: trimmed } : p)));
   };
 
+  // Duplicate a preset via the right-click menu (WARDEN-1359). Mirrors the proven
+  // duplicatePattern path in PatternsSection (WARDEN-898); only the name is
+  // synthesized. The copy gets a non-colliding "Name (copy)" / "Name (copy 2)" …
+  // suffix, truncated so a source name already at the PRESET_NAME_MAX cap
+  // doesn't overflow once suffixed. validatePresetName only loops on 'duplicate'
+  // (a suffixed copy of a valid name can never be empty or reserved — the
+  // suffix keeps it off the claude/shell built-ins — and truncation caps the
+  // length), so the loop always terminates on a free slot. Unlike snippets there
+  // is no count cap: addPreset enforces none, so neither does the duplicate.
+  const duplicatePreset = (name: string) => {
+    const src = customPresets.find((p) => p.name === name);
+    if (!src) return;
+    const makeName = (n: number) => {
+      const suffix = n === 1 ? ' (copy)' : ` (copy ${n})`;
+      const base = src.name.slice(0, PRESET_NAME_MAX - suffix.length);
+      return `${base}${suffix}`;
+    };
+    let n = 1;
+    let copyName = makeName(n);
+    while (validatePresetName(copyName, customPresets) === 'duplicate') {
+      n++;
+      copyName = makeName(n);
+    }
+    setCustomPresets([...customPresets, { name: copyName, cmd: src.cmd }]);
+  };
+
   const deletePreset = (name: string) => {
     setCustomPresets(customPresets.filter((p) => p.name !== name));
     if (defaultNewChatPreset === name) setDefaultNewChatPreset('claude');
@@ -254,6 +280,7 @@ export function NewChatsSection(props: NewChatsSectionProps) {
                 isDefault={defaultNewChatPreset === p.name}
                 onRename={renamePreset}
                 onCmdChange={updatePresetCmd}
+                onDuplicate={duplicatePreset}
                 onDelete={(name) => setPendingDelete(name)}
               />
             ))}
