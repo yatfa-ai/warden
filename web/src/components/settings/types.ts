@@ -274,8 +274,11 @@ export interface DesktopAlertPrefs {
   // retired channel ONLY, and went with it.
   attentionDesktopAlerts: boolean;
   setAttentionDesktopAlerts: (v: boolean) => void;
-  attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
-  setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean }) => void;
+  // WARDEN-1360: only the states the passive readout can substantiate remain.
+  // erroring/waiting/blocked were substring guesses; their fields went with
+  // their rollup buckets (mirrors web/src/lib/storage.ts's UiState pref).
+  attentionStates: { stuck?: boolean; done?: boolean };
+  setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
 }
 
 /** Re-exported so sections that take a hostLabels pref share one type. */

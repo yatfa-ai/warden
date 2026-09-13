@@ -1,6 +1,11 @@
-// Pure helpers behind the inline quick-reply affordance on the attention surfaces
-// (WARDEN-770): the AttentionBadge popover's waiting/blocked rows, the return-banner
-// callout, and the WatchCatchup rows.
+// Pure helpers behind the inline quick-reply affordance (WARDEN-770). The passive
+// attention surfaces (AttentionBadge popover rows + the return-banner callout) that
+// used to render it lost their replyable states to WARDEN-1360 — the waiting/blocked
+// buckets were substring guesses — so the SURVIVING consumer is the per-chat WATCH
+// lane: WatchCatchup rows, gated on the miss's `reason` (a WatchReason, which is a
+// string subtype, so it flows through unchanged). Watch reasons are a
+// transition-detected need on a chat the human explicitly opted into, so the
+// waiting/blocked vocabulary stays live there.
 //
 // WARDEN-770 closes the "last mile" of the human-in-the-loop: every attention surface
 // already ROUTES the human to a needy agent (detection is exhaustively built), but
@@ -30,11 +35,8 @@ const REPLYABLE_STATES: ReadonlySet<string> = new Set(['waiting', 'blocked']);
 /**
  * Whether an attention item in `state` should show the inline quick-reply control.
  *
- * The gating decision for all three WARDEN-770 surfaces:
- *  - AttentionBadge popover rows — passed `replyable` explicitly from the waiting +
- *    blocked Sections (the section IS the state, so the call site knows).
- *  - Return-banner callout — called with `attentionTop.state` (a ranked AttentionItem
- *    can be any state; only waiting/blocked earn the reply affordance).
+ * The gating decision for the surviving WARDEN-770 surface (WARDEN-1360 removed the
+ * other two with the guess buckets they keyed on):
  *  - WatchCatchup rows — called with the miss's `reason` (a WatchReason, which is a
  *    string subtype, so it flows through unchanged).
  *

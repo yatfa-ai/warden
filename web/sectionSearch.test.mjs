@@ -328,10 +328,9 @@ const SHIPPED_LABELS = [
   ['notifications', 'Webhook URL'],
   ['notifications', 'Shared secret (optional)'],
   // Pane-state switches — authored as an inline data array in the section file.
-  ['notifications', 'Erroring'],
+  // WARDEN-1360: only the surviving states remain (erroring/waiting/blocked
+  // toggles went with their guess buckets).
   ['notifications', 'Stuck'],
-  ['notifications', 'Waiting on you'],
-  ['notifications', 'Blocked'],
   ['notifications', 'Finished'],
 ];
 
@@ -443,7 +442,7 @@ function stripComments(source) {
  *
  * Only the LEADING plain-text run of an element is taken: children are cut at
  * the first nested tag or `{expression}`. That keeps a label from being
- * concatenated with its sub-hint <span> (`Attention` + `stuck / erroring / …`,
+ * concatenated with its sub-hint <span> (`Attention` + `Stuck` + its hint,
  * which would produce a string that renders nowhere), and it drops genuinely
  * dynamic runtime values (`{defaultNewChatPreset} (deleted)`, `{host} (no
  * longer available)` — per-host text, not preferences).
@@ -470,7 +469,7 @@ function extractRowAndOptionText(source) {
   while ((m = headings.exec(source))) push(m[2]);
   const ariaLabels = /aria-label="([^"]+)"/g;
   while ((m = ariaLabels.exec(source))) push(m[1]);
-  // Inline data arrays: `{ k: 'erroring', label: 'Erroring', hint: '…' }` —
+  // Inline data arrays: `{ k: 'stuck', label: 'Stuck', hint: '…' }` —
   // the label renders (via `{label}` children the JSX pass cannot read), the
   // key/hint do not surface as row names.
   const inlineLabels = /\blabel:\s*(['"])((?:\\.|(?!\1).)*)\1/g;
@@ -545,13 +544,15 @@ function literalIds(source) {
 const DYNAMIC_ANCHOR_SOURCES = [
   {
     // NotificationsSection: `id={`attention-state-${k}`}` over the inline
-    // pane-state array (`{ k: 'erroring', label: 'Erroring', … }`).
+    // pane-state array (`{ k: 'stuck', label: 'Stuck', … }`).
     section: 'notifications',
     requires: /id=\{`attention-state-\$\{k\}`\}/,
     keysFrom: 'section',
     keyPattern: /\bk:\s*'([^']+)'/g,
     idFor: (k) => `attention-state-${k}`,
-    minKeys: 5,
+    // WARDEN-1360 dropped the section's array from five states to two (stuck /
+    // done) — the floor tracks the SURVIVING entries.
+    minKeys: 2,
   },
   {
     // TelemetrySection: `id={cat.configKey}` over the consent REGISTRY

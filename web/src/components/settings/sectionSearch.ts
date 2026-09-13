@@ -477,10 +477,11 @@ export const SETTINGS_SECTIONS = [
       // from each entry's key (`attention-state-<k>`). Transcribed verbatim so
       // the corpus carries the text the user actually reads. WARDEN-1274 left
       // these in place as pure DISPLAY filters on the passive badge/rundown.
-      { anchorId: 'attention-state-erroring', terms: ['Erroring'] },
+      // WARDEN-1360: the erroring/waiting/blocked toggles are gone with their
+      // guess buckets — an anchor that resolves to a control the user cannot
+      // find is worse than none (the same rule that removed the per-severity
+      // anchors below), so they get no entries here.
       { anchorId: 'attention-state-stuck', terms: ['Stuck'] },
-      { anchorId: 'attention-state-waiting', terms: ['Waiting on you'] },
-      { anchorId: 'attention-state-blocked', terms: ['Blocked'] },
       { anchorId: 'attention-state-done', terms: ['Finished'] },
       // WARDEN-1274: the four per-severity sub-toggles ('Critical agents' /
       // 'Warning agents' / 'Pending directives' / 'Recent errors') and the

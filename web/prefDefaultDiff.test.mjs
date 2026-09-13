@@ -123,13 +123,13 @@ test('object/array prefs compare STRUCTURALLY, not by reference', () => {
   // `!==` comparator would paint every one of these rows as modified forever.
   assert.equal(
     clientPrefDiffersFromDefault('attentionStates', {
-      stuck: true, erroring: true, waiting: true, blocked: true, done: true,
+      stuck: true, done: true,
     }),
     false,
   );
   assert.equal(
     clientPrefDiffersFromDefault('attentionStates', {
-      stuck: true, erroring: true, waiting: false, blocked: true, done: true,
+      stuck: true, done: false,
     }),
     true,
   );
