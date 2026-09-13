@@ -46,7 +46,6 @@ import {
 } from '@/lib/attentionRollup';
 import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
-import type { Snippet } from '@/lib/storage';
 import { cn } from '@/lib/utils';
 // WARDEN-770 — the inline reply affordance shared by every attention surface. Rendered
 // (conditionally, only for replyable rows) inside AgentRow below.
@@ -73,8 +72,6 @@ export interface AttentionListProps {
    *  human is already reading (the "trains the human to ignore it" product-killer). The
    *  sectioned rundown still lists it unchanged — no information loss. */
   focusedPaneKey?: string | null;
-  /** WARDEN-770 — saved instruction snippets for the inline reply control's one-click fills. */
-  snippets?: Snippet[];
   /** WARDEN-770 — surface the reply send outcome so App can toast it. */
   onReplyResult?: (ok: boolean, error?: string) => void;
 }
@@ -125,7 +122,6 @@ export function AttentionList({
   onOpenChat,
   onOpenActivity,
   focusedPaneKey,
-  snippets,
   onReplyResult,
   className,
   scrollClassName = 'max-h-72 overflow-y-auto',
@@ -258,7 +254,6 @@ export function AttentionList({
                     // input earn the inline reply affordance. waiting (parked at a
                     // "press enter"/"needs input" prompt) is the headline case.
                     replyable
-                    snippets={snippets}
                     onReplyResult={onReplyResult}
                   />
                 );
@@ -281,7 +276,6 @@ export function AttentionList({
                     // WARDEN-770: blocked (waiting on approval/dependency) is the
                     // second replyable state — the human can unblock inline.
                     replyable
-                    snippets={snippets}
                     onReplyResult={onReplyResult}
                   />
                 );
@@ -376,7 +370,6 @@ function AgentRow({
   durationStateLabel,
   durationTense = 'ongoing',
   replyable = false,
-  snippets,
   onReplyResult,
 }: {
   agent: AttentionAgent;
@@ -400,8 +393,6 @@ function AgentRow({
    * every other section omits it so critical/stuck/erroring/warning/custom/done rows
    * are untouched (preserves the existing deep-link + severity ordering). */
   replyable?: boolean;
-  /** WARDEN-770 — the snippet library for the reply control's one-click fills. */
-  snippets?: Snippet[];
   /** WARDEN-770 — surface the reply send outcome so App can toast it. */
   onReplyResult?: (ok: boolean, error?: string) => void;
 }) {
@@ -544,7 +535,6 @@ function AgentRow({
         <QuickReply
           targetId={rowKey}
           targetLabel={label}
-          snippets={snippets ?? []}
           onReplyResult={onReplyResult}
           onDismiss={() => setReplyOpen(false)}
         />
