@@ -100,6 +100,8 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     onExitBehavior: s.onExitBehavior,
     // WARDEN-1342 (slice 4): same compile-locked snapshot field.
     timestampFormat: s.timestampFormat,
+    // WARDEN-1204 slice 6: same compile-locked snapshot field.
+    hostLabels: s.hostLabels,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -730,6 +732,147 @@ test('the migrated facts are independent — writing timestampFormat does not di
   assert.equal(store.getState().fileViewerViewMode, 'rendered');
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
   assert.equal(store.getState().terminalFontSize, DEFAULT_UI.terminalFontSize);
+});
+
+// ─── hostLabels (WARDEN-490, roadmap WARDEN-1204 slice 6) ────────────────────
+//
+// Per-host display labels — the LAST shared fact with two sharing channels (a
+// purpose-built React context with ~10 readers, plus a props channel to the
+// Settings writer). This slice is its ONE home: the context module is deleted
+// and web/src has zero React contexts. The store's seeded {} replaces the
+// context's `undefined` default with an equivalent — hostLabelFor/hostTagOf
+// treat both as "no labels" — so nothing renders differently. Same invariants
+// as the slices before it: the persistence boundary is unbroken, the factory
+// really isolates.
+
+console.log('\ncreateUiStore — hostLabels seeds from storage.ts, never from a re-declared default');
+test('a fresh store seeds {} on a clean install (the DEFAULT_UI value, not a local literal)', () => {
+  reset();
+  assert.deepEqual(createUiStore().getState().hostLabels, {});
+  assert.deepEqual(createUiStore().getState().hostLabels, DEFAULT_UI.hostLabels);
+});
+test('a fresh store seeds from the PERSISTED payload when one exists', () => {
+  reset();
+  const mine = { '(local)': 'workstation', 'ci-runner': 'CI runner' };
+  saveUi({ ...loadUi(), hostLabels: mine });
+  assert.deepEqual(createUiStore().getState().hostLabels, mine);
+});
+test("the seed runs through loadUi's sanitizer (blank/whitespace labels are dropped)", () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    hostLabels: { '(local)': '  Desk  ', 'ci-runner': '   ', ghost: 42 },
+  }));
+  // loadUi drops empty/whitespace values (an empty label means "no label", so
+  // it must never persist as a blank) and non-strings — the store inherits
+  // that rather than re-declaring it.
+  assert.deepEqual(createUiStore().getState().hostLabels, { '(local)': 'Desk' });
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage)', () => {
+  reset();
+  saveUi({ ...loadUi(), hostLabels: { 'ci-runner': 'CI runner' } });
+  const seeded = { '(local)': 'from the factory' };
+  assert.deepEqual(createUiStore({ hostLabels: seeded }).getState().hostLabels, seeded);
+});
+
+console.log("\nsetHostLabels — the store is the live copy, and it does NOT write localStorage");
+test('setHostLabels replaces the map', () => {
+  reset();
+  const store = createUiStore({ hostLabels: { '(local)': 'old' } });
+  const next = { '(local)': 'workstation', 'ci-runner': 'CI runner' };
+  store.getState().setHostLabels(next);
+  assert.deepEqual(store.getState().hostLabels, next);
+  // Deleting a label = writing a map without the key (HostsSection's
+  // setHostLabel drops the key for an empty value).
+  store.getState().setHostLabels({ 'ci-runner': 'CI runner' });
+  assert.deepEqual(store.getState().hostLabels, { 'ci-runner': 'CI runner' });
+});
+test('a subscriber is notified with the new map (the SHARING channel every host-tag surface reads)', () => {
+  reset();
+  const store = createUiStore({ hostLabels: {} });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push(s.hostLabels));
+  const next = { 'ci-runner': 'CI runner' };
+  store.getState().setHostLabels(next);
+  unsubscribe();
+  assert.deepEqual(seen, [next]);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setHostLabels({});
+  assert.equal(seen.length, 1);
+});
+test('setHostLabels alone writes NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ hostLabels: {} });
+  store.getState().setHostLabels({ '(local)': 'Ghost label' });
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the action identity is stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore({ hostLabels: {} });
+  const before = store.getState().setHostLabels;
+  before({ '(local)': 'x' });
+  assert.equal(store.getState().setHostLabels, before);
+});
+
+console.log('\nround trip: Hosts edit → store → App snapshot → the saveUi effect → loadUi');
+test('a label set in Settings → Hosts survives a restart', () => {
+  reset();
+  const store = createUiStore();
+  assert.deepEqual(store.getState().hostLabels, {});
+  store.getState().setHostLabels({ '(local)': 'workstation', 'ci-runner': 'CI runner' }); // HostsSection
+  flushSnapshotToDisk(store);                                                              // App snapshot → saveUi effect
+  assert.deepEqual(loadUi().hostLabels, { '(local)': 'workstation', 'ci-runner': 'CI runner' }); // next launch
+  // And the next launch's store seeds from exactly that.
+  assert.deepEqual(createUiStore().getState().hostLabels, { '(local)': 'workstation', 'ci-runner': 'CI runner' });
+});
+test('clearing every label sticks — the empty map is the no-label identity, never resurrected', () => {
+  reset();
+  const store = createUiStore({ hostLabels: { '(local)': 'workstation' } });
+  // HostsSection's setHostLabel deletes the key when the value is emptied, so
+  // the last cleared label leaves {}.
+  store.getState().setHostLabels({});
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().hostLabels, {});
+  assert.deepEqual(createUiStore().getState().hostLabels, {});
+});
+test('the reset path restores {} through the store-backed setter', () => {
+  reset();
+  const store = createUiStore({ hostLabels: { '(local)': 'workstation' } });
+  // App's resetSetters entry is `hostLabels: setHostLabels` — the SAME setter,
+  // now backed by the store, called with resetUiPrefDefaults()' {}.
+  store.getState().setHostLabels(DEFAULT_UI.hostLabels);
+  flushSnapshotToDisk(store);
+  assert.deepEqual(store.getState().hostLabels, {});
+  assert.deepEqual(loadUi().hostLabels, {});
+});
+
+console.log('\nfactory isolation + fact independence — hostLabels');
+test('two stores do not share the label map', () => {
+  reset();
+  const a = createUiStore({ hostLabels: {} });
+  const b = createUiStore({ hostLabels: {} });
+  a.getState().setHostLabels({ '(local)': 'only A' });
+  assert.deepEqual(a.getState().hostLabels, { '(local)': 'only A' });
+  assert.deepEqual(b.getState().hostLabels, {});
+});
+test("mutating a factory store's hostLabels leaves the APP-LEVEL singleton untouched", () => {
+  reset();
+  const before = uiStore.getState().hostLabels;
+  createUiStore({ hostLabels: {} }).getState().setHostLabels({ '(local)': 'Test-only' });
+  assert.deepEqual(uiStore.getState().hostLabels, before);
+});
+test('the migrated facts are independent — writing hostLabels does not disturb the others', () => {
+  reset();
+  const store = createUiStore({ hostLabels: {} });
+  store.getState().setHostLabels({ '(local)': 'workstation' });
+  assert.equal(store.getState().fileViewerViewMode, 'rendered');
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().timestampFormat, 'relative');
+  assert.equal(store.getState().terminalFontSize, DEFAULT_UI.terminalFontSize);
+  store.getState().setTimestampFormat('absolute');
+  assert.deepEqual(store.getState().hostLabels, { '(local)': 'workstation' });
 });
 
 console.log('\nWARDEN-1362 — the supply side QuickReply reads now that the last snippets prop is retired');

@@ -67,9 +67,9 @@ export function displayName(c?: NameableChat): string {
 // SSH/telemetry path). Keys are the raw host strings ('(local)' for this
 // machine, the SSH host name for remote); values are the human's label. An
 // absent or empty/whitespace entry for a host = no label → today's behavior.
-// Threaded to each display surface via HostLabelsContext (useHostLabels in
-// lib/hostLabels.ts) so the label reaches every surface without prop-drilling
-// through intermediate components.
+// Rides the shared uiStore (useHostLabels in lib/uiStore.ts — roadmap
+// WARDEN-1204 slice 6), so the label reaches every display surface without
+// prop-drilling through intermediate components.
 export type HostLabels = Record<string, string>;
 
 // Resolve a host's optional friendly label (WARDEN-490). Returns the trimmed

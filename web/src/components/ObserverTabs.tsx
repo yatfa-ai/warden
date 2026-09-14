@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';

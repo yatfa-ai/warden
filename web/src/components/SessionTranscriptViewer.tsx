@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
 import { fetchBounded } from '@/lib/api';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import {
   Dialog,
   DialogContent,

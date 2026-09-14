@@ -17,7 +17,7 @@ import type { Chat } from '@/lib/types';
 // Shared pure display helpers live in @/lib/chatDisplay so the sidebar and this
 // page render identical labels (no drift in chat names between the two surfaces).
 import { THIS_MACHINE, basename, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import { formatTokens } from '@/lib/formatTokens';

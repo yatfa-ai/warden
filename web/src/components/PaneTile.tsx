@@ -9,7 +9,7 @@ import { findPathCandidates } from '@/lib/path-links';
 import { findUrlCandidates } from '@/lib/url-links';
 import { openExternalUrl } from '@/lib/electron';
 import { hostTagOf } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
 import { readClipboardImage, deliverImagePaste, shouldRouteNativePasteToTerminal } from '@/lib/pasteImage';
 import { shouldRouteNativeCutToTerminal, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
