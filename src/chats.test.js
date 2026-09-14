@@ -1290,6 +1290,216 @@ describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
   });
 });
 
+// -------------------- discoverManual companion routing (WARDEN-1371) -------
+// discoverManual was the LAST ungated remote-discovery surface in chats.js: its
+// two catalog legs — the batched has-session alive-check and the per-session
+// window_activity read — kept spawning raw ssh (pooled + one un-pooled ssh per
+// active session) on the 60s lifecycle clock, even with every sibling surface
+// (discover proper, capturePanes, the tmux ops, the nine WARDEN-1283 script
+// legs, the git domain) already riding the companion channel. These tests pin
+// the routing: the WARDEN-1284 per-leg disciplines (PARITY / DELEGATION /
+// COMPANION-OR-FAIL / FLAG-OFF byte-parity) over discover()'s guard-suite
+// shape, driven through the same `deps` seam — no real ssh. The expected script
+// literals are pinned explicitly so a quoting drift in EITHER transport fails
+// with a readable diff.
+describe('discoverManual() routes its catalog legs onto the companion channel (WARDEN-1371)', () => {
+  const ENTRIES = [
+    { host: 'prod', session: 'sess-a', name: 'A', cwd: '/w', cmd: 'claude' },
+    { host: 'prod', session: 'sess-b', name: 'B', cwd: '/w', cmd: 'claude' },
+  ];
+  const WINDOW_ACTIVITY = '1789088272\n';
+  const WINDOW_ACTIVITY_MS = 1789088272000;
+  // has-session probe: both sessions alive.
+  const alive = { ok: true, stdout: '1 sess-a\n1 sess-b\n' };
+  // The exact scripts the two legs deliver today (both transports): the batched
+  // alive-check covers every catalog session in ONE round-trip; the activity
+  // read is one display-message per ACTIVE session.
+  const ALIVE_SCRIPT = `for s in sess-a sess-b; do if tmux has-session -t "$s" >/dev/null 2>&1; then printf '1 %s\\n' "$s"; else printf '0 %s\\n' "$s"; fi; done`;
+  const activityCmdFor = (session) => `tmux display-message -p -t ${session} '#{window_activity}'`;
+  // The companion-or-fail envelope execInContext produces on a dead channel
+  // (message rides stderr — the raw run() shape — never an `error` field).
+  const CHANNEL_DEAD = {
+    host: 'prod', ok: false, code: -1, stdout: '',
+    stderr: 'companion transport error for prod: channel died. Set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.',
+  };
+
+  it('FLAG ON: BOTH legs deliver through deliverRemoteScript with the exact scripts, opts, and caller transports as `run:` — the raw transports are NEVER touched', async () => {
+    let poolCalls = 0, runCalls = 0;
+    const pooled = async () => { poolCalls++; return alive; };
+    const plain = async () => { runCalls++; return { ok: true, stdout: WINDOW_ACTIVITY }; };
+    const stamps = [];
+    const delivered = [];
+    const res = await discoverManual('prod', ENTRIES, { connectTimeout: 3 }, {}, {
+      isCompanionTransportEnabled: () => true,
+      deliverRemoteScript: async (host, script, opts, cfg) => {
+        delivered.push({ host, script, opts, cfg });
+        return script === ALIVE_SCRIPT ? alive : { ok: true, stdout: WINDOW_ACTIVITY };
+      },
+      runWithPool: pooled,
+      run: plain,
+      stampCatalogActivity: async (host, session, ts) => stamps.push([host, session, ts]),
+    });
+
+    // One batched alive-check + one activity read PER ACTIVE session. TRIPWIRE:
+    // neither raw transport may be consulted under the flag.
+    assert.strictEqual(delivered.length, 3, 'one has-session round-trip + one window_activity per active session');
+    assert.deepStrictEqual(delivered[0], {
+      host: 'prod', script: ALIVE_SCRIPT,
+      opts: { timeout: 18000, run: pooled }, cfg: { connectTimeout: 3 },
+    }, 'the alive-check rides the channel: pooled transport as its `run:` override, connectTimeout-derived deadline kept');
+    assert.deepStrictEqual(
+      [delivered[1], delivered[2]].map((d) => [d.host, d.script, d.opts.timeout, d.opts.run === plain]),
+      [['prod', activityCmdFor('sess-a'), 1000, true], ['prod', activityCmdFor('sess-b'), 1000, true]],
+      'each activity read rides the channel: plain-run transport as its `run:` override, 1s deadline kept');
+    assert.strictEqual(poolCalls, 0, 'flag ON must not touch runWithPool');
+    assert.strictEqual(runCalls, 0, 'flag ON must not touch run');
+    // Discovery semantics are unchanged under the channel: same parse, same ms
+    // conversion, same stamp.
+    assert.strictEqual(stamps.length, 2);
+    assert.deepStrictEqual(stamps.map((s) => s[2]), [WINDOW_ACTIVITY_MS, WINDOW_ACTIVITY_MS]);
+    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]),
+      [[true, WINDOW_ACTIVITY_MS], [true, WINDOW_ACTIVITY_MS]]);
+  });
+
+  it('FLAG OFF: byte-for-byte today — the raw transports deliver the same scripts with the exact pre-1371 opts, the companion never consulted', async () => {
+    let companionCalls = 0;
+    const poolCalls = [];
+    const runCalls = [];
+    const res = await discoverManual('prod', ENTRIES, { connectTimeout: 3 }, {}, {
+      isCompanionTransportEnabled: () => false,
+      deliverRemoteScript: async () => { companionCalls++; return alive; },
+      runWithPool: async (...args) => { poolCalls.push(args); return alive; },
+      run: async (...args) => { runCalls.push(args); return { ok: true, stdout: WINDOW_ACTIVITY }; },
+      stampCatalogActivity: async () => {},
+    });
+    assert.strictEqual(companionCalls, 0, 'flag OFF -> the channel is never touched');
+    assert.deepStrictEqual(poolCalls, [['prod', ALIVE_SCRIPT, { timeout: 18000 }, { connectTimeout: 3 }]],
+      'the alive-check keeps its exact pooled call: host, script, opts, cfg');
+    assert.deepStrictEqual(runCalls, [
+      ['prod', activityCmdFor('sess-a'), { timeout: 1000 }],
+      ['prod', activityCmdFor('sess-b'), { timeout: 1000 }],
+    ], 'the pre-1371 un-pooled plain-run activity fan, unchanged — note NO cfg argument');
+    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]),
+      [[true, WINDOW_ACTIVITY_MS], [true, WINDOW_ACTIVITY_MS]],
+      'identical results under either transport');
+  });
+
+  it('FLAG ON: the pooled transport rides as the alive-check’s `run:` OPTION, never in deps.run (the bootstrap seam)', async () => {
+    const pooled = async () => alive;
+    const plain = async () => ({ ok: true, stdout: WINDOW_ACTIVITY });
+    let seenDeps = null;
+    const seenOpts = [];
+    await discoverManual('prod', ENTRIES, {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      deliverRemoteScript: async (_h, script, opts, _c, deps) => {
+        seenOpts.push({ script, run: opts.run });
+        seenDeps = deps;
+        return script === ALIVE_SCRIPT ? alive : { ok: true, stdout: WINDOW_ACTIVITY };
+      },
+      runWithPool: pooled,
+      run: plain,
+      stampCatalogActivity: async () => {},
+    });
+    assert.strictEqual(seenOpts[0].run, pooled,
+      'the alive-check declares runWithPool as its default-path OPTION');
+    assert.notStrictEqual(seenDeps.run, pooled,
+      'the pooled transport must NOT ride in deps.run — that slot is the companion bootstrap’s');
+  });
+
+  it('COMPANION-OR-FAIL (alive-check): a dead channel reads every session inactive — zero raw transports, no stamps, no activity fan', async () => {
+    let poolCalls = 0, runCalls = 0, stamps = 0, activityDeliveries = 0;
+    const res = await discoverManual('prod', ENTRIES, {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      deliverRemoteScript: async (_h, script) => {
+        if (script === ALIVE_SCRIPT) return CHANNEL_DEAD;
+        activityDeliveries++;
+        return { ok: true, stdout: WINDOW_ACTIVITY };
+      },
+      runWithPool: async () => { poolCalls++; return alive; },
+      run: async () => { runCalls++; return { ok: true, stdout: WINDOW_ACTIVITY }; },
+      stampCatalogActivity: async () => { stamps++; },
+    });
+    assert.strictEqual(poolCalls, 0, 'no silent raw-SSH fallback inside the experimental path');
+    assert.strictEqual(runCalls, 0);
+    assert.strictEqual(activityDeliveries, 0, 'no session reads active -> the activity fan never fires');
+    assert.strictEqual(stamps, 0);
+    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]), [[false, null], [false, null]],
+      'ok:false -> the has-session loop parses nothing -> inactive, persisted lastActivity hydrated');
+  });
+
+  it('COMPANION-OR-FAIL (activity leg): a dead channel surfaces through the existing .then guard — no stamp, no throw, zero raw transports', async () => {
+    let poolCalls = 0, runCalls = 0, stamps = 0;
+    const res = await discoverManual('prod', ENTRIES, {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      deliverRemoteScript: async (_h, script) => (script === ALIVE_SCRIPT ? alive : CHANNEL_DEAD),
+      runWithPool: async () => { poolCalls++; return alive; },
+      run: async () => { runCalls++; return { ok: true, stdout: WINDOW_ACTIVITY }; },
+      stampCatalogActivity: async () => { stamps++; },
+    });
+    assert.strictEqual(poolCalls, 0);
+    assert.strictEqual(runCalls, 0);
+    assert.strictEqual(stamps, 0, 'an ok:false envelope stamps nothing');
+    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]), [[true, null], [true, null]],
+      'sessions stay active, activity simply unknown — the capturePanesViaCompanion "panes map simply empty" precedent');
+  });
+
+  it('a THROWING activity delivery cannot reject the whole fan (the .catch belt holds under the channel)', async () => {
+    const res = await discoverManual('prod', ENTRIES, {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      deliverRemoteScript: async (_h, script) => {
+        if (script === ALIVE_SCRIPT) return alive;
+        if (script === activityCmdFor('sess-a')) throw new Error('transport exploded');
+        return { ok: true, stdout: WINDOW_ACTIVITY };
+      },
+      stampCatalogActivity: async () => {},
+    });
+    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]), [[true, null], [true, WINDOW_ACTIVITY_MS]],
+      'the surviving leg still answers; the dead one degrades to the persisted value');
+  });
+
+  it('a (local) host never reaches the channel, even under the flag', async () => {
+    let companionCalls = 0, poolCalls = 0;
+    await discoverManual('(local)', ENTRIES, {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      deliverRemoteScript: async () => { companionCalls++; return alive; },
+      runWithPool: async () => { poolCalls++; return alive; },
+      run: async () => ({ ok: true, stdout: WINDOW_ACTIVITY }),
+      stampCatalogActivity: async () => {},
+    });
+    assert.strictEqual(companionCalls, 0,
+      'the host !== LOCAL half of the guard keeps (local) on the default path (companion is remote-only)');
+    assert.strictEqual(poolCalls, 1);
+  });
+
+  it('the activity fan is AWAITED: lastActivity is fresh at the RETURN instant even when the transport is slow (both toggle paths)', async () => {
+    // The routing tests above resolve their mocks on the microtask queue, so
+    // their chains complete before the caller's continuation runs and the
+    // asserts observe fresh values whether or not the fan is awaited. This one
+    // makes the activity transport GENUINELY slow (a 20ms macrotask inside the
+    // mock) and asserts lastActivity at discoverManual's RETURN — the value
+    // both real callers consume synchronously (discoverHost maps m.lastActivity
+    // into the GET /api/discover response; discoverAll builds its lifecycle
+    // resultObjects the same way). A discarded chain hands Promise.all
+    // [undefined,...], resolves immediately, and fails this on BOTH toggle
+    // paths. (Review finding, WARDEN-1371 round 1.)
+    const slowActivity = async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return { ok: true, stdout: WINDOW_ACTIVITY };
+    };
+    for (const flag of [true, false]) {
+      const res = await discoverManual('prod', ENTRIES, {}, {}, {
+        isCompanionTransportEnabled: () => flag,
+        deliverRemoteScript: async (_h, script) => (script === ALIVE_SCRIPT ? alive : slowActivity()),
+        runWithPool: async () => alive,
+        run: slowActivity,
+        stampCatalogActivity: async () => {},
+      });
+      assert.deepStrictEqual(res.map((r) => r.lastActivity), [WINDOW_ACTIVITY_MS, WINDOW_ACTIVITY_MS],
+        `flag ${flag ? 'ON' : 'OFF'}: discoverManual must not return before the activity reads and their stamps land`);
+    }
+  });
+});
+
 // The guard above lives in discoverManual, but the BUG was the caller: discoverAll
 // dropped the flag on the floor (`discoverManual(host, entries, cfg)`), so a guard
 // alone would still be dead on the lean sweep. discoverAll gets the same `deps`

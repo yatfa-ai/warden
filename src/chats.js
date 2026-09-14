@@ -8,7 +8,7 @@ import { loadCatalog, stampCatalogActivity } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats, windowActivityToMs, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
-import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
+import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, deliverRemoteScript, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
@@ -341,7 +341,27 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
 // `deps` is a test seam mirroring discover()'s at :197 — the ssh calls and the
 // catalog write are injectable so the lean/non-lean split is assertable without
 // real ssh or touching chats.json. Defaults are the real ones, so production
-// behavior is unchanged.
+// behavior is unchanged. WARDEN-1371 adds the routing seam: both remote legs
+// (the alive-check and the window_activity read) deliver through
+// `deps.deliverRemoteScript ?? deliverRemoteScript` when
+// `deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled` says the
+// toggle is on — companion-or-fail, no raw-ssh fallback — and keep the exact
+// pre-1371 runWithPool/run delivery when it is off.
+//
+// WARDEN-1371: the companion-transport routing predicate for discoverManual's
+// two catalog-discovery legs. Same shape as discover()'s guard above — REMOTE
+// hosts only (the companion serves remote hosts; a (local) host must keep its
+// default path), and only when WARDEN_COMPANION_TRANSPORT=1. Evaluated once PER
+// LEG — twice per discoverManual call (alive-check, then the activity read) —
+// not once per call. A single call cannot split its transports midway in
+// practice because the toggle is env-stable within a call; note this is NOT a
+// cache — deliverRemoteScript re-reads the toggle internally anyway, so caching
+// the read here would strengthen nothing. Toggle OFF keeps every leg
+// byte-for-byte on its pre-1371 transport.
+function viaCompanion(host, deps = {}) {
+  return host !== LOCAL && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)();
+}
+
 export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   const runFn = deps.run ?? run;
   const runWithPoolFn = deps.runWithPool ?? runWithPool;
@@ -350,7 +370,9 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   const activeMap = {};
   if (sessions.length) {
     const script = `for s in ${sessions.join(' ')}; do if tmux has-session -t "$s" >/dev/null 2>&1; then printf '1 %s\\n' "$s"; else printf '0 %s\\n' "$s"; fi; done`;
-    const res = await runWithPoolFn(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 }, cfg);
+    const res = viaCompanion(host, deps)
+      ? await (deps.deliverRemoteScript ?? deliverRemoteScript)(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000, run: runWithPoolFn }, cfg, deps)
+      : await runWithPoolFn(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 }, cfg);
     if (res.ok) for (const line of res.stdout.split('\n')) {
       const m = line.match(/^([01]) (\S+)$/);
       if (m) activeMap[m[2]] = m[1] === '1';
@@ -372,7 +394,7 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   // so WARDEN-245's recency ordering is preserved. (WARDEN-994)
   if (opts.activity !== false && activeEntries.length > 0) {
     await Promise.all(
-      activeEntries.map(entry =>
+      activeEntries.map(entry => {
         // WARDEN-1340: tmux's own #{window_activity} — the window's last OUTPUT
         // in epoch seconds — replaces the `capture-pane -S - -E - | head -1` this
         // leg used to run. The old command read the OLDEST line of the
@@ -380,7 +402,25 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
         // one is strictly cheaper AND correct. Lean (opts.activity === false,
         // the lifecycle poll) still skips this pass entirely, exactly as before
         // (WARDEN-994).
-        runFn(host, `tmux display-message -p -t ${entry.session} '#{window_activity}'`, { timeout: 1000 })
+        //
+        // WARDEN-1371: the transport is routable — companion channel when the
+        // toggle is on (companion-or-fail: a dead channel surfaces as an
+        // ok:false envelope here, stamping nothing), the pre-1371 un-pooled
+        // `run` otherwise, byte-for-byte. The script string is identical on
+        // both transports.
+        const activityPromise = viaCompanion(host, deps)
+          ? (deps.deliverRemoteScript ?? deliverRemoteScript)(host, `tmux display-message -p -t ${entry.session} '#{window_activity}'`, { timeout: 1000, run: runFn }, cfg, deps)
+          : runFn(host, `tmux display-message -p -t ${entry.session} '#{window_activity}'`, { timeout: 1000 });
+        // The chain MUST be RETURNED from the .map callback: discoverManual's
+        // `await Promise.all(...)` holds the fan open until every activity read
+        // AND its stampCatalogActivity write completes, because both real
+        // callers (discoverHost's GET /api/discover response and discoverAll's
+        // lifecycle resultObjects) read entry.lastActivity at the RETURN
+        // instant (WARDEN-245's recency ordering serves exactly that value). A
+        // discarded chain hands Promise.all [undefined,...], which resolves
+        // immediately and serves the stale/persisted value instead. (Review
+        // finding, WARDEN-1371 round 1 — proven on both toggle paths.)
+        return activityPromise
           .then(async activityRes => {
             if (activityRes.ok) {
               // windowActivityToMs converts epoch SECONDS → the ms lastActivity
@@ -399,8 +439,8 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
           })
           .catch(err => {
             console.warn(`Failed to capture activity for ${entry.session}:`, err instanceof Error ? err.message : String(err));
-          })
-      )
+          });
+      })
     );
   }
 
