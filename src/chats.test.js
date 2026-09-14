@@ -1470,6 +1470,34 @@ describe('discoverManual() routes its catalog legs onto the companion channel (W
       'the host !== LOCAL half of the guard keeps (local) on the default path (companion is remote-only)');
     assert.strictEqual(poolCalls, 1);
   });
+
+  it('the activity fan is AWAITED: lastActivity is fresh at the RETURN instant even when the transport is slow (both toggle paths)', async () => {
+    // The routing tests above resolve their mocks on the microtask queue, so
+    // their chains complete before the caller's continuation runs and the
+    // asserts observe fresh values whether or not the fan is awaited. This one
+    // makes the activity transport GENUINELY slow (a 20ms macrotask inside the
+    // mock) and asserts lastActivity at discoverManual's RETURN — the value
+    // both real callers consume synchronously (discoverHost maps m.lastActivity
+    // into the GET /api/discover response; discoverAll builds its lifecycle
+    // resultObjects the same way). A discarded chain hands Promise.all
+    // [undefined,...], resolves immediately, and fails this on BOTH toggle
+    // paths. (Review finding, WARDEN-1371 round 1.)
+    const slowActivity = async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return { ok: true, stdout: WINDOW_ACTIVITY };
+    };
+    for (const flag of [true, false]) {
+      const res = await discoverManual('prod', ENTRIES, {}, {}, {
+        isCompanionTransportEnabled: () => flag,
+        deliverRemoteScript: async (_h, script) => (script === ALIVE_SCRIPT ? alive : slowActivity()),
+        runWithPool: async () => alive,
+        run: slowActivity,
+        stampCatalogActivity: async () => {},
+      });
+      assert.deepStrictEqual(res.map((r) => r.lastActivity), [WINDOW_ACTIVITY_MS, WINDOW_ACTIVITY_MS],
+        `flag ${flag ? 'ON' : 'OFF'}: discoverManual must not return before the activity reads and their stamps land`);
+    }
+  });
 });
 
 // The guard above lives in discoverManual, but the BUG was the caller: discoverAll

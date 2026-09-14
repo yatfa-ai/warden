@@ -351,10 +351,13 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
 // WARDEN-1371: the companion-transport routing predicate for discoverManual's
 // two catalog-discovery legs. Same shape as discover()'s guard above — REMOTE
 // hosts only (the companion serves remote hosts; a (local) host must keep its
-// default path), and only when WARDEN_COMPANION_TRANSPORT=1. Read ONCE per
-// discoverManual call and threaded to both legs so a single call cannot split
-// its transports midway. Toggle OFF keeps every leg byte-for-byte on its
-// pre-1371 transport.
+// default path), and only when WARDEN_COMPANION_TRANSPORT=1. Evaluated once PER
+// LEG — twice per discoverManual call (alive-check, then the activity read) —
+// not once per call. A single call cannot split its transports midway in
+// practice because the toggle is env-stable within a call; note this is NOT a
+// cache — deliverRemoteScript re-reads the toggle internally anyway, so caching
+// the read here would strengthen nothing. Toggle OFF keeps every leg
+// byte-for-byte on its pre-1371 transport.
 function viaCompanion(host, deps = {}) {
   return host !== LOCAL && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)();
 }
@@ -408,7 +411,16 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
         const activityPromise = viaCompanion(host, deps)
           ? (deps.deliverRemoteScript ?? deliverRemoteScript)(host, `tmux display-message -p -t ${entry.session} '#{window_activity}'`, { timeout: 1000, run: runFn }, cfg, deps)
           : runFn(host, `tmux display-message -p -t ${entry.session} '#{window_activity}'`, { timeout: 1000 });
-        activityPromise
+        // The chain MUST be RETURNED from the .map callback: discoverManual's
+        // `await Promise.all(...)` holds the fan open until every activity read
+        // AND its stampCatalogActivity write completes, because both real
+        // callers (discoverHost's GET /api/discover response and discoverAll's
+        // lifecycle resultObjects) read entry.lastActivity at the RETURN
+        // instant (WARDEN-245's recency ordering serves exactly that value). A
+        // discarded chain hands Promise.all [undefined,...], which resolves
+        // immediately and serves the stale/persisted value instead. (Review
+        // finding, WARDEN-1371 round 1 — proven on both toggle paths.)
+        return activityPromise
           .then(async activityRes => {
             if (activityRes.ok) {
               // windowActivityToMs converts epoch SECONDS → the ms lastActivity
