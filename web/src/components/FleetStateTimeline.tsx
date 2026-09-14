@@ -43,12 +43,18 @@ import {
  * Encoding (WCAG 2.1 1.4.1 — never color alone, the same discipline heatmap.ts
  * follows): each state is a distinct BACKGROUND COLOR + a GLYPH + a human LABEL,
  * and every cell carries a tooltip + aria-label with the state name. So a
- * colorblind operator distinguishes stuck (↻ amber) from erroring (✕ red), or
- * waiting (? sky) from blocked (■ blue), via the glyph/tooltip/label — not hue
- * alone. Colors use the EXISTING Tailwind palette tokens the AttentionBadge /
- * StatusDot already use (green/red/blue/emerald/amber/muted) so they read across
- * all themes; idle is the theme-aware muted-foreground at reduced opacity (the
- * "calm" baseline), unknown/null is a transparent outlined cell.
+ * colorblind operator distinguishes stuck (↻ amber) from pattern_matched
+ * (~ zinc), or done (✓ emerald) from idle (· muted), via the glyph/tooltip/
+ * label — not hue alone. Colors use the EXISTING Tailwind palette tokens the
+ * AttentionBadge / StatusDot already use (green/red/blue/emerald/amber/muted)
+ * so they read across all themes; idle is the theme-aware muted-foreground at
+ * reduced opacity (the "calm" baseline), unknown/null is a transparent
+ * outlined cell. The classifier's substring-guess states (erroring/blocked/
+ * waiting) render NO tone of their own since WARDEN-1368: they arrive
+ * re-encoded as the neutral `pattern_matched` (the same zinc family
+ * capture_failed uses — a recorded fact, not a verdict), so the timeline
+ * never paints a red/blue/sky agent-state claim a substring match cannot
+ * substantiate.
  *
  * Collapse state is LOCAL React state (deliberately NOT a persisted /api/config
  * pref — avoids the dead-pref trap, same as the heatmap) and lives in the
@@ -78,23 +84,26 @@ interface Props {
 // pure lib so it has no class/DOM dependency). Saturated Tailwind palette colors
 // render identically across light/dark (matching the heatmap's bg-red-500); idle
 // is the theme-aware muted-foreground at /40 opacity (the dim "calm" baseline).
+// WARDEN-1368: `pattern_matched` shares capture_failed's zinc tone
+// deliberately — both are "a recorded fact, not a health verdict"; the glyph
+// (~ vs ⚠) + label keep them distinguishable (WCAG 1.4.1's non-color channel).
 const STATE_BG: Record<string, string> = {
   active: 'bg-green-500',
   done: 'bg-emerald-500',
   idle: 'bg-muted-foreground/40',
-  waiting: 'bg-sky-500',
-  blocked: 'bg-blue-500',
   stuck: 'bg-amber-600',
-  erroring: 'bg-red-500',
+  pattern_matched: 'bg-zinc-500',
   capture_failed: 'bg-zinc-500',
 };
 const UNKNOWN_BG = 'bg-transparent border border-border/50';
 
 // Legend: the states the timeline can actually render, in scan-friendly order
-// (working → finished → quiet → needs-input → needs-action → unreachable). `done`
-// is the client-side active→idle completion (deriveDone in stateTimeline.ts).
+// (working → finished → quiet → looping → recorded text-pattern match →
+// unreachable). `done` is the client-side active→idle completion (deriveDone
+// in stateTimeline.ts); `pattern_matched` is WARDEN-1368's neutral encoding
+// for the hours whose classifier reading was a substring guess.
 const LEGEND_STATES = [
-  'active', 'done', 'idle', 'waiting', 'blocked', 'stuck', 'erroring', 'capture_failed',
+  'active', 'done', 'idle', 'stuck', 'pattern_matched', 'capture_failed',
 ] as const;
 
 function cellBg(state: string | null): string {
