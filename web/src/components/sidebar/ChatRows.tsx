@@ -21,7 +21,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { StatusDot } from '@/components/StatusDot';
 import { cn } from '@/lib/utils';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import type { Chat, AgentStateRow } from '@/lib/types';

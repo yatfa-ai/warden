@@ -12,7 +12,6 @@ import {
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, RefreshCw, SearchIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { type HostLabels } from '@/lib/chatDisplay';
 
 import { useBackendConfig } from '@/components/settings/useBackendConfig';
 import { sectionPersistence } from '@/components/settings/sectionPersistence';
@@ -69,8 +68,6 @@ interface Props {
   // WARDEN-1271: no `snippets` group — SnippetsSection subscribes to the shared
   // client-state store (lib/uiStore.ts) directly.
   alerts: DesktopAlertPrefs;
-  hostLabels: HostLabels;
-  setHostLabels: (v: HostLabels) => void;
   resetUiPrefsToDefaults: () => void;
 }
 
@@ -89,8 +86,6 @@ export function SettingsPage({
   appearance,
   newChats,
   alerts,
-  hostLabels,
-  setHostLabels,
   resetUiPrefsToDefaults,
 }: Props) {
   // The backend /api/config persistence seam: GET on mount, PUT on Save, the
@@ -319,8 +314,6 @@ export function SettingsPage({
                   <HostsSection
                     config={config}
                     setConfig={setConfig}
-                    hostLabels={hostLabels}
-                    setHostLabels={setHostLabels}
                     availableHosts={availableHosts}
                     hidden={activeSection !== 'hosts'}
                   />

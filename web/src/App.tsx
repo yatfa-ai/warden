@@ -3,8 +3,7 @@ import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type CustomPreset, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
-import { displayName, type HostLabels } from '@/lib/chatDisplay';
-import { HostLabelsContext } from '@/lib/hostLabels';
+import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
@@ -22,7 +21,7 @@ import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -423,12 +422,16 @@ function App() {
   const fileViewerViewMode = useFileViewerViewMode();
   const setFileViewerViewMode = useSetFileViewerViewMode();
   // WARDEN-490 — per-host display labels (friendly names). A raw host string
-  // ('(local)' / SSH host) → the human's label, which replaces the raw host in
-  // every host-tag display surface via the HostLabelsContext provider below.
-  // Pure client-side pref (like healthGroupBy/defaultShellByHost): persisted by
-  // the saveUi effect below, never sent to the backend / /api/config. An empty
-  // map (or a host with no entry) = today's behavior.
-  const [hostLabels, setHostLabels] = useState<HostLabels>(() => uiState.hostLabels ?? {});
+  // ('(local)' / SSH host) → the human's label, shown in every host-tag display
+  // surface. Migrated onto the shared uiStore (roadmap WARDEN-1204 slice 6):
+  // App SUBSCRIBES to the fact instead of owning it in a useState — the old
+  // context provider and the SettingsPage props channel are gone, and readers
+  // plus the HostsSection writer subscribe at lib/uiStore directly.
+  // Pure client-side pref (like healthCollapsedHosts/defaultShellByHost):
+  // persisted by the saveUi effect below, never sent to the backend /
+  // /api/config. An empty map (or a host with no entry) = today's behavior.
+  const hostLabels = useHostLabels();
+  const setHostLabels = useSetHostLabels();
   // WARDEN-500: the per-host expand/collapse state INSIDE Health's Host grouping.
   // Was a HealthDashboard-local useState that reset to {} on every restart — so
   // the durable grouping choice (WARDEN-468) survived reload but the collapsed
@@ -1797,7 +1800,6 @@ function App() {
   }, [applyLayoutClamp]);
 
   return (
-    <HostLabelsContext.Provider value={hostLabels}>
     <div className="h-screen flex flex-col bg-background text-foreground">
       {showReturnBanner && (
         <div className="flex items-center justify-between gap-3 px-3 py-2 bg-blue-50 dark:bg-blue-950 border-b border-blue-200 dark:border-blue-800">
@@ -1923,8 +1925,6 @@ function App() {
             attentionDesktopAlerts, setAttentionDesktopAlerts,
             attentionStates, setAttentionStates,
           }}
-          hostLabels={hostLabels}
-          setHostLabels={setHostLabels}
           resetUiPrefsToDefaults={resetUiPrefsToDefaults}
         />
       ) : chatBrowserOpen ? (
@@ -2137,7 +2137,6 @@ function App() {
         onConfirm={confirmCloseWorkspace}
       />
     </div>
-    </HostLabelsContext.Provider>
   );
 }
 

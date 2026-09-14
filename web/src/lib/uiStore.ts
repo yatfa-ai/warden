@@ -54,6 +54,7 @@ import {
   type OnExitBehavior,
 } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
+import type { HostLabels } from '@/lib/chatDisplay';
 
 /**
  * The shared client-state slice. One field + its setter per migrated pref.
@@ -153,6 +154,21 @@ export interface UiStoreState {
   timestampFormat: TimestampFormat;
   /** Set the timestamp format. The persisted write follows via App's snapshot. */
   setTimestampFormat: (v: TimestampFormat) => void;
+  /**
+   * Per-host display labels (WARDEN-490) — raw host string ('(local)' / SSH
+   * host) → the human's friendly label, shown wherever a host tag appears.
+   * Migrated onto the store (roadmap WARDEN-1204 slice 6), which deletes the
+   * LAST React context in web/src: a purpose-built provider that carried the
+   * map to ~10 reading surfaces, plus a parallel props channel to the Settings
+   * writer. HostsSection (the writer) and every display surface (readers) now
+   * subscribe here directly. Pure client localStorage — display-only, it never
+   * reaches the backend — so this is shared/persisted CLIENT state and
+   * WARDEN-832 row 2 (this store), not the server-state rows, governs. An
+   * empty map (or a host with no entry) = no label = the raw host.
+   */
+  hostLabels: HostLabels;
+  /** Replace the label map. The persisted write follows via App's snapshot. */
+  setHostLabels: (labels: HostLabels) => void;
 }
 
 /**
@@ -176,6 +192,7 @@ export type UiStoreSeed = Partial<
     | 'copyOnSelect'
     | 'onExitBehavior'
     | 'timestampFormat'
+    | 'hostLabels'
   >
 >;
 
@@ -221,6 +238,14 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // terminalFontFamily truthiness exception.
     timestampFormat: seed.timestampFormat ?? persisted.timestampFormat ?? 'relative',
     setTimestampFormat: (timestampFormat) => set({ timestampFormat }),
+    // WARDEN-1204 slice 6: ??-only shape — DEFAULT_UI.hostLabels is {} and an
+    // empty map is the "no labels" identity, the same Record-shape class App's
+    // `useState(() => uiState.hostLabels ?? {})` initializer established for
+    // healthCollapsedHosts. The store's {} replaces the context's `undefined`
+    // default with an equivalent: hostLabelFor/hostTagOf treat both as "no
+    // labels", so nothing renders differently.
+    hostLabels: seed.hostLabels ?? persisted.hostLabels ?? {},
+    setHostLabels: (hostLabels) => set({ hostLabels }),
   }));
 }
 
@@ -368,4 +393,24 @@ export function useTimestampFormat(): TimestampFormat {
 /** The timestamp-format setter (AppearanceSection). Stable across renders. */
 export function useSetTimestampFormat(): (v: TimestampFormat) => void {
   return useUiStore((s) => s.setTimestampFormat);
+}
+
+/**
+ * Per-host display labels (WARDEN-490, roadmap WARDEN-1204 slice 6). Every
+ * host-tag surface (pane tiles, sidebar rows, fleet dashboards, transcripts,
+ * directive history) subscribes here instead of consuming the deleted
+ * React context — this store is now the fact's ONE home.
+ */
+export function useHostLabels(): HostLabels {
+  return useUiStore((s) => s.hostLabels);
+}
+
+/**
+ * The label-map setter (HostsSection is the only writer). Stable across
+ * renders (zustand actions are created once with the store), so it is safe in
+ * a dependency array — and its plain value signature is what App's
+ * resetSetters entry calls.
+ */
+export function useSetHostLabels(): (labels: HostLabels) => void {
+  return useUiStore((s) => s.setHostLabels);
 }

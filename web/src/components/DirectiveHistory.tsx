@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import type { Directive } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {

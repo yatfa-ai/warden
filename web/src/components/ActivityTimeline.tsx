@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';

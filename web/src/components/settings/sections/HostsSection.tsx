@@ -1,9 +1,12 @@
 // Hosts & Connection section — MIXED persistence: `config` (hosts, poll
 // interval, tmux session, connect timeout) is backend /api/config, while
-// `hostLabels` is a pure client localStorage pref threaded in separately. The
+// `hostLabels` (WARDEN-490, roadmap WARDEN-1204 slice 6) is a pure client
+// localStorage pref SUBSCRIBED at the shared uiStore (lib/uiStore.ts) — the
+// section reads it via useHostLabels() and writes it via useSetHostLabels(),
+// with no prop threading through SettingsPage. The
 // addHost/removeHost/setHostLabel handlers are relocated here verbatim from
-// SettingsPage (WARDEN-664) — each operates only on props this section already
-// receives, so behavior is unchanged.
+// SettingsPage (WARDEN-664) — each operates only on props/state this section
+// already has, so behavior is unchanged.
 //
 // That MIXED split is now SURFACED in-section (WARDEN-951) using the same
 // per-block persistence-labeling pattern NotificationsSection established for
@@ -30,7 +33,8 @@ import {
 } from '@/components/ui/select';
 import { resolvePollIntervalMs } from '@/lib/pollInterval';
 import { validateNewHost } from '@/lib/hostInput';
-import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
+import { THIS_MACHINE } from '@/lib/chatDisplay';
+import { useHostLabels, useSetHostLabels } from '@/lib/uiStore';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { clampToBounds, isOutOfBounds } from '../numericBounds';
@@ -43,10 +47,6 @@ import { type ConfigData, type SetConfig } from '../types';
 export interface HostsSectionProps {
   config: ConfigData;
   setConfig: SetConfig;
-  // Pure client localStorage pref (display-only labels), never sent to the
-  // backend. Threaded in separately from the `config` fields above.
-  hostLabels: HostLabels;
-  setHostLabels: (v: HostLabels) => void;
   availableHosts: string[];
   hidden: boolean;
 }
@@ -54,11 +54,17 @@ export interface HostsSectionProps {
 export function HostsSection({
   config,
   setConfig,
-  hostLabels,
-  setHostLabels,
   availableHosts,
   hidden,
 }: HostsSectionProps) {
+  // Per-host display labels (WARDEN-490): a pure client localStorage pref read
+  // and written through the shared uiStore (roadmap WARDEN-1204 slice 6) —
+  // this section is its only writer, so the subscription replaces the old
+  // SettingsPage props channel. The write spreads into a fresh map before
+  // mutating (never mutate the store object in place), and the setter replaces
+  // the whole map, so a label change notifies every subscribed surface.
+  const hostLabels = useHostLabels();
+  const setHostLabels = useSetHostLabels();
   // WARDEN-928 — the host pending confirmed removal (`null` = dialog closed).
   // Hosts are a list, so this is ONE piece of state driving ONE shared
   // ConfirmDialog, not a boolean per chip. Cancel/Escape/overlay-click clear it

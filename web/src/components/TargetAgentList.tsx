@@ -25,7 +25,7 @@
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { copyWithToast } from '@/lib/clipboardToast';
-import { useHostLabels } from '@/lib/hostLabels';
+import { useHostLabels } from '@/lib/uiStore';
 import type { Chat } from '@/lib/types';
 
 export function TargetAgentList({ targets }: { targets: Chat[] }) {
