@@ -27,7 +27,7 @@ import { copyWithToast } from '@/lib/clipboardToast';
 import {
   formatCatchupSummary,
   formatWatchMiss,
-  WATCH_MISS_REASON_LABEL,
+  watchMissReasonLabel,
   type WatchMiss,
 } from '@/lib/watchCatchup';
 import { canReply } from '@/lib/quickReply';
@@ -117,8 +117,10 @@ export function WatchCatchup({ misses, onOpenMiss, onDismiss, onReplyResult }: P
                         <ContextMenuItem onSelect={() => copyWithToast(m.signal!)}>Copy signal</ContextMenuItem>
                       )}
                       {/* Copy the SAME human phrasing the row renders (formatWatchMiss),
-                          not the raw enum — with the same fallback. */}
-                      <ContextMenuItem onSelect={() => copyWithToast(WATCH_MISS_REASON_LABEL[m.reason] || m.reason)}>
+                          not the raw enum — watchMissReasonLabel is formatWatchMiss's
+                          own lookup (current map → WARDEN-1373 legacy map → raw), so a
+                          pre-trim persisted row copies the same faithful phrase. */}
+                      <ContextMenuItem onSelect={() => copyWithToast(watchMissReasonLabel(m.reason))}>
                         Copy reason
                       </ContextMenuItem>
                     </ContextMenuContent>

@@ -58,18 +58,18 @@ const test = (name, fn) => {
 
 console.log('\nformatWatchMessage (WARDEN-378): targeted body names the agent + quotes the signal');
 test('body names the agent and quotes the triggering signal', () => {
-  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'waiting', signal: 'press enter to continue' };
-  const { title, body } = formatWatchMessage(r, 'waiting');
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'stuck', signal: 'same error 5x in a row' };
+  const { title, body } = formatWatchMessage(r, 'stuck');
   assert.ok(body.includes('warden-worker'), 'body names the agent');
-  assert.ok(body.includes("'press enter to continue'"), 'body quotes the signal verbatim');
-  assert.ok(body.includes('waiting for your input'), 'body conveys the reason');
+  assert.ok(body.includes("'same error 5x in a row'"), 'body quotes the signal verbatim');
+  assert.ok(body.includes('stuck (repeating output)'), 'body conveys the reason');
   assert.ok(title.startsWith('Warden:'), 'title is branded');
 });
 test('body conveys the reason even when no signal is present', () => {
-  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'erroring', signal: null };
-  const { body } = formatWatchMessage(r, 'erroring');
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'stuck', signal: null };
+  const { body } = formatWatchMessage(r, 'stuck');
   assert.ok(body.includes('warden-worker'), 'still names the agent');
-  assert.ok(body.includes('erroring'), 'conveys the reason');
+  assert.ok(body.includes('stuck (repeating output)'), 'conveys the reason');
   assert.ok(!body.includes("'"), 'no signal quote when signal absent');
 });
 test('completed reason has a human label in the body', () => {
@@ -96,27 +96,21 @@ test('custom reason (WARDEN-540) names the pattern + quotes the matching line', 
 
 console.log('\nwatchStateLabel (WARDEN-514): row tooltip = reason vocabulary + quoted signal');
 test('returns the reason label alone when there is no signal', () => {
-  assert.equal(watchStateLabel('waiting'), 'waiting for your input');
+  assert.equal(watchStateLabel('stuck'), 'stuck (repeating output)');
 });
 test('quotes the signal verbatim after the label', () => {
-  assert.equal(watchStateLabel('waiting', 'press enter to continue'), "waiting for your input — 'press enter to continue'");
-});
-test('blocked reason has a human label (persistent current-state parity, WARDEN-514)', () => {
-  assert.equal(watchStateLabel('blocked'), 'blocked — waiting on a dependency');
-});
-test('blocked quotes its signal too', () => {
-  assert.equal(watchStateLabel('blocked', 'ticket #12'), "blocked — waiting on a dependency — 'ticket #12'");
+  assert.equal(watchStateLabel('stuck', 'same error 5x in a row'), "stuck (repeating output) — 'same error 5x in a row'");
 });
 test('omits the signal quote when the signal is empty/null', () => {
-  assert.equal(watchStateLabel('erroring', null), 'erroring');
+  assert.equal(watchStateLabel('custom', null), 'matched a watch pattern');
   assert.equal(watchStateLabel('stuck', ''), 'stuck (repeating output)');
 });
 test('uses the SAME vocabulary the watch ping body uses (one voice)', () => {
-  const r = { id: 'w', key: 'w', name: 'w', state: 'waiting', signal: 'press enter' };
+  const r = { id: 'w', key: 'w', name: 'w', state: 'stuck', signal: 'same error 5x in a row' };
   // formatWatchMessage's body is "<name> · <watchStateLabel>"; the row tooltip is the
   // label tail alone — identical wording, so toast + row indicator speak with one voice.
-  const { body } = formatWatchMessage(r, 'waiting');
-  assert.ok(body.endsWith(watchStateLabel('waiting', 'press enter')), 'ping body ends with the row tooltip text');
+  const { body } = formatWatchMessage(r, 'stuck');
+  assert.ok(body.endsWith(watchStateLabel('stuck', 'same error 5x in a row')), 'ping body ends with the row tooltip text');
 });
 
 // --- WARDEN-530: watchReasonTone + formatWatchInApp (the in-app watch ping's pure pieces) ----
@@ -134,43 +128,35 @@ test('uses the SAME vocabulary the watch ping body uses (one voice)', () => {
 // (here), and watchCatchup.shouldRecordMiss (watchCatchup.test.mjs). The inline control
 // flow itself mirrors WARDEN-402's `document.visibilityState === 'visible'` branch exactly.
 console.log('\nwatchReasonTone (WARDEN-530): reason → themed tone, incl. completed → success');
-test('erroring → critical (broken agent — red)', () => {
-  assert.equal(watchReasonTone('erroring'), 'critical');
-});
 test('stuck → critical (broken agent — red)', () => {
   assert.equal(watchReasonTone('stuck'), 'critical');
-});
-test('waiting → warning (needs your input — amber)', () => {
-  assert.equal(watchReasonTone('waiting'), 'warning');
 });
 test('completed → success (positive — green, NOT forced into red/amber)', () => {
   assert.equal(watchReasonTone('completed'), 'success');
 });
-test('blocked → warning (mild state, shares amber with waiting — WARDEN-514 integration)', () => {
-  // blocked is never a transition ping (diffWatchAlerts doesn't fire on it), so the
-  // fire-loop never reaches watchReasonTone with blocked — but the pure fn is TOTAL over
-  // WatchReason, and blocked ("waiting on a dependency") is mild, so it shares warning
-  // with waiting, matching the row indicator's amber treatment of the pair.
-  assert.equal(watchReasonTone('blocked'), 'warning');
+test('custom → critical (the user\'s pattern matched — actionable, unchanged fall-through)', () => {
+  assert.equal(watchReasonTone('custom'), 'critical');
 });
 test('every WatchReason resolves to a defined tone (no reason falls through)', () => {
-  for (const reason of ['waiting', 'erroring', 'stuck', 'completed', 'blocked']) {
-    assert.ok(['critical', 'warning', 'success'].includes(watchReasonTone(reason)), `${reason} maps to a tone`);
+  // WARDEN-1373: the surviving vocabulary is stuck/completed/custom — the amber
+  // 'warning' tier went with the retired waiting/blocked reasons.
+  for (const reason of ['stuck', 'completed', 'custom']) {
+    assert.ok(['critical', 'success'].includes(watchReasonTone(reason)), `${reason} maps to a tone`);
   }
 });
 
 console.log('\nformatWatchInApp (WARDEN-530): crafted title (agent name) + reason/signal description');
 test('names the agent as the title and carries the reason as the description', () => {
-  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'waiting', signal: null };
-  const { title, description } = formatWatchInApp(r, 'waiting');
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'stuck', signal: null };
+  const { title, description } = formatWatchInApp(r, 'stuck');
   assert.equal(title, 'warden-worker', 'title is the agent name (which chat)');
-  assert.ok(description.includes('waiting for your input'), 'description conveys the reason (why)');
+  assert.ok(description.includes('stuck (repeating output)'), 'description conveys the reason (why)');
 });
 test('quotes the triggering signal verbatim in the description', () => {
-  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'waiting', signal: 'press enter to continue' };
-  const { description } = formatWatchInApp(r, 'waiting');
-  assert.ok(description.includes("'press enter to continue'"), 'description quotes the signal');
-  assert.ok(description.includes('waiting for your input'), 'still conveys the reason alongside the signal');
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'stuck', signal: 'same error 5x in a row' };
+  const { description } = formatWatchInApp(r, 'stuck');
+  assert.ok(description.includes("'same error 5x in a row'"), 'description quotes the signal');
+  assert.ok(description.includes('stuck (repeating output)'), 'still conveys the reason alongside the signal');
 });
 test('completed uses its positive label in the description', () => {
   const r = { id: 'w', key: 'w', name: 'w', state: 'idle', signal: null };
@@ -183,9 +169,9 @@ test('falls back to key for the title when name is absent', () => {
   assert.equal(title, 'k1', 'falls back to key for the name');
 });
 test('a description with no signal is just the reason label (no dangling quote)', () => {
-  const r = { id: 'e', key: 'e', name: 'e', state: 'erroring', signal: null };
-  const { description } = formatWatchInApp(r, 'erroring');
-  assert.equal(description, 'erroring');
+  const r = { id: 'e', key: 'e', name: 'e', state: 'stuck', signal: null };
+  const { description } = formatWatchInApp(r, 'stuck');
+  assert.equal(description, 'stuck (repeating output)');
   assert.ok(!description.includes("'"), 'no signal quote when signal absent');
 });
 
@@ -230,7 +216,7 @@ test('returns true (delivered) when permission granted + construction succeeds',
   globalThis.window = { focus() {} };
   globalThis.Notification = makeNotificationShim({ permission: 'granted' });
   lastNotification = null;
-  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting', signal: null }, 'waiting');
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'stuck', signal: null }, 'stuck');
   assert.equal(delivered, true);
   assert.ok(lastNotification, 'a Notification was constructed');
   restoreGlobals();
@@ -239,7 +225,7 @@ test('returns false (lost) when permission is denied — no construction', () =>
   globalThis.window = { focus() {} };
   globalThis.Notification = makeNotificationShim({ permission: 'denied' });
   lastNotification = null;
-  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting' }, 'waiting');
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'stuck' }, 'stuck');
   assert.equal(delivered, false);
   assert.equal(lastNotification, null, 'no Notification constructed when denied');
   restoreGlobals();
@@ -248,14 +234,14 @@ test('returns false (lost) when a restrictive webview rejects new Notification (
   globalThis.window = { focus() {} };
   globalThis.Notification = makeNotificationShim({ permission: 'granted', throws: true });
   lastNotification = null;
-  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting' }, 'waiting');
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'stuck' }, 'stuck');
   assert.equal(delivered, false);
   restoreGlobals();
 });
 test('returns false (lost) when the Notifications API is unsupported (no Notification global)', () => {
   globalThis.window = { focus() {} };
   delete globalThis.Notification;
-  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting' }, 'waiting');
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'stuck' }, 'stuck');
   assert.equal(delivered, false);
   restoreGlobals();
 });
@@ -265,7 +251,7 @@ test('onclick deep-links to the watched chat via onOpenChat + focuses the window
   let opened = null;
   let focused = 0;
   globalThis.window.focus = () => { focused += 1; };
-  fireWatchNotification({ id: 'w', key: 'watched-key', name: 'w', state: 'waiting' }, 'waiting', (id) => { opened = id; });
+  fireWatchNotification({ id: 'w', key: 'watched-key', name: 'w', state: 'stuck' }, 'stuck', (id) => { opened = id; });
   assert.ok(lastNotification?.onclick, 'onclick handler was wired on construction');
   lastNotification.onclick();
   assert.equal(opened, 'watched-key', 'onclick deep-links to the watched chat key');
@@ -275,9 +261,9 @@ test('onclick deep-links to the watched chat via onOpenChat + focuses the window
 test('a distinct tag per chat key so two watched chats never replace each other', () => {
   globalThis.window = { focus() {} };
   globalThis.Notification = makeNotificationShim({ permission: 'granted' });
-  fireWatchNotification({ id: 'a', key: 'a', name: 'a', state: 'waiting' }, 'waiting');
+  fireWatchNotification({ id: 'a', key: 'a', name: 'a', state: 'stuck' }, 'stuck');
   const tagA = lastNotification.options.tag;
-  fireWatchNotification({ id: 'b', key: 'b', name: 'b', state: 'waiting' }, 'waiting');
+  fireWatchNotification({ id: 'b', key: 'b', name: 'b', state: 'stuck' }, 'stuck');
   const tagB = lastNotification.options.tag;
   assert.notEqual(tagA, tagB, 'distinct tags per chat');
   assert.equal(tagA, 'warden-watch:a');
@@ -289,19 +275,19 @@ test('a distinct tag per chat key so two watched chats never replace each other'
 
 console.log('\nshouldFireWatch (WARDEN-426): when PRESENT (visible), suppress ONLY for the focused pane');
 test('present + focused === pane key (matched by key) → suppress (false)', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
+  const row = { id: 'i', key: 'k', state: 'stuck', signal: 'press enter' };
   assert.equal(shouldFireWatch('k', row, 'visible'), false);
 });
 test('present + focused !== pane key → fire (true)', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
+  const row = { id: 'i', key: 'k', state: 'stuck', signal: 'press enter' };
   assert.equal(shouldFireWatch('other-pane', row, 'visible'), true);
 });
 test('present + focused null → fire (true)', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting' };
+  const row = { id: 'i', key: 'k', state: 'stuck' };
   assert.equal(shouldFireWatch(null, row, 'visible'), true);
 });
 test('present + focused undefined (no focus context threaded) → fire (true)', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting' };
+  const row = { id: 'i', key: 'k', state: 'stuck' };
   assert.equal(shouldFireWatch(undefined, row, 'visible'), true);
 });
 test('present: a row with ONLY id (no key) is matched against focusedPaneKey by id', () => {
@@ -313,7 +299,7 @@ test('present + empty-string focused key fires (treated as no real focus)', () =
   // A nullish check (== null) intentionally lets '' fall through to the comparison;
   // '' never equals a real pane key (which is non-empty), so this still fires —
   // matching the "focused elsewhere" contract without special-casing ''.
-  const row = { id: 'i', key: 'k', state: 'waiting' };
+  const row = { id: 'i', key: 'k', state: 'stuck' };
   assert.equal(shouldFireWatch('', row, 'visible'), true);
 });
 
@@ -325,15 +311,15 @@ console.log('\nshouldFireWatch (WARDEN-426): when AWAY (hidden), ALWAYS fire —
 // visible to carry the signal while away. Feeding 'hidden' goes RED on a
 // shouldFireWatch that keys only on focus (it would return false) and GREEN here.
 test('away + focused === pane key → fire (true) [the sticky-focus regression guard]', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
+  const row = { id: 'i', key: 'k', state: 'stuck', signal: 'press enter' };
   assert.equal(shouldFireWatch('k', row, 'hidden'), true);
 });
 test('away + focused !== pane key → fire (true)', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting' };
+  const row = { id: 'i', key: 'k', state: 'stuck' };
   assert.equal(shouldFireWatch('other-pane', row, 'hidden'), true);
 });
 test('away + focused null → fire (true)', () => {
-  const row = { id: 'i', key: 'k', state: 'waiting' };
+  const row = { id: 'i', key: 'k', state: 'stuck' };
   assert.equal(shouldFireWatch(null, row, 'hidden'), true);
 });
 test('away: a row with ONLY id focused on it still fires (id match does not suppress while away)', () => {
@@ -342,23 +328,23 @@ test('away: a row with ONLY id focused on it still fires (id match does not supp
 });
 
 console.log('\nshouldFireWatch: the gate is reason-agnostic — every WatchReason suppresses equally (when present)');
-test('present: suppresses uniformly across waiting/erroring/stuck/completed when focused on that pane', () => {
+test('present: suppresses uniformly across stuck/completed/custom when focused on that pane', () => {
   const focus = 'k';
-  for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
+  for (const state of ['stuck', 'completed', 'custom']) {
     const row = { id: 'i', key: 'k', state };
     assert.equal(shouldFireWatch(focus, row, 'visible'), false, `${state} suppresses when present + focused`);
   }
 });
-test('present: fires uniformly across waiting/erroring/stuck/completed when focused elsewhere', () => {
+test('present: fires uniformly across stuck/completed/custom when focused elsewhere', () => {
   const focus = 'other-pane';
-  for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
+  for (const state of ['stuck', 'completed', 'custom']) {
     const row = { id: 'i', key: 'k', state };
     assert.equal(shouldFireWatch(focus, row, 'visible'), true, `${state} fires when present + focused elsewhere`);
   }
 });
-test('away: fires uniformly across waiting/erroring/stuck/completed even when focused on that pane', () => {
+test('away: fires uniformly across stuck/completed/custom even when focused on that pane', () => {
   const focus = 'k';
-  for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
+  for (const state of ['stuck', 'completed', 'custom']) {
     const row = { id: 'i', key: 'k', state };
     assert.equal(shouldFireWatch(focus, row, 'hidden'), true, `${state} fires when away + focused on it`);
   }
@@ -457,7 +443,7 @@ test('the budget tag never collides with the watch tag (real tags, read from bot
   fireBudgetNotification('Budget', 'over');
   const budgetTag = lastNotification.options.tag;
 
-  fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting', signal: null }, 'waiting');
+  fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'stuck', signal: null }, 'stuck');
   const watchTag = lastNotification.options.tag;
 
   assert.notEqual(budgetTag, watchTag, 'budget must not share the watch tag');

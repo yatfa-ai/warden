@@ -42,6 +42,7 @@ const {
   awayMisses,
   reconcileAwayMisses,
   formatWatchMiss,
+  watchMissReasonLabel,
   formatCatchupSummary,
   loadWatchMissLog,
   saveWatchMissLog,
@@ -65,17 +66,21 @@ globalThis.localStorage = {
 
 // Row + miss builders so cases read as scenarios, not walls of literals. `row`
 // mirrors the AgentStateRow shape the fire site passes (key, id, name, state,
-// signal). `miss` builds a WatchMiss directly for the pure helpers.
+// signal). `miss` builds a WatchMiss directly for the pure helpers. Defaults are
+// 'stuck' — the surviving direct needs-you reason (WARDEN-1373 trimmed the rest);
+// tests that deliberately model PRE-TRIM persisted rows pass reason: 'waiting' /
+// 'erroring' / 'blocked' explicitly, exactly the shape a legacy localStorage log
+// carries.
 const row = (id, over = {}) => ({
   id,
   key: over.key ?? id,
   name: over.name ?? id,
-  state: over.state ?? 'waiting',
+  state: over.state ?? 'stuck',
   signal: Object.prototype.hasOwnProperty.call(over, 'signal') ? over.signal : 'press enter',
 });
 const miss = (key, over = {}) => ({
   key,
-  reason: over.reason ?? 'waiting',
+  reason: over.reason ?? 'stuck',
   name: over.name ?? key,
   signal: Object.prototype.hasOwnProperty.call(over, 'signal') ? over.signal : undefined,
   firedAt: over.firedAt ?? 1000,
@@ -92,10 +97,10 @@ const test = (name, fn) => {
 console.log('toWatchMiss: captures {name, signal} the lost OS ping would have shown');
 
 test('builds a miss with key/name/reason/signal/firedAt', () => {
-  const m = toWatchMiss(row('a', { name: 'Agent A', signal: 'press enter' }), 'waiting', 5000);
+  const m = toWatchMiss(row('a', { name: 'Agent A', signal: 'press enter' }), 'stuck', 5000);
   assert.equal(m.key, 'a');
   assert.equal(m.name, 'Agent A');
-  assert.equal(m.reason, 'waiting');
+  assert.equal(m.reason, 'stuck');
   assert.equal(m.signal, 'press enter');
   assert.equal(m.firedAt, 5000);
 });
@@ -104,12 +109,12 @@ test('key falls back to id when key is absent', () => {
   assert.equal(m.key, 'only-id');
 });
 test('name falls back to key then id', () => {
-  assert.equal(toWatchMiss({ id: 'i', key: 'k', state: 'waiting' }, 'waiting', 1).name, 'k');
-  assert.equal(toWatchMiss({ id: 'i', state: 'waiting' }, 'waiting', 1).name, 'i');
+  assert.equal(toWatchMiss({ id: 'i', key: 'k', state: 'stuck' }, 'stuck', 1).name, 'k');
+  assert.equal(toWatchMiss({ id: 'i', state: 'stuck' }, 'stuck', 1).name, 'i');
 });
 test('a blank signal becomes undefined (no empty-string quote)', () => {
-  assert.equal(toWatchMiss(row('a', { signal: '' }), 'waiting', 1).signal, undefined);
-  assert.equal(toWatchMiss(row('a', { signal: null }), 'waiting', 1).signal, undefined);
+  assert.equal(toWatchMiss(row('a', { signal: '' }), 'stuck', 1).signal, undefined);
+  assert.equal(toWatchMiss(row('a', { signal: null }), 'stuck', 1).signal, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -177,12 +182,12 @@ test('filters to the away window only', () => {
 });
 test('dedupes to the NEWEST miss per key (a flapping chat surfaces once)', () => {
   const log = [
-    miss('a', { reason: 'waiting', firedAt: 100 }),
-    miss('a', { reason: 'erroring', firedAt: 200 }), // later, more actionable
+    miss('a', { reason: 'stuck', firedAt: 100 }),
+    miss('a', { reason: 'completed', firedAt: 200 }), // later — the newest wins
   ];
   const out = awayMisses(log, 0);
   assert.equal(out.length, 1);
-  assert.equal(out[0].reason, 'erroring'); // newest wins
+  assert.equal(out[0].reason, 'completed'); // newest wins
 });
 test('orders newest-first across keys', () => {
   const log = [
@@ -198,36 +203,57 @@ test('empty log → empty surface', () => {
 });
 
 // ---------------------------------------------------------------------------
-console.log('\nawayMisses urgency ranking: erroring > stuck > completed > waiting [WARDEN-476]');
+console.log('\nawayMisses urgency ranking: stuck > completed = custom [WARDEN-476, trimmed WARDEN-1373]');
 //
-// The sort changed from purely firedAt-desc to URGENCY (WATCH_REASON_PRIORITY) with a
-// firedAt-desc tiebreak (WARDEN-476 goal #2: a live "erroring" no longer ranks below a
-// trivial "finished a task"). Same-reason inputs still fall back to firedAt-desc, so the
-// prior newest-first behaviour is preserved for an equal-reason set.
+// The sort is URGENCY (WATCH_REASON_PRIORITY) with a firedAt-desc tiebreak
+// (WARDEN-476 goal #2: a live "stuck" no longer ranks below a trivial "finished a
+// task"). Same-reason inputs fall back to firedAt-desc, so the prior newest-first
+// behaviour is preserved for an equal-reason set. WARDEN-1373 trimmed the ladder to
+// the surviving reasons (stuck first; completed and custom share a tier).
 
-test('ranks a live erroring ABOVE a trivial completed (the goal #2 example)', () => {
+test('ranks a live stuck ABOVE a trivial completed (the goal #2 example)', () => {
   const log = [
     miss('done', { reason: 'completed', firedAt: 300 }), // later, but lower urgency
-    miss('err', { reason: 'erroring', firedAt: 100 }),   // earlier, but most urgent
+    miss('s', { reason: 'stuck', firedAt: 100 }),        // earlier, but most urgent
   ];
-  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['err', 'done']);
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['s', 'done']);
 });
-test('full urgency order across reasons: erroring, stuck, completed, waiting', () => {
+test('full urgency order across reasons: stuck, then completed/custom (same tier)', () => {
   const log = [
-    miss('w', { reason: 'waiting', firedAt: 500 }),
+    miss('c2', { reason: 'custom', firedAt: 500 }),
     miss('c', { reason: 'completed', firedAt: 400 }),
     miss('s', { reason: 'stuck', firedAt: 300 }),
-    miss('e', { reason: 'erroring', firedAt: 200 }),
+    miss('s2', { reason: 'stuck', firedAt: 200 }),
   ];
-  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['e', 's', 'c', 'w']);
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['s', 's2', 'c2', 'c']);
 });
 test('same reason → firedAt-desc tiebreak (newest first) is preserved', () => {
   const log = [
-    miss('old', { reason: 'erroring', firedAt: 10 }),
-    miss('new', { reason: 'erroring', firedAt: 300 }),
-    miss('mid', { reason: 'erroring', firedAt: 200 }),
+    miss('old', { reason: 'stuck', firedAt: 10 }),
+    miss('new', { reason: 'stuck', firedAt: 300 }),
+    miss('mid', { reason: 'stuck', firedAt: 200 }),
   ];
   assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['new', 'mid', 'old']);
+});
+test('same-tier reasons → firedAt-desc tiebreak (completed vs custom)', () => {
+  const log = [
+    miss('done', { reason: 'completed', firedAt: 100 }),
+    miss('pat', { reason: 'custom', firedAt: 300 }),
+  ];
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['pat', 'done']);
+});
+test('a LEGACY retired reason falls through to the firedAt tiebreak (deterministic)', () => {
+  // A pre-WARDEN-1373 persisted log can carry reason 'waiting'/'erroring'/'blocked',
+  // whose lookup in the trimmed priority map is undefined → `undefined - number` is
+  // NaN → falsy → the firedAt-desc tiebreak takes over. A historical row has no
+  // current urgency tier; ranking it by recency is the honest deterministic reading.
+  const log = [
+    miss('legacy', { reason: 'waiting', firedAt: 250 }),
+    miss('s', { reason: 'stuck', firedAt: 300 }),
+    miss('old-legacy', { reason: 'erroring', firedAt: 50 }),
+  ];
+  // stuck is urgent (0) and newest; the two legacy rows order by firedAt-desc.
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['s', 'legacy', 'old-legacy']);
 });
 
 // ---------------------------------------------------------------------------
@@ -243,48 +269,90 @@ console.log('\nreconcileAwayMisses: suppress recovered, keep completed + no-snap
 const states = (entries) => Object.fromEntries(entries.map(([k, state]) => [k, row(k, { state })]));
 
 test('suppresses a miss whose chat recovered (current state no longer needs-you)', () => {
-  const misses = [miss('a', { reason: 'erroring', firedAt: 100 })];
+  const misses = [miss('a', { reason: 'stuck', firedAt: 100 })];
   assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'active']])).map((m) => m.key), []);
 });
-test('KEEPS a miss whose chat is STILL needs-you (erroring → now waiting)', () => {
-  const misses = [miss('a', { reason: 'erroring', firedAt: 100 })];
-  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'waiting']])).map((m) => m.key), ['a']);
+test('KEEPS a miss whose chat is STILL needs-you (stuck → still stuck)', () => {
+  const misses = [miss('a', { reason: 'stuck', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'stuck']])).map((m) => m.key), ['a']);
 });
 test('KEEPS a miss whose key has NO current snapshot (cannot confirm recovery)', () => {
-  const misses = [miss('a', { reason: 'erroring', firedAt: 100 })];
+  const misses = [miss('a', { reason: 'stuck', firedAt: 100 })];
   assert.deepEqual(reconcileAwayMisses(misses, states([['b', 'active']])).map((m) => m.key), ['a']);
 });
 test('KEEPS a completed miss though its landing state idle is not needs-you', () => {
   const misses = [miss('a', { reason: 'completed', firedAt: 100 })];
   assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'idle']])).map((m) => m.key), ['a']);
 });
-test('KEEPS a miss whose chat is blocked — blocked IS a needs-you state (WARDEN-1217)', () => {
-  // A chat that entered `blocked` while the user was away must surface in the
-  // catch-up on the same footing as waiting/erroring/stuck (parity with chatWatch's
-  // persistent WATCH_NEED_STATES, which includes blocked).
+test('a miss whose chat is blocked is SUPPRESSED — blocked left the needs-you set (WARDEN-1373)', () => {
+  // REVERSAL of the WARDEN-1217 parity rule, deliberate: 'blocked' was one of the
+  // classifier's guess labels and WARDEN-1360 already removed the AttentionBadge
+  // buckets it was parity with, so the catch-up no longer treats a blocked CURRENT
+  // state as a need. A miss whose chat now sits in blocked is dropped exactly like
+  // one recovered to active — the machine cannot substantiate a current need for it.
+  const misses = [miss('a', { reason: 'stuck', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'blocked']])).map((m) => m.key), []);
+});
+
+// ─── LEGACY persisted rows (pre-WARDEN-1373 log contents) ────────────────────
+//
+// The miss log persists in localStorage and survives an upgrade, so rows carrying a
+// retired reason ('waiting' / 'erroring' / 'blocked') must not crash — they render
+// via the legacy label map and reconcile ONE-WAY: kept only while the chat is
+// verifiably 'stuck', dropped the moment the trimmed needs-you set cannot confirm a
+// current need (a named, accepted consequence of the trim).
+test('LEGACY: a retired-reason miss renders the SAME human phrase it always had', () => {
+  assert.equal(
+    formatWatchMiss(miss('a', { name: 'Agent A', reason: 'waiting', signal: 'press enter' })),
+    "Agent A · waiting for your input — 'press enter'",
+  );
+  assert.equal(formatWatchMiss(miss('a', { name: 'A', reason: 'erroring' })), 'A · erroring');
+  assert.equal(formatWatchMiss(miss('a', { name: 'A', reason: 'blocked' })), 'A · blocked — waiting on a dependency');
+});
+test('LEGACY: an unknown reason string falls back to the raw enum (no crash)', () => {
+  assert.equal(formatWatchMiss(miss('a', { name: 'A', reason: 'some-future-reason' })), 'A · some-future-reason');
+});
+test('watchMissReasonLabel: current map → legacy map → raw (the single lookup path)', () => {
+  // The same helper the rendered row uses is what Copy reason (WARDEN-1315) calls,
+  // so a legacy row copies the SAME faithful phrase it renders.
+  assert.equal(watchMissReasonLabel('stuck'), 'stuck (repeating output)');
+  assert.equal(watchMissReasonLabel('completed'), 'finished a task');
+  assert.equal(watchMissReasonLabel('custom'), 'matched a watch pattern');
+  assert.equal(watchMissReasonLabel('waiting'), 'waiting for your input'); // legacy
+  assert.equal(watchMissReasonLabel('erroring'), 'erroring');              // legacy
+  assert.equal(watchMissReasonLabel('blocked'), 'blocked — waiting on a dependency'); // legacy
+  assert.equal(watchMissReasonLabel('mystery'), 'mystery');                // raw fallback
+});
+test('LEGACY: a retired-reason miss whose chat is STILL stuck is kept (verifiable need)', () => {
   const misses = [miss('a', { reason: 'waiting', firedAt: 100 })];
-  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'blocked']])).map((m) => m.key), ['a']);
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'stuck']])).map((m) => m.key), ['a']);
+});
+test('LEGACY: a retired-reason miss whose chat is still in a guess state is suppressed (one-way)', () => {
+  // The chat still reads 'waiting' to the classifier, but that state substantiates
+  // nothing anymore — the catch-up agrees with the row indicator (neutral glyph).
+  const misses = [miss('a', { reason: 'waiting', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'waiting']])).map((m) => m.key), []);
 });
 test('null currentByKey is a no-op (keeps everything — the pre-poll default)', () => {
-  const misses = [miss('a', { reason: 'erroring' }), miss('b', { reason: 'waiting' })];
+  const misses = [miss('a', { reason: 'stuck' }), miss('b', { reason: 'custom' })];
   assert.equal(reconcileAwayMisses(misses, null).length, 2);
 });
 test('empty currentByKey keeps everything (every key absent → keep)', () => {
-  assert.equal(reconcileAwayMisses([miss('a', { reason: 'erroring' })], {}).length, 1);
+  assert.equal(reconcileAwayMisses([miss('a', { reason: 'stuck' })], {}).length, 1);
 });
 test('mixed: drops only the recovered one and preserves the urgency order', () => {
-  // awayMisses would urgency-rank these erroring(0) < completed(2) < waiting(3); feed
+  // awayMisses would urgency-rank these stuck(0) < completed(1) = custom(1); feed
   // them pre-ranked and assert reconcile drops ONLY the recovered chat, preserving order.
   const misses = [
-    miss('err', { reason: 'erroring', firedAt: 100 }),  // still erroring → keep
+    miss('s', { reason: 'stuck', firedAt: 100 }),        // still stuck → keep
     miss('done', { reason: 'completed', firedAt: 200 }), // completed → keep (lands idle)
-    miss('wait', { reason: 'waiting', firedAt: 300 }),   // recovered to active → drop
+    miss('pat', { reason: 'custom', firedAt: 300 }),     // recovered to active → drop
   ];
-  const cur = states([['err', 'erroring'], ['done', 'idle'], ['wait', 'active']]);
-  assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['err', 'done']);
+  const cur = states([['s', 'stuck'], ['done', 'idle'], ['pat', 'active']]);
+  assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['s', 'done']);
 });
 test('does not mutate the input array', () => {
-  const misses = [miss('a', { reason: 'erroring' })];
+  const misses = [miss('a', { reason: 'stuck' })];
   reconcileAwayMisses(misses, states([['a', 'active']]));
   assert.equal(misses.length, 1);
 });
@@ -312,13 +380,13 @@ test('keeps a miss whose authored pattern is still matching, on a non-needs-you 
   assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['a']);
 });
 test('keeps a pattern-matching chat with a customMatch-later non-custom miss too (precedence is per-snapshot, not per-miss)', () => {
-  // The chat fired an `erroring` miss while away and has SINCE recovered to idle —
+  // The chat fired a `stuck` miss while away and has SINCE recovered to idle —
   // but its pattern is matching RIGHT NOW. The current snapshot needs the human, so
   // the miss is kept: the catch-up points at a chat that still needs them.
   const cur = statesWithMatch([
     ['a', { state: 'idle', customMatch: { pattern: 'p', line: 'matched line' } }],
   ]);
-  const misses = [miss('a', { reason: 'erroring' })];
+  const misses = [miss('a', { reason: 'stuck' })];
   assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['a']);
 });
 test('a chat with NO match and a non-needs-you state is still dropped, as today', () => {
@@ -326,7 +394,7 @@ test('a chat with NO match and a non-needs-you state is still dropped, as today'
     ['a', { state: 'active', customMatch: null }],
     ['b', { state: 'idle' }],
   ]);
-  const misses = [miss('a', { reason: 'custom' }), miss('b', { reason: 'waiting' })];
+  const misses = [miss('a', { reason: 'custom' }), miss('b', { reason: 'stuck' })];
   assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), []);
 });
 
@@ -349,14 +417,14 @@ console.log('\nformatWatchMiss: names the chat + quotes the reason/signal (WARDE
 
 test('name · reason — quoted signal when present', () => {
   assert.equal(
-    formatWatchMiss(miss('a', { name: 'Agent A', reason: 'waiting', signal: 'press enter' })),
-    "Agent A · waiting for your input — 'press enter'",
+    formatWatchMiss(miss('a', { name: 'Agent A', reason: 'stuck', signal: 'press enter' })),
+    "Agent A · stuck (repeating output) — 'press enter'",
   );
 });
 test('no trailing quote when signal is absent', () => {
   assert.equal(
-    formatWatchMiss(miss('a', { name: 'Agent A', reason: 'erroring', signal: undefined })),
-    'Agent A · erroring',
+    formatWatchMiss(miss('a', { name: 'Agent A', reason: 'custom', signal: undefined })),
+    'Agent A · matched a watch pattern',
   );
 });
 test('name falls back to key when name missing', () => {
@@ -454,7 +522,7 @@ test('saveWatchMissLog never throws on quota (console.warn)', () => {
 });
 test('recordWatchMiss appends + persists (load sees it)', () => {
   resetStore();
-  recordWatchMiss(row('a', { name: 'A', signal: 'hi' }), 'waiting', 9001);
+  recordWatchMiss(row('a', { name: 'A', signal: 'hi' }), 'stuck', 9001);
   const back = loadWatchMissLog();
   assert.equal(back.length, 1);
   assert.equal(back[0].key, 'a');
@@ -464,7 +532,7 @@ test('recordWatchMiss appends + persists (load sees it)', () => {
 });
 test('recordWatchMiss respects the ring-buffer cap (never grows unbounded)', () => {
   resetStore();
-  for (let i = 0; i < WATCH_MISS_LOG_MAX + 5; i++) recordWatchMiss(row(`k${i}`), 'waiting', i);
+  for (let i = 0; i < WATCH_MISS_LOG_MAX + 5; i++) recordWatchMiss(row(`k${i}`), 'stuck', i);
   const back = loadWatchMissLog();
   assert.equal(back.length, WATCH_MISS_LOG_MAX);
   assert.equal(back[back.length - 1].key, `k${WATCH_MISS_LOG_MAX + 4}`); // newest kept

@@ -55,18 +55,23 @@ export function SessionRowSkeleton() {
 }
 
 // WARDEN-514: the state-aware watch indicator shared by ChatRow + OpenPaneRow. When a
-// WATCHED chat's CURRENT state needs the human (waiting/erroring/stuck/blocked —
-// currentWatchNeed over the threaded watchState), the static blue Eye is replaced by a
-// themed, at-a-glance StatusDot (red + pulsing for the broken states erroring/stuck;
-// amber + solid for the milder waiting/blocked — the SAME red/amber split the
-// AttentionBadge's dotForState uses for these states), with a tooltip naming the reason
-// in the watch ping's own vocabulary (watchStateLabel) and quoting the triggering signal
-// verbatim. A happily-working/idle watched chat shows the neutral Eye glyph (unchanged).
-// Either way the control is the watch TOGGLE — clicking swaps back to unwatch.
+// WATCHED chat's CURRENT state needs the human — currentWatchNeed over the threaded
+// watchState — the static blue Eye is replaced by a themed, at-a-glance StatusDot, with
+// a tooltip naming the reason in the watch ping's own vocabulary (watchStateLabel) and
+// quoting the triggering signal verbatim. A happily-working/idle watched chat shows the
+// neutral Eye glyph (unchanged). Either way the control is the watch TOGGLE — clicking
+// swaps back to unwatch.
+//
+// WARDEN-1373: the needs-you set is machine-substantiable only, so the dot split
+// reduces to TWO cases — stuck = red + pulsing (mechanical repetition, the machine
+// observed it) and custom = amber + solid (the user's own pattern matching). The
+// classifier's guessed 'waiting'/'erroring'/'blocked' states no longer light the dot
+// at all: a chat the classifier mislabels `erroring` (a PASSING suite's "0 errors"
+// line) renders the neutral glyph, not a false alarm.
 //
 // WCAG 1.4.1 (WARDEN-68): the needs-you signal is NOT color alone. The StatusDot (a dot)
 // replaces the Eye ICON (a shape change), and the pulse-vs-solid variant further
-// separates broken from waiting — so the binary "needs me / happy" never rests on hue
+// separates stuck from custom — so the binary "needs me / happy" never rests on hue
 // alone. The specific reason is always in the tooltip + the control's accessible name.
 // Built on the library primitives (StatusDot / Button / IconTooltip) — no raw <span>,
 // no magic sizes, no inline visual styles.
@@ -81,7 +86,7 @@ function WatchToggle({ isWatched, watchState, onToggle }: {
   // the neutral Eye (the safe default, matching the catch-up's null-snapshot behavior).
   const need = isWatched && watchState ? currentWatchNeed(watchState) : null;
   if (need) {
-    const broken = need === 'erroring' || need === 'stuck';
+    const broken = need === 'stuck';
     // WARDEN-540: for a custom-pattern match, the actionable "signal" is the matching
     // line + pattern name (row.signal is the classifyPane signal, not the match).
     const customSignal = need === 'custom' && watchState?.customMatch

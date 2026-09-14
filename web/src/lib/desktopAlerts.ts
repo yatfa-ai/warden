@@ -20,6 +20,17 @@
 // only to quiet it). Do NOT re-add a rollup-diff alert here: the passive badge
 // readout is the surviving surface for that signal, and it interrupts nobody.
 //
+// WARDEN-1373 — the surviving watch channel is now WHOLLY substantiable, which
+// completes the WARDEN-1274 rationale rather than amending it. Until this slice the
+// watch ping still spoke three classifier-guess reasons ('waiting' / 'erroring' —
+// the same substring guesses that killed the fleet alert — plus 'blocked', a
+// parity member inherited from the retired attention machinery). They are removed
+// from the watch's trigger/need sets, so EVERYTHING this module formats and
+// delivers is now one of: a literal the USER authored ('custom'), a mechanical
+// repetition the poll OBSERVED ('stuck'), or the done cue ('completed' — a quiet
+// working→idle transition). The user-authored-literal argument below was true of
+// only part of the channel before; it genuinely covers the whole channel now.
+//
 // The pure helpers are the ones the unit test exercises; requestAlertPermission /
 // fireWatchNotification / fireBudgetNotification touch browser globals (no
 // Notification API in the Node test runner) and are kept defensive so they can
@@ -76,16 +87,15 @@ export async function requestAlertPermission(): Promise<boolean> {
 
 // Reason → human phrasing for the watch body. Conveys the concrete "why" so the
 // human knows what kind of attention the chat needs, not just that it needs some.
-// `blocked` (WARDEN-514) is never produced by the transition ping (diffWatchAlerts
-// doesn't fire on blocked), but the persistent CURRENT-state row indicator
-// (currentWatchNeed) DOES surface blocked, so its label lives in the SAME vocabulary
-// the ping uses — the row tooltip and the OS toast phrase a blocked chat identically.
+// WARDEN-1373: trimmed to the machine-substantiable survivors (stuck/completed/
+// custom) — the retired 'waiting'/'erroring'/'blocked' entries went with the
+// watch's trigger/need sets (chatWatch.ts), so no production path formats them.
+// The persistent row indicator (currentWatchNeed) reads the same trimmed
+// vocabulary, so the row tooltip and the OS toast phrase any watch claim
+// identically.
 const WATCH_REASON_LABEL: Record<WatchReason, string> = {
-  waiting: 'waiting for your input',
-  erroring: 'erroring',
   stuck: 'stuck (repeating output)',
   completed: 'finished a task',
-  blocked: 'blocked — waiting on a dependency',
   custom: 'matched a watch pattern',
 };
 
@@ -166,7 +176,7 @@ export function formatWatchMessage(row: AgentStateRow, reason: WatchReason): { t
 /**
  * Pure: the reason line for a watched chat's CURRENT needs-you state — the
  * WATCH_REASON_LABEL phrasing plus, when the row carries a signal, the signal quoted
- * verbatim (e.g. "waiting for your input — 'press enter to continue'"). (WARDEN-514.)
+ * verbatim (e.g. "stuck (repeating output) — 'install looping'"). (WARDEN-514.)
  *
  * Sibling of formatWatchMessage's body, MINUS the agent name: the row already shows the
  * chat's name, so the row indicator's tooltip needs only the reason + signal. The row
@@ -183,18 +193,12 @@ export function watchStateLabel(reason: WatchReason, signal?: string | null): st
 
 /**
  * Pure: the severity TONE for a watch reason's crafted in-app toast (WARDEN-530).
- * Mirrors the badge's own red/amber severity split for the broken/slowing reasons
- * and adds a THIRD tone, success (green), for the watch-only `completed` reason —
- * a POSITIVE state ("finished a task") a red/amber split has no analog for:
- *   - erroring / stuck → 'critical'  (broken agent — red)
- *   - waiting / blocked → 'warning'  (needs your input / mild — amber)
- *   - completed        → 'success'   (positive — green)
- *
- * `blocked` (WARDEN-514) is never produced by the transition ping (diffWatchAlerts
- * doesn't fire on blocked), so the fire-loop never reaches this with `blocked` — but the
- * pure function is written to be TOTAL over WatchReason: blocked is a mild state ("waiting
- * on a dependency"), so it shares `warning` (amber) with waiting, matching the row
- * indicator's amber treatment of the milder waiting/blocked pair.
+ * WARDEN-1373: the amber 'warning' tier went with the retired waiting/blocked
+ * reasons; the survivors split red/green:
+ *   - stuck  → 'critical'  (broken agent — red; mechanical repetition observed)
+ *   - custom → 'critical'  (the user's pattern matched — treated as actionable,
+ *     unchanged from its pre-trim fall-through)
+ *   - completed → 'success' (positive — green)
  *
  * `completed` is consciously mapped to success rather than forced into red/amber: the OS
  * channel already fires it (this is parity with the existing channel, not new noise), and
@@ -204,10 +208,9 @@ export function watchStateLabel(reason: WatchReason, signal?: string | null): st
  * (not 'error') so the badge's severity vocabulary is shared; the delivery side maps
  * 'critical' → sonner's `error` variant (see fireWatchInApp).
  */
-export function watchReasonTone(reason: WatchReason): 'critical' | 'warning' | 'success' {
+export function watchReasonTone(reason: WatchReason): 'critical' | 'success' {
   if (reason === 'completed') return 'success';
-  if (reason === 'waiting' || reason === 'blocked') return 'warning';
-  return 'critical'; // erroring + stuck — broken agent
+  return 'critical'; // stuck — broken agent; custom — the user's pattern matched
 }
 
 /**
