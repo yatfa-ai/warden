@@ -2,11 +2,14 @@
 //
 // The deterministic, non-LLM, per-chat, opt-in complement to the fleet-wide
 // Attention desktop alert. The human marks a SPECIFIC chat "watch"; diffWatchAlerts
-// decides WHEN that chat newly needs them (waiting / erroring / stuck / completed),
-// firing on change-into-state ONLY — the near-zero-false-signal bar. The detector
-// is canonical in src/lib/chatWatch.ts (lifted by WARDEN-378 from fleet-wide
-// alerting that WARDEN-509 has since retired); exercised here on the
-// /api/agent-states row path.
+// decides WHEN that chat newly needs them (stuck / completed, plus the user-authored
+// custom), firing on change-into-state ONLY — the near-zero-false-signal bar.
+// WARDEN-1373: the vocabulary is machine-substantiable only — the classifier's
+// substring guesses ('waiting' / 'erroring') no longer turn into watch claims, and
+// this file pins that trim with dedicated litmus + mutation checks (see the
+// WARDEN-1373 section below). The detector is canonical in src/lib/chatWatch.ts
+// (lifted by WARDEN-378 from fleet-wide alerting that WARDEN-509 has since retired);
+// exercised here on the /api/agent-states row path.
 //
 // No front-end test runner in this repo, so (like desktopAlerts.test.mjs) this loads
 // the REAL src/lib/chatWatch.ts (transpiled TS -> ESM via Vite's OXC transform) and
@@ -48,61 +51,87 @@ const row = (key, state, extra = {}) => ({ id: key, key, name: key, state, ...ex
 
 console.log('\nfirst observation is a baseline — no fire (diffWatchAlerts: `if (!p) continue`)');
 test('no prior for a watched key → no alert', () => {
-  assert.equal(diffWatchAlerts({}, { a: row('a', 'waiting') }, ['a']).length, 0);
+  assert.equal(diffWatchAlerts({}, { a: row('a', 'stuck') }, ['a']).length, 0);
 });
 test('null prev → no alert', () => {
-  assert.equal(diffWatchAlerts(null, { a: row('a', 'erroring') }, ['a']).length, 0);
+  assert.equal(diffWatchAlerts(null, { a: row('a', 'stuck') }, ['a']).length, 0);
 });
 test('null cur → no alert', () => {
   assert.equal(diffWatchAlerts({ a: row('a', 'active') }, null, ['a']).length, 0);
 });
 
-console.log('\ntransition into a needs-you state fires');
-test('active → waiting fires (the watch\'s primary case)', () => {
-  const [a] = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'waiting') }, ['a']);
-  assert.equal(a.reason, 'waiting');
-});
-test('active → erroring fires', () => {
-  const [a] = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'erroring') }, ['a']);
-  assert.equal(a.reason, 'erroring');
-});
-test('active → stuck fires', () => {
+console.log('\ntransition into a needs-you state fires (stuck / completed / custom — WARDEN-1373 survivors)');
+test('active → stuck fires (the surviving direct needs-you state)', () => {
   const [a] = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'stuck') }, ['a']);
   assert.equal(a.reason, 'stuck');
-});
-test('blocked → waiting fires (newly waiting, regardless of prior)', () => {
-  const [a] = diffWatchAlerts({ a: row('a', 'blocked') }, { a: row('a', 'waiting') }, ['a']);
-  assert.equal(a.reason, 'waiting');
 });
 test('active → idle fires completed (working→idle flip)', () => {
   const [a] = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'idle') }, ['a']);
   assert.equal(a.reason, 'completed');
 });
 
+console.log('\nWARDEN-1373: the classifier-guess states are NO LONGER watch reasons');
+// THE LITMUS. src/agentState.js substring-classifies a PASSING suite's
+// "✓ 42 tests passed, 0 errors" line as `erroring` and coordination prose as
+// `waiting`. Pre-trim, a watched chat showing that line pinged the human with a
+// red "erroring" claim the machine never observed. The trim removes those states
+// from WATCH_DIRECT_STATES / WATCH_NEED_STATES, so:
+//  - diffWatchAlerts fires NOTHING on a change-into erroring/waiting/blocked, and
+//  - currentWatchNeed maps those CURRENT states to null (no row dot, no tooltip).
+// Success criterion 4: a watched chat emitting the passing-suite line produces no
+// OS notification (no diffWatchAlerts alert), no in-app toast (same), no row dot
+// (currentWatchNeed → null).
+test('active → erroring does NOT fire (a passing suite reads erroring — retired)', () => {
+  assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'erroring') }, ['a']).length, 0);
+});
+test('active → waiting does NOT fire (prose reads waiting — retired)', () => {
+  assert.equal(diffWatchAlerts({ a: row('a', 'blocked') }, { a: row('a', 'waiting') }, ['a']).length, 0);
+});
+test('blocked → idle fires completed, though blocked itself is retired (WORKING_STATES untouched)', () => {
+  // The completed cue is deliberately UNTOUCHED by the trim: WORKING_STATES stays
+  // broad, so a chat the classifier had labeled 'blocked' (or 'waiting'/'erroring')
+  // that goes idle still fires the machine-observed "it finished" — trimming it
+  // would silently drop true completions. Success criterion 1's WORKING_STATES
+  // exception, pinned here.
+  const [a] = diffWatchAlerts({ a: row('a', 'blocked') }, { a: row('a', 'idle') }, ['a']);
+  assert.equal(a.reason, 'completed');
+});
+test('active → blocked does NOT fire (blocked is retired from the watch entirely)', () => {
+  assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'blocked') }, ['a']).length, 0);
+});
+// MUTATION CHECKS — the trim must stay a trim. Re-adding a retired member to the
+// trigger/need sets turns one of these RED:
+//   'waiting'/'erroring' re-added to WATCH_DIRECT_STATES → the two no-fire tests
+//   above go red (an alert fires where exactly zero is asserted).
+//   'blocked' re-added to WATCH_NEED_STATES → the currentWatchNeed 'blocked → null'
+//   test in the currentWatchNeed section below goes red.
+test('MUTATION GUARD: change-into erroring yields exactly NO WatchAlert', () => {
+  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'erroring') }, ['a']);
+  assert.deepEqual(alerts, [], 'erroring must not produce a WatchAlert — if this fires, it was re-added to WATCH_DIRECT_STATES');
+});
+test('MUTATION GUARD: change-into waiting yields exactly NO WatchAlert', () => {
+  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'waiting') }, ['a']);
+  assert.deepEqual(alerts, [], 'waiting must not produce a WatchAlert — if this fires, it was re-added to WATCH_DIRECT_STATES');
+});
+
 console.log('\na transition fires ONCE across consecutive diffs (prev advances — never twice)');
-test('active→waiting fires once, then waiting persists without re-firing', () => {
+test('active→stuck fires once, then stuck persists without re-firing', () => {
   let prev = {};
   const watched = ['a'];
   // poll 1: first observation — baseline, no fire
   let cur = { a: row('a', 'active') };
   assert.equal(diffWatchAlerts(prev, cur, watched).length, 0);
   prev = cur;
-  // poll 2: transition active→waiting — fires exactly once
-  cur = { a: row('a', 'waiting') };
+  // poll 2: transition active→stuck — fires exactly once
+  cur = { a: row('a', 'stuck') };
   assert.equal(diffWatchAlerts(prev, cur, watched).length, 1);
   prev = cur;
-  // poll 3: still waiting — no repeat (persistent state never re-fires)
-  cur = { a: row('a', 'waiting') };
+  // poll 3: still stuck — no repeat (persistent state never re-fires)
+  cur = { a: row('a', 'stuck') };
   assert.equal(diffWatchAlerts(prev, cur, watched).length, 0);
 });
 
 console.log('\npersistent state never re-fires');
-test('waiting → waiting does NOT fire', () => {
-  assert.equal(diffWatchAlerts({ a: row('a', 'waiting') }, { a: row('a', 'waiting') }, ['a']).length, 0);
-});
-test('erroring → erroring does NOT fire', () => {
-  assert.equal(diffWatchAlerts({ a: row('a', 'erroring') }, { a: row('a', 'erroring') }, ['a']).length, 0);
-});
 test('stuck → stuck does NOT fire', () => {
   assert.equal(diffWatchAlerts({ a: row('a', 'stuck') }, { a: row('a', 'stuck') }, ['a']).length, 0);
 });
@@ -111,11 +140,8 @@ test('idle → idle does NOT fire (no completed, no bare idle)', () => {
 });
 
 console.log('\nrecovery never fires');
-test('waiting → active does NOT fire (recovery)', () => {
-  assert.equal(diffWatchAlerts({ a: row('a', 'waiting') }, { a: row('a', 'active') }, ['a']).length, 0);
-});
-test('erroring → active does NOT fire (recovery)', () => {
-  assert.equal(diffWatchAlerts({ a: row('a', 'erroring') }, { a: row('a', 'active') }, ['a']).length, 0);
+test('stuck → active does NOT fire (recovery)', () => {
+  assert.equal(diffWatchAlerts({ a: row('a', 'stuck') }, { a: row('a', 'active') }, ['a']).length, 0);
 });
 test('stuck → idle fires completed (stuck is a working state → working→idle)', () => {
   // A stuck agent going idle resolved its loop — stuck counts as a working state,
@@ -128,37 +154,27 @@ console.log('\nbare idle (non-working → idle) does NOT fire');
 test('capture_failed → idle does NOT fire (capture_failed is not a working state)', () => {
   assert.equal(diffWatchAlerts({ a: row('a', 'capture_failed') }, { a: row('a', 'idle') }, ['a']).length, 0);
 });
-test('active → blocked does NOT fire (blocked is not a needs-you state)', () => {
-  assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'blocked') }, ['a']).length, 0);
-});
 
 console.log('\nonly WATCHED keys are considered');
 test('a transition on an un-watched key produces no alert', () => {
   const prev = { a: row('a', 'active'), b: row('b', 'active') };
-  const cur = { a: row('a', 'waiting'), b: row('b', 'waiting') };
+  const cur = { a: row('a', 'stuck'), b: row('b', 'stuck') };
   const alerts = diffWatchAlerts(prev, cur, ['a']);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].key, 'a');
 });
 test('an empty watched set produces no alerts', () => {
-  assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'waiting') }, []).length, 0);
+  assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'stuck') }, []).length, 0);
 });
 test('a watched key absent this poll is skipped (no fire; caller keeps prior)', () => {
   assert.equal(diffWatchAlerts({ a: row('a', 'active') }, {}, ['a']).length, 0);
 });
 test('accepts a Set of watched keys (the hook passes the live set)', () => {
-  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'waiting') }, new Set(['a']));
+  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'stuck') }, new Set(['a']));
   assert.equal(alerts.length, 1);
 });
 
-console.log('\nmultiple alerts sort by urgency (erroring > stuck > completed > waiting)');
-test('erroring sorts before waiting', () => {
-  const prev = { a: row('a', 'active'), b: row('b', 'active') };
-  const cur = { a: row('a', 'waiting'), b: row('b', 'erroring') };
-  const alerts = diffWatchAlerts(prev, cur, ['a', 'b']);
-  assert.equal(alerts[0].reason, 'erroring');
-  assert.equal(alerts[1].reason, 'waiting');
-});
+console.log('\nmultiple alerts sort by urgency (stuck > completed = custom — WARDEN-1373 survivors)');
 test('stuck sorts before completed', () => {
   const prev = { a: row('a', 'active'), b: row('b', 'active') };
   const cur = { a: row('a', 'idle'), b: row('b', 'stuck') };
@@ -166,24 +182,43 @@ test('stuck sorts before completed', () => {
   assert.equal(alerts[0].reason, 'stuck');
   assert.equal(alerts[1].reason, 'completed');
 });
+test('custom shares completed\'s tier — same-priority alerts keep insertion order', () => {
+  // WATCH_REASON_PRIORITY gives completed and custom the same number; the sort is
+  // stable, so same-tier alerts keep watched-key order (deterministic, never random).
+  const prev = { a: row('a', 'active'), b: row('b', 'active') };
+  const cur = { a: row('a', 'idle'), b: row('b', 'active', { customMatch: { pattern: 'D', line: 'x' } }) };
+  const alerts = diffWatchAlerts(prev, cur, ['a', 'b']);
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].reason, 'completed');
+  assert.equal(alerts[1].reason, 'custom');
+});
 
 console.log('\nthe alert carries the row + transition states (for the targeted formatter)');
 test('alert carries name + signal + from/to', () => {
   const prev = { a: row('a', 'active') };
-  const cur = { a: row('a', 'waiting', { name: 'warden-worker', signal: 'press enter to continue' }) };
+  const cur = { a: row('a', 'stuck', { name: 'warden-worker', signal: 'same error 5x in a row' }) };
   const [a] = diffWatchAlerts(prev, cur, ['a']);
   assert.equal(a.row.name, 'warden-worker');
-  assert.equal(a.row.signal, 'press enter to continue');
+  assert.equal(a.row.signal, 'same error 5x in a row');
   assert.equal(a.fromState, 'active');
-  assert.equal(a.toState, 'waiting');
+  assert.equal(a.toState, 'stuck');
 });
 
-console.log('\ndetectWatchCompleted: the working→idle completion rule');
+console.log('\ndetectWatchCompleted: the working→idle completion rule (UNTOUCHED by WARDEN-1373)');
 test('active → idle is completed', () => {
   assert.equal(detectWatchCompleted('active', 'idle'), true);
 });
-test('waiting → idle is completed (waiting is a working state)', () => {
+test('waiting → idle is completed (waiting is still a WORKING state — set left broad)', () => {
+  // WARDEN-1373: 'waiting' left the watch's REASON vocabulary but stays in
+  // WORKING_STATES — the completed cue's claim is the quiet transition itself, not
+  // the prior label's accuracy, and trimming it would drop true completions.
   assert.equal(detectWatchCompleted('waiting', 'idle'), true);
+});
+test('erroring → idle is completed (same — a mislabeled-but-working chat finishing still counts)', () => {
+  assert.equal(detectWatchCompleted('erroring', 'idle'), true);
+});
+test('blocked → idle is completed (same)', () => {
+  assert.equal(detectWatchCompleted('blocked', 'idle'), true);
 });
 test('idle → idle is NOT completed (idle is not working)', () => {
   assert.equal(detectWatchCompleted('idle', 'idle'), false);
@@ -223,49 +258,53 @@ test('WATCH_PING_COOLDOWN_MS defaults to ~5 min', () => {
 });
 
 test('first fire (no prior) fires + anchors the window at now', () => {
-  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting')], {}, 1000, 5000);
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'stuck')], {}, 1000, 5000);
   assert.equal(fire.length, 1);
   assert.equal(fire[0].key, 'a');
-  assert.equal(lastFired.a.reason, 'waiting');
+  assert.equal(lastFired.a.reason, 'stuck');
   assert.equal(lastFired.a.firedAt, 1000);
 });
 
 test('null lastFired → every alert fires (first-fire baseline)', () => {
-  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting'), walert('b', 'erroring')], null, 1000, 5000);
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'stuck'), walert('b', 'completed')], null, 1000, 5000);
   assert.equal(fire.length, 2);
   assert.equal(lastFired.a.firedAt, 1000);
   assert.equal(lastFired.b.firedAt, 1000);
 });
 
-test('same key + same reason re-entered WITHIN the window is SUPPRESSED', () => {
-  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
-  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting')], prev, 3000, 5000);
+test('same key + same reason re-entered WITHIN the window is SUPPRESSED (anchor not advanced)', () => {
+  const prev = { a: { reason: 'stuck', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'stuck')], prev, 3000, 5000);
   assert.equal(fire.length, 0);
   // the anchor is NOT advanced — the window stays measured from the first fire
   assert.equal(lastFired.a.firedAt, 1000);
-  assert.equal(lastFired.a.reason, 'waiting');
+  assert.equal(lastFired.a.reason, 'stuck');
 });
 
 test('same key + same reason re-entered AFTER the window fires + re-anchors', () => {
-  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
-  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting')], prev, 7000, 5000);
+  const prev = { a: { reason: 'stuck', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'stuck')], prev, 7000, 5000);
   assert.equal(fire.length, 1);
   assert.equal(lastFired.a.firedAt, 7000);
 });
 
-test('waiting → erroring WITHIN the window is an ESCALATION → fires + resets timer', () => {
-  // lower priority number = more urgent: erroring(0) < waiting(3)
-  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
-  const { fire, lastFired } = applyWatchCooldown([walert('a', 'erroring')], prev, 3000, 5000);
+test('completed → stuck WITHIN the window is an ESCALATION → fires + resets timer', () => {
+  // lower priority number = more urgent: stuck(0) < completed(1). The escalation pair
+  // changed with WARDEN-1373's trim (was waiting(3) → erroring(0)); the mechanism —
+  // a more urgent need never waits out a window — is unchanged.
+  const prev = { a: { reason: 'completed', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'stuck')], prev, 3000, 5000);
   assert.equal(fire.length, 1);
-  assert.equal(lastFired.a.reason, 'erroring');
+  assert.equal(lastFired.a.reason, 'stuck');
   assert.equal(lastFired.a.firedAt, 3000); // reset
 });
 
 test('escalation RESETS the timer: a later same-reason re-entry is suppressed vs the NEW anchor', () => {
-  // fire waiting@1000; escalate erroring@3000 (resets anchor to 3000); re-enter
-  // erroring@7000. From the RESET anchor: 7000-3000=4000 < 5000 → suppressed. From
-  // the original t=1000 it would be 6000 >= 5000 → fire. The suppress proves reset.
+  // fire stuck@1000; escalate stuck... use completed→stuck→stuck: fire stuck@1000 is
+  // not an escalation pair here, so: fire completed@1000 (first fire), escalate
+  // stuck@3000 (resets anchor to 3000), re-enter stuck@7000. From the RESET anchor:
+  // 7000-3000=4000 < 5000 → suppressed. From the original t=1000 it would be
+  // 6000 >= 5000 → fire. The suppress proves reset.
   let lastFired = {};
   let pings = 0;
   const step = (alerts, now) => {
@@ -273,29 +312,39 @@ test('escalation RESETS the timer: a later same-reason re-entry is suppressed vs
     lastFired = r.lastFired;
     pings += r.fire.length;
   };
-  step([walert('a', 'waiting')], 1000);  // fires (1)
-  step([walert('a', 'erroring')], 3000); // escalation → fires + resets to 3000 (2)
-  step([walert('a', 'erroring')], 7000); // 7000-3000=4000 < 5000 → suppressed
+  step([walert('a', 'completed')], 1000); // fires (1)
+  step([walert('a', 'stuck')], 3000);     // escalation → fires + resets to 3000 (2)
+  step([walert('a', 'stuck')], 7000);     // 7000-3000=4000 < 5000 → suppressed
   assert.equal(pings, 2);
 });
 
-test('erroring → waiting WITHIN the window is LOWER urgency → suppressed', () => {
-  const prev = { a: { reason: 'erroring', firedAt: 1000 } };
-  const { fire } = applyWatchCooldown([walert('a', 'waiting')], prev, 3000, 5000);
+test('stuck → completed WITHIN the window is LOWER urgency → suppressed', () => {
+  const prev = { a: { reason: 'stuck', firedAt: 1000 } };
+  const { fire } = applyWatchCooldown([walert('a', 'completed')], prev, 3000, 5000);
   assert.equal(fire.length, 0);
 });
 
-test('waiting → completed WITHIN the window fires (completed outranks waiting on the urgency ladder)', () => {
-  // Documents the deliberate WARDEN-452 choice: `completed` participates in the uniform
-  // priority rule, not special-cased. completed(2) < waiting(3) → escalation → fires/reset.
-  // A finished task is genuinely new, actionable info; suppressing it risks a false negative.
-  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
-  const { fire, lastFired } = applyWatchCooldown([walert('a', 'completed')], prev, 3000, 5000);
+test('same-tier custom → completed WITHIN the window is a re-entry → suppressed', () => {
+  // custom(1) = completed(1): >= is a same-or-lower urgency re-entry, suppressed
+  // within the window like any other. Completed does not outrank anything anymore
+  // post-trim — it shares its tier with custom and only loses to stuck.
+  const prev = { a: { reason: 'custom', firedAt: 1000 } };
+  const { fire } = applyWatchCooldown([walert('a', 'completed')], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+});
+
+test('stuck → completed AFTER the window fires (lower-urgency re-entry once the window elapses)', () => {
+  // completed(1) over a prior stuck(0) fire is same-or-LOWER urgency → suppressed
+  // within the window (the test above), but never silenced indefinitely: after the
+  // window elapses it fires and re-anchors. This pins the AFTER-window branch for a
+  // lower-urgency reason.
+  const prev = { a: { reason: 'stuck', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'completed')], prev, 7000, 5000);
   assert.equal(fire.length, 1);
   assert.equal(lastFired.a.reason, 'completed');
 });
 
-test('a flapping key (erroring → active → erroring each poll) → ONE ping per episode window', () => {
+test('a flapping key (stuck → active → stuck each poll) → ONE ping per episode window', () => {
   const cooldown = WATCH_PING_COOLDOWN_MS;
   let lastFired = {};
   let pings = 0;
@@ -304,27 +353,27 @@ test('a flapping key (erroring → active → erroring each poll) → ONE ping p
     lastFired = r.lastFired;
     pings += r.fire.length;
   };
-  // episode window [0, 5min): several re-entries into erroring
-  step([walert('a', 'erroring')], 0);            // first erroring → fires (1)
-  step([walert('a', 'erroring')], 60_000);       // re-entry within window → suppressed
-  step([walert('a', 'erroring')], 120_000);      // suppressed
-  step([walert('a', 'erroring')], 240_000);      // suppressed
+  // episode window [0, 5min): several re-entries into stuck
+  step([walert('a', 'stuck')], 0);               // first stuck → fires (1)
+  step([walert('a', 'stuck')], 60_000);          // re-entry within window → suppressed
+  step([walert('a', 'stuck')], 120_000);         // suppressed
+  step([walert('a', 'stuck')], 240_000);         // suppressed
   assert.equal(pings, 1);
   // after the window elapses, a re-entry fires again (a new episode)
-  step([walert('a', 'erroring')], cooldown + 60_000);
+  step([walert('a', 'stuck')], cooldown + 60_000);
   assert.equal(pings, 2);
 });
 
 test('different keys are independent (no cross-key cooldown)', () => {
-  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  const prev = { a: { reason: 'stuck', firedAt: 1000 } };
   // key a same-reason within window → suppressed; key b no prior → fires
-  const { fire } = applyWatchCooldown([walert('a', 'waiting'), walert('b', 'waiting')], prev, 3000, 5000);
+  const { fire } = applyWatchCooldown([walert('a', 'stuck'), walert('b', 'stuck')], prev, 3000, 5000);
   assert.equal(fire.length, 1);
   assert.equal(fire[0].key, 'b');
 });
 
 test('a key with a prior anchor but no alert this diff KEEPS its anchor (carry-forward)', () => {
-  const prev = { a: { reason: 'waiting', firedAt: 1000 }, b: { reason: 'erroring', firedAt: 2000 } };
+  const prev = { a: { reason: 'stuck', firedAt: 1000 }, b: { reason: 'completed', firedAt: 2000 } };
   const { fire, lastFired } = applyWatchCooldown([], prev, 3000, 5000);
   assert.equal(fire.length, 0);
   assert.equal(lastFired.a.firedAt, 1000); // preserved
@@ -332,8 +381,8 @@ test('a key with a prior anchor but no alert this diff KEEPS its anchor (carry-f
 });
 
 test('the input lastFired map is NOT mutated (immutability)', () => {
-  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
-  const { lastFired } = applyWatchCooldown([walert('a', 'waiting')], prev, 3000, 5000);
+  const prev = { a: { reason: 'stuck', firedAt: 1000 } };
+  const { lastFired } = applyWatchCooldown([walert('a', 'stuck')], prev, 3000, 5000);
   assert.equal(prev.a.firedAt, 1000);      // input unchanged
   assert.equal(lastFired.a.firedAt, 1000); // suppressed → anchor retained
   assert.notEqual(lastFired, prev);        // a new map is returned
@@ -354,30 +403,34 @@ test('composes with diffWatchAlerts: a flapping chat pings once per window end-t
     pings += r.fire.length;
   };
   poll('active', 0);                                   // baseline (no alert)
-  poll('erroring', 60_000);                            // active→erroring → fires (1)
+  poll('stuck', 60_000);                               // active→stuck → fires (1)
   poll('active', 120_000);                             // recovery (no alert)
-  poll('erroring', 180_000);                           // re-entry within window → suppressed
+  poll('stuck', 180_000);                              // re-entry within window → suppressed
   poll('active', 240_000);                             // recovery
-  poll('erroring', 300_000);                           // suppressed (1)
+  poll('stuck', 300_000);                              // suppressed (1)
   assert.equal(pings, 1);
   // after the window from the first fire (t=60_000) elapses, a re-entry fires
   poll('active', 60_000 + cooldown + 10_000);
-  poll('erroring', 60_000 + cooldown + 20_000);        // fires (2)
+  poll('stuck', 60_000 + cooldown + 20_000);           // fires (2)
   assert.equal(pings, 2);
 });
 
 console.log('\ncurrentWatchNeed (WARDEN-514): current state → persistent needs-you reason');
-test('waiting → waiting', () => {
-  assert.equal(currentWatchNeed(row('a', 'waiting')), 'waiting');
-});
-test('erroring → erroring', () => {
-  assert.equal(currentWatchNeed(row('a', 'erroring')), 'erroring');
-});
-test('stuck → stuck', () => {
+test('stuck → stuck (the surviving persistent needs-you state)', () => {
   assert.equal(currentWatchNeed(row('a', 'stuck')), 'stuck');
 });
-test('blocked → blocked (parity with the AttentionBadge; NOT a transition ping)', () => {
-  assert.equal(currentWatchNeed(row('a', 'blocked')), 'blocked');
+test('erroring → null (WARDEN-1373: retired — a PASSING suite reads erroring)', () => {
+  // THE row-dot half of the litmus: a watched chat whose classifier state is
+  // `erroring` (e.g. it just printed "✓ 42 tests passed, 0 errors") shows the
+  // neutral glyph — no red pulsing dot, no "erroring" tooltip.
+  assert.equal(currentWatchNeed(row('a', 'erroring')), null);
+});
+test('waiting → null (WARDEN-1373: retired — prose reads waiting)', () => {
+  assert.equal(currentWatchNeed(row('a', 'waiting')), null);
+});
+test('blocked → null (WARDEN-1373: retired — MUTATION GUARD, see WATCH_NEED_STATES)', () => {
+  // If this goes red, 'blocked' was re-added to WATCH_NEED_STATES.
+  assert.equal(currentWatchNeed(row('a', 'blocked')), null);
 });
 test('active → null (neutral — a working chat does not need you right now)', () => {
   assert.equal(currentWatchNeed(row('a', 'active')), null);
@@ -392,10 +445,10 @@ test('guards a row with no state', () => {
   assert.equal(currentWatchNeed({}), null);
   assert.equal(currentWatchNeed({ state: undefined }), null);
 });
-test('blocked is NOT a transition ping reason (current-state only, WARDEN-514)', () => {
-  // diffWatchAlerts fires change-into waiting/erroring/stuck (WATCH_DIRECT_STATES) but
-  // NOT blocked — blocked is a persistent needs-you state surfaced only by
-  // currentWatchNeed on the row, never a once-per-transition OS ping.
+test('blocked is NOT a transition ping reason — and not a row reason either (WARDEN-1373)', () => {
+  // diffWatchAlerts fires change-into 'stuck' ONLY (WATCH_DIRECT_STATES). blocked was
+  // never a transition ping (WARDEN-514 made it current-state-only) and WARDEN-1373
+  // retired it from the row indicator too — no watch surface reports it.
   assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'blocked') }, ['a']).length, 0);
 });
 
@@ -435,25 +488,25 @@ test('a custom match that CLEARS (had it, now gone) does NOT fire', () => {
 });
 
 console.log('\ncustom takes the single per-key slot when both it + a state transition newly appear');
-test('custom wins precedence over an erroring onset (one alert, reason "custom")', () => {
-  // Both newly appear this tick: state flipped active→erroring AND a customMatch
+test('custom wins precedence over a stuck onset (one alert, reason "custom")', () => {
+  // Both newly appear this tick: state flipped active→stuck AND a customMatch
   // appeared. Precedence emits ONE alert (custom) — the user explicitly opted into
-  // the pattern, so its specific signal is the more useful ping. The erroring STATE
+  // the pattern, so its specific signal is the more useful ping. The stuck STATE
   // is still on the row (the badge shows it); only the PING label is custom. This
-  // ADDS a signal without relaxing the erroring detection.
+  // ADDS a signal without relaxing the stuck detection.
   const prev = { a: row('a', 'active') };
-  const cur = { a: row('a', 'erroring', { customMatch: match('Deploy', 'deploy failed') }) };
+  const cur = { a: row('a', 'stuck', { customMatch: match('Deploy', 'deploy failed') }) };
   const alerts = diffWatchAlerts(prev, cur, ['a']);
   assert.equal(alerts.length, 1, 'exactly one alert per key per diff');
   assert.equal(alerts[0].reason, 'custom');
-  assert.equal(alerts[0].row.state, 'erroring', 'the erroring state still flows on the row');
+  assert.equal(alerts[0].row.state, 'stuck', 'the stuck state still flows on the row');
 });
 test('a pure state transition (no customMatch) still fires the state reason, unchanged', () => {
-  // Regression guard: custom precedence must not swallow a normal erroring ping when
+  // Regression guard: custom precedence must not swallow a normal stuck ping when
   // no pattern matched. Behavior identical to pre-WARDEN-540.
-  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'erroring') }, ['a']);
+  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'stuck') }, ['a']);
   assert.equal(alerts.length, 1);
-  assert.equal(alerts[0].reason, 'erroring');
+  assert.equal(alerts[0].reason, 'stuck');
 });
 
 console.log('\ncustom participates in the cooldown (a flapping match collapses to one ping/episode)');
@@ -475,12 +528,14 @@ test('a custom re-match AFTER the cooldown window re-fires (new episode)', () =>
 console.log('\ncurrentWatchNeed: a currently-matching pattern is a persistent needs-you signal');
 test('a row with customMatch → "custom" (precedence over the pane state)', () => {
   assert.equal(currentWatchNeed(row('a', 'idle', { customMatch: match('D', 'x') })), 'custom');
-  // Even an erroring pane with a custom match surfaces 'custom' on the row glyph —
-  // the user's pattern is the specific signal worth showing at a glance.
+  // Even a classifier-guessed-state pane (erroring) with a custom match surfaces
+  // 'custom' on the row glyph — the user's pattern is the specific OBSERVED signal
+  // worth showing at a glance, while the guessed state alone surfaces nothing.
   assert.equal(currentWatchNeed(row('a', 'erroring', { customMatch: match('D', 'x') })), 'custom');
 });
-test('a row with no customMatch falls through to the pane state (unchanged)', () => {
-  assert.equal(currentWatchNeed(row('a', 'erroring')), 'erroring');
+test('a row with no customMatch falls through to the pane state (trimmed set)', () => {
+  assert.equal(currentWatchNeed(row('a', 'stuck')), 'stuck');
+  assert.equal(currentWatchNeed(row('a', 'erroring')), null); // retired — WARDEN-1373
   assert.equal(currentWatchNeed(row('a', 'idle')), null);
 });
 

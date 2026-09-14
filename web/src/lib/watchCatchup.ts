@@ -41,7 +41,7 @@ import type { AgentStateRow } from '@/lib/types';
 export const WATCH_MISS_LOG_KEY = 'warden:watchMissedLog';
 export const WATCH_MISS_SEEN_KEY = 'warden:watchMissedSeen';
 
-// Ring-buffer cap. A watched chat that flaps (e.g. waiting → active → waiting) can
+// Ring-buffer cap. A watched chat that flaps (e.g. stuck → active → stuck) can
 // fire repeatedly across a long step-away; the log is bounded so it never grows
 // unbounded in localStorage across a long session. 50 is generous (one away session
 // rarely produces more than a handful) yet cheap to serialize, and it is only ever
@@ -53,7 +53,13 @@ export const WATCH_MISS_LOG_MAX = 50;
 export interface WatchMiss {
   /** Pane key (row.key || row.id) — the deep-link target, same identity openChat uses. */
   key: string;
-  /** Why the chat newly needed the human (the WatchReason from diffWatchAlerts). */
+  /**
+   * Why the chat newly needed the human (the WatchReason from diffWatchAlerts).
+   * WARDEN-1373: production only records stuck/completed/custom now, but rows
+   * persisted before that trim (this log survives an upgrade in localStorage) can
+   * still carry a retired spelling at runtime — they render via the legacy label
+   * map (watchMissReasonLabel) and reconcile one-way (see WATCH_NEEDS_YOU_STATES).
+   */
   reason: WatchReason;
   /** Agent display name (row.name || row.key || row.id) for the catch-up line. */
   name: string;
@@ -128,34 +134,38 @@ export function inAwayWindow(miss: WatchMiss, since: number): boolean {
 
 // The persistent needs-you states a CURRENT snapshot can reconcile an away miss
 // against (WARDEN-476). Mirrors chatWatch.ts's WATCH_NEED_STATES (the persistent
-// needs-you set — WATCH_DIRECT_STATES plus 'blocked') — keep in sync. A watched chat
-// whose current state is NOT one of these has RECOVERED since the miss fired, so its
-// away miss is suppressed at read-time (reconcileAwayMisses) and the catch-up agrees
-// with the live return-banner callout. `blocked` (WARDEN-1217) puts a chat that
-// entered blocked while the user was away on the same footing as waiting/erroring/
-// stuck — the class of chat that most clearly needs attention must not be the one
-// silently dropped from the catch-up. Mirrored locally (not imported) to preserve
-// this module's dependency-free discipline — the same way WATCH_MISS_REASON_LABEL
-// below mirrors desktopAlerts' WATCH_REASON_LABEL.
-const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['waiting', 'erroring', 'stuck', 'blocked']);
+// needs-you set) — keep in sync. WARDEN-1373: trimmed to {'stuck'} with it. A
+// watched chat whose current state is NOT in this set has RECOVERED since the miss
+// fired, so its away miss is suppressed at read-time (reconcileAwayMisses) and the
+// catch-up agrees with the live row indicator. NOTE the legacy consequence, named
+// per the ticket: a PRE-TRIM persisted miss (reason 'waiting'/'erroring'/'blocked')
+// whose chat now sits in one of those states is suppressed — 'stuck' is the only
+// current state that still counts as needs-you, so legacy rows get honest ONE-WAY
+// semantics (kept while the chat is verifiably stuck; dropped the moment the
+// machine cannot substantiate a current need). No production path emits those
+// reasons anymore; only rows persisted before this trim can carry them.
+// Mirrored locally (not imported) to preserve this module's dependency-free
+// discipline — the same way WATCH_MISS_REASON_LABEL below mirrors desktopAlerts'
+// WATCH_REASON_LABEL.
+const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['stuck']);
 
 // Urgency precedence for ranking surviving misses (WARDEN-476). Mirrors chatWatch.ts
-// WATCH_REASON_PRIORITY (:54) — keep in sync. The catch-up ranks survivors by the
-// SAME order the live pings FIRE in (diffWatchAlerts sorts its alerts by this table),
-// so the in-app catch-up is consistent with the live channel. Lower number = MORE
-// urgent (sorts first); a stable firedAt-desc tiebreak keeps same-reason misses
-// newest-first. NOTE this ranks 'waiting' LAST among survivors — see WARDEN-476's PR:
-// reusing the keyed fire-order table over attentionRollup's ATTENTION_RANK (which
-// promotes 'waiting' first) is the deliberate choice, for cross-channel consistency
-// with the order the pings themselves fire. Mirrored locally for the same
-// dependency-free reason as WATCH_NEEDS_YOU_STATES above.
+// WATCH_REASON_PRIORITY — keep in sync. WARDEN-1373: trimmed to the surviving
+// reasons, preserving their relative order (stuck < completed = custom). The catch-up
+// ranks survivors by the SAME order the live pings FIRE in (diffWatchAlerts sorts its
+// alerts by this table), so the in-app catch-up is consistent with the live channel.
+// Lower number = MORE urgent (sorts first); a stable firedAt-desc tiebreak keeps
+// same-reason misses newest-first. Mirrored locally for the dependency-free reason
+// as WATCH_NEEDS_YOU_STATES above.
+//
+// LEGACY LOGS: a miss persisted before WARDEN-1373 can carry a retired reason, whose
+// lookup here is `undefined` — `undefined - number` is NaN, and `NaN` is falsy, so
+// the `|| b.firedAt - a.firedAt` tiebreak takes over: a legacy row ranks by RECENCY
+// (against survivors and other legacy rows alike), deterministically under V8's
+// stable sort. That is the honest reading — a historical row has no current urgency
+// tier — and it is pinned by a unit test.
 const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
-  // `blocked` (4) mirrors chatWatch.ts (WARDEN-514): unreachable on the catch-up path —
-  // a miss is a recorded TRANSITION ping, and the ping never fires on blocked — so its
-  // slot exists only to satisfy the exhaustive Record<WatchReason, number>. `custom`
-  // (2, WARDEN-540) mirrors chatWatch.ts's priority so a custom-pattern miss ranks in
-  // the SAME urgency tier here as the ping fired there (cross-channel consistency).
-  erroring: 0, stuck: 1, completed: 2, custom: 2, waiting: 3, blocked: 4,
+  stuck: 0, completed: 1, custom: 1,
 };
 
 /**
@@ -164,12 +174,13 @@ const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
  * (WARDEN-476). This is the candidate list the catch-up surface renders AFTER
  * reconcileAwayMisses suppresses the recovered ones.
  *
- * Dedup-by-newest (not oldest) means a chat that flapped (e.g. fired waiting, then
- * later erroring, while you were away) surfaces ONCE with its latest, most
- * actionable reason — never two rows for one chat. The urgency ranking (WATCH_REASON_PRIORITY)
- * puts a live "erroring" ABOVE a trivial "finished a task" (goal #2): a stable
- * firedAt-desc tiebreak keeps the prior newest-first behaviour for an equal-reason
- * set, so this is behaviour-preserving for single-reason inputs.
+ * Dedup-by-newest (not oldest) means a chat that flapped (e.g. fired stuck, then
+ * later matched its pattern again, while you were away) surfaces ONCE with its
+ * latest, most actionable reason — never two rows for one chat. The urgency
+ * ranking (WATCH_REASON_PRIORITY) puts a live "stuck" ABOVE a trivial "finished a
+ * task" (goal #2): a stable firedAt-desc tiebreak keeps the prior newest-first
+ * behaviour for an equal-reason set, so this is behaviour-preserving for
+ * single-reason inputs.
  */
 export function awayMisses(log: WatchMiss[], since: number): WatchMiss[] {
   const inWindow = log.filter((m) => inAwayWindow(m, since));
@@ -200,6 +211,11 @@ export function awayMisses(log: WatchMiss[], since: number): WatchMiss[] {
  *  - A miss whose key has a current snapshot that is NO LONGER a persistent needs-you
  *    state (not in WATCH_NEEDS_YOU_STATES) is suppressed — the chat recovered while the
  *    human was away, so directing them to it lands on a chat that needs nothing.
+ *    WARDEN-1373: since the needs-you set is {'stuck'}, a LEGACY persisted miss
+ *    (retired reason) whose chat now sits in 'waiting'/'erroring'/'blocked' is also
+ *    suppressed — the machine can no longer substantiate a current need for it. That
+ *    one-way semantics for legacy rows is deliberate and named (see
+ *    WATCH_NEEDS_YOU_STATES); a legacy row whose chat is verifiably STUCK is kept.
  *  - A key with NO current snapshot (host blip / not yet fetched this poll) is KEPT —
  *    suppressing without confirmation would risk a false NEGATIVE (silently dropping a
  *    real need), the worse failure mode. On a normal return the agent-states poll has
@@ -244,20 +260,42 @@ export function reconcileAwayMisses(
 // WARDEN-1315: exported so WatchCatchup's themed right-click `Copy reason` item can
 // copy the SAME human phrasing the row renders (formatWatchMiss) instead of forking
 // a private copy of the map or copying the raw enum.
+// WARDEN-1373: trimmed to the surviving reasons (stuck/completed/custom) with
+// desktopAlerts' map. The retired spellings survive ONLY in
+// LEGACY_WATCH_MISS_REASON_LABEL below.
 export const WATCH_MISS_REASON_LABEL: Record<WatchReason, string> = {
-  waiting: 'waiting for your input',
-  erroring: 'erroring',
   stuck: 'stuck (repeating output)',
   completed: 'finished a task',
-  // WARDEN-540: mirrors desktopAlerts' WATCH_REASON_LABEL. A custom-pattern ping IS
-  // recorded as a miss (the catch-up covers every transition ping the OS channel
-  // lost), so this phrasing is reachable — it reads identically to the lost toast.
   custom: 'matched a watch pattern',
-  // WARDEN-514: mirrors desktopAlerts' WATCH_REASON_LABEL. Unreachable on the catch-up
-  // path (a miss is a recorded transition ping, and the ping never fires on blocked),
-  // but present so the mirror stays an exhaustive Record<WatchReason, string>.
+};
+
+// WARDEN-1373 tombstone: the phrasings the RETIRED reasons carried, kept ONLY so a
+// miss persisted to localStorage before this trim (watchCatchup's durable log
+// survives an upgrade) still renders the human phrase it always did instead of the
+// bare classifier enum. NO production path emits these reasons anymore — the watch
+// vocabulary is machine-substantiable only — so this map is a read-only rendering
+// legacy, never a source of new claims. Consulted via watchMissReasonLabel (below);
+// do not add members, and do not route new code through it.
+const LEGACY_WATCH_MISS_REASON_LABEL: Record<string, string> = {
+  waiting: 'waiting for your input',
+  erroring: 'erroring',
   blocked: 'blocked — waiting on a dependency',
 };
+
+/**
+ * The human phrasing for a miss's reason — current map first, then the legacy map
+ * for pre-WARDEN-1373 persisted rows, then the raw string. `reason` is typed
+ * WatchReason, but rows loaded from localStorage (loadWatchMissLog) are untyped at
+ * runtime and can still carry a retired spelling; this is the single lookup path
+ * both the rendered row (formatWatchMiss) and the Copy-reason context item use, so
+ * a legacy row renders and copies the SAME faithful phrase. Exported so the
+ * component copies the map's phrasing without re-deriving the fallback chain.
+ */
+export function watchMissReasonLabel(reason: WatchReason | string): string {
+  return WATCH_MISS_REASON_LABEL[reason as WatchReason]
+    || LEGACY_WATCH_MISS_REASON_LABEL[reason]
+    || reason;
+}
 
 /**
  * Pure: the reason-specific catch-up line for ONE miss — names the chat and conveys
@@ -267,7 +305,7 @@ export const WATCH_MISS_REASON_LABEL: Record<WatchReason, string> = {
  * catch-up carries the identical information the lost OS ping would have.
  */
 export function formatWatchMiss(miss: WatchMiss): string {
-  const label = WATCH_MISS_REASON_LABEL[miss.reason] || miss.reason;
+  const label = watchMissReasonLabel(miss.reason);
   return `${miss.name} · ${label}${miss.signal ? ` — '${miss.signal}'` : ''}`;
 }
 
