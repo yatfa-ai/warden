@@ -102,6 +102,9 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     timestampFormat: s.timestampFormat,
     // WARDEN-1204 slice 6: same compile-locked snapshot field.
     hostLabels: s.hostLabels,
+    // WARDEN-1375 (slice 7): same compile-locked snapshot field.
+    agentFilter: s.agentFilter,
+    agentSort: s.agentSort,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -894,6 +897,115 @@ test('a store seeded with two snippets renders them through the replySnippetPrev
   const next = [{ name: 'Rollback', text: 'revert it' }];
   store.getState().setSnippets(next);
   assert.deepEqual(replySnippetPreview(store.getState().snippets), next);
+});
+
+console.log('\nWARDEN-1375 (roadmap slice 7) — agentFilter/agentSort: the sidebar fleet filter/sort pair');
+test("a fresh store seeds 'all'/'manual' on a clean install (the DEFAULT_UI values, not local literals)", () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().agentFilter, DEFAULT_UI.agentFilter);
+  assert.equal(store.getState().agentSort, 'manual');
+  assert.equal(store.getState().agentSort, DEFAULT_UI.agentSort);
+});
+test('a fresh store seeds both from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({ ...loadUi(), agentFilter: 'yatfa', agentSort: 'name' });
+  const store = createUiStore();
+  assert.equal(store.getState().agentFilter, 'yatfa');
+  assert.equal(store.getState().agentSort, 'name');
+});
+test("the seed runs through loadUi's sanitizers (a bogus filter falls back to 'all'; a legal sort is accepted)", () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], agentFilter: 'claude-only-please', agentSort: 'activity' }));
+  const store = createUiStore();
+  // agentFilter's enum-membership sanitizer rejects the bogus value (the same
+  // normalizer App's retired lazy initializer inherited from loadUi) …
+  assert.equal(store.getState().agentFilter, 'all');
+  // … while agentSort's ?? sanitizer passes the legal value straight through.
+  assert.equal(store.getState().agentSort, 'activity');
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage) — the UiStoreSeed addition', () => {
+  reset();
+  saveUi({ ...loadUi(), agentFilter: 'yatfa', agentSort: 'name' });
+  const store = createUiStore({ agentFilter: 'manual', agentSort: 'status' });
+  assert.equal(store.getState().agentFilter, 'manual');
+  assert.equal(store.getState().agentSort, 'status');
+});
+
+console.log("\nsetAgentFilter/setAgentSort — the popover's writes, and they do NOT touch localStorage");
+test('the setters replace both values, and a subscriber is notified (the SHARING channel ChatSidebar reads)', () => {
+  reset();
+  const store = createUiStore({ agentFilter: 'all', agentSort: 'manual' });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push([s.agentFilter, s.agentSort]));
+  store.getState().setAgentFilter('claude');
+  store.getState().setAgentSort('host');
+  unsubscribe();
+  assert.deepEqual(seen, [['claude', 'manual'], ['claude', 'host']]);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setAgentFilter('all');
+  assert.equal(seen.length, 2);
+});
+test('the setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ agentFilter: 'all', agentSort: 'manual' });
+  store.getState().setAgentFilter('yatfa');
+  store.getState().setAgentSort('name');
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore({ agentFilter: 'all', agentSort: 'manual' });
+  const beforeFilter = store.getState().setAgentFilter;
+  const beforeSort = store.getState().setAgentSort;
+  beforeFilter('yatfa');
+  beforeSort('name');
+  assert.equal(store.getState().setAgentFilter, beforeFilter);
+  assert.equal(store.getState().setAgentSort, beforeSort);
+});
+
+console.log('\nround trip: sidebar popover → store → App snapshot → the saveUi effect → loadUi');
+test('a filter/sort picked in ANY of the three headers survives a restart', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().agentSort, 'manual');
+  store.getState().setAgentFilter('claude');   // the popover's filter Select
+  store.getState().setAgentSort('status');     // the popover's sort Select
+  flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
+  assert.equal(loadUi().agentFilter, 'claude'); // next launch
+  assert.equal(loadUi().agentSort, 'status');
+  // And the next launch's store seeds from exactly that.
+  assert.equal(createUiStore().getState().agentFilter, 'claude');
+  assert.equal(createUiStore().getState().agentSort, 'status');
+});
+test("the reset path restores 'all'/'manual' through the store-backed setters", () => {
+  reset();
+  const store = createUiStore({ agentFilter: 'yatfa', agentSort: 'name' });
+  // App's resetSetters entries are `agentFilter: setAgentFilter` /
+  // `agentSort: setAgentSort` — the SAME setters, now backed by the store,
+  // called with resetUiPrefDefaults()' values.
+  store.getState().setAgentFilter(DEFAULT_UI.agentFilter);
+  store.getState().setAgentSort(DEFAULT_UI.agentSort);
+  flushSnapshotToDisk(store);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().agentSort, 'manual');
+  assert.equal(loadUi().agentFilter, 'all');
+  assert.equal(loadUi().agentSort, 'manual');
+});
+test('the pair is independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore({ agentFilter: 'yatfa', agentSort: 'name' });
+  store.getState().setAgentFilter('manual');
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().fileViewerViewMode, 'rendered');
+  assert.deepEqual(store.getState().hostLabels, {});
+  store.getState().setTimestampFormat('absolute');
+  assert.equal(store.getState().agentFilter, 'manual');
+  assert.equal(store.getState().agentSort, 'name');
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

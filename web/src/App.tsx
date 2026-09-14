@@ -7,7 +7,6 @@ import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
-import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useWatchState } from '@/lib/useWatchState';
@@ -21,7 +20,7 @@ import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -383,20 +382,26 @@ function App() {
   // are untouched (the slice-3 pattern).
   const timestampFormat = useTimestampFormat();
   const setTimestampFormat = useSetTimestampFormat();
-  // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
-  // WARDEN-91. These were ChatSidebar-local useState with their own save effect,
-  // which App's saveUi spread (which omits both keys) then clobbered on every
-  // unrelated state change — wiping them from disk so the controls reset to
-  // 'all'/'manual' on reload. Now App-owned and persisted by its saveUi effect
-  // (the single writer), like every other UiState pref. Seeded from loadUi; the
-  // 'all'/'manual' defaults already match DEFAULT_UI. Forwarded read-only to
-  // ChatSidebar except for the change handlers. Pure client-side pref.
-  const [agentFilter, setAgentFilter] = useState<AgentFilter>(() => uiState.agentFilter ?? 'all');
-  const [agentSort, setAgentSort] = useState<AgentSort>(() => uiState.agentSort ?? 'manual');
+  // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped
+  // in WARDEN-91. These were ChatSidebar-local useState with their own save
+  // effect, which App's saveUi spread (which omits both keys) then clobbered on
+  // every unrelated state change — wiping them from disk so the controls reset
+  // to 'all'/'manual' on reload. WARDEN-1204 slice 7: the pair lives on the
+  // shared client-state store (lib/uiStore.ts) — App SUBSCRIBES for the same
+  // two single-writer reasons as every migrated pref (the PersistedPrefSnapshot
+  // field below and the resetSetters entry), and ChatSidebar + its three
+  // AgentFilterSortControls mounts subscribe directly, so the four JSX pass
+  // sites into ChatSidebar are gone. Pure client-side pref; the store seeds
+  // itself from loadUi() with the same 'all'/'manual' defaults DEFAULT_UI has.
+  const agentFilter = useAgentFilter();
+  const setAgentFilter = useSetAgentFilter();
+  const agentSort = useAgentSort();
+  const setAgentSort = useSetAgentSort();
   // WARDEN-468: HealthDashboard "Group agents by: Health | Host" toggle
   // (WARDEN-237). Was a HealthDashboard-local useState that silently reset to
   // 'health' on every Warden restart. Now App-owned + persisted by the saveUi
-  // effect (the single writer), exactly like agentFilter/agentSort above — so a
+  // effect (the single writer), like agentFilter/agentSort above (which
+  // WARDEN-1204 slice 7 moved one step further onto the shared uiStore) — so a
   // cross-host human's Host grouping survives reload. Forwarded read-only to
   // HealthDashboard except for the change handler. Pure client-side pref.
   const [healthGroupBy, setHealthGroupBy] = useState<GroupMode>(() => uiState.healthGroupBy ?? 'health');
@@ -2015,10 +2020,6 @@ function App() {
               watchedStates={watchedStateByKey}
               onToggleWatch={toggleWatch}
               onToggleWatchMany={toggleWatchMany}
-              agentFilter={agentFilter}
-              agentSort={agentSort}
-              onFilterChange={setAgentFilter}
-              onSortChange={setAgentSort}
               sourceControlCollapsed={sourceControlCollapsed}
               onSourceControlCollapsedChange={setSourceControlCollapsed}
             />
