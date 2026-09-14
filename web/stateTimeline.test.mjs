@@ -43,6 +43,8 @@ const {
   countStateSegments,
   rowStateAriaLabel,
   matrixStateAriaLabel,
+  KNOWN_STATES,
+  PATTERN_MATCHED,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -92,11 +94,14 @@ test('container null/undefined/empty all filtered out, container agents kept', (
 
 console.log('\ncase 2 — container with a stateSeries entry -> real per-bucket cells');
 test('each bucket carries the agent state, parallel to buckets', () => {
-  // No active→idle adjacency, so deriveDone is a no-op and the raw states pass through.
+  // No active→idle adjacency, so deriveDone is a no-op and the re-encoded states
+  // pass through. (WARDEN-1368: the classifier's erroring/blocked/waiting arrive
+  // re-encoded as the ONE neutral `pattern_matched` — the substring guesses are
+  // no longer rendered as agent states.)
   const m = selectStateCells(series({ c1: { states: ['stuck', 'erroring', 'blocked', 'waiting', 'active'] } }), [agent('c1')]);
   assert.equal(m.rows.length, 1);
   assert.equal(m.rows[0].cells.length, 5);
-  assert.deepEqual(m.rows[0].cells.map((c) => c.state), ['stuck', 'erroring', 'blocked', 'waiting', 'active']);
+  assert.deepEqual(m.rows[0].cells.map((c) => c.state), ['stuck', 'pattern_matched', 'pattern_matched', 'pattern_matched', 'active']);
 });
 test('row order follows the agents list', () => {
   const m = selectStateCells(
@@ -122,7 +127,7 @@ test('idle with NO active predecessor stays idle (not a finish)', () => {
   assert.deepEqual(deriveDone(['idle', 'idle']), ['idle', 'idle']);
   assert.deepEqual(deriveDone([null, null, 'idle']), [null, null, 'idle']);
 });
-test('idle after a non-active state (stuck/erroring/…) stays idle', () => {
+test('idle after a non-active state (stuck/pattern_matched/…) stays idle', () => {
   assert.deepEqual(deriveDone(['stuck', 'idle']), ['stuck', 'idle']);
   assert.deepEqual(deriveDone(['active', 'stuck', 'idle']), ['active', 'stuck', 'idle']);
 });
@@ -172,10 +177,18 @@ test('null buckets are skipped (unobserved neither starts nor breaks a segment)'
 
 console.log('\nstateGlyph / stateLabel — known states + null + an unknown server state');
 test('each known state has a non-empty glyph + a human label', () => {
-  for (const s of ['active', 'idle', 'stuck', 'erroring', 'blocked', 'waiting', 'done', 'capture_failed']) {
+  for (const s of ['active', 'idle', 'stuck', 'pattern_matched', 'done', 'capture_failed']) {
     assert.ok(stateGlyph(s).length > 0, `${s} has a glyph`);
     assert.ok(stateLabel(s).length > 0, `${s} has a label`);
   }
+});
+test('KNOWN_STATES no longer carries the substring-guess names (WARDEN-1368)', () => {
+  // The three classifier guesses are re-encoded in selectStateCells; the legend +
+  // glyph maps' single source of truth must not list them as renderable states.
+  for (const retired of ['erroring', 'blocked', 'waiting']) {
+    assert.ok(!KNOWN_STATES.includes(retired), `${retired} is out of KNOWN_STATES`);
+  }
+  assert.ok(KNOWN_STATES.includes('pattern_matched'), 'pattern_matched is the one neutral encoding');
 });
 test('null (unobserved) -> empty glyph + "unknown" label', () => {
   assert.equal(stateGlyph(null), '');
@@ -184,6 +197,91 @@ test('null (unobserved) -> empty glyph + "unknown" label', () => {
 test('a future/unknown server state degrades gracefully (glyph + verbatim label)', () => {
   assert.ok(stateGlyph('future_state').length > 0, 'unknown state gets a neutral glyph');
   assert.equal(stateLabel('future_state'), 'future_state', 'label is the state verbatim');
+});
+
+console.log('\nWARDEN-1368 — substring-guess hours render the ONE neutral pattern_matched encoding');
+test('LITMUS: erroring/waiting/blocked buckets re-encode to pattern_matched — non-health label, no health glyphs', () => {
+  // The exact live-probe false positives from the ticket: a passing suite's
+  // "0 errors" line classified erroring; a review prompt classified waiting;
+  // blocked-dependency prose classified blocked. None of that is an agent
+  // state, so the timeline renders the observable fact instead.
+  const m = selectStateCells(
+    series({ c1: { states: ['active', 'erroring', 'waiting', 'blocked', 'idle'] } }),
+    [agent('c1')],
+  );
+  const rendered = m.rows[0].cells.map((c) => c.state);
+  assert.deepEqual(rendered, ['active', PATTERN_MATCHED, PATTERN_MATCHED, PATTERN_MATCHED, 'idle']);
+  for (const s of rendered) {
+    if (s !== PATTERN_MATCHED) continue;
+    const label = stateLabel(s);
+    const glyph = stateGlyph(s);
+    for (const banned of ['erroring', 'blocked', 'waiting']) {
+      assert.ok(!label.toLowerCase().includes(banned), `label carries no "${banned}" claim: ${label}`);
+    }
+    assert.ok(!['✕', '■', '?'].includes(glyph), `glyph is not a health mark: ${glyph}`);
+    assert.ok(label.includes('text-pattern'), `label names the FACT (the text-pattern match): ${label}`);
+  }
+  // The passing-suite hour no longer reads "erroring" anywhere on the timeline.
+  assert.ok(!rendered.includes('erroring'), 'no erroring state survives rendering');
+});
+
+test('MUTATION-CHECK anchor: reverting the re-encode turns the litmus RED', () => {
+  // This only holds BECAUSE selectStateCells re-encodes. Delete the
+  // reencodePatternGuesses call in stateTimeline.ts and it fails — 'erroring'
+  // would pass through raw as an agent-state claim again.
+  const m = selectStateCells(series({ c1: { states: ['erroring'] } }), [agent('c1')]);
+  assert.equal(m.rows[0].cells[0].state, PATTERN_MATCHED);
+});
+
+test('deriveDone interplay pinned: active -> [pattern_matched hour] -> idle does NOT read done', () => {
+  // The neutral name must break a done-run exactly as the three guess names do —
+  // re-encoding must not change what reads as a completion.
+  assert.deepEqual(deriveDone(['active', PATTERN_MATCHED, 'idle']), ['active', PATTERN_MATCHED, 'idle']);
+  // End-to-end: the RAW series still carries the classifier's name and the
+  // break survives the re-encode.
+  const m = selectStateCells(series({ c1: { states: ['active', 'erroring', 'idle'] } }, 3), [agent('c1')]);
+  assert.deepEqual(m.rows[0].cells.map((c) => c.state), ['active', PATTERN_MATCHED, 'idle']);
+});
+
+test('countStateSegments interplay pinned: a pattern_matched cell still counts as a segment', () => {
+  // active -> guess hours -> active = 3 segments — mechanically true (the
+  // classifier's output changed), so the aria "N state changes" stays honest.
+  const m = selectStateCells(
+    series({ c1: { states: ['active', 'blocked', 'waiting', 'erroring', 'active'] } }),
+    [agent('c1')],
+  );
+  const cells = m.rows[0].cells;
+  assert.deepEqual(cells.map((c) => c.state), ['active', PATTERN_MATCHED, PATTERN_MATCHED, PATTERN_MATCHED, 'active']);
+  assert.equal(countStateSegments(cells), 3);
+  assert.equal(rowStateAriaLabel(cells), '2 state changes in the last 24 hours');
+});
+
+test('a genuinely-steady stuck/active row still renders exactly as today', () => {
+  // The timeline's real job — oscillation — is untouched: active/idle/stuck/
+  // done/capture_failed pass through byte-identically.
+  const m = selectStateCells(series({ c1: { states: ['stuck', 'stuck', 'active', 'active', 'stuck'] } }), [agent('c1')]);
+  assert.deepEqual(m.rows[0].cells.map((c) => c.state), ['stuck', 'stuck', 'active', 'active', 'stuck']);
+});
+
+test('single source of truth: the renderer tone + legend carry the neutral encoding, not the guesses', () => {
+  // The .tsx cannot be imported by this DOM-free harness, so pin its two
+  // encoding tables by source: STATE_BG / LEGEND_STATES must have dropped the
+  // three guess states (no red/blue/sky agent-state claim) and carry the
+  // neutral zinc encoding instead.
+  const tsx = readFileSync(resolve(__dirname, 'src/components/FleetStateTimeline.tsx'), 'utf8');
+  const bg = tsx.match(/const STATE_BG[^=]*= \{[\s\S]*?\n\};/)?.[0] ?? '';
+  assert.ok(bg.length > 0, 'STATE_BG block found');
+  assert.ok(bg.includes("pattern_matched: 'bg-zinc-500'"), 'pattern_matched uses the neutral zinc tone');
+  for (const retired of ['waiting', 'blocked', 'erroring']) {
+    assert.ok(!bg.includes(`${retired}:`), `STATE_BG dropped the ${retired} tone`);
+  }
+  assert.ok(!/bg-red-500|bg-blue-500|bg-sky-500/.test(bg), 'no red/blue/sky agent-state tone remains in STATE_BG');
+  const legend = tsx.match(/const LEGEND_STATES = \[[\s\S]*?\] as const/)?.[0] ?? '';
+  assert.ok(legend.length > 0, 'LEGEND_STATES block found');
+  assert.ok(legend.includes("'pattern_matched'"), 'legend lists pattern_matched');
+  for (const retired of ['waiting', 'blocked', 'erroring']) {
+    assert.ok(!legend.includes(`'${retired}'`), `legend dropped '${retired}'`);
+  }
 });
 
 console.log('\nmatrixStateAriaLabel — overall shape summary');

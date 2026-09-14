@@ -7,9 +7,14 @@
 // This module is the orthogonal complement — it turns the SAME wire series's
 // `stateSeries` into a coordinated matrix where rows = agents, columns = the
 // shared epoch-aligned hourly buckets, and each cell is the agent's classified
-// STATE in that bucket (active/idle/stuck/erroring/blocked/waiting/…). A
-// repeating stuck/active/stuck stripe reads at a glance — the one signal no
-// current surface can show.
+// STATE in that bucket (active/idle/stuck/done/capture_failed) — plus, since
+// WARDEN-1368, ONE neutral `pattern_matched` encoding for the hours whose
+// classifier reading was a substring regex GUESS (the classifier's
+// erroring/blocked/waiting): the observable fact the machine genuinely has —
+// "the pane's text matched one of warden's text patterns at that hour" — never
+// a health claim a substring match cannot substantiate. A repeating
+// stuck/active/stuck stripe reads at a glance — the one signal no current
+// surface can show.
 //
 // The decision per row mirrors selectHeatmapCells (web/src/lib/heatmap.ts) so the
 // two panels share one row set + axis:
@@ -59,16 +64,27 @@ export interface StateMatrix {
 }
 
 /**
- * The canonical pane states `classifyPane` produces, plus `capture_failed`
- * (capture tried + failed) — every state `pollAgentStates` can log as a
- * `state_changed` `to`. `done` is included for forward-compat: it is today a
- * CLIENT-side active→idle completion concept (WARDEN-575, in useAttentionRollup),
- * NOT a state the server logs, so it will not appear in the series unless future
+ * The canonical pane states the timeline can render. Since WARDEN-1368 this is
+ * NOT simply "every state `classifyPane` produces": the classifier's
+ * `erroring` / `blocked` / `waiting` outputs are substring regex guesses over
+ * the pane's text tail (src/agentState.js SUMM_ERROR_RE / SUMM_BLOCKED_RE /
+ * SUMM_WAITING_RE — a passing suite's "0 errors" line classifies `erroring`,
+ * coordination prose classifies `waiting`/`blocked`), so the timeline
+ * re-encodes those hours to the ONE neutral `pattern_matched` encoding in
+ * `selectStateCells` (the observable fact: the pane's text matched a warden
+ * text-pattern at that hour) instead of painting an agent-state health claim
+ * it cannot substantiate. `classifyPane` keeps emitting the three names — the
+ * journal is the audit trail and the Observer consumes it — but they can no
+ * longer reach this panel's cells. Plus `capture_failed` (capture tried +
+ * failed — every other state `pollAgentStates` can log as a `state_changed`
+ * `to`). `done` is included for forward-compat: it is today a CLIENT-side
+ * active→idle completion concept (WARDEN-575, in useAttentionRollup), NOT a
+ * state the server logs, so it will not appear in the series unless future
  * work logs it server-side. Kept here so the legend + glyph map are the single
  * source of truth for every state the timeline can ever render.
  */
 export const KNOWN_STATES = [
-  'active', 'idle', 'stuck', 'erroring', 'blocked', 'waiting', 'done', 'capture_failed',
+  'active', 'idle', 'stuck', 'pattern_matched', 'done', 'capture_failed',
 ] as const;
 
 /** Human label for a state (tooltip / aria / legend). */
@@ -77,9 +93,7 @@ export function stateLabel(state: string | null): string {
     case 'active': return 'active';
     case 'idle': return 'idle';
     case 'stuck': return 'stuck (repeating loop)';
-    case 'erroring': return 'erroring';
-    case 'blocked': return 'blocked (dependency)';
-    case 'waiting': return 'waiting (input)';
+    case 'pattern_matched': return 'pane text matched a warden text-pattern — not an agent state';
     case 'done': return 'done';
     case 'capture_failed': return 'capture failed (unreachable)';
     case null: return 'unknown / not yet observed';
@@ -91,24 +105,58 @@ export function stateLabel(state: string | null): string {
  * A single-glyph encoding per state — WCAG 2.1 1.4.1: state is NEVER encoded by
  * color alone. The glyph is the non-color channel (rendered in-cell at a small
  * size AND in the legend beside its color swatch), so a colorblind operator can
- * distinguish stuck (↻) from erroring (✕), or waiting (?) from blocked (■),
+ * distinguish stuck (↻) from pattern_matched (~), or done (✓) from idle (·),
  * without relying on hue. This is the same discipline heatmap.ts follows (error
  * is never color-alone — its tooltip + aria carry the count); here the discrete
- * states warrant a per-state glyph rather than a single error flag.
+ * states warrant a per-state glyph rather than a single error flag. The
+ * pattern_matched glyph is deliberately NOT a health mark (✕/■/? are gone with
+ * the substring-guess states they painted, WARDEN-1368) — '~' reads as a fuzzy
+ * text-match note, not a verdict.
  */
 export function stateGlyph(state: string | null): string {
   switch (state) {
     case 'active': return '▸';
     case 'idle': return '·';
     case 'stuck': return '↻';
-    case 'erroring': return '✕';
-    case 'blocked': return '■';
-    case 'waiting': return '?';
+    case 'pattern_matched': return '~';
     case 'done': return '✓';
     case 'capture_failed': return '⚠';
     case null: return '';
     default: return '·'; // unknown server state — neutral dot
   }
+}
+
+/**
+ * The classifier states this timeline refuses to render as agent states
+ * (WARDEN-1368). Each is a substring regex guess over the pane's text tail
+ * (src/agentState.js SUMM_ERROR_RE / SUMM_BLOCKED_RE / SUMM_WAITING_RE): a
+ * passing suite's "✓ 42 tests passed, 0 errors" line classifies `erroring`,
+ * "please review the diff" classifies `waiting`, "blocked by the pending
+ * dependency" classifies `blocked` — none of which says anything about the
+ * AGENT's health. The classifier keeps emitting them (the journal is the audit
+ * trail and the Observer consumes it); this panel just no longer repeats the
+ * health claim a substring match cannot substantiate.
+ */
+const PATTERN_GUESS_STATES: ReadonlySet<string> = new Set(['erroring', 'blocked', 'waiting']);
+
+/**
+ * The ONE neutral, non-health encoding the guess states re-encode to — the
+ * observable fact the machine genuinely has for that hour. Deliberately NOT
+ * `active` (that carries a stricter predicate of its own — folding would
+ * substitute one unsubstantiated claim for another) and NOT `null` (null means
+ * UNOBSERVED — WARDEN-1318's honest gap — and these hours WERE observed and
+ * classified).
+ */
+export const PATTERN_MATCHED = 'pattern_matched';
+
+/**
+ * Re-encode the substring-guess states to the neutral `pattern_matched`
+ * encoding; everything else (including `null` and future/unknown server
+ * states) passes through untouched. Pure and stateless — called from
+ * `selectStateCells` on `raw` BEFORE `deriveDone`.
+ */
+function reencodePatternGuesses(states: readonly (string | null)[]): (string | null)[] {
+  return states.map((s) => (s !== null && PATTERN_GUESS_STATES.has(s) ? PATTERN_MATCHED : s));
 }
 
 /**
@@ -145,9 +193,17 @@ export function selectStateCells(
     // renders a flat "unobserved" stripe, not a blank (parity with the heatmap's
     // idle zero-fill: an alive-but-untracked agent reads as a row, not a gap).
     const raw: (string | null)[] = entry ? entry.states : new Array<null>(n).fill(null);
+    // WARDEN-1368 — re-encode BEFORE deriveDone, so BOTH downstream consumers
+    // behave correctly by construction: deriveDone breaks a done-run on any
+    // non-active/non-idle state (the neutral name breaks it exactly as the
+    // three guess names do — active → [guess hour] → idle stays NOT done), and
+    // countStateSegments still counts the re-encoded cell as a distinct
+    // segment (mechanically true: the classifier's output changed), keeping
+    // the aria "N state changes" honest.
+    const unguessed = reencodePatternGuesses(raw);
     // Guard length: a malformed/truncated series array must never desync from the
     // bucket grid — coerce to null so cells stay 1:1 with buckets.
-    const states = deriveDone(raw);
+    const states = deriveDone(unguessed);
     const cells: StateCell[] = new Array<StateCell>(n);
     for (let i = 0; i < n; i++) {
       cells[i] = { state: states[i] ?? null };
@@ -173,8 +229,8 @@ export function selectStateCells(
  *  - `active` ends any done-run (the agent is working again).
  *  - `idle` whose most-recent KNOWN non-idle state was `active` starts/continues a
  *    done-run → relabeled `done`.
- *  - `idle` with any other known predecessor (stuck/erroring/blocked/waiting/…)
- *    stays `idle` — only a clean active→idle reads as a finish.
+ *  - `idle` with any other known predecessor (stuck/pattern_matched/…) stays
+ *    `idle` — only a clean active→idle reads as a finish.
  *  - any other known state ends the done-run; `null` (unobserved) BREAKS the run.
  *
  * WARDEN-1318 — WHY `null` BREAKS THE RUN (it used to be transparent). Before the
