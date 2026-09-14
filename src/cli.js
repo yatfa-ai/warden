@@ -5,8 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { load, save, configPath, cachePath } from './config.js';
 import { discover, discoverAll, resolveChatWithRefresh, agentTarget } from './chats.js';
-import { read, send, sendKey, attachInteractive } from './tmux.js';
-import { run } from './ssh.js';
+import { read, send, sendKey, attachInteractive, attachInteractiveCompanion } from './tmux.js';
+import { run, attach, buildAttachRemoteScript } from './ssh.js';
+import { deliverRemoteScript, isCompanionTransportEnabled } from './companion.js';
 import { atomicWriteJson, readJsonDefensiveSync } from './persist.js';
 
 // ---------- tiny ANSI ----------
@@ -145,46 +146,111 @@ async function cmdAttach(argv, cfg) {
   process.exit(code);
 }
 
-async function cmdDash(argv, cfg) {
+// The dash preflight script — dash builds a tmux session ON THE HOST, so the
+// host needs tmux (yatfa containers have tmux; the host itself usually doesn't).
+// Byte-for-byte the raw-SSH string today's cmdDash delivers, and the same script
+// the server-side preflightTmux leg delivers over the shared router (the
+// WARDEN-1283 mirror this slice follows). One constant, both transports.
+const DASH_PREFLIGHT_SCRIPT = 'command -v tmux >/dev/null 2>&1 && echo OK || echo MISSING';
+
+// The host-side dash script: one tmux session on the HOST with a window per
+// active chat (window cmd `docker exec -it <c> tmux attach -t agent`), then the
+// foreground `tmux attach`. ONE builder so BOTH transports — the default
+// attach() path and the companion attach path — deliver the byte-identical
+// script (WARDEN-1364 parity by construction), and so the delivered string is
+// pinnable by test rather than reconstructed inline.
+export function buildDashScript(session, containers) {
+  const lines = [
+    `tmux kill-session -t ${session} 2>/dev/null || true`,
+  ];
+  containers.forEach((c, i) => {
+    const win = i === 0
+      ? `tmux new-session -d -s ${session} -n ${c} "docker exec -it ${c} tmux attach -t agent"`
+      : `tmux new-window -t ${session} -n ${c} "docker exec -it ${c} tmux attach -t agent"`;
+    lines.push(win);
+  });
+  lines.push(`tmux attach -t ${session}`);
+  return lines.join('\n');
+}
+
+// `deps` is an optional test seam (production callers omit it):
+// isCompanionTransportEnabled / discover / run / deliverRemoteScript /
+// attachInteractiveCompanion / attach / die / exit. The toggle-off path — every
+// seam defaulted — is byte-for-byte the pre-WARDEN-1364 command.
+//
+// Companion routing (WARDEN-1364, roadmap WARDEN-270): both remote legs — the
+// tmux preflight and the multi-window attach — ride the persistent companion
+// channel under WARDEN_COMPANION_TRANSPORT=1 (zero ssh spawns: preflight via
+// the shared deliverRemoteScript router → execInContext, the same shape the
+// server-side preflightTmux leg took in WARDEN-1283; attach via the
+// attachSession PTY family through the same interactive bridge `warden attach`
+// uses). LOCAL never routes through the companion. Companion-or-fail: a dead
+// channel or a stale binary dies with the actionable error on stderr and a
+// non-zero exit — never a silent raw-SSH fallback (same call as exec and
+// attachStream). The default path below is byte-for-byte today's, INCLUDING the
+// fix this ticket is named for: `attach` is now actually imported from ssh.js
+// — before WARDEN-1364 every non-dry-run remote `warden dash` died with
+// `ReferenceError: attach is not defined` right after the preflight.
+export async function cmdDash(argv, cfg, deps = {}) {
+  const fail = (msg) => (deps.die ?? die)(msg);
   const { flags } = parseFlags(argv, ['dry-run']);
   const host = flags.host || cfg.hosts[0];
-  if (!host) die('no host. set `hosts` in ~/.yatfa-warden/config.json or pass --host.');
-  const r = await discover(host, cfg);
-  if (!r.ok) die(`${host}: ${r.error}`);
+  if (!host) return fail('no host. set `hosts` in ~/.yatfa-warden/config.json or pass --host.');
+  const r = await (deps.discover ?? discover)(host, cfg);
+  if (!r.ok) return fail(`${host}: ${r.error}`);
   const active = r.chats.filter((c) => c.active);
-  if (!active.length) die(`no active chats on ${host}.`);
+  if (!active.length) return fail(`no active chats on ${host}.`);
   for (const c of active) {
-    if (!/^[A-Za-z0-9_.-]+$/.test(c.container)) die(`bad container name: ${c.container}`);
+    if (!/^[A-Za-z0-9_.-]+$/.test(c.container)) return fail(`bad container name: ${c.container}`);
   }
   const session = flags.session || 'warden';
+
+  // Companion routing guard: REMOTE host + toggle on (LOCAL never routes through
+  // the companion — same guard shape as every gated sibling in tmux.js).
+  const useCompanion = (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && host !== '(local)';
 
   // Preflight: dash builds a tmux session ON THE HOST, so the host needs tmux
   // (yatfa containers have tmux, but the host itself usually doesn't). The web
   // dashboard (Phase 2) has no such requirement — it polls over SSH instead.
   if (!flags['dry-run']) {
-    const pf = await run(host, 'command -v tmux >/dev/null 2>&1 && echo OK || echo MISSING', { timeout: 8000 });
+    let pf;
+    if (useCompanion) {
+      // Companion path: the shared deliverRemoteScript router (→ execInContext).
+      // Companion-or-fail: a channel/bootstrap failure (or a stale binary —
+      // execInContext already shapes the too-old error into stderr) dies here
+      // with the actionable message instead of masquerading as "no tmux".
+      pf = await (deps.deliverRemoteScript ?? deliverRemoteScript)(host, DASH_PREFLIGHT_SCRIPT, { timeout: 8000 }, cfg, deps);
+      if (!pf.ok) {
+        fail(`companion preflight on ${host} failed: ${(pf.stderr || '').trim() || `exit ${pf.code}`}\n` +
+            `    (companion-or-fail: dash never falls back to raw SSH while the toggle reads on.\n` +
+            `     fix the channel, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.)`);
+        return;
+      }
+    } else {
+      pf = await (deps.run ?? run)(host, DASH_PREFLIGHT_SCRIPT, { timeout: 8000 });
+    }
     if (!pf.stdout.includes('OK')) {
-      die(`host "${host}" has no tmux (dash runs tmux there). install it:\n` +
+      fail(`host "${host}" has no tmux (dash runs tmux there). install it:\n` +
           `    ssh ${host} 'brew install tmux'        # macOS (Homebrew)\n` +
           `    ssh ${host} 'sudo apt-get install -y tmux'   # Debian/Ubuntu\n` +
           `then re-run. (The other commands — scan/tail/send/attach — work without host tmux.)`);
+      return;
     }
   }
 
-  const lines = [
-    `tmux kill-session -t ${session} 2>/dev/null || true`,
-  ];
-  active.forEach((c, i) => {
-    const win = i === 0
-      ? `tmux new-session -d -s ${session} -n ${c.container} "docker exec -it ${c.container} tmux attach -t agent"`
-      : `tmux new-window -t ${session} -n ${c.container} "docker exec -it ${c.container} tmux attach -t agent"`;
-    lines.push(win);
-  });
-  lines.push(`tmux attach -t ${session}`);
-  if (flags['dry-run']) { console.log(lines.join('\n')); return; }
+  const script = buildDashScript(session, active.map((c) => c.container));
+  if (flags['dry-run']) { console.log(script); return; }
   console.error(paint(`opening ${active.length} chats on ${host}: ${active.map((c) => c.container).join(', ')} …`, C.dim));
-  const code = await attach(host, lines.join('\n'));
-  process.exit(code);
+  let code;
+  if (useCompanion) {
+    // The same interactive bridge `warden attach` uses, carrying the composed
+    // multi-window script under the shared buildAttachRemoteScript wrapper (the
+    // LANG/LC_ALL export + `bash -lc` the web pane delivers).
+    code = await (deps.attachInteractiveCompanion ?? attachInteractiveCompanion)(host, buildAttachRemoteScript(script), cfg, deps);
+  } else {
+    code = await (deps.attach ?? attach)(host, script);
+  }
+  (deps.exit ?? process.exit)(code);
 }
 
 async function cmdConfig(argv, cfg) {
