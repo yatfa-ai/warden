@@ -74,6 +74,17 @@ const MAIN_CRASH_REASON = 'unexpected-termination';
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 1000; // expected cadence between ticks
 const DEFAULT_STALL_THRESHOLD_MS = 1000; // a tick >2s after the previous = a stall
 
+// WARDEN-1376 — the overdue gap ABOVE which a tick is treated as a SUSPENSION,
+// not a stall. A single-threaded event loop blocked for a minute while the
+// process stayed alive is not a thing warden's main process does; a lag that
+// large is the process having been SUSPENDED (laptop sleep, hibernate, Modern
+// Standby doze, VM pause) and measuring its own absence. Live telemetry makes
+// the split unambiguous: every retained main-runtime stall event above ~44
+// minutes lines up with a machine sleep, while genuine blocks sit at 1-2s.
+// This ceiling is the coarse half of the split; `suspendClock` (powerMonitor
+// suspend/resume windows) is the precise half for the in-between band.
+const DEFAULT_MAX_CREDIBLE_LAG_MS = 60000;
+
 // Node emits 'uncaughtExceptionMonitor' BEFORE the default uncaught-exception
 // handler runs, and installing it does NOT change the process's crash behavior
 // (the app still exits as normal). That is exactly what a telemetry source
@@ -499,6 +510,11 @@ function containsPath(text) {
 //                                     arms/disarms subscriptions AND name attachment
 //   .setContext({chatName?, sessionName?}) — latest focused names (WARDEN-538)
 //   .setRecord(fn)                  — hot-swap the record sink (slice 1 wiring)
+//   .setSuspendClock(fn)            — hot-set the suspend-window predicate the
+//                                     heartbeat consults before reporting a stall
+//                                     (WARDEN-1376; main wires powerMonitor post-ready)
+//   .heartbeatStats()               — heartbeat tick/emit/suppression counters
+//                                     (WARDEN-1376 test + observability seam)
 //   .recordRendererError(serialized) — consent-gated renderer JS-error entry point
 //                                       (forwarded over IPC from preload; WARDEN-637)
 //   .dispose()                      — detach everything + stop the heartbeat
@@ -526,6 +542,22 @@ function createTelemetrySource(opts) {
   const clearInt = typeof o.clearInterval === 'function' ? o.clearInterval : clearInterval;
   const heartbeatMs = typeof o.heartbeatMs === 'number' ? o.heartbeatMs : DEFAULT_HEARTBEAT_INTERVAL_MS;
   const thresholdMs = typeof o.thresholdMs === 'number' ? o.thresholdMs : DEFAULT_STALL_THRESHOLD_MS;
+  // WARDEN-1376 — the two suspension discriminators. `maxCredibleLagMs`: overdue
+  // gaps above it are suspensions by magnitude (see the constant's note).
+  // `suspendClock`: an injected (from, to) → boolean that main wires to a
+  // powerMonitor-backed suspend-window tracker (electron/suspend-clock.cjs);
+  // a lag window SPANNING a suspend/resume is the wake tick (and its resume
+  // storm), not a loop block. Both are INJECTABLE so the split is unit-testable
+  // without Electron; an unwired clock only leaves the magnitude ceiling armed.
+  const maxCredibleLagMs =
+    typeof o.maxCredibleLagMs === 'number' && o.maxCredibleLagMs > 0
+      ? o.maxCredibleLagMs
+      : DEFAULT_MAX_CREDIBLE_LAG_MS;
+  let suspendClock = typeof o.suspendClock === 'function' ? o.suspendClock : null;
+  // Diagnostic counters for the suppression decisions (test seam + observability):
+  // a maintainer reading emittedStalls should be able to see how many candidate
+  // stalls the suspension split absorbed, and why.
+  const heartbeatStats = { ticks: 0, stallsEmitted: 0, suspendSkipped: 0, magnitudeSkipped: 0 };
 
   // BASE-tier app release label (WARDEN-665). A non-identifying release version
   // (identical for every user on a release — not an identifier, not content)
@@ -615,16 +647,46 @@ function createTelemetrySource(opts) {
   };
 
   // --- heartbeat: measures real wall-clock lag between timer callbacks ---
+  //
+  // WARDEN-1376 — a tick over the stall threshold is reported ONLY when the
+  // overdue gap is credible as a LOOP BLOCK. Two regimes are suppressed:
+  //   1. MAGNITUDE: overdue > maxCredibleLagMs — the process was suspended
+  //      (sleep/hibernate/doze/VM pause) and the first post-wake tick is
+  //      overdue by the whole absence. No JS loop blocks for a minute while
+  //      the process stays alive to report it.
+  //   2. BOUNDARY: the lag window [lastTick, t] spans a powerMonitor
+  //      suspend→resume — the wake tick itself plus its resume storm (disk
+  //      spin-up, driver re-init, AV rescan), which DOES block the loop for
+  //      ~1-2s on Windows but is the OS's block, not warden work.
+  // Both suppressions exist so the emitted `stall:event-loop` population
+  // means "the main process's own loop was blocked", which is the only
+  // reading a maintainer can act on.
   function startHeartbeat() {
     if (heartbeatTimer) return;
     lastTick = nowFn();
     heartbeatTimer = setInt(() => {
       const t = nowFn();
-      const overdue = t - lastTick - heartbeatMs; // how late this tick arrived
+      const prev = lastTick;
+      const overdue = t - prev - heartbeatMs; // how late this tick arrived
       lastTick = t;
-      if (isStall(overdue, thresholdMs)) {
-        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...nameFields(), ...versionOpt, ...platformOpt }));
+      heartbeatStats.ticks++;
+      if (!isStall(overdue, thresholdMs)) return;
+      if (overdue > maxCredibleLagMs) {
+        heartbeatStats.magnitudeSkipped++;
+        return;
       }
+      // Consult the suspend clock LAST (it may be a real function call); a
+      // throwing clock must not break the heartbeat, so it is guarded.
+      if (suspendClock) {
+        try {
+          if (suspendClock(prev, t)) {
+            heartbeatStats.suspendSkipped++;
+            return;
+          }
+        } catch { /* a broken suspend clock degrades to reporting the stall */ }
+      }
+      heartbeatStats.stallsEmitted++;
+      emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...nameFields(), ...versionOpt, ...platformOpt }));
     }, heartbeatMs);
     // The telemetry heartbeat must never keep the process alive on its own —
     // unref it when the scheduler returned a real Node timer (guarded for the
@@ -730,6 +792,20 @@ function createTelemetrySource(opts) {
     setRecord(fn) {
       record = typeof fn === 'function' ? fn : null;
     },
+    // WARDEN-1376 — hot-set the suspend-window predicate the heartbeat consults
+    // before reporting a stall. main.cjs creates the source at module scope but
+    // powerMonitor only exists after app ready, so the clock is wired post-ready
+    // through this setter (same shape as setRecord). Pass a non-function to
+    // detach (the magnitude ceiling stays armed either way).
+    setSuspendClock(fn) {
+      suspendClock = typeof fn === 'function' ? fn : null;
+    },
+    // WARDEN-1376 — heartbeat observability: how many ticks ran, how many
+    // candidate stalls were emitted, and how many the two suspension
+    // discriminators absorbed. Test seam + maintainer surface; cheap integers.
+    heartbeatStats() {
+      return { ...heartbeatStats };
+    },
     // WARDEN-637 — consent-gated entry point for a RENDERER-process JS error (a
     // React render throw caught by ErrorBoundary, a global `error` event, or an
     // unhandled promise rejection) forwarded over IPC from preload. The renderer
@@ -794,6 +870,7 @@ module.exports = {
   MAIN_CRASH_REASON,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_STALL_THRESHOLD_MS,
+  DEFAULT_MAX_CREDIBLE_LAG_MS,
   UNCAUGHT_EVENT,
   REJECTION_EVENT,
   redactIdentifiers,

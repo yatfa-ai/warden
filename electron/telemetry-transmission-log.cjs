@@ -155,7 +155,11 @@ function parseTransmissionLog(text) {
 // Persistence seam (WARDEN-782): `save(entries)` is invoked with a ring snapshot
 // after each record() (debounced via `debounceMs`); production injects an atomic
 // fs writer, tests inject a capturing fake. Default noop → today's session-scoped
-// behavior (nothing persisted). The ring stays pure + dependency-injected: `save`
+// behavior (nothing persisted). WARDEN-1376: `save` may be ASYNC (returns a
+// promise — production's steady-state writer is, so a persist can never block
+// the loop it saves from; rejections are swallowed inside fireSave), and an
+// optional `saveSync` writer serves flushSave()'s quit path where the write must
+// land before process exit. The ring stays pure + dependency-injected: `save`
 // never reaches real fs from inside this module, so the seam is unit-testable with
 // zero real fs (same discipline as the injected clock/cap).
 function createTransmissionLog(opts) {
@@ -163,6 +167,10 @@ function createTransmissionLog(opts) {
   const cap = Number.isInteger(o.cap) && o.cap > 0 ? o.cap : DEFAULT_CAP;
   const clock = typeof o.clock === 'function' ? o.clock : defaultClock;
   const save = typeof o.save === 'function' ? o.save : noop;
+  // WARDEN-1376 — optional SYNC writer used ONLY by flushSave (the quit path).
+  // Absent → flushSave reuses `save` (today's behavior; tests inject a single
+  // capturing fake and keep working unchanged).
+  const saveSync = typeof o.saveSync === 'function' ? o.saveSync : null;
   const debounceMs =
     Number.isFinite(o.debounceMs) && o.debounceMs >= 0 ? Math.floor(o.debounceMs) : 0;
   const ring = [];
@@ -178,7 +186,13 @@ function createTransmissionLog(opts) {
   function fireSave() {
     saveTimer = null;
     try {
-      save(snapshot());
+      // WARDEN-1376 — `save` may now return a promise (production's writer is
+      // async so a persist can never block the loop it is saving from). A
+      // rejection is swallowed HERE so an async failure can never surface as an
+      // unhandled rejection on the telemetry path — the sync try/catch below
+      // only sees synchronous throws.
+      const result = save(snapshot());
+      if (result && typeof result.catch === 'function') result.catch(() => {});
     } catch {
       /* a persist failure must never crash the telemetry pipeline */
     }
@@ -226,7 +240,19 @@ function createTransmissionLog(opts) {
   function flushSave() {
     if (saveTimer == null) return false;
     clearTimeout(saveTimer);
-    fireSave();
+    saveTimer = null; // a second flush is a no-op — no late debounced save may leak
+    // WARDEN-1376 — the quit path needs the write to land BEFORE the process
+    // exits, so it uses the SYNC writer when production injected one (an async
+    // save fired at quit would race process teardown and lose the final
+    // entries). A saveSync throw is swallowed like a save throw: durability is
+    // best-effort, never load-bearing on quit.
+    const writer = saveSync || save;
+    try {
+      const result = writer(snapshot());
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    } catch {
+      /* a persist failure must never break the quit path */
+    }
     return true;
   }
 

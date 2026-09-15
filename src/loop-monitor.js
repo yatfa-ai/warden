@@ -239,10 +239,14 @@ export function summarizeSyncTotals(agg) {
  * (type / lagMs / source / timestamp) and adds the server runtime tag plus the
  * attribution block that makes a duration actionable.
  */
-export function buildStallRecord({ lagMs, attribution, syncTotals, timestamp, heartbeatMs, thresholdMs, uptimeMs, pid }) {
+export function buildStallRecord({ lagMs, attribution, syncTotals, timestamp, heartbeatMs, thresholdMs, uptimeMs, pid, runtime }) {
   const record = {
     type: STALL_TYPE,
-    runtime: STALL_RUNTIME,
+    // WARDEN-1376 — the runtime the stall happened in. The server keeps the
+    // module default; the main process creates its monitor with
+    // `runtime: 'main'` so the shared journal (and the diagnostics dialog that
+    // reads it) can tell the two processes' freezes apart.
+    runtime: typeof runtime === 'string' && runtime ? runtime : STALL_RUNTIME,
     source: STALL_SOURCE,
     timestamp: new Date(timestamp).toISOString(),
     lagMs: Math.round(lagMs),
@@ -268,7 +272,11 @@ export function formatStallLine(record) {
   const who = (record.attribution || [])
     .map((a) => `${a.label} (${a.overlapMs}ms${a.open ? ', still open' : ''})`)
     .join(', ');
-  const line = `[warden:stall] server event loop blocked ${record.lagMs}ms — during: ${who || 'nothing instrumented was running'}`;
+  // WARDEN-1376 — name the runtime the record carries ('server' for the
+  // module's own records; 'main' once the Electron main process shares this
+  // monitor), so a shared journal line says WHO froze, not just for how long.
+  const rt = record && typeof record.runtime === 'string' && record.runtime ? record.runtime : STALL_RUNTIME;
+  const line = `[warden:stall] ${rt} event loop blocked ${record.lagMs}ms — during: ${who || 'nothing instrumented was running'}`;
   // The aggregate is what makes a death-by-a-thousand-statSync stall legible on
   // the console line, so it belongs here and not only in the JSON.
   const sync = (record.syncTotals || [])
@@ -298,10 +306,25 @@ export function formatStallLine(record) {
  * @param {() => number} [opts.now]        monotonic clock (ms) for all lag math
  * @param {() => number} [opts.wallClock]  wall clock (ms) for the record timestamp
  * @param {(record: object) => void} [opts.onStall] delivery sink (never throws through)
+ * @param {string} [opts.runtime]          record runtime tag ('server' default; the
+ *                                          main process passes 'main' — WARDEN-1376)
+ * @param {number} [opts.maxCredibleLagMs] overdue gap above which a tick is a
+ *                                          SUSPENSION, not a stall (default: no
+ *                                          ceiling — the server keeps today's
+ *                                          behavior; main opts in — WARDEN-1376)
+ * @param {(from: number, to: number) => boolean} [opts.isSuspendBoundary]
+ *                                          predicate the tick consults: a lag
+ *                                          window spanning a suspend→resume is
+ *                                          the wake tick (and its resume storm),
+ *                                          not a loop block (WARDEN-1376)
  */
 export function createLoopMonitor(opts = {}) {
   const heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const thresholdMs = opts.thresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+  const runtime = typeof opts.runtime === 'string' && opts.runtime ? opts.runtime : STALL_RUNTIME;
+  const maxCredibleLagMs =
+    typeof opts.maxCredibleLagMs === 'number' && opts.maxCredibleLagMs > 0 ? opts.maxCredibleLagMs : null;
+  const isSuspendBoundary = typeof opts.isSuspendBoundary === 'function' ? opts.isSuspendBoundary : null;
   const spanRingSize = Math.max(1, opts.spanRingSize ?? DEFAULT_SPAN_RING_SIZE);
   const stallRingSize = Math.max(1, opts.stallRingSize ?? DEFAULT_STALL_RING_SIZE);
   const syncFloorMs = opts.syncFloorMs ?? DEFAULT_SYNC_FLOOR_MS;
@@ -333,7 +356,7 @@ export function createLoopMonitor(opts = {}) {
   let startedAtWall = 0;
   const stats = {
     ticks: 0, stalls: 0, worstLagMs: 0, spansRecorded: 0,
-    syncOpsRecorded: 0, syncOpsSeen: 0, syncMsSeen: 0,
+    syncOpsRecorded: 0, syncOpsSeen: 0, syncMsSeen: 0, suspendedSkips: 0,
   };
 
   function pushSpan(span) {
@@ -442,8 +465,30 @@ export function createLoopMonitor(opts = {}) {
     // The block ended when the loop was released — i.e. now. It therefore
     // occupied the overdue gap immediately preceding this tick.
     const windowStart = Math.max(prev, t - lagMs);
+
+    // WARDEN-1376 — suspension discrimination, same two regimes as the main
+    // heartbeat in electron/telemetry-source.cjs. A lag above the ceiling, or
+    // one whose window spans a suspend→resume boundary, is the process having
+    // been SUSPENDED (plus the OS resume storm on wake) — reported as neither a
+    // stall nor a record. A broken predicate degrades to reporting the stall,
+    // never to silently swallowing it. Both opt-in: the server keeps today's
+    // behavior byte-for-byte until its wiring passes these options.
+    if (maxCredibleLagMs != null && lagMs > maxCredibleLagMs) {
+      stats.suspendedSkips++;
+      return null;
+    }
+    if (isSuspendBoundary) {
+      try {
+        if (isSuspendBoundary(windowStart, t)) {
+          stats.suspendedSkips++;
+          return null;
+        }
+      } catch { /* a broken clock must not suppress real evidence */ }
+    }
+
     const record = buildStallRecord({
       lagMs,
+      runtime,
       attribution: attributeStall(spanRing, windowStart, t),
       syncTotals: summarizeSyncTotals(syncWindow),
       timestamp: wallClock(),
@@ -486,7 +531,7 @@ export function createLoopMonitor(opts = {}) {
     begin, end, recordSyncOp, trace, tick, start, stop,
     setOnStall(fn) { onStall = typeof fn === 'function' ? fn : null; },
     get started() { return timer != null; },
-    config: Object.freeze({ heartbeatMs, thresholdMs, syncFloorMs, spanRingSize, stallRingSize }),
+    config: Object.freeze({ heartbeatMs, thresholdMs, syncFloorMs, spanRingSize, stallRingSize, runtime, maxCredibleLagMs, suspendAware: isSuspendBoundary != null }),
     stalls() { return stallRing.slice(); },
     stats() { return { ...stats, syncMsSeen: Math.round(stats.syncMsSeen), started: timer != null }; },
     // Test seam: the raw ring (with holes) the attributor reads.

@@ -618,3 +618,120 @@ describe('instrumentSyncIo — attribution down to the blocking call', () => {
     restore();
   });
 });
+
+// ==========================================================================
+// WARDEN-1376 — main-process reuse + suspension discrimination.
+// The Electron main process creates the SAME monitor with runtime:'main' and
+// opts into the two suspension discriminators (magnitude ceiling +
+// suspend-boundary predicate). Server defaults stay byte-for-byte: no ceiling,
+// no predicate, runtime 'server'.
+// ==========================================================================
+describe('WARDEN-1376 — runtime tag + suspension discrimination', () => {
+  it("defaults keep the server's identity and no suppression arms", () => {
+    const { monitor } = makeMonitor();
+    assert.equal(monitor.config.runtime, 'server');
+    assert.equal(monitor.config.maxCredibleLagMs, null);
+    assert.equal(monitor.config.suspendAware, false);
+  });
+
+  it("runtime:'main' stamps main into the record and the stderr line", () => {
+    const { monitor, clock, stalls } = makeMonitor({ runtime: 'main' });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(3000);
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 1);
+    assert.equal(stalls[0].runtime, 'main');
+    const line = formatStallLine(stalls[0]);
+    assert.match(line, /\[warden:stall\] main event loop blocked/);
+  });
+
+  it('formatStallLine keeps saying server for legacy/untagged records', () => {
+    assert.match(formatStallLine({ lagMs: 1234, attribution: [], syncTotals: [] }), /server event loop blocked 1234ms/);
+  });
+
+  it('a lag above maxCredibleLagMs is a suspension — no record, skip counted', () => {
+    const { monitor, clock, stalls } = makeMonitor({ runtime: 'main', maxCredibleLagMs: 60000 });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(1000 + 43474684); // the live dataset's 12-hour sleep, verbatim
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 0, 'a 12-hour "lag" is a sleep artifact, never a stall');
+    assert.equal(monitor.stats().suspendedSkips, 1);
+    assert.equal(monitor.stats().stalls, 0);
+  });
+
+  it('a lag inside the ceiling still records — only the absurd magnitudes are dropped', () => {
+    const { monitor, clock, stalls } = makeMonitor({ runtime: 'main', maxCredibleLagMs: 60000 });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(1000 + 1954); // the mid-use 1954ms block from the live dataset
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'a real ~2s block must still be recorded');
+    assert.equal(stalls[0].lagMs, 1954);
+    assert.equal(monitor.stats().suspendedSkips, 0);
+  });
+
+  it('a lag window spanning a suspend→resume boundary is skipped (resume storm)', () => {
+    const suspendWindows = [{ from: 5000, to: 61000 }];
+    const isSuspendBoundary = (from, to) =>
+      suspendWindows.some((w) => w.from < to && w.to >= from);
+    const { monitor, clock, stalls } = makeMonitor({
+      runtime: 'main',
+      isSuspendBoundary,
+      // no ceiling — isolate the boundary arm
+    });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();               // lastTick = 2000
+    // The machine suspends at 5000 and resumes at 61000 (clock jumped); the
+    // wake tick lands at 61300 → window (2000, 61300) straddles the boundary.
+    clock.advance(61300 - 2000);
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 0, 'the wake tick + its storm is the OS, not a loop block');
+    assert.equal(monitor.stats().suspendedSkips, 1);
+  });
+
+  it('a quiet window after the wake still records normally', () => {
+    const suspendWindows = [{ from: 5000, to: 61000 }];
+    const isSuspendBoundary = (from, to) =>
+      suspendWindows.some((w) => w.from < to && w.to >= from);
+    const { monitor, clock, stalls } = makeMonitor({ runtime: 'main', isSuspendBoundary });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(61300 - 2000);
+    monitor.tick();               // wake tick — skipped
+    clock.advance(1000 + 1500);   // a genuine post-wake block
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'post-wake real blocks stay visible');
+    assert.equal(monitor.stats().suspendedSkips, 1);
+  });
+
+  it('a THROWING suspend predicate degrades to recording the stall', () => {
+    const { monitor, clock, stalls } = makeMonitor({
+      runtime: 'main',
+      isSuspendBoundary: () => { throw new Error('boom'); },
+    });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(1000 + 2000);
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'a broken discriminator must not swallow real stalls');
+  });
+
+  it('buildStallRecord accepts an explicit runtime without disturbing the default', () => {
+    assert.equal(buildStallRecord({ lagMs: 100, timestamp: 0 }).runtime, 'server');
+    assert.equal(buildStallRecord({ lagMs: 100, timestamp: 0, runtime: 'main' }).runtime, 'main');
+  });
+});
