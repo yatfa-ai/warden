@@ -22,6 +22,13 @@
 //   local  + container → docker exec -i <c> sh -c '<script>' (no ssh hop)
 //   local, no container → a direct fs write (no child at all)
 //
+// A FIFTH shape arrived with WARDEN-1377: a container-less MANUAL pane whose
+// tree front a container anyway (the user docker-exec-attached from the pane's
+// shell). deliverPastedImage resolves the pane's own process tree (see
+// paneContainer.js) and, when it finds a boundary, delivers through the first
+// and third legs above with the resolved name; when it cannot settle one, the
+// host write stands and the marker says so (`where: 'host'`).
+//
 // WARDEN-1350 — under the companion transport the two REMOTE shapes stop
 // spawning ssh per paste (this module was created on the raw-ssh pattern five
 // days AFTER the generic exec RPC landed, un-pooled, one full handshake per
@@ -51,6 +58,7 @@ import path from 'node:path';
 import { spawn as defaultSpawn } from 'node:child_process';
 import { buildSshArgv, shellQuote, SSH_BIN } from './ssh.js';
 import { isCompanionTransportEnabled, writeFileToHost } from './companion.js';
+import { resolvePaneContainer } from './paneContainer.js';
 
 const LOCAL = '(local)';
 
@@ -289,10 +297,17 @@ export function pasteFileName(info, now = Date.now()) {
 
 // The ONE line that crosses the terminal. Everything about the image the agent
 // could want is here: where the file is, and what it is.
-export function buildMarker(destPath, info) {
+export function buildMarker(destPath, info, opts = {}) {
   const dims = info && info.width && info.height ? ` ${info.width}×${info.height}` : '';
   const fmt = info && info.format ? ` (${info.format}${dims})` : '';
-  return `[pasted image → ${destPath}${fmt}]`;
+  // WARDEN-1377 — `where: 'host'` marks the honest fallback: the pane's tree
+  // carried a container boundary the resolution could not settle (or the walk
+  // failed), so the bytes took the host leg and this path is a HOST path — the
+  // in-container agent may not be able to read it, and the marker must never
+  // pretend otherwise. Absent `where` (the container-known legs, and a walk
+  // that positively found NO boundary) keeps the plain marker.
+  const where = opts && opts.where === 'host' ? ' on the warden host' : '';
+  return `[pasted image → ${destPath}${where}${fmt}]`;
 }
 
 // ---------------------------- delivery plumbing -----------------------------
@@ -384,7 +399,32 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
   const info = describeImage(buf);
   const name = pasteFileName(info, now);
   const isLocal = !chat || chat.host === LOCAL;
-  const container = (chat && chat.container) || null;
+  let container = (chat && chat.container) || null;
+
+  // WARDEN-1377 — a chat with NO container is a manual tmux pane, and the pane
+  // may still front a container: the user docker-exec-attaches from a shell in
+  // the pane, the tree says so verbatim (`docker exec -it -u yatfa <c> tmux
+  // attach …`), and until now the image landed on the host where the in-pane
+  // agent could never read it. Resolve the pane's own tree once (cached per
+  // pane in paneContainer.js) and deliver to what it finds. The gate is
+  // deliberately `!container`: the yatfa and catalog chat shapes that already
+  // carry one are unreachable here by construction, so this can never regress
+  // them. Every non-resolved outcome ('none', 'ambiguous', 'failed') keeps
+  // today's host write — the delivery below is unchanged — and
+  // 'ambiguous'/'failed' additionally QUALIFY the marker (buildMarker's
+  // `where: 'host'`), because in those two states we cannot claim the agent can
+  // read the path it names. A resolution failure must never fail a paste, so
+  // even a throw from the resolver degrades to the host write.
+  let resolution = null;
+  if (chat && !container && chat.session) {
+    try {
+      resolution = await (deps.resolvePaneContainer ?? resolvePaneContainer)(chat, cfg);
+    } catch (e) {
+      resolution = { state: 'failed', reason: e.message };
+    }
+    if (resolution.state === 'resolved') container = resolution.container;
+  }
+  const hostFallbackMarker = !!resolution && (resolution.state === 'ambiguous' || resolution.state === 'failed');
 
   // Local + no container: the agent's tmux session runs on THIS machine, so the
   // file is simply written here. No child, no shell, no quoting question.
@@ -409,7 +449,7 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
     } catch (e) {
       console.warn(`[warden:paste] prune failed: ${e.message}`);
     }
-    return { ok: true, path: dest, marker: buildMarker(dest, info), info };
+    return { ok: true, path: dest, marker: buildMarker(dest, info, hostFallbackMarker ? { where: 'host' } : {}), info };
   }
 
   const dest = `${PASTE_DIR}/${name}`;
@@ -439,7 +479,7 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
       // words, fall back to the exit code when it said nothing.
       return { ok: false, error: (r.stderr || '').trim() || `delivery failed (exit ${r.code})` };
     }
-    return { ok: true, path: dest, marker: buildMarker(dest, info), info };
+    return { ok: true, path: dest, marker: buildMarker(dest, info, hostFallbackMarker ? { where: 'host' } : {}), info };
   }
   const [bin, argv] = isLocal
     ? [deps.dockerBin ?? DOCKER_BIN, buildContainerExecArgv(container, dest)]
@@ -451,5 +491,5 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
     // far side's own words, fall back to the exit code when it said nothing.
     return { ok: false, error: (r.stderr || '').trim() || `delivery failed (exit ${r.code})` };
   }
-  return { ok: true, path: dest, marker: buildMarker(dest, info), info };
+  return { ok: true, path: dest, marker: buildMarker(dest, info, hostFallbackMarker ? { where: 'host' } : {}), info };
 }
