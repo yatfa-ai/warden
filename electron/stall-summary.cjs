@@ -132,7 +132,7 @@ function formatStallSummary(summary, { logFile, now = Date.now() } = {}) {
   const s = summary && typeof summary === 'object' ? summary : { count: 0 };
   const lines = [];
   if (!s.count) {
-    lines.push('No stalls recorded — the server event loop has not blocked long enough to be logged.');
+    lines.push('No stalls recorded — the event loop has not blocked long enough to be logged.');
   } else {
     lines.push(`${s.count} stall${s.count === 1 ? '' : 's'} recorded in the retained journal.`);
     if (s.lastAt) {

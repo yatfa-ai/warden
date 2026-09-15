@@ -357,6 +357,63 @@ test('flushSave clears the pending timer — a second flush is a no-op (no late 
   assert.equal(calls, 1, 'still exactly one write after the second flush');
 });
 
+// (WARDEN-1376) The steady-state writer may be ASYNC (production's is, so a
+// persist can never block the loop it saves from); the quit path uses the
+// optional SYNC writer so the final entries are durable before process exit.
+
+test('an async (promise-returning) save works on the debounced path — no unhandled rejection', () => {
+  const saved = [];
+  const log = createTransmissionLog({
+    clock: () => 1,
+    debounceMs: 50,
+    save: (e) => new Promise((resolve) => { saved.push(e); resolve(); }),
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  assert.equal(saved.length, 0, 'debounced — not yet fired');
+  assert.equal(log.flushSave(), true, 'flush materializes the pending write');
+  assert.equal(saved.length, 1, 'the async writer received the snapshot');
+  assert.equal(saved[0].length, 1);
+});
+
+test('a REJECTING async save never surfaces as an unhandled rejection or crash', async () => {
+  let unhandled = null;
+  const onUnhandled = (err) => { unhandled = err; };
+  process.on('unhandledRejection', onUnhandled);
+  const log = createTransmissionLog({
+    clock: () => 1,
+    save: () => Promise.reject(new Error('disk full')),
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  // Give the rejected promise a microtask + macrotask to land.
+  await new Promise((r) => setTimeout(r, 10));
+  process.off('unhandledRejection', onUnhandled);
+  assert.equal(unhandled, null, 'the rejection must be swallowed inside fireSave');
+  assert.equal(log.size(), 1, 'the ring still recorded');
+});
+
+test('flushSave prefers the SYNC writer when one is injected (quit-path durability)', () => {
+  let asyncCalls = 0;
+  let syncCalls = 0;
+  const log = createTransmissionLog({
+    clock: () => 1,
+    debounceMs: 50,
+    save: () => { asyncCalls += 1; },
+    saveSync: () => { syncCalls += 1; },
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.flushSave();
+  assert.equal(syncCalls, 1, 'the flush used the sync writer');
+  assert.equal(asyncCalls, 0, 'the async writer was not used on the quit path');
+});
+
+test('without saveSync, flushSave falls back to save (single-writer tests keep working)', () => {
+  let calls = 0;
+  const log = createTransmissionLog({ clock: () => 1, debounceMs: 50, save: () => { calls += 1; } });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.flushSave();
+  assert.equal(calls, 1);
+});
+
 test('noopTransmissionLog exposes the persistence seam as no-ops (uniform interface)', () => {
   assert.equal(noopTransmissionLog.flushSave(), false, 'noop flushSave reports nothing flushed');
   assert.doesNotThrow(() => noopTransmissionLog.seed([{ outcome: 'ok' }]));

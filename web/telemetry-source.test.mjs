@@ -403,6 +403,120 @@ test('source heartbeat: tick over threshold → stall; under threshold → nothi
 });
 
 // ==========================================================================
+// (c2) Heartbeat suspension discrimination (WARDEN-1376) — a suspended
+// machine must never be reported as a blocked one. Live telemetry showed 6 of
+// 9 main-runtime stall events were 44min–12h sleep artifacts, and 2 of the 3
+// real ones fired at the wake instant (resume storm).
+// ==========================================================================
+
+test('heartbeat: overdue above the magnitude ceiling → no stall (suspended, not blocked)', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100, maxCredibleLagMs: 2000,
+  });
+  src.setConsent({ incidents: true });
+  // The machine slept ~35 minutes: overdue ≫ ceiling.
+  clock.state.now = 1000 + 500 + 2100000;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 0, 'a 35-minute "lag" is a sleep artifact, never a stall');
+  const st = src.heartbeatStats();
+  assert.equal(st.magnitudeSkipped, 1);
+  assert.equal(st.stallsEmitted, 0);
+  // The NEXT tick (quiet) still reports a real stall — suppression is per-window.
+  clock.state.now += 500 + 300; // overdue 300 > 100
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1, 'a normal post-wake block is still reported');
+});
+
+test('heartbeat: lag window spanning a suspend→resume boundary → no stall (resume storm)', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  // The suspend clock main wires from powerMonitor, faked: a suspend window
+  // [5000, 61000].
+  const suspendWindows = [{ from: 5000, to: 61000 }];
+  const suspendClock = (from, to) =>
+    suspendWindows.some((w) => w.from < to && w.to >= from);
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100, maxCredibleLagMs: 1000000, // ceiling OFF — isolate the boundary arm
+    suspendClock,
+  });
+  src.setConsent({ incidents: true });
+  // lastTick = 1000; the tick lands after the wake: window (1000, 61300)
+  // straddles the suspend → suppressed. A 1300ms "block" — exactly the
+  // human-scale resume-storm shape from the live dataset.
+  clock.state.now = 61300;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 0, 'wake-tick block is the OS resume storm, not warden work');
+  assert.equal(src.heartbeatStats().suspendSkipped, 1);
+  // A tick whose window is entirely awake reports normally.
+  clock.state.now = 61300 + 500 + 250;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1);
+});
+
+test('heartbeat: setSuspendClock hot-sets and detaches the boundary discriminator', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100, maxCredibleLagMs: 1000000,
+  });
+  src.setConsent({ incidents: true });
+  // No clock wired yet: the same window that will be suppressed below emits.
+  clock.state.now = 61300;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1, 'without a clock the stall is reported');
+  // Wire the clock post-ready (main creates the source at module scope,
+  // powerMonitor only exists after ready) — a suspend window [70000, 120000].
+  src.setSuspendClock((from, to) => from < 120000 && to >= 70000);
+  clock.state.now = 61300 + 500 + 61000; // window (61300, 122800) straddles it
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1, 'boundary inside → suppressed');
+  assert.equal(src.heartbeatStats().suspendSkipped, 1);
+  // Detach: reporting resumes.
+  src.setSuspendClock(null);
+  clock.state.now += 500 + 250;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 2, 'detached clock → the stall is reported again');
+});
+
+test('heartbeat: a THROWING suspend clock degrades to reporting the stall', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100, maxCredibleLagMs: 1000000,
+    suspendClock: () => { throw new Error('boom'); },
+  });
+  src.setConsent({ incidents: true });
+  clock.state.now = 1000 + 500 + 250;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1, 'a broken discriminator must not swallow real stalls');
+});
+
+test('heartbeat: stats counters track ticks, emissions, and both suppression arms', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100, maxCredibleLagMs: 2000,
+    suspendClock: (from, to) => from < 5000,
+  });
+  src.setConsent({ incidents: true });
+  clock.state.now = 1000 + 500 + 150; clock.state.tickFn(); // stall → emitted
+  clock.state.now += 500 + 2100000; clock.state.tickFn();   // magnitude → skipped
+  clock.state.now += 500 + 300; clock.state.tickFn();       // boundary (from < 5000) → skipped
+  const st = src.heartbeatStats();
+  assert.deepEqual(
+    { ticks: st.ticks, stallsEmitted: st.stallsEmitted, magnitudeSkipped: st.magnitudeSkipped, suspendSkipped: st.suspendSkipped },
+    { ticks: 3, stallsEmitted: 1, magnitudeSkipped: 1, suspendSkipped: 1 },
+  );
+});
+
+// ==========================================================================
 // (d) Consent gate — off = no tap subscribed, no event built (two layers)
 // ==========================================================================
 

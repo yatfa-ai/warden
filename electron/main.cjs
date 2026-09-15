@@ -1,12 +1,15 @@
 // Yatfa Warden — Electron main process (CommonJS).
 // Spawns the backend server (ESM) as a child process, then opens a window.
-const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu, shell } = require('electron');
+const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu, shell, powerMonitor } = require('electron');
 const { fork, execSync } = require('child_process');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const fs = require('fs');
 const os = require('os');
 const http = require('http');
+// Promise-based fs for the ASYNC steady-state persistence paths (WARDEN-1376):
+// window-state + transmission-log saves yield the loop instead of blocking it.
+const fsp = fs.promises;
 // Pure window-bounds decision logic (no electron dependency) — see file header.
 // main.cjs wires the live electron APIs (screen, win.getBounds/isMaximized, fs)
 // to these decisions so the core logic is unit-testable in web/window-state.test.mjs.
@@ -63,6 +66,12 @@ const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('.
 // too (web/stall-summary.test.mjs).
 const { buildMenuTemplate, windowNeedsRestore } = require('./menu-template.cjs');
 const { summarizeStalls, formatStallSummary } = require('./stall-summary.cjs');
+// WARDEN-1376 — pure suspend-window tracker: main wires Electron's powerMonitor
+// ('suspend'/'resume') into it, and BOTH stall detectors (the telemetry source's
+// heartbeat and the local attribution monitor below) consult it so a suspended
+// machine is never reported as a blocked one. Pure/testable (suspend-clock.test.mjs);
+// main.cjs wires the live events.
+const { createSuspendClock } = require('./suspend-clock.cjs');
 
 // --- Single-instance lock (WARDEN-1346) ----------------------------------------
 // Warden is a SINGLE-INSTANCE app: every instance shares one backend port
@@ -112,6 +121,67 @@ let win = null;
 let isQuitting = false;
 let closeToTray = false;
 let tray = null;
+
+// --- Suspend clock + MAIN loop monitor (WARDEN-1376) ---------------------------
+// Live evidence, 2026-09: 6 of 9 retained main-runtime `stall:event-loop`
+// telemetry events carry lagMs between 44 minutes and 12 HOURS — a suspended
+// machine measuring its own absence through the heartbeat, not a blocked loop —
+// and 2 of the 3 human-scale events fired at the same wall-clock second as a
+// wake (the OS resume storm). The main process had NO local stall evidence at
+// all (the attribution journal is server-only), so its real freezes were
+// undiagnosable by construction. This block fixes both:
+//
+//   1. `suspendClock` — powerMonitor suspend/resume windows (wired in
+//      app.whenReady, where powerMonitor exists). Both detectors consult it:
+//      a lag window above the magnitude ceiling (60s — no live process blocks
+//      that long) or spanning a suspend→resume is a suspension, not a stall.
+//   2. `mainLoopMonitor` — the SAME pure monitor the server child uses
+//      (src/loop-monitor.js, created with runtime:'main'), started post-ready:
+//      it instruments main's sync fs/child_process members, attributes every
+//      stall to the work that was blocking the loop, prints one
+//      `[warden:stall] main …` stderr line, and appends to the SHARED
+//      ~/.yatfa-warden/stalls.jsonl journal (records already carry a runtime
+//      field, so the Stall Diagnostics dialog and GET /api/diagnostics/stalls
+//      read main records with zero changes). Runs regardless of telemetry
+//      consent — a local journal needs none — and never blocks the loop it
+//      watches (the journal write is async; the heartbeat is unref'd).
+const suspendClock = createSuspendClock({ now: () => Date.now() });
+// Ceiling shared by both detectors: a single-threaded loop blocked longer than
+// this while the process stays alive is a suspension by definition.
+const MAX_CREDIBLE_LAG_MS = 60000;
+let mainLoopMonitor = null;
+
+// Start the main-process loop monitor. Post-ready (dynamic ESM import of the
+// shared src/ modules — the same move main already makes for the telemetry
+// transport and the stall-journal read). A failure degrades to "no local main
+// stall evidence" and never breaks boot or the window.
+async function startMainLoopMonitor() {
+  try {
+    const monitorMod = await import(srcModuleUrl('loop-monitor.js'));
+    const stallLogMod = await import(srcModuleUrl('stall-log.js'));
+    mainLoopMonitor = monitorMod.createLoopMonitor({
+      runtime: 'main',
+      maxCredibleLagMs: MAX_CREDIBLE_LAG_MS,
+      isSuspendBoundary: (from, to) => suspendClock.spansSuspend(from, to),
+    });
+    mainLoopMonitor.setOnStall((record) => {
+      console.error(`${monitorMod.formatStallLine(record)} | recorded in ${stallLogMod.stallLogFile()}`);
+      stallLogMod.appendStall(record).catch((e) => {
+        console.warn(`[warden:stall] could not append to ${stallLogMod.stallLogFile()}: ${e.message}`);
+      });
+    });
+    // Attribute the sync work main actually does: the boot-time sentinel scan
+    // + killStalePort's netstat/taskkill execSyncs, the remaining sync window-
+    // state / transmission-log writes (close + quit paths), and any sync fs a
+    // dependency performs. One patch on the module object covers every call
+    // site (imports share the same object), exactly as in the server child.
+    monitorMod.instrumentSyncIo(mainLoopMonitor, { fs, childProcess: require('child_process') });
+    mainLoopMonitor.start();
+  } catch (e) {
+    console.warn('[warden:stall] main loop monitor failed to start (stalls stay telemetry-only)', e);
+    mainLoopMonitor = null;
+  }
+}
 
 // --- Telemetry SOURCE + PIPELINE wiring (WARDEN-463 / WARDEN-486 / WARDEN-524) -
 // Optional, OFF-by-default instrumentation (roadmap WARDEN-446 / design
@@ -204,7 +274,28 @@ function loadTransmissionLog() {
 // Atomic rewrite (temp file + rename) so a partial write is never observable — the
 // reader sees either the previous complete file or the new one, never a torn write.
 // catch + warn (never throws): a persist failure must not break the send path.
-function saveTransmissionLog(filePath, entries) {
+//
+// WARDEN-1376 — ASYNC (steady state) + SYNC (quit). During a telemetry-on
+// session the debounced save fires at least every 500ms while events flow —
+// exactly the "busy panes, streaming output, telemetry running" condition of
+// the freeze report — and a sync create+write+rename on Windows can block the
+// main loop for hundreds of ms under real-time AV. The debounced writer is
+// therefore async; flushSave() (before-quit) uses the SYNC twin so the final
+// entries are durable before process exit.
+async function saveTransmissionLog(filePath, entries) {
+  try {
+    const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    const tmp = `${filePath}.tmp`;
+    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.rename(tmp, filePath);
+  } catch (e) {
+    console.warn('[warden:telemetry-transmission-log] failed to persist', e);
+  }
+}
+
+// The SYNC twin — quit path only (flushSave). Same durability argument as
+// saveWindowStateSync: an async write fired at quit races process teardown.
+function saveTransmissionLogSync(filePath, entries) {
   try {
     const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
     const tmp = `${filePath}.tmp`;
@@ -221,6 +312,9 @@ const telemetryTransmissionLog = createTransmissionLog({
   // app.whenReady(). So app.getPath('userData') is never touched at require() time
   // (a top-level getPath would throw before whenReady → boot-loop).
   save: (entries) => saveTransmissionLog(transmissionLogPath(), entries),
+  // WARDEN-1376 — SYNC writer for the quit path (flushSave): the final entries
+  // must be on disk before process exit, which an async write cannot promise.
+  saveSync: (entries) => saveTransmissionLogSync(transmissionLogPath(), entries),
   debounceMs: TRANSMISSION_LOG_DEBOUNCE_MS,
 });
 
@@ -500,7 +594,7 @@ async function showStallDiagnostics() {
     const res = await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
       type: 'info',
       title: 'Stall Diagnostics',
-      message: 'Server event-loop stalls',
+      message: 'Event-loop stalls (backend server + app main process)',
       detail: summaryText,
       buttons: ['Open Data Folder', 'Close'],
       defaultId: 1,
@@ -644,11 +738,33 @@ function loadWindowState() {
 // Atomic rewrite (temp file + rename), mirroring saveTransmissionLog above so a
 // partial write is never observable — an interrupted write (OS logout/shutdown
 // mid-write) leaves either the previous complete state or the new one, never a
-// truncated file the loader would read as absent (defaults). Sync on purpose:
-// main.cjs is CommonJS and the shared atomic-write helper is an async ES module,
-// not importable here. catch + warn (never throws): a persist failure must not
-// break the save path.
-function saveWindowState(state) {
+// truncated file the loader would read as absent (defaults). catch + warn (never
+// throws): a persist failure must not break the save path.
+//
+// WARDEN-1376 — ASYNC on every steady-state path. The write+rename pair is the
+// one blocking mechanism warden's own code puts on the main loop during normal
+// use: a resize/move debounce fires it 500ms later and maximize/unmaximize
+// fires it immediately, and on Windows a create+write+rename of even a tiny
+// file can stall for hundreds of ms under real-time antivirus scanning (worst
+// case: seconds). Steady-state callers fire-and-forget the promise; the
+// terminal moments (window close, before-quit) keep the SYNC twin below so the
+// final state is durable before the process exits.
+async function saveWindowState(state) {
+  try {
+    const filePath = windowStatePath();
+    const tmp = `${filePath}.tmp`;
+    await fsp.writeFile(tmp, JSON.stringify(state, null, 2), 'utf8');
+    await fsp.rename(tmp, filePath);
+  } catch (e) {
+    console.warn('[warden:window-state] failed to persist', e);
+  }
+}
+
+// The SYNC twin, for the two paths where durability beats latency: the window
+// 'close' flush and before-quit. An async write fired at quit races process
+// teardown and can lose the final state; a once-per-session sync write of a
+// few hundred bytes costs nothing a user can see.
+function saveWindowStateSync(state) {
   try {
     const filePath = windowStatePath();
     const tmp = `${filePath}.tmp`;
@@ -700,7 +816,13 @@ function attachWindowStateCapture(window) {
   window.on('close', (e) => {
     if (closeToTray && !isQuitting) { e.preventDefault(); window.hide(); return; }
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
-    flushBoundsCapture(window);
+    // Terminal moment → SYNC save (WARDEN-1376): the write must land before the
+    // window is gone, and a once-per-close sync write costs nothing visible.
+    {
+      const b = window.getBounds();
+      const next = captureBounds(loadWindowState(), b, window.isMaximized());
+      if (next) saveWindowStateSync(next);
+    }
   });
 }
 
@@ -1151,6 +1273,35 @@ app.whenReady().then(async () => {
   // window) can ever run without the lock.
   if (!gotTheLock) return;
 
+  // WARDEN-1376 — powerMonitor is only valid post-ready. Feed the suspend
+  // clock, arm the telemetry heartbeat's suspension discriminator, and start
+  // the local main-process stall monitor (attribution + shared journal, always
+  // on — it needs no consent). Also: the OS-shutdown gesture. On Windows a
+  // session end / update reboot does not run before-quit, and with
+  // close-to-tray ON the window-close intercept HIDES the window instead of
+  // letting the quit through — the process is then force-killed with its
+  // crash-sentinel marker in place, and the NEXT launch reports an
+  // unexpected-termination for what was a normal shutdown. Mark the quit,
+  // clear the marker, tear down — best-effort, each guarded, because the OS
+  // may kill us mid-flight anyway.
+  try {
+    powerMonitor.on('suspend', () => { try { suspendClock.onSuspend(); } catch { /* never the host's problem */ } });
+    powerMonitor.on('resume', () => { try { suspendClock.onResume(); } catch { /* never the host's problem */ } });
+    powerMonitor.on('shutdown', () => {
+      isQuitting = true;
+      try { clearThisInstanceMarker(); } catch { /* best effort */ }
+      try { telemetryTransmissionLog.flushSave(); } catch { /* best effort */ }
+      cleanup();
+      // Graceful window teardown if the OS gives us the milliseconds; before-quit
+      // will re-run the marker clear + flushes, all idempotent.
+      try { app.quit(); } catch { /* best effort */ }
+    });
+  } catch (e) {
+    console.warn('[warden:power] powerMonitor wiring failed (suspension split disabled)', e);
+  }
+  telemetry.setSuspendClock((from, to) => suspendClock.spansSuspend(from, to));
+  void startMainLoopMonitor();
+
   // Replace Electron's STOCK application menu (WARDEN-1280). Installed FIRST —
   // before the backend fork and the window — so the app never briefly shows the
   // stock template's "About Electron" / electronjs.org / New Window items, and so
@@ -1274,6 +1425,9 @@ function cleanup() {
   // Tear down the telemetry taps so no listener outlives quit (defensive; the
   // process is exiting anyway).
   try { telemetry.dispose(); } catch {}
+  // Stop the local main-process stall monitor (WARDEN-1376) — its unref'd
+  // heartbeat must never be (or keep) work on the quit path.
+  try { if (mainLoopMonitor) mainLoopMonitor.stop(); } catch {}
   if (serverProcess) {
     try { serverProcess.kill('SIGTERM'); } catch {}
     // Force kill after 2s if still alive
@@ -1307,9 +1461,14 @@ app.on('before-quit', () => {
   isQuitting = true;
   // Flush any pending bounds capture as a safety net (the window 'close' handler
   // already flushes; this covers an app.quit() that bypasses per-window close).
+  // SYNC save (WARDEN-1376): at quit the async write would race process teardown.
   if (win && !win.isDestroyed()) {
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
-    flushBoundsCapture(win);
+    {
+      const b = win.getBounds();
+      const next = captureBounds(loadWindowState(), b, win.isMaximized());
+      if (next) saveWindowStateSync(next);
+    }
   }
   // Crash sentinel (WARDEN-687): clear THIS instance's marker on a real quit so a
   // clean quit → relaunch lands ZERO crash events (DONE criterion #2). Per-PID
