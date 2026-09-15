@@ -38,9 +38,21 @@ const test = (name, fn) => {
   passed += 1;
   console.log('  ok -', name);
 };
+// Async twin (the web/electron.test.mjs pattern) for the WARDEN-1376 thenable
+// tests: the sync helper cannot await, so these register on resolution.
+const testAsync = (name, fn) =>
+  fn().then(
+    () => {
+      passed += 1;
+      console.log('  ok -', name);
+    },
+    (e) => {
+      console.error('  NOT OK -', name, e && e.message);
+      throw e;
+    },
+  );
 
 // A deterministic injected clock — the test discipline: never Date.now() directly.
-// Each call advances a counter so successive records get ascending, pin-able ts.
 const sequencedClock = (start = 1000, step = 10) => {
   let t = start;
   return () => {
@@ -578,6 +590,70 @@ test('a rejected entry round-trips losslessly through record → serialize → p
   restarted.seed(parseTransmissionLog(text));
   assert.equal(restarted.entries()[0].outcome, 'rejected', 'rejected survives a restart, not stripped to null');
   assert.deepEqual(restarted.entries(), recorded.entries(), 'lossless');
+});
+
+// ==========================================================================
+// (WARDEN-1376) Thenable-safe save seam — the production writer is now ASYNC
+// off the main thread; the module must swallow REJECTIONS (not just sync
+// throws), and flushSave must pass the { sync: true } hint so the quit path's
+// writer can go synchronous (app.quit() will not wait for a promise).
+// ==========================================================================
+
+testAsync('a REJECTING async save is swallowed — no unhandled rejection escapes the pipeline', async () => {
+  // Node surfaces an unhandled rejection by CRASHING the process (default).
+  // If the module failed to attach .catch, this test file dies here.
+  const log = createTransmissionLog({
+    clock: () => 1,
+    save: () => Promise.reject(new Error('disk gone')),
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  await new Promise((resolve) => setImmediate(resolve)); // let the rejection land
+  assert.equal(log.size(), 1, 'the ring is unaffected by the persist failure');
+});
+
+testAsync('a REJECTING async save on the debounced timer is also swallowed', async () => {
+  const log = createTransmissionLog({
+    clock: () => 1,
+    debounceMs: 5,
+    save: () => Promise.reject(new Error('disk gone')),
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  await new Promise((resolve) => setTimeout(resolve, 30)); // let the timer + rejection land
+  assert.equal(log.size(), 1, 'the ring survived the async persist failure');
+});
+
+test('flushSave passes the { sync: true } hint to the injected save (quit path goes synchronous)', () => {
+  const hints = [];
+  const log = createTransmissionLog({
+    clock: () => 1,
+    debounceMs: 50,
+    save: (entries, hint) => { hints.push(hint); },
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.flushSave();
+  assert.deepEqual(hints, [{ sync: true }], 'the flush carries the sync hint');
+});
+
+testAsync('a debounced (timer-fired) save carries NO sync hint (session writes stay async)', async () => {
+  const hints = [];
+  const log = createTransmissionLog({
+    clock: () => 1,
+    debounceMs: 5,
+    save: (entries, hint) => { hints.push(hint === undefined ? 'absent' : hint); },
+  });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(hints, ['absent'], 'the timer-fired save passes no hint');
+});
+
+test('a SYNC-throwing save is still swallowed (the original WARDEN-782 contract holds)', () => {
+  const log = createTransmissionLog({
+    clock: () => 1,
+    save: () => { throw new Error('sync boom'); },
+  });
+  assert.doesNotThrow(() => log.record({ outcome: 'ok', attempts: 1, status: 200 }));
+  assert.doesNotThrow(() => log.flushSave());
+  assert.equal(log.size(), 1, 'the ring is unaffected');
 });
 
 console.log(`\n✓ TELEMETRY TRANSMISSION-LOG TESTS PASS (${passed})`);

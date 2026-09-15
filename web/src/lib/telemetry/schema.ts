@@ -173,6 +173,27 @@ export interface StallEvent {
   platform?: string; // non-identifying OS label (darwin/win32/linux); optional
   lagMs: number; // how far the tick was overdue (≥0)
   source: 'event-loop' | 'unresponsive';
+  /** WARDEN-1376 — OPTIONAL, main-runtime `event-loop` stalls only: what the
+   *  main process's sync-I/O probe (electron/stall-attribution.cjs) saw running
+   *  across the blocked window. Each entry folds one closed-set kebab-case
+   *  label (an instrumented sync call site, never a path/hostname) into the
+   *  overlap of its slow calls with [timestamp − lagMs, timestamp]. ABSENT when
+   *  nothing instrumented overlapped — an honest empty ships NO field, never a
+   *  zero — and absent on every renderer stall. Additive optional field: no
+   *  schema-version bump (both validators treat unknown fields as extras; this
+   *  one is now SHAPE-CHECKED when present). */
+  attribution?: StallAttribution[];
+}
+
+/** One folded main-stall attribution entry — the `performance-stall`
+ *  counterpart of a `server-stall` culprit. `culprit` is a constant kebab-case
+ *  literal (`fs-write-file-sync`), so no path or hostname can ride it;
+ *  `overlapMs` is how much of the blocked window this label's slow calls
+ *  spanned (an understatement when the block's head predates the window —
+ *  never an overstatement). */
+export interface StallAttribution {
+  culprit: string; // closed-set kebab-case key (validator-enforced)
+  overlapMs: number; // blocked-window overlap, ≥ 0
 }
 
 // ---------------------------------------------------------------------------
@@ -390,14 +411,34 @@ function isOperationalMetricsShape(e: Record<string, unknown>): boolean {
 // separator), no hostname (needs a dot), no chat/agent name (needs its own
 // characters) can match, so the culprit map cannot become a channel for user
 // data even if the producer's key mapping were bypassed.
-const CULPRIT_NAME_RE = OPERATION_NAME_RE;
-// The producer's footprint bound: at most maxCulprits distinct keys (32 by
+const CULPRIT_NAME_RE = OPERATION_NAME_RE;// The producer's footprint bound: at most maxCulprits distinct keys (32 by
 // default) + the one reserved overflow accumulator. Held generously above the
 // producer's default so a future cap raise does not need a schema bump.
 const MAX_CULPRITS_PER_EVENT = 65;
 
-/** True iff `c` is a structurally valid ServerStallCulprit. */
-function isServerStallCulprit(c: unknown): c is ServerStallCulprit {
+// WARDEN-1376 — the `performance-stall` OPTIONAL `attribution` block. Absent
+// (undefined) on renderer stalls and on main stalls where nothing instrumented
+// overlapped; when present it is a non-empty bounded array of
+// {culprit, overlapMs} entries whose keys are the SAME closed-set kebab-case
+// literals the server-stall culprits use. Shape-checking an optional field
+// here keeps a malformed block from riding the wire while leaving every
+// attribution-free event byte-identical to before.
+const MAX_ATTRIBUTION_ENTRIES_PER_EVENT = 65;
+
+function isValidStallAttribution(a: unknown): boolean {
+  if (a === undefined) return true;
+  if (!Array.isArray(a) || a.length === 0) return false;
+  if (a.length > MAX_ATTRIBUTION_ENTRIES_PER_EVENT) return false;
+  for (const c of a) {
+    if (!c || typeof c !== 'object') return false;
+    const o = c as Record<string, unknown>;
+    if (typeof o.culprit !== 'string' || !CULPRIT_NAME_RE.test(o.culprit)) return false;
+    if (typeof o.overlapMs !== 'number' || !Number.isFinite(o.overlapMs) || o.overlapMs < 0) return false;
+  }
+  return true;
+}
+
+/** True iff `c` is a structurally valid ServerStallCulprit. */function isServerStallCulprit(c: unknown): c is ServerStallCulprit {
   if (!c || typeof c !== 'object') return false;
   const o = c as Record<string, unknown>;
   if (typeof o.culprit !== 'string' || !CULPRIT_NAME_RE.test(o.culprit)) return false;
@@ -451,7 +492,8 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
       return typeof e.reason === 'string';
     case 'performance-stall':
       return typeof e.lagMs === 'number' &&
-        (e.source === 'event-loop' || e.source === 'unresponsive');
+        (e.source === 'event-loop' || e.source === 'unresponsive') &&
+        isValidStallAttribution(e.attribution);
     case 'operational-metrics':
       return isOperationalMetricsShape(e);
     case 'server-stall':

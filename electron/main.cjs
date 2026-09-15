@@ -53,6 +53,16 @@ const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
 const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('./telemetry-transmission-log.cjs');
+// WARDEN-1376 — the main-process stall ATTRIBUTION probe + the ordered async
+// session persister. The probe wraps the sync fs/child_process module objects
+// ONCE at require time (a wrapper per member, originals restored on dispose) so
+// every main-process sync call site — the persist paths above, the crash
+// sentinel, the menu helpers — is attributable when the telemetry source's
+// event-loop heartbeat detects a freeze. The persister takes the session-time
+// window-state + transmission-log writes off the main thread (see the writers
+// below for why that is the freeze fix itself).
+const { installSyncIoProbe, SYNC_FS_METHODS, SYNC_CHILD_PROCESS_METHODS } = require('./stall-attribution.cjs');
+const { createSessionPersister } = require('./session-persist.cjs');
 // Application menu (WARDEN-1280). Warden shipped Electron's STOCK template — which
 // advertises "About Electron", Help links to electronjs.org, and a File > New
 // Window that boots a second instance whose killStalePort() kills the FIRST
@@ -133,6 +143,16 @@ let tray = null;
 //      pipeline's own consent resolver (resolveTelemetryConsent) is a SECOND
 //      off-gate, and the transport is the LAST — nothing collecting OR
 //      no-endpoint sends nothing.
+// WARDEN-1376 — the probe is installed BEFORE the source consumes it, at module
+// scope: main.cjs requires fs at the top, so the wrap observes every later sync
+// call site including this module's own boot work (the transmission-log seed
+// read, the crash-sentinel scan). cleanup() disposes it (originals restored).
+const mainStallProbe = installSyncIoProbe({
+  targets: [
+    { obj: fs, prefix: 'fs', methods: SYNC_FS_METHODS },
+    { obj: require('child_process'), prefix: 'child-process', methods: SYNC_CHILD_PROCESS_METHODS },
+  ],
+});
 const telemetry = createTelemetrySource({
   // The source's record sink is bound to the pipeline's entry point below — a
   // source signal then flows source → record() → pipeline (resolveTier → redact
@@ -141,6 +161,15 @@ const telemetry = createTelemetrySource({
   // on), so binding it captures nothing on its own.
   record: null,
   now: () => Date.now(),
+  // WARDEN-1376 — the stall ATTRIBUTION probe. Installed at module scope (not
+  // in whenReady) so even a boot-time block attributes. The probe aggregates
+  // in memory only: it writes nothing and sends nothing on its own — its data
+  // leaves the machine only when the consent-gated heartbeat builds a stall
+  // event, so "off = nothing" is preserved exactly (the aggregate cost is two
+  // clock reads per sync fs call, the same always-on posture the server child's
+  // monitor took in WARDEN-977). attributeStall folds the probe's slow calls
+  // overlapping [t − lagMs, t]; an honest empty ships NO attribution field.
+  attributeStall: mainStallProbe.attributeStall,
   // Non-identifying app release label (WARDEN-665): stamped on every emitted event
   // so a maintainer can attribute volume to a release. Read live from package.json
   // via Electron's app.getVersion() (0.1.19 today); injected here so the source
@@ -179,8 +208,9 @@ for (const cat of TELEMETRY_CATEGORIES) telemetryPrefs[cat.configKey] = false;
 //
 // --- Persistence helpers (WARDEN-782) -----------------------------------------
 // Same userData dir + atomic-rewrite + debounce + skip-malformed discipline as
-// window-state.json (the in-repo template at lines ~262-339; saveWindowState below
-// uses the same temp-file + rename shape as saveTransmissionLog). The file is NDJSON
+// window-state.json (the window-state persister below uses the same temp-file +
+// rename shape as saveTransmissionLog — both now async off the main thread on
+// the session path, sync on the quit path; WARDEN-1376). The file is NDJSON
 // (one metadata-only entry per line); the ring is already capped in memory, so the
 // file is bounded over the app's lifetime (never append-only growth). METADATA ONLY
 // by construction — the ring never holds payload content / redacted fields / chat-or-
@@ -201,18 +231,42 @@ function loadTransmissionLog() {
   }
 }
 
-// Atomic rewrite (temp file + rename) so a partial write is never observable — the
-// reader sees either the previous complete file or the new one, never a torn write.
-// catch + warn (never throws): a persist failure must not break the send path.
-function saveTransmissionLog(filePath, entries) {
-  try {
-    const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+// WARDEN-1376 — the production writer behind the log's `save` seam. The old
+// writer ran writeFileSync + renameSync ON THE MAIN THREAD after every send:
+// for a collecting user that is a UI-thread freeze of the write's duration
+// every time the pipeline dispatches (the ~5-min operational-metrics window,
+// every incident), and on win32 a filter-driver/antivirus stretch of the small
+// JSON rename is exactly the multi-second main-loop block the heartbeat
+// records (`stall:event-loop`) and the user feels as dead keystrokes. The
+// session write is therefore ASYNC + ORDERED (the shared
+// electron/session-persist.cjs chain: one write in flight, in call order,
+// failures logged and skipped), while the QUIT flush arrives with a
+// `{ sync: true }` hint and writes synchronously — app.quit() does not wait
+// for promises, and the last send outcomes must be durable.
+//
+// The tmp + rename sequence is identical in both modes, so a reader (the boot
+// seed) still sees either the previous complete file or the new one, never a
+// torn write.
+const transmissionLogPersister = createSessionPersister({
+  writeAsync: ({ filePath, text }) => {
+    const tmp = `${filePath}.tmp`;
+    return fs.promises.writeFile(tmp, text, 'utf8').then(() => fs.promises.rename(tmp, filePath));
+  },
+  writeSync: ({ filePath, text }) => {
     const tmp = `${filePath}.tmp`;
     fs.writeFileSync(tmp, text, 'utf8');
     fs.renameSync(tmp, filePath);
-  } catch (e) {
-    console.warn('[warden:telemetry-transmission-log] failed to persist', e);
+  },
+  onError: (e) => console.warn('[warden:telemetry-transmission-log] failed to persist', e),
+});
+
+function saveTransmissionLog(filePath, entries, opts) {
+  const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+  if (opts && opts.sync === true) {
+    transmissionLogPersister.persistSync({ filePath, text });
+    return;
   }
+  transmissionLogPersister.persist({ filePath, text });
 }
 
 const telemetryTransmissionLog = createTransmissionLog({
@@ -641,22 +695,67 @@ function loadWindowState() {
   }
 }
 
-// Atomic rewrite (temp file + rename), mirroring saveTransmissionLog above so a
-// partial write is never observable — an interrupted write (OS logout/shutdown
-// mid-write) leaves either the previous complete state or the new one, never a
-// truncated file the loader would read as absent (defaults). Sync on purpose:
-// main.cjs is CommonJS and the shared atomic-write helper is an async ES module,
-// not importable here. catch + warn (never throws): a persist failure must not
-// break the save path.
-function saveWindowState(state) {
-  try {
+// WARDEN-1376 — the session-time window-state WRITER. Writes used to run
+// `writeFileSync` + `renameSync` directly on the main thread: main's event loop
+// IS Chromium's browser UI thread, so every debounced resize/move capture and
+// every maximize/unmaximize froze input delivery for the write's duration —
+// the mechanism behind the telemetry-confirmed multi-second `stall:event-loop`
+// freezes on win32 (a filter-driver/antivirus stretch turns a small JSON rename
+// into seconds). Session captures now go through the ORDERED async persister
+// (electron/session-persist.cjs: one write in flight, in call order, failures
+// logged); the EXIT path below (real window close + before-quit) still writes
+// synchronously because app.quit() will not wait for a promise and the last
+// bounds must be durable.
+//
+// The CACHE below is what makes async safe: every capture is a read-modify-
+// write, and with the write no longer landing synchronously, re-reading the
+// file per capture could observe a stale predecessor and resurrect older
+// fields (two rapid Settings toggles would race each other through the disk).
+// The cache IS the live truth — set synchronously on every persist, seeded
+// from disk once — so each next state is always derived from the freshest
+// value, in call order, regardless of when the disk catches up. It also
+// removes a sync READ per capture.
+let windowStateCache; // undefined = not loaded yet; null = disk absent/malformed
+function currentWindowState() {
+  if (windowStateCache === undefined) windowStateCache = loadWindowState();
+  return windowStateCache;
+}
+
+function windowStatePersisterError(e) {
+  console.warn('[warden:window-state] failed to persist', e);
+}
+
+const windowStatePersister = createSessionPersister({
+  writeAsync: (state) => {
+    const filePath = windowStatePath();
+    const tmp = `${filePath}.tmp`;
+    return fs.promises
+      .writeFile(tmp, JSON.stringify(state, null, 2), 'utf8')
+      .then(() => fs.promises.rename(tmp, filePath));
+  },
+  writeSync: (state) => {
+    // Atomic rewrite (temp file + rename) — the exact sequence the old sync
+    // saveWindowState ran, kept byte-identical for the exit path.
     const filePath = windowStatePath();
     const tmp = `${filePath}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
     fs.renameSync(tmp, filePath);
-  } catch (e) {
-    console.warn('[warden:window-state] failed to persist', e);
-  }
+  },
+  onError: windowStatePersisterError,
+});
+
+// Enqueue one async atomic persist AND update the live cache synchronously (the
+// cache update is the state change; the disk write is its materialization).
+function saveWindowStateAsync(state) {
+  windowStateCache = state;
+  windowStatePersister.persist(state);
+}
+
+// Exit-path persist (window 'close' on a real close + before-quit): update the
+// cache and write through synchronously — app.quit() will not wait for async.
+function saveWindowStateSync(state) {
+  windowStateCache = state;
+  windowStatePersister.persistSync(state);
 }
 
 // Persist the current normal-state bounds. No-op when the pref is off or the
@@ -664,16 +763,28 @@ function saveWindowState(state) {
 function flushBoundsCapture(window) {
   if (!window || window.isDestroyed()) return;
   const b = window.getBounds();
-  const next = captureBounds(loadWindowState(), b, window.isMaximized());
-  if (next) saveWindowState(next);
+  const next = captureBounds(currentWindowState(), b, window.isMaximized());
+  if (next) saveWindowStateAsync(next);
 }
 
 // Persist a maximize/unmaximize transition (immediate, not debounced) so the
 // flag is current even if the app closes during a debounce window.
 function flushMaximizedCapture(window, isMaximized) {
   if (!window || window.isDestroyed()) return;
-  const next = captureMaximized(loadWindowState(), isMaximized);
-  if (next) saveWindowState(next);
+  const next = captureMaximized(currentWindowState(), isMaximized);
+  if (next) saveWindowStateAsync(next);
+}
+
+// The EXIT-path twin of flushBoundsCapture: same capture decision, but the
+// write is SYNCHRONOUS. The window 'close' (real close) and before-quit
+// handlers run on the quit path, where app.quit() will not wait for the async
+// persister's promise — the last bounds must land on disk before the process
+// exits, and a blocking write is invisible there.
+function flushBoundsCaptureSync(window) {
+  if (!window || window.isDestroyed()) return;
+  const b = window.getBounds();
+  const next = captureBounds(currentWindowState(), b, window.isMaximized());
+  if (next) saveWindowStateSync(next);
 }
 
 function scheduleBoundsCapture(window) {
@@ -700,7 +811,7 @@ function attachWindowStateCapture(window) {
   window.on('close', (e) => {
     if (closeToTray && !isQuitting) { e.preventDefault(); window.hide(); return; }
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
-    flushBoundsCapture(window);
+    flushBoundsCaptureSync(window);
   });
 }
 
@@ -819,7 +930,7 @@ function clearThisInstanceMarker() {
 function createWindow() {
   // Resolve the seed bounds from saved state vs the current displays. A saved
   // window on a now-unplugged monitor falls back to the visible default.
-  const saved = loadWindowState();
+  const saved = currentWindowState();
   const displays = screen.getAllDisplays().map((d) => ({ bounds: d.bounds }));
   const init = resolveInitialBounds(saved, displays);
 
@@ -882,7 +993,7 @@ function createWindow() {
   if (persistedCloseToTray) {
     closeToTray = createTray();
     if (!closeToTray) {
-      saveWindowState(withCloseToTray(loadWindowState(), false));
+      saveWindowStateAsync(withCloseToTray(currentWindowState(), false));
     }
   } else {
     closeToTray = false;
@@ -967,11 +1078,11 @@ function destroyTray() {
 // The Settings toggle reads/writes the `remember` flag through these channels;
 // main's window-state.json remains the single source of truth.
 ipcMain.handle('window:get-remember-bounds', () => {
-  return rememberIsActive(loadWindowState());
+  return rememberIsActive(currentWindowState());
 });
 ipcMain.handle('window:set-remember-bounds', (_event, remember) => {
-  const next = withRemember(loadWindowState(), remember === true);
-  saveWindowState(next);
+  const next = withRemember(currentWindowState(), remember === true);
+  saveWindowStateAsync(next);
   return next.remember;
 });
 
@@ -1021,14 +1132,14 @@ ipcMain.handle('window:set-close-to-tray', (_event, on) => {
     // but no-tray state. WARDEN-330.
     if (!createTray()) {
       closeToTray = false;
-      saveWindowState(withCloseToTray(loadWindowState(), false));
+      saveWindowStateAsync(withCloseToTray(currentWindowState(), false));
       return false;
     }
   } else {
     destroyTray();
   }
   closeToTray = on === true;
-  saveWindowState(withCloseToTray(loadWindowState(), closeToTray));
+  saveWindowStateAsync(withCloseToTray(currentWindowState(), closeToTray));
   return closeToTray;
 });
 
@@ -1274,6 +1385,8 @@ function cleanup() {
   // Tear down the telemetry taps so no listener outlives quit (defensive; the
   // process is exiting anyway).
   try { telemetry.dispose(); } catch {}
+  // WARDEN-1376 — restore every fs/child_process member the stall probe wrapped.
+  try { mainStallProbe.dispose(); } catch {}
   if (serverProcess) {
     try { serverProcess.kill('SIGTERM'); } catch {}
     // Force kill after 2s if still alive
@@ -1307,9 +1420,10 @@ app.on('before-quit', () => {
   isQuitting = true;
   // Flush any pending bounds capture as a safety net (the window 'close' handler
   // already flushes; this covers an app.quit() that bypasses per-window close).
+  // SYNC variant: the quit path cannot wait for the async persister.
   if (win && !win.isDestroyed()) {
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
-    flushBoundsCapture(win);
+    flushBoundsCaptureSync(win);
   }
   // Crash sentinel (WARDEN-687): clear THIS instance's marker on a real quit so a
   // clean quit → relaunch lands ZERO crash events (DONE criterion #2). Per-PID

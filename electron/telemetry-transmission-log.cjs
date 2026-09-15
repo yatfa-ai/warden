@@ -175,12 +175,31 @@ function createTransmissionLog(opts) {
   // Persist a snapshot via the injected save. Wrapped so a throwing save (e.g. a
   // real fs failure not caught by production's writer) can never crash the telemetry
   // pipeline — durability is best-effort, never load-bearing on the send path.
-  function fireSave() {
+  //
+  // WARDEN-1376: production's writer is now ASYNC off the main thread (the main
+  // event loop is Chromium's UI thread, so a sync write froze input delivery
+  // for its duration). An async writer signals failure by REJECTION, not by a
+  // sync throw, so a thenable result gets an explicit .catch — otherwise the
+  // first failed async write would surface as an unhandled rejection in the
+  // main process. The one-argument call shape is unchanged (sync fakes never
+  // return a thenable); the optional second argument is the flush hint below.
+  function fireSave(syncHint) {
     saveTimer = null;
+    let entriesSnapshot;
     try {
-      save(snapshot());
+      entriesSnapshot = snapshot();
     } catch {
-      /* a persist failure must never crash the telemetry pipeline */
+      return; // snapshotting the ring cannot realistically fail; never let it
+    }
+    try {
+      const result = save(entriesSnapshot, syncHint ? { sync: true } : undefined);
+      if (result && typeof result.catch === 'function') {
+        result.catch(() => {
+          /* a failed persist must never crash the telemetry pipeline */
+        });
+      }
+    } catch {
+      /* a throwing save must never crash the telemetry pipeline */
     }
   }
 
@@ -192,7 +211,6 @@ function createTransmissionLog(opts) {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(fireSave, debounceMs);
   }
-
   function record(entry) {
     ring.push(normalizeEntry(entry, clock));
     if (ring.length > cap) ring.shift(); // bounded — drop the OLDEST past the cap
@@ -223,10 +241,15 @@ function createTransmissionLog(opts) {
   // Wired to the app's quit path so the last sends survive a close-mid-debounce.
   // Returns whether a pending write was flushed; a no-op (returns false) when
   // nothing is pending, so it is safe to call unconditionally on quit.
+  //
+  // WARDEN-1376: the flush passes the sync hint so production's writer performs
+  // a SYNCHRONOUS write — the quit path must not hand its last write to a
+  // promise app.quit() will not wait for. Tests injecting plain fakes are
+  // unaffected (they observe the same entries; the hint is the second argument).
   function flushSave() {
     if (saveTimer == null) return false;
     clearTimeout(saveTimer);
-    fireSave();
+    fireSave(true);
     return true;
   }
 

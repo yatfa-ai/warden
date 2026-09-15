@@ -403,6 +403,101 @@ test('source heartbeat: tick over threshold → stall; under threshold → nothi
 });
 
 // ==========================================================================
+// (WARDEN-1376) Main-stall ATTRIBUTION — the optional collaborator
+// ==========================================================================
+
+test('source heartbeat: a main stall asks the attribution collaborator and carries a valid block', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const windowsSeen = [];
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100,
+    attributeStall: (w) => { windowsSeen.push(w); return [{ culprit: 'fs-write-file-sync', overlapMs: 1500 }]; },
+  });
+  src.setConsent({ incidents: true });
+  clock.state.now = 1750; // overdue 250 > 100
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1);
+  const ev = record.calls[0];
+  assert.deepEqual(ev.attribution, [{ culprit: 'fs-write-file-sync', overlapMs: 1500 }], 'the block rides the event');
+  assert.ok(validateBaseEvent(ev), 'the attributed event is schema-valid');
+  // The window is the OVERDUE gap ending at the tick: [t − overdue, t].
+  assert.deepEqual(windowsSeen, [{ windowStartMs: 1750 - 250, windowEndMs: 1750 }]);
+});
+
+test('an HONEST EMPTY attribution ships NO field (never an empty list, never a guess)', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100,
+    attributeStall: () => [],
+  });
+  src.setConsent({ incidents: true });
+  clock.state.now = 1750;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1, 'the stall event still ships');
+  assert.equal('attribution' in record.calls[0], false, 'no field when nothing instrumented overlapped');
+  assert.ok(validateBaseEvent(record.calls[0]));
+});
+
+test('a THROWING or malformed collaborator degrades to NO field — never drops the stall', () => {
+  for (const broken of [
+    () => { throw new Error('probe boom'); },
+    () => 'not-an-array',
+    () => [{ culprit: 'C:\\evil\\path', overlapMs: 5 }],
+    () => [{ culprit: 'fs-ok', overlapMs: -1 }],
+  ]) {
+    const clock = fakeClock();
+    const record = recorder();
+    const src = createTelemetrySource({
+      record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+      heartbeatMs: 500, thresholdMs: 100,
+      attributeStall: broken,
+    });
+    src.setConsent({ incidents: true });
+    clock.state.now = 1750;
+    clock.state.tickFn();
+    assert.equal(record.calls.length, 1, 'the stall event still ships');
+    assert.equal('attribution' in record.calls[0], false, 'malformed attribution is dropped, not attached');
+  }
+});
+
+test('a renderer unresponsive stall NEVER carries attribution (main-process evidence only)', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  let asked = 0;
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100,
+    attributeStall: () => { asked += 1; return [{ culprit: 'fs-read-file-sync', overlapMs: 1 }]; },
+  });
+  src.setConsent({ incidents: true });
+  const fakeWebContents = fakeEmitter();
+  src.attachRenderer(fakeWebContents);
+  fakeWebContents.emit('unresponsive');
+  assert.equal(asked, 0, 'the collaborator was not consulted for a renderer hang');
+  assert.equal(record.calls[0].source, 'unresponsive');
+  assert.equal('attribution' in record.calls[0], false);
+});
+
+test('validateBaseEvent: the optional attribution block is shape-checked when present', () => {
+  const base = { schemaVersion: SCHEMA_VERSION, type: 'performance-stall', runtime: 'main', timestamp: 1, lagMs: 1500, source: 'event-loop' };
+  assert.ok(validateBaseEvent({ ...base }), 'absent attribution is valid (the dominant shape)');
+  assert.ok(validateBaseEvent({ ...base, attribution: [{ culprit: 'fs-write-file-sync', overlapMs: 1500 }] }));
+  assert.ok(validateBaseEvent({ ...base, attribution: [{ culprit: 'fs-rename-sync', overlapMs: 0 }] }));
+  assert.equal(validateBaseEvent({ ...base, attribution: [] }), false, 'an empty block is malformed (absent is the honest empty)');
+  assert.equal(validateBaseEvent({ ...base, attribution: 'nope' }), false);
+  assert.equal(validateBaseEvent({ ...base, attribution: [{ culprit: 'a/b/c', overlapMs: 1 }] }), false, 'a path cannot ride a culprit key');
+  assert.equal(validateBaseEvent({ ...base, attribution: [{ culprit: 'ok.example.com', overlapMs: 1 }] }), false, 'a hostname cannot ride a culprit key');
+  assert.equal(validateBaseEvent({ ...base, attribution: [{ culprit: 'fs-ok' }] }), false, 'overlapMs is required');
+  const tooMany = Array.from({ length: 66 }, (_, i) => ({ culprit: `c-${i}`, overlapMs: 1 }));
+  assert.equal(validateBaseEvent({ ...base, attribution: tooMany }), false, 'the bound mirrors MAX_CULPRITS_PER_EVENT');
+  assert.ok(validateBaseEvent({ ...base, attribution: Array.from({ length: 65 }, (_, i) => ({ culprit: `c-${i}`, overlapMs: 1 })) }));
+});
+
+// ==========================================================================
 // (d) Consent gate — off = no tap subscribed, no event built (two layers)
 // ==========================================================================
 

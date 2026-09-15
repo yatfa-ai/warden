@@ -36,6 +36,11 @@ const {
   normalizeConsent,
 } = require('../src/telemetry-consent.cjs');
 
+// WARDEN-1376 — the attribution ENTRY validator, owned by the producer module
+// (electron/stall-attribution.cjs) so the wire shape and the probe vocabulary
+// cannot drift apart. Required (not re-declared) for exactly that reason.
+const { isValidAttributionEntry } = require('./stall-attribution.cjs');
+
 // ---------------------------------------------------------------------------
 // Slice-1 contract (base-tier). Reconcile with WARDEN-457's canonical schema
 // when it ships. The event-type list, runtimes, and SCHEMA_VERSION are the
@@ -352,6 +357,20 @@ function validateBaseEvent(event) {
   } else if (event.type === 'performance-stall') {
     if (typeof event.lagMs !== 'number') return false;
     if (event.source !== 'event-loop' && event.source !== 'unresponsive') return false;
+    // WARDEN-1376 — the OPTIONAL main-process attribution block. Absent on
+    // every renderer stall and on any main stall where nothing instrumented
+    // overlapped (an honest empty ships NO field). When present, each entry is
+    // a {culprit, overlapMs} pair whose key is a closed-set kebab-case literal —
+    // the same pattern `server-stall` culprits and `operational-metrics`
+    // operation names carry, which makes the WARDEN-443 hard exclusions
+    // (paths, hostnames) STRUCTURAL here too.
+    if (event.attribution !== undefined) {
+      if (!Array.isArray(event.attribution) || event.attribution.length === 0) return false;
+      if (event.attribution.length > MAX_ATTRIBUTION_ENTRIES_PER_EVENT) return false;
+      for (const c of event.attribution) {
+        if (!isValidAttributionEntry(c)) return false;
+      }
+    }
   } else if (event.type === 'operational-metrics') {
     // WARDEN-1258 — the aggregate event. Mirrors the canonical schema's shape
     // checks (see web/src/lib/telemetry/schema.ts); the kebab-case operation
@@ -391,6 +410,14 @@ function validateBaseEvent(event) {
 // schema's OPERATION_NAME_RE. Lowercase letters, digits, and hyphens only, so
 // no path (needs a separator) and no hostname (needs a dot + TLD) can match.
 const OP_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+// WARDEN-1376 — the performance-stall attribution entry + bound. The key pattern
+// is the SAME kebab-case literal shape OP_NAME_RE enforces elsewhere; the bound
+// mirrors the server-stall event's MAX_CULPRITS_PER_EVENT. Shared with
+// electron/stall-attribution.cjs (which OWNS the producer-side vocabulary) via
+// its exported isValidAttributionEntry — required here directly so the
+// validator's definition cannot drift from the producer's.
+const MAX_ATTRIBUTION_ENTRIES_PER_EVENT = 65;
 // The aggregator's footprint bound (maxOperations + the reserved overflow key).
 const MAX_METRIC_OPERATIONS = 129;
 
@@ -526,6 +553,16 @@ function createTelemetrySource(opts) {
   const clearInt = typeof o.clearInterval === 'function' ? o.clearInterval : clearInterval;
   const heartbeatMs = typeof o.heartbeatMs === 'number' ? o.heartbeatMs : DEFAULT_HEARTBEAT_INTERVAL_MS;
   const thresholdMs = typeof o.thresholdMs === 'number' ? o.thresholdMs : DEFAULT_STALL_THRESHOLD_MS;
+  // WARDEN-1376 — the OPTIONAL main-process stall ATTRIBUTION collaborator.
+  // Injected by main.cjs (the sync-I/O probe in electron/stall-attribution.cjs);
+  // called with the blocked window { windowStartMs, windowEndMs } when the
+  // heartbeat below detects a stall, it returns a bounded
+  // [{culprit, overlapMs}] list (closed-set kebab keys) or [] / null when
+  // nothing instrumented overlapped — an HONEST empty (the blocker lives
+  // somewhere the probe cannot see), which ships no field rather than a guess.
+  // Absent/null collaborator → byte-identical events to before (renderer taps
+  // and every other caller never ask for attribution).
+  const attributeStall = typeof o.attributeStall === 'function' ? o.attributeStall : null;
 
   // BASE-tier app release label (WARDEN-665). A non-identifying release version
   // (identical for every user on a release — not an identifier, not content)
@@ -623,7 +660,25 @@ function createTelemetrySource(opts) {
       const overdue = t - lastTick - heartbeatMs; // how late this tick arrived
       lastTick = t;
       if (isStall(overdue, thresholdMs)) {
-        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...nameFields(), ...versionOpt, ...platformOpt }));
+        const event = buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...nameFields(), ...versionOpt, ...platformOpt });
+        // WARDEN-1376 — attribute the blocked window [t - overdue, t]. A
+        // synchronous block ends when this late tick finally runs, so the
+        // overdue gap is guaranteed to overlap every call that blocked the
+        // loop (its head may predate the window; the overlap is then
+        // understated, never the culprit missed). A throwing or malformed
+        // collaborator result degrades to NO field — attribution is evidence,
+        // never a reason to drop the stall event.
+        if (attributeStall) {
+          try {
+            const attribution = attributeStall({ windowStartMs: t - overdue, windowEndMs: t });
+            if (Array.isArray(attribution) && attribution.length > 0 && attribution.every(isValidAttributionEntry)) {
+              event.attribution = attribution;
+            }
+          } catch {
+            /* attribution must never cost us the stall event itself */
+          }
+        }
+        emit(event);
       }
     }, heartbeatMs);
     // The telemetry heartbeat must never keep the process alive on its own —
@@ -804,4 +859,5 @@ module.exports = {
   isStall,
   validateBaseEvent,
   createTelemetrySource,
+  MAX_ATTRIBUTION_ENTRIES_PER_EVENT,
 };

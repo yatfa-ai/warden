@@ -467,4 +467,43 @@ test('null / undefined / primitive inputs are handled defensively', () => {
   assert.equal(redact('leak: AKIAIOSFODNN7EXAMPLE', { consent: NAMES_ON }), 'leak: [REDACTED:aws-key]');
 });
 
+// ==========================================================================
+// (WARDEN-1376) The performance-stall attribution block passes through redact
+// UNTOUCHED — the culprit keys are closed-set kebab literals (no path/hostname
+// shape to scrub) and overlapMs is a number, so the whole block is byte-
+// identical through the pipeline's redact stage. A hostile string smuggled
+// into a culprit key is still scrubbed (redact is the last line of defense).
+// ==========================================================================
+
+test('an attributed main-stall event round-trips redact with the block intact', () => {
+  const event = {
+    schemaVersion: 6,
+    type: 'performance-stall',
+    runtime: 'main',
+    timestamp: 1789329683143,
+    lagMs: 1954,
+    source: 'event-loop',
+    attribution: [
+      { culprit: 'fs-write-file-sync', overlapMs: 1500 },
+      { culprit: 'fs-rename-sync', overlapMs: 454 },
+    ],
+  };
+  const out = redact(event, { consent: NAMES_ON });
+  assert.deepEqual(out.attribution, event.attribution, 'kebab keys + numbers survive untouched');
+});
+
+test('a smuggled identifier inside a culprit key is still scrubbed (redact is the last line)', () => {
+  const event = {
+    schemaVersion: 6,
+    type: 'performance-stall',
+    runtime: 'main',
+    timestamp: 1,
+    lagMs: 1200,
+    source: 'event-loop',
+    attribution: [{ culprit: 'read from /home/user/secrets.txt', overlapMs: 1200 }],
+  };
+  const out = redact(event, { consent: NAMES_ON });
+  assert.doesNotMatch(JSON.stringify(out), /home\/user/);
+});
+
 console.log(`\n✓ TELEMETRY REDACTION TESTS PASS (${passed})`);

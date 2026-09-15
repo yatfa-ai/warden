@@ -450,4 +450,61 @@ test('server-stall carries NO free-text field — the whole shape is numbers + c
   }
 });
 
+// ==========================================================================
+// (WARDEN-1376) The performance-stall OPTIONAL attribution block — canonical
+// validator reconciles with the CJS mirror and the probe's producer vocabulary
+// ==========================================================================
+
+test('stall attribution: absent is valid (renderer stalls and honest empties ship no field)', () => {
+  assert.ok(validateBaseEvent(stallFixture), 'the fixture stays byte-valid without the field');
+});
+
+test('stall attribution: a well-formed block validates; closed-set kebab keys only', () => {
+  assert.ok(validateBaseEvent({ ...stallFixture, attribution: [{ culprit: 'fs-write-file-sync', overlapMs: 1500 }] }));
+  assert.ok(validateBaseEvent({
+    ...stallFixture,
+    attribution: [
+      { culprit: 'fs-write-file-sync', overlapMs: 1500 },
+      { culprit: 'child-process-exec-sync', overlapMs: 400 },
+    ],
+  }));
+});
+
+test('stall attribution: malformed blocks are rejected at the canonical validator too', () => {
+  const cases = [
+    { attribution: [] },                                                    // empty is malformed (absent is the honest empty)
+    { attribution: 'not-an-array' },
+    { attribution: [{ culprit: 'C:\\Users\\x', overlapMs: 1 }] },           // a path cannot ride a key
+    { attribution: [{ culprit: 'x.example.com', overlapMs: 1 }] },          // a hostname cannot ride a key
+    { attribution: [{ culprit: 'fs-ok' }] },                                // overlapMs required
+    { attribution: [{ culprit: 'fs-ok', overlapMs: -1 }] },                 // ≥ 0
+    { attribution: Array.from({ length: 66 }, (_, i) => ({ culprit: `c-${i}`, overlapMs: 1 })) }, // bound
+  ];
+  for (const c of cases) {
+    assert.equal(validateBaseEvent({ ...stallFixture, ...c }), false, JSON.stringify(c));
+  }
+  // One below the bound is fine — mirrors the server-stall MAX_CULPRITS_PER_EVENT (65).
+  assert.ok(validateBaseEvent({
+    ...stallFixture,
+    attribution: Array.from({ length: 65 }, (_, i) => ({ culprit: `c-${i}`, overlapMs: 1 })),
+  }));
+});
+
+test('stall attribution: a CJS-mirror reconciliation fixture round-trips both validators', () => {
+  // The exact event the main-process heartbeat builds with an attributed block
+  // (probe label vocabulary) must validate on the canonical side too.
+  const event = {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'performance-stall',
+    runtime: RUNTIME.MAIN,
+    timestamp: 1789329683143,
+    lagMs: 1954,
+    source: 'event-loop',
+    appVersion: '0.1.70',
+    platform: 'win32',
+    attribution: [{ culprit: 'fs-rename-sync', overlapMs: 1954 }],
+  };
+  assert.ok(validateBaseEvent(event));
+});
+
 console.log(`\n✓ TELEMETRY-SCHEMA TESTS PASS (${passed})`);
