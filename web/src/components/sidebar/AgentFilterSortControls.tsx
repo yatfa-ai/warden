@@ -6,23 +6,23 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { FILTER_OPTIONS, SORT_OPTIONS, type AgentFilter, type AgentSort } from '@/lib/agentFilter';
+import { useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort } from '@/lib/uiStore';
 
 // Filter + sort popover shared by the root, host, and collection view headers.
 // Collapsing both controls behind a single icon keeps the header from
 // overflowing at the default sidebar width (220px) — two inline selects did not
 // fit.
+//
+// WARDEN-442 (slice 7 of roadmap WARDEN-1204): the popover SUBSCRIBES to the
+// filter/sort pair and writes it through the shared store's setters — every
+// mount applies the same choice live everywhere, with no prop threading
+// through ChatSidebar or App. Persistence still flows through App's
+// PersistedPrefSnapshot (the ONE compile-locked saveUi effect stays the single
+// writer).
 export function AgentFilterSortControls({
-  agentFilter,
-  agentSort,
-  onFilterChange,
-  onSortChange,
   hideHostSort = false,
   hideSort = false,
 }: {
-  agentFilter: AgentFilter;
-  agentSort: AgentSort;
-  onFilterChange: (v: AgentFilter) => void;
-  onSortChange: (v: AgentSort) => void;
   hideHostSort?: boolean;
   // WARDEN-949: the root list mirrors the pane grid and never runs sortChats,
   // so the root header offers filter only. Without this the sort Select was
@@ -30,6 +30,10 @@ export function AgentFilterSortControls({
   // sort tinted the trigger `active` as if it had, an affirmative false signal.
   hideSort?: boolean;
 }) {
+  const agentFilter = useAgentFilter();
+  const onFilterChange = useSetAgentFilter();
+  const agentSort = useAgentSort();
+  const onSortChange = useSetAgentSort();
   // A hidden sort must not count toward the "something is in effect" tint.
   const active = agentFilter !== 'all' || (!hideSort && agentSort !== 'manual');
   const sortOptions = hideHostSort ? SORT_OPTIONS.filter((o) => o.value !== 'host') : SORT_OPTIONS;

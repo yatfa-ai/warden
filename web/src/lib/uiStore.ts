@@ -55,6 +55,7 @@ import {
 } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
+import type { AgentFilter, AgentSort } from '@/lib/agentFilter';
 
 /**
  * The shared client-state slice. One field + its setter per migrated pref.
@@ -169,6 +170,32 @@ export interface UiStoreState {
   hostLabels: HostLabels;
   /** Replace the label map. The persisted write follows via App's snapshot. */
   setHostLabels: (labels: HostLabels) => void;
+  /**
+   * The sidebar fleet Filter (all/yatfa/claude/manual — WARDEN-442's pair,
+   * controls shipped in WARDEN-91), migrated onto the store (roadmap
+   * WARDEN-1204 slice 7), which retires the LAST large prop-drilled persisted
+   * pair: App owned both in a useState and threaded them read-only into
+   * ChatSidebar, which passed all four down to each of its three
+   * AgentFilterSortControls mounts. ChatSidebar (which APPLIES the pair —
+   * matchesAgentFilter + sortChats on the collection and host lists) and the
+   * popover (which WRITES it) now subscribe here directly, and the 16 JSX
+   * pass sites are gone. Persistence is unchanged: App keeps its snapshot
+   * field + resetSetters entry, so the ONE compile-locked saveUi effect
+   * remains the single writer. Default 'all'.
+   */
+  agentFilter: AgentFilter;
+  /** Set the sidebar fleet filter. The persisted write follows via App's snapshot. */
+  setAgentFilter: (filter: AgentFilter) => void;
+  /**
+   * The sidebar fleet Sort (manual/name/host/status/activity — the other half
+   * of WARDEN-442's pair), same migration as agentFilter above. Read by
+   * sortChats on the collection and host lists; the ROOT list deliberately
+   * never sorts (WARDEN-949), and its header hides the sort Select so a
+   * non-manual value can never tint an inactive control. Default 'manual'.
+   */
+  agentSort: AgentSort;
+  /** Set the sidebar fleet sort. The persisted write follows via App's snapshot. */
+  setAgentSort: (sort: AgentSort) => void;
 }
 
 /**
@@ -193,6 +220,8 @@ export type UiStoreSeed = Partial<
     | 'onExitBehavior'
     | 'timestampFormat'
     | 'hostLabels'
+    | 'agentFilter'
+    | 'agentSort'
   >
 >;
 
@@ -246,6 +275,15 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // labels", so nothing renders differently.
     hostLabels: seed.hostLabels ?? persisted.hostLabels ?? {},
     setHostLabels: (hostLabels) => set({ hostLabels }),
+    // WARDEN-1204 slice 7: ??-only shape, mirroring App's retired
+    // `useState(() => uiState.agentFilter ?? 'all')` / `?? 'manual'`
+    // initializers — both literals mirror DEFAULT_UI (pinned against it by
+    // uiStore.test.mjs), and loadUi()'s own sanitizers already normalize a
+    // persisted payload (agentFilter by enum membership, agentSort by ??).
+    agentFilter: seed.agentFilter ?? persisted.agentFilter ?? 'all',
+    setAgentFilter: (agentFilter) => set({ agentFilter }),
+    agentSort: seed.agentSort ?? persisted.agentSort ?? 'manual',
+    setAgentSort: (agentSort) => set({ agentSort }),
   }));
 }
 
@@ -413,4 +451,43 @@ export function useHostLabels(): HostLabels {
  */
 export function useSetHostLabels(): (labels: HostLabels) => void {
   return useUiStore((s) => s.setHostLabels);
+}
+
+/**
+ * The sidebar fleet Filter (WARDEN-442, roadmap WARDEN-1204 slice 7). The
+ * three sidebar views' filter applications and their shared
+ * AgentFilterSortControls popover subscribe here instead of receiving the
+ * pair through App's 16 JSX pass sites — the last large prop-drilled
+ * persisted pair is retired.
+ */
+export function useAgentFilter(): AgentFilter {
+  return useUiStore((s) => s.agentFilter);
+}
+
+/**
+ * The filter setter (the popover's filter Select is the only writer, and
+ * App's "Reset appearance & UI preferences" calls it through the same
+ * resetSetters entry). Stable across renders (zustand actions are created
+ * once with the store), so it is safe in a dependency array.
+ */
+export function useSetAgentFilter(): (filter: AgentFilter) => void {
+  return useUiStore((s) => s.setAgentFilter);
+}
+
+/**
+ * The sidebar fleet Sort (WARDEN-442, roadmap WARDEN-1204 slice 7). Read by
+ * sortChats on the collection and host lists (the root list deliberately
+ * never sorts — WARDEN-949); the popover's sort Select subscribes to the
+ * setter.
+ */
+export function useAgentSort(): AgentSort {
+  return useUiStore((s) => s.agentSort);
+}
+
+/**
+ * The sort setter (the popover's sort Select, plus the same reset path as
+ * the filter). Stable across renders, so it is safe in a dependency array.
+ */
+export function useSetAgentSort(): (sort: AgentSort) => void {
+  return useUiStore((s) => s.setAgentSort);
 }

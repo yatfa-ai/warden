@@ -32,14 +32,13 @@ import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, useAgentFilter, useAgentSort } from '@/lib/uiStore';
 import { parseLoadedPins, nextPins } from '@/lib/pinSync';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import { formatTokens } from '@/lib/formatTokens';
 import {
   matchesAgentFilter, sortChats, findChat, displayNameFor,
-  type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { chatMatchesCriteria } from '@/lib/collections';
 import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
@@ -121,17 +120,15 @@ interface Props {
   // (WARDEN-1274: its sibling, bulk SNOOZE, went with the alert channel it
   // silenced — there is no longer anything for a snooze to suppress.)
   onToggleWatchMany: (keys: string[], on: boolean) => void;
-  // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
-  // WARDEN-91. Owned by App and persisted by its saveUi effect (these were
-  // previously ChatSidebar-local useState, which App's lossy saveUi spread then
-  // wiped on every unrelated state change — the controls silently reset on
-  // reload). Read-only here except for the two change handlers, which delegate to
-  // App so it stays the single writer of the `warden:ui` blob. Threaded to the
-  // AgentFilterSortControls in both the collapsed and expanded fleet views.
-  agentFilter: AgentFilter;
-  agentSort: AgentSort;
-  onFilterChange: (filter: AgentFilter) => void;
-  onSortChange: (sort: AgentSort) => void;
+  // WARDEN-442 (slice 7 of roadmap WARDEN-1204): the sidebar fleet
+  // Filter (all/yatfa/claude/manual) + Sort pair lives on the shared
+  // client-state store (lib/uiStore.ts), and this component SUBSCRIBES to both
+  // values — it is the surface that APPLIES them (matchesAgentFilter +
+  // sortChats across the root/host/collection views). Persistence is
+  // unchanged: App's PersistedPrefSnapshot keeps both fields, so the ONE
+  // compile-locked saveUi effect remains the single writer of the `warden:ui`
+  // blob. The AgentFilterSortControls popover mounts below subscribe for
+  // themselves too — no props for the pair travel through here anymore.
   // WARDEN-431: Source Control section collapse state + setter. Owned by App
   // (persisted via its saveUi effect, like sidebarCollapsed); the panel component
   // receives them as props so it stays self-contained for the sidebar redesign
@@ -209,10 +206,16 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onToggleWatchMany, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
+  // WARDEN-442 (slice 7): the fleet filter/sort pair is read straight from the
+  // shared store — this component APPLIES it (matchesAgentFilter + sortChats
+  // below), and the AgentFilterSortControls mounts subscribe for themselves,
+  // so neither the pair nor its setters arrives as a prop anymore.
+  const agentFilter = useAgentFilter();
+  const agentSort = useAgentSort();
   // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
   // (5 previewed → up to the 20-entry cap).
   const [showAllClosed, setShowAllClosed] = useState(false);
@@ -1040,12 +1043,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
               card's own count, with no way to see or clear it without leaving the
               view. No hideHostSort: a collection can span hosts, so "Host" is a
               meaningful sort here (unlike the single-host view). */}
-          <AgentFilterSortControls
-            agentFilter={agentFilter}
-            agentSort={agentSort}
-            onFilterChange={onFilterChange}
-            onSortChange={onSortChange}
-          />
+          <AgentFilterSortControls />
           {/* WARDEN-338: one-click broadcast to the whole collection. Resolves the
               collection's live membership (the same `agents` array the list renders,
               so the target set is byte-for-byte what the action bar's "All" button
@@ -1137,13 +1135,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
           <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{hostLabelFor(H, hostLabels) || LABEL[H] || H}</span>
-          <AgentFilterSortControls
-            agentFilter={agentFilter}
-            agentSort={agentSort}
-            onFilterChange={onFilterChange}
-            onSortChange={onSortChange}
-            hideHostSort
-          />
+          <AgentFilterSortControls hideHostSort />
           {/* WARDEN-975: the per-host header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N) and
               collision badges (⚠/⏱/⇄) are gone. They described git OUTSIDE the focused
               pane — which the product decision says has no value — and every one of
@@ -1346,13 +1338,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           onChange={(e) => setTabSearchQuery(e.target.value)}
           className="h-6 text-[10px] px-2 flex-1 max-w-[120px] min-w-20"
         />
-        <AgentFilterSortControls
-          agentFilter={agentFilter}
-          agentSort={agentSort}
-          onFilterChange={onFilterChange}
-          onSortChange={onSortChange}
-          hideSort
-        />
+        <AgentFilterSortControls hideSort />
         {/* WARDEN-975: the root fleet header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N), its
             collision badges (⚠/⏱/⇄), its "triage first" callout and the fleet-wide
             commit/code search (WARDEN-534/559/589) are all gone. Each described or
