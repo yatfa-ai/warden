@@ -23,7 +23,7 @@ import os from 'node:os';
  *     CLEARED — the load-bearing reason resetConfig bypasses applyConfigPut's
  *     secret no-clobber;
  *   - the reset round-trips through save (survives a restart — read from disk);
- *   - the live side-effects fire (the companion env gate flips back to OFF via
+ *   - the live side-effects fire (the companion env gate flips back to ON via
  *     afterSave → applyCompanionToggle, exactly as a PUT would);
  *   - internal USER DATA (pinned chats / notes / session tags) survives — a
  *     backend-config reset must not wipe them.
@@ -188,21 +188,21 @@ describe('POST /api/config/reset — restores a configured backend to defaults',
     assert.strictEqual(onDisk.connectTimeout, 10, 'connectTimeout default persisted');
   });
 
-  it('fires the live side-effects via afterSave (companion gate flips back to OFF)', async () => {
+  it('fires the live side-effects via afterSave (companion gate flips back to ON)', async () => {
     // afterSave re-applies applyCompanionToggle on the reset path, exactly as a
-    // PUT would. Seed companion ON (gate → '1' when not operator-overridden),
-    // reset (default is OFF → gate back to '0'), and assert the live gate
+    // PUT would. Seed companion OFF (gate → '0' when not operator-overridden),
+    // reset (default is ON → gate back to '1'), and assert the live gate
     // flipped — proving the reset takes effect live, not just on restart.
-    await putConfig({ companionTransportEnabled: true });
+    await putConfig({ companionTransportEnabled: false });
     if (!companionEnvOverriddenAtBoot) {
-      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '1', 'gate ON after seed');
+      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '0', 'gate OFF after seed');
     }
     await resetConfigHttp();
     const after = await getConfig();
-    assert.strictEqual(after.companionTransportEnabled, false, 'companion back to default OFF');
+    assert.strictEqual(after.companionTransportEnabled, true, 'companion back to default ON');
     if (!companionEnvOverriddenAtBoot) {
-      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '0',
-        'live gate flipped back to OFF via afterSave — reset is live, not restart-only');
+      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '1',
+        'live gate flipped back to ON via afterSave — reset is live, not restart-only');
     }
   });
 

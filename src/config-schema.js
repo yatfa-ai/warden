@@ -329,7 +329,7 @@ export const CONFIG_FIELDS = [
   },
   {
     key: 'companionTransportEnabled',
-    default: false,
+    default: true,
     exposure: 'public',
     type: 'boolean',
     resolve: 'identity',
@@ -338,9 +338,11 @@ export const CONFIG_FIELDS = [
     // channel to a remote host that collapses per-op SSH handshakes into one
     // connection — the biggest lever for cutting ssh-process churn on a
     // remote-heavy fleet. Was reachable only via the WARDEN_COMPANION_TRANSPORT=1
-    // env var; now a first-class Settings toggle. Default OFF (experimental);
-    // the env var remains an explicit operator override (force on/off regardless
-    // of the UI). Remote-only by design — local hosts never route through it.
+    // env var; now a first-class Settings toggle, default ON (WARDEN-1379 —
+    // every remote op rides the channel; an explicitly persisted false or an
+    // operator env override still wins). The env var remains an explicit
+    // operator override (force on/off regardless of the UI). Remote-only by
+    // design — local hosts never route through it.
   },
   // Optional telemetry — OFF BY DEFAULT, INDEPENDENT PER-CATEGORY consent
   // (WARDEN-1116 / roadmap WARDEN-446 / design WARDEN-443 Principle 2). Nothing

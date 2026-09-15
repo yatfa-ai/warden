@@ -14,7 +14,7 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
       <div className="flex items-center gap-2">
         <Switch
           id="companionTransportEnabled"
-          checked={config.companionTransportEnabled ?? false}
+          checked={config.companionTransportEnabled ?? true}
           disabled={config.companionTransportOverridden}
           onCheckedChange={(v) => setConfig({ ...config, companionTransportEnabled: v })}
         />
@@ -22,7 +22,7 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
           htmlFor="companionTransportEnabled"
           className={cn('cursor-pointer', config.companionTransportOverridden && 'cursor-not-allowed opacity-60')}
         >
-          Companion transport <Badge variant="secondary">experimental</Badge>
+          Companion transport
         </Label>
         {/* The env override makes the toggle inert, so a restore would write a
             draft value nothing honors — hide the affordance in that state, the
@@ -32,10 +32,14 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
         )}
       </div>
       <p className="text-xs text-muted-foreground">
-        Route remote tmux ops (discover, capture, spawn, kill, liveness, resize) through a
-        single persistent SSH channel instead of a fresh ssh process per operation — so the
-        per-op ssh process count on remote hosts drops to near zero. Takes effect on the next
-        operation. Local hosts are unaffected (remote-only by design).
+        Route remote host operations — tmux discovery, pane capture with live delta
+        push, session spawn/kill/resize, text and keystroke send, liveness/ping,
+        interactive terminal attach, exec, file writes, plus the script-delivery legs
+        (git routes, file read/exists, session search/read, observer tails, claude
+        detection) — through a single persistent SSH channel instead of a fresh ssh
+        process per operation, so the per-op ssh process count on remote hosts drops
+        to near zero. Takes effect on the next operation. Local hosts are unaffected
+        (remote-only by design).
       </p>
       {config.companionTransportOverridden && (
         <p className="text-xs text-muted-foreground">
