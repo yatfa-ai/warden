@@ -64,7 +64,7 @@ describe('deriveDefaults — DEFAULTS is fully derived from CONFIG_FIELDS', () =
     assert.deepStrictEqual(d.llm, {});
     assert.deepStrictEqual(d.pins, []);
     assert.strictEqual(d.webhookAlertDone, true);
-    assert.strictEqual(d.companionTransportEnabled, false);
+    assert.strictEqual(d.companionTransportEnabled, true);
     // internal-only fields are present (managed by other endpoints, not /api/config)
     assert.ok('agentNotes' in d && 'sessionTags' in d);
   });

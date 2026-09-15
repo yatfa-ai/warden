@@ -160,7 +160,22 @@ describe('WARDEN-1200 over-correction guard — what must NOT be called unreacha
   // route because a COMMAND failure cannot be produced over real SSH in CI (Node 20 has
   // no `mock.module`, hence the seam) — so the honest claim here is about the
   // classification the route consumes, not about a wire body observed under that state.
+  //
+  // WARDEN-1379: the schema default flipped to ON, so the sibling describe's server
+  // boot (applyCompanionToggle at import) leaves WARDEN_COMPANION_TRANSPORT='1' in this
+  // shared process env — which would route these calls over the companion channel and
+  // silently bypass the raw-path `run` seam they exist to drive. Pin the gate OFF
+  // around the suite (the companion-exec-legs.test.js pattern) and restore it after:
+  // these assertions are about RAW-SSH result classification, so the raw path must be
+  // the one selected, regardless of ambient env or sibling describes.
+  const ORIG_GATE = process.env.WARDEN_COMPANION_TRANSPORT;
   const result = (over = {}) => ({ ok: false, code: 1, stdout: '', stderr: '', ...over });
+
+  before(() => { process.env.WARDEN_COMPANION_TRANSPORT = '0'; });
+  after(() => {
+    if (ORIG_GATE === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_GATE;
+  });
 
   it('a non-zero exit WITH real stdout classifies as unreachable:false — a COMMAND failure', async () => {
     // The case that makes "report every failure as unreachable" wrong. The machine

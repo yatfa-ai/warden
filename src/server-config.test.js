@@ -165,10 +165,11 @@ describe('/api/config clamps an inverted threshold pair so it cannot lie (WARDEN
 });
 
 describe('/api/config companion transport toggle (WARDEN-439)', () => {
-  it('GET exposes companionTransportEnabled defaulting to false + the override flag', async () => {
+  it('GET exposes companionTransportEnabled defaulting to true + the override flag', async () => {
     const body = await (await fetch(`${baseUrl}/api/config`)).json();
     assert.ok('companionTransportEnabled' in body, 'toggle field present in GET');
-    assert.strictEqual(body.companionTransportEnabled, false, 'safe default is OFF (experimental)');
+    assert.strictEqual(body.companionTransportEnabled, true,
+      'default is ON — the deliberate roadmap cutover (WARDEN-1379)');
     assert.strictEqual(
       body.companionTransportOverridden,
       companionEnvOverriddenAtBoot,

@@ -103,7 +103,7 @@ export function normalizeLoadedConfig(rawConfigData: any): ConfigData {
       configData.tokenBudgetPerSessionThresholdTokens,
       1_000_000,
     ),
-    companionTransportEnabled: configData.companionTransportEnabled ?? false,
+    companionTransportEnabled: configData.companionTransportEnabled ?? true,
     companionTransportOverridden: configData.companionTransportOverridden ?? false,
     confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
     notifyChatOps: configData.notifyChatOps ?? true,
