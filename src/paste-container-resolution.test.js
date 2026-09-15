@@ -302,7 +302,7 @@ describe('resolvePaneContainer — one walk per pane, cached; honest when it can
     const seen = [];
     const r = await resolvePaneContainer(chat, {}, {
       now: 1_000,
-      run: (host, script, opts, cfg) => {
+      runWithPool: (host, script, opts, cfg) => {
         seen.push({ host, script, opts, cfg });
         return { ok: true, code: 0, stdout: WALKED, stderr: '' };
       },
@@ -318,7 +318,7 @@ describe('resolvePaneContainer — one walk per pane, cached; honest when it can
     let walks = 0;
     const deps = {
       now: 1_000,
-      run: () => { walks += 1; return { ok: true, code: 0, stdout: WALKED, stderr: '' }; },
+      runWithPool: () => { walks += 1; return { ok: true, code: 0, stdout: WALKED, stderr: '' }; },
     };
     await resolvePaneContainer(chat, {}, deps);
     await resolvePaneContainer(chat, {}, deps);
@@ -332,7 +332,7 @@ describe('resolvePaneContainer — one walk per pane, cached; honest when it can
 
   it('clearPaneContainerCache forces the next paste to re-walk (test seam)', async () => {
     let walks = 0;
-    const deps = { now: 1, run: () => { walks += 1; return { ok: true, code: 0, stdout: '', stderr: '' }; } };
+    const deps = { now: 1, runWithPool: () => { walks += 1; return { ok: true, code: 0, stdout: '', stderr: '' }; } };
     await resolvePaneContainer(chat, {}, deps);
     await resolvePaneContainer(chat, {}, deps);
     clearPaneContainerCache();
@@ -342,13 +342,13 @@ describe('resolvePaneContainer — one walk per pane, cached; honest when it can
 
   it('a failed walk says failed — it never guesses', async () => {
     const r = await resolvePaneContainer(chat, {}, {
-      run: () => ({ ok: false, code: 255, stdout: '', stderr: 'ssh: connect refused\n' }),
+      runWithPool: () => ({ ok: false, code: 255, stdout: '', stderr: 'ssh: connect refused\n' }),
     });
     assert.deepStrictEqual(r, { state: 'failed', reason: 'ssh: connect refused' });
   });
 
   it('an empty walk (dead pane, no boundary) is an honest none', async () => {
-    const r = await resolvePaneContainer(chat, {}, { run: () => ({ ok: true, code: 0, stdout: '', stderr: '' }) });
+    const r = await resolvePaneContainer(chat, {}, { runWithPool: () => ({ ok: true, code: 0, stdout: '', stderr: '' }) });
     assert.deepStrictEqual(r, { state: 'none' });
   });
 
@@ -361,6 +361,7 @@ describe('resolvePaneContainer — one walk per pane, cached; honest when it can
         return { ok: true, code: 0, stdout: WALKED, stderr: '' };
       },
       run: () => { throw new Error('raw ssh must not run under the companion toggle'); },
+      runWithPool: () => { throw new Error('pooled ssh must not run under the companion toggle either'); },
     });
     assert.deepStrictEqual(r, { state: 'resolved', container: 'yatfa-planner-2' });
     assert.equal(seen.length, 1);
@@ -393,7 +394,7 @@ describe('resolvePaneContainer — one walk per pane, cached; honest when it can
 
   it('the walk targets the SAME pane the marker is keystroked into (the send ladder, cfg leg included)', async () => {
     const scripts = [];
-    const deps = { run: (_h, script) => { scripts.push(script); return { ok: true, code: 0, stdout: '', stderr: '' }; } };
+    const deps = { runWithPool: (_h, script) => { scripts.push(script); return { ok: true, code: 0, stdout: '', stderr: '' }; } };
     await resolvePaneContainer({ host: 'box', session: 'mysess' }, { tmuxSession: 'cfgsess' }, deps);
     await resolvePaneContainer({ host: 'box', session: '' }, { tmuxSession: 'cfgsess' }, deps);
     await resolvePaneContainer({ host: 'box', session: '' }, {}, deps);

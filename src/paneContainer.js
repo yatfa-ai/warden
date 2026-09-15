@@ -38,7 +38,7 @@
 // flags-before-container exec shape (`-it -u yatfa`).
 import { spawn } from 'node:child_process';
 import { captureAndSettle } from './childCapture.js';
-import { shellQuote, run, runWithPool } from './ssh.js';
+import { shellQuote, runWithPool } from './ssh.js';
 import { isCompanionTransportEnabled, deliverRemoteScript } from './companion.js';
 
 const LOCAL = '(local)';
@@ -265,6 +265,6 @@ function runWalk(host, script, cfg, deps = {}) {
   }
   const companionOn = (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)();
   return companionOn
-    ? (deps.deliverRemoteScript ?? deliverRemoteScript)(host, script, { timeout: WALK_TIMEOUT_MS, run: deps.runWithPool ?? runWithPool }, cfg, deps)
-    : (deps.run ?? run)(host, script, { timeout: WALK_TIMEOUT_MS }, cfg);
+    ? (deps.deliverRemoteScript ?? deliverRemoteScript)(host, script, { timeout: WALK_TIMEOUT_MS }, cfg, deps)
+    : (deps.runWithPool ?? runWithPool)(host, script, { timeout: WALK_TIMEOUT_MS }, cfg);
 }
