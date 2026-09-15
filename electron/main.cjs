@@ -7,9 +7,6 @@ const { pathToFileURL } = require('url');
 const fs = require('fs');
 const os = require('os');
 const http = require('http');
-// Promise-based fs for the ASYNC steady-state persistence paths (WARDEN-1376):
-// window-state + transmission-log saves yield the loop instead of blocking it.
-const fsp = fs.promises;
 // Pure window-bounds decision logic (no electron dependency) — see file header.
 // main.cjs wires the live electron APIs (screen, win.getBounds/isMaximized, fs)
 // to these decisions so the core logic is unit-testable in web/window-state.test.mjs.
@@ -25,6 +22,15 @@ const {
   MIN_WIDTH,
   MIN_HEIGHT,
 } = require('./window-state.cjs');
+// Collision-proof atomic writers (WARDEN-1376 audit fix) — one per logical
+// target. The WARDEN-1376 async cut staged every persist to a single fixed
+// `${file}.tmp`, which is only collision-free while writes are sequential;
+// with steady-state saves now ASYNC, two writers could interleave on that one
+// path (torn/empty file) and a stale write could outlive the quit-path sync
+// twin. See electron/atomic-persist.cjs for the mechanism: unique per-write
+// temp names + a per-target generation gate so the last-REQUESTED snapshot is
+// always what lands.
+const { createAtomicFileWriter } = require('./atomic-persist.cjs');
 // Telemetry SOURCE layer (WARDEN-463) — turns main-process failure/freeze
 // signals into consent-gated base-tier events routed to `record()`. Off by
 // default; see the wiring block in app.whenReady() below. Pure/testable logic
@@ -249,8 +255,9 @@ for (const cat of TELEMETRY_CATEGORIES) telemetryPrefs[cat.configKey] = false;
 //
 // --- Persistence helpers (WARDEN-782) -----------------------------------------
 // Same userData dir + atomic-rewrite + debounce + skip-malformed discipline as
-// window-state.json (the in-repo template at lines ~262-339; saveWindowState below
-// uses the same temp-file + rename shape as saveTransmissionLog). The file is NDJSON
+// window-state.json (the in-repo template at lines ~262-339; both writers below
+// stage through the same collision-proof writer, createAtomicFileWriter). The file
+// is NDJSON
 // (one metadata-only entry per line); the ring is already capped in memory, so the
 // file is bounded over the app's lifetime (never append-only growth). METADATA ONLY
 // by construction — the ring never holds payload content / redacted fields / chat-or-
@@ -281,13 +288,18 @@ function loadTransmissionLog() {
 // the freeze report — and a sync create+write+rename on Windows can block the
 // main loop for hundreds of ms under real-time AV. The debounced writer is
 // therefore async; flushSave() (before-quit) uses the SYNC twin so the final
-// entries are durable before process exit.
+// entries are durable before process exit. Both twins stage through the shared
+// collision-proof writer (unique per-write temp name + generation gate, see
+// atomic-persist.cjs): a save superseded while in flight — a debounced save
+// racing a maximize-path save, or an async save in flight when flushSave's
+// sync twin fires at quit — discards itself instead of landing stale or torn
+// bytes over the newer snapshot.
+const transmissionLogWriter = createAtomicFileWriter();
+
 async function saveTransmissionLog(filePath, entries) {
   try {
     const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
-    const tmp = `${filePath}.tmp`;
-    await fsp.writeFile(tmp, text, 'utf8');
-    await fsp.rename(tmp, filePath);
+    await transmissionLogWriter.write(filePath, text);
   } catch (e) {
     console.warn('[warden:telemetry-transmission-log] failed to persist', e);
   }
@@ -298,9 +310,7 @@ async function saveTransmissionLog(filePath, entries) {
 function saveTransmissionLogSync(filePath, entries) {
   try {
     const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
-    const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, text, 'utf8');
-    fs.renameSync(tmp, filePath);
+    transmissionLogWriter.writeSync(filePath, text);
   } catch (e) {
     console.warn('[warden:telemetry-transmission-log] failed to persist', e);
   }
@@ -748,13 +758,19 @@ function loadWindowState() {
 // file can stall for hundreds of ms under real-time antivirus scanning (worst
 // case: seconds). Steady-state callers fire-and-forget the promise; the
 // terminal moments (window close, before-quit) keep the SYNC twin below so the
-// final state is durable before the process exits.
+// final state is durable before the process exits. Both twins stage through
+// the shared collision-proof writer (unique per-write temp name + generation
+// gate, see atomic-persist.cjs): a save superseded while in flight — a
+// maximize capture racing a pending debounce write, or an async save in
+// flight when a quit/close sync twin fires — discards itself instead of
+// landing stale or torn bytes over the newer snapshot. Before the gate, the
+// maximize-vs-debounce race was last-FINISHED-wins: a stale predecessor could
+// beat the newer snapshot and the user's final window arrangement was lost.
+const windowStateWriter = createAtomicFileWriter();
+
 async function saveWindowState(state) {
   try {
-    const filePath = windowStatePath();
-    const tmp = `${filePath}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(state, null, 2), 'utf8');
-    await fsp.rename(tmp, filePath);
+    await windowStateWriter.write(windowStatePath(), JSON.stringify(state, null, 2));
   } catch (e) {
     console.warn('[warden:window-state] failed to persist', e);
   }
@@ -766,10 +782,7 @@ async function saveWindowState(state) {
 // few hundred bytes costs nothing a user can see.
 function saveWindowStateSync(state) {
   try {
-    const filePath = windowStatePath();
-    const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
-    fs.renameSync(tmp, filePath);
+    windowStateWriter.writeSync(windowStatePath(), JSON.stringify(state, null, 2));
   } catch (e) {
     console.warn('[warden:window-state] failed to persist', e);
   }
