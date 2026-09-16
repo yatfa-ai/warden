@@ -117,13 +117,27 @@ export function findUrlCandidates(line: string, opts?: UrlScanOptions): UrlCandi
 export function maskUrls(line: string): string {
   const urls = findUrlCandidates(line);
   if (!urls.length) return line;
-  // Build with string slices (NOT [...line] char arrays): spans are in UTF-16
-  // code units, and a code-point spread would misalign on astral characters.
+  return maskSpans(line, urls);
+}
+
+// Blank out the given same-line spans with same-length spaces. Indices of all
+// other text are preserved (same-length masking), so running a LOWER-precedence
+// matcher over the output yields candidates whose ranges are valid against the
+// ORIGINAL line while every span's interior is structurally unreachable. This
+// is the general form of the mask-then-subtract precedence trick above
+// (WARDEN-1388: the issue-key matcher masks the PATH candidates' spans the same
+// way path matching masks URLs). Assumes spans are sorted by start and
+// non-overlapping — the exact shape findUrlCandidates/findPathCandidates
+// return. Built with string slices (NOT [...line] char arrays): spans are in
+// UTF-16 code units, and a code-point spread would misalign on astral
+// characters.
+export function maskSpans(line: string, spans: { start: number; length: number }[]): string {
+  if (!spans.length) return line;
   let out = '';
   let last = 0;
-  for (const u of urls) {
-    out += line.slice(last, u.start) + ' '.repeat(u.length);
-    last = u.start + u.length;
+  for (const s of spans) {
+    out += line.slice(last, s.start) + ' '.repeat(s.length);
+    last = s.start + s.length;
   }
   return out + line.slice(last);
 }

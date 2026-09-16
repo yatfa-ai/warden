@@ -23,6 +23,11 @@
 // the external contract.
 
 import { sanitizeWatchPatterns } from './agentState.js';
+// WARDEN-1388 — the issue-link integration's per-project tracker-mapping
+// sanitizer. Pure + dependency-free (see the module header): the
+// `issueLinkTrackers` descriptor's PUT guard below delegates to it, the same
+// one-sanitizer-one-descriptor shape as watchPatterns above.
+import { sanitizeIssueLinkTrackers } from './issueLinks.js';
 // WARDEN-1116 — THE telemetry consent authority. Its category registry DRIVES the
 // telemetry consent fields below, so adding a category is one entry there rather
 // than a new descriptor (plus a new GET key, a new PUT guard, a new default…)
@@ -63,6 +68,7 @@ const TELEMETRY_CONSENT_ORDER = 38;
 //   'flooredNumber'           — finite number → Math.max(1, x); accepts null
 //                               iff `nullable: true` (the tokenBudget asymmetry).
 //   'watchPatterns'           — sanitizeWatchPatterns (null → no mutation).
+//   'issueLinkTrackers'       — sanitizeIssueLinkTrackers (null → no mutation).
 //   'secret'                  — non-empty string only (no-clobber).
 //   'llm'                     — nested object; sub-fields described by `fields`.
 //
@@ -587,6 +593,39 @@ export const CONFIG_FIELDS = [
     // enforcement and the UI's advertised min/max come from that one place.
     derived: () => buildBounds(),
   },
+  {
+    key: 'issueLinksEnabled',
+    default: false,
+    exposure: 'public',
+    type: 'boolean',
+    resolve: 'identity',
+    order: 42,
+    // Issue-key links in terminal panes (WARDEN-1388 / roadmap WARDEN-1386
+    // slice 1). OFF BY DEFAULT — the whole integration is invisible until a
+    // human turns it on: while off, the frontend's link provider emits byte-
+    // identical output to before this field existed (no pixel changes). The
+    // per-project prefix→tracker mapping it gates is issueLinkTrackers below;
+    // neither field does anything without the other (off → no linkification
+    // even with mappings configured; on with no mapping for a pane's project →
+    // that pane still linkifies nothing).
+  },
+  {
+    key: 'issueLinkTrackers',
+    default: [],
+    exposure: 'public',
+    type: 'issueLinkTrackers',
+    resolve: 'arrayOrEmpty',
+    order: 43,
+    // The per-project tracker mapping (WARDEN-1388): one sanitized structured
+    // entry `{ project, prefix, tracker }` per mapping, stated BY A HUMAN —
+    // the project→prefix→tracker link is never inferred from container names
+    // or key text. Empty by default → nothing linkifies even with the toggle
+    // on. Sanitized on PUT via sanitizeIssueLinkTrackers (string entries like
+    // `warden=WARDEN@github.com/acme/warden/issues` and the structured shape
+    // are both admitted; malformed entries are dropped, deduped by project).
+    // Consumed only where issueLinksEnabled is true and ONLY for the pane's
+    // own chat.project (strict, case-sensitive equality).
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -606,6 +645,7 @@ export const CONFIG_FIELDS = [
 const VALID_TYPES = new Set([
   'array', 'number', 'string', 'boolean', 'oneOf',
   'nullablePositiveNumber', 'flooredNumber', 'watchPatterns', 'secret', 'llm',
+  'issueLinkTrackers',
 ]);
 const VALID_RESOLVES = new Set(['identity', 'neqFalse', 'eqTrue', 'orEmpty', 'arrayOrEmpty']);
 const VALID_EXPOSURES = new Set(['public', 'secret', 'derived', 'internal']);
@@ -949,6 +989,15 @@ function applyField(d, target, value, refused, refuseKey) {
       // sanitizeWatchPatterns returns null for a non-array (→ no mutation); a
       // sanitized array otherwise (capped, deduped by id, bad entries dropped).
       const cleaned = sanitizeWatchPatterns(value);
+      if (cleaned) target[key] = cleaned;
+      else note();
+      return;
+    }
+    case 'issueLinkTrackers': {
+      // WARDEN-1388 — identical contract to watchPatterns: sanitizeIssueLink
+      // Trackers returns null for a non-array (→ no mutation); a sanitized
+      // array otherwise (capped, deduped by project, bad entries dropped).
+      const cleaned = sanitizeIssueLinkTrackers(value);
       if (cleaned) target[key] = cleaned;
       else note();
       return;

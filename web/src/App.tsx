@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
+import { normalizeIssueLinkEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
@@ -796,7 +797,17 @@ function App() {
         showStatusIndicators: cfg.showStatusIndicators ?? true,
         showProjectBadges: cfg.showProjectBadges ?? false,
         hideOfflineHosts: cfg.hideOfflineHosts ?? false,
+        // WARDEN-1388: issue-key link integration (server config, off by
+        // default — `=== true` keeps a missing/absent field OFF, the same
+        // strict reading the server's boolean default encodes).
+        issueLinksEnabled: cfg.issueLinksEnabled === true,
       });
+      // WARDEN-1388: the tracker mapping is its own state (an array of
+      // structured entries, not a boolean display flag — see the state comment
+      // above), defensively re-normalized so a hand-edited config.json can't
+      // hand the matcher a malformed mapping (GET is a raw arrayOrEmpty
+      // passthrough; only PUT is sanitized server-side).
+      setIssueLinkTrackers(normalizeIssueLinkEntries(cfg.issueLinkTrackers));
       setConfirmDestructiveActions(cfg.confirmDestructiveActions ?? true);
       // WARDEN-332 — observer lifecycle prefs. observerSessionTimeout is null OR
       // a finite positive number (server.js:373-376); `?? null` preserves an
@@ -1710,7 +1721,19 @@ function App() {
     showStatusIndicators: true,
     showProjectBadges: false,
     hideOfflineHosts: false,
+    // WARDEN-1388: the issue-key link integration rides the same bundle (one
+    // server-config fetch owns both halves — see refreshConfigPrefs).
+    issueLinksEnabled: false,
   });
+  // WARDEN-1388: the issue-key link integration, from /api/config (server
+  // config — persisted across restarts, not a local UI pref). The toggle rides
+  // displaySettings below; the tracker mapping is its own state because it is
+  // an array of structured entries, not a boolean display flag. Both OFF/empty
+  // by default, and the entries are re-normalized defensively on every fetch
+  // (normalizeIssueLinkEntries): the server sanitizes on PUT, but a hand-edited
+  // config.json bypasses that, and GET is a raw arrayOrEmpty passthrough — the
+  // frontend filters rather than trusting.
+  const [issueLinkTrackers, setIssueLinkTrackers] = useState<IssueLinkEntry[]>([]);
   // Resize drag state
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [isResizingObserver, setIsResizingObserver] = useState(false);
@@ -2066,6 +2089,10 @@ function App() {
             onPaneRowRatiosChange={setPaneRowRatios}
             terminalThemeId={terminalThemeId}
             showHostTags={displaySettings.showHostTags}
+            // WARDEN-1388: the issue-key link integration — server config
+            // fetched by refreshConfigPrefs, live-updating already-open panes.
+            issueLinksEnabled={displaySettings.issueLinksEnabled}
+            issueLinkTrackers={issueLinkTrackers}
             pollIntervalMs={pollIntervalMs}
             onReorderPanes={reorderPanes}
           />

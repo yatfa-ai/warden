@@ -177,8 +177,11 @@ await test('the token menu item reads the LATCH, never the live hover ref', asyn
 await test('Copy is disabled from the latch, and the token item is separated + kind-worded', async () => {
   assert.match(src, /<ContextMenuItem disabled=\{!menuHasSelection\}[\s\S]*?>Copy<\/ContextMenuItem>/,
     'Copy must be disabled when the latch says there is no selection');
-  assert.match(src, /menuToken\.kind === 'url' \? 'Copy Link Address' : 'Copy File Path'/,
-    'wording must follow the established vocabulary, per kind');
+  // WARDEN-1388 added the third kind: an issue key is a link, but the menu
+  // copies the KEY (what you paste into a ticket), not the tracker URL — so
+  // its wording is its own, still the established-vocabulary convention.
+  assert.match(src, /menuToken\.kind === 'url' \? 'Copy Link Address' : menuToken\.kind === 'issue' \? 'Copy Issue Key' : 'Copy File Path'/,
+    'wording must follow the established vocabulary, per kind (url/issue/path)');
   // The token item is rendered only when a token was latched, and is followed
   // by a separator so it reads as a distinct group (the browser/terminal norm).
   const block = src.match(/\{menuToken && \(\s*<>[\s\S]*?<\/>\s*\)\}/);
@@ -201,13 +204,21 @@ await test('the hover latch is set for URLs immediately, and for paths only once
     'a path latches only inside the confirmed-file + still-hovered guard');
 });
 
-await test('leaving a token clears the hover latch for BOTH kinds', async () => {
+await test('leaving a token clears the hover latch for ALL THREE kinds', async () => {
   const leaves = [...src.matchAll(/leave\(\) \{[\s\S]*?\},/g)].map((m) => m[0]);
-  assert.equal(leaves.length, 2, 'one leave handler per link kind (url, path)');
+  // WARDEN-1388: three link kinds now (url, path, issue) — one leave each.
+  assert.equal(leaves.length, 3, 'one leave handler per link kind (url, path, issue)');
   for (const l of leaves) {
     assert.match(l, /hoveredTokenRef\.current = null/,
       'every leave must clear the hover latch, or a stale token follows the cursor off the link');
   }
 });
 
+await test('an issue key latches immediately, like a URL (valid by construction)', async () => {
+  // A configured key is valid by construction — no async probe — so the menu
+  // can offer "Copy Issue Key" from the instant it is hoverable, the same
+  // condition that flips its construction-time underline on.
+  assert.match(src, /hoveredTokenRef\.current = \{ text: c\.key, kind: 'issue' \}/,
+    'a hovered issue key latches straight away (kind issue, text = the key)');
+});
 console.log(`\n${passed} passing\n`);

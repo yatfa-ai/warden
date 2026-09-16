@@ -15,6 +15,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneLayout } from '@/lib/storage';
 import {
   resolveVisibleTiles,
@@ -128,6 +129,12 @@ interface Props {
   // Settings toggle live-updates already-open pane headers, mirroring the
   // sidebar's live update.
   showHostTags?: boolean;
+  // WARDEN-1388: the issue-key link integration (master toggle + per-project
+  // tracker mapping, both /api/config server config). Pure pass-through to
+  // PaneTile, exactly the showHostTags shape — App owns the fetch
+  // (refreshConfigPrefs) so a Settings save live-updates already-open panes.
+  issueLinksEnabled?: boolean;
+  issueLinkTrackers?: IssueLinkEntry[];
   // Follow poll cadence (WARDEN-749): pure pass-through to PaneTile and to this
   // grid's own FileViewer — App owns the resolved value (the same one the catalog
   // poll uses), so Follow shares the dashboard cadence instead of hardcoding one.
@@ -140,7 +147,7 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -779,6 +786,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     terminalThemeId={terminalThemeId}
                     showHostTags={showHostTags}
+                    issueLinksEnabled={issueLinksEnabled}
+                    issueLinkTrackers={issueLinkTrackers}
                     onSpawned={onSpawned}
                     pollIntervalMs={pollIntervalMs}
                   />

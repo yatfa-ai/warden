@@ -8,7 +8,8 @@ import { getPaneLatencySampler } from '@/lib/paneLatency';
 import { openExternalUrl, forwardPaneMetrics } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
-import { findUrlCandidates } from '@/lib/url-links';
+import { findUrlCandidates, maskUrls, maskSpans } from '@/lib/url-links';
+import { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, type IssueLinkEntry } from '@/lib/issue-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
@@ -233,6 +234,14 @@ interface Props {
   // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
   // one toggle governs both surfaces. Undefined/true → shown, false → hidden.
   showHostTags?: boolean;
+  // WARDEN-1388: the issue-key link integration. Master toggle + per-project
+  // tracker mapping, both from /api/config (server config, not a UI pref) —
+  // pure pass-through from App via PaneGrid, mirrored into refs below so a
+  // Settings save applies LIVE to already-open panes without a re-attach.
+  // Both default to off/empty: with either missing, the link provider's output
+  // is byte-identical to pre-1388 (no pixel changes anywhere).
+  issueLinksEnabled?: boolean;
+  issueLinkTrackers?: IssueLinkEntry[];
   // WARDEN-231: a new chat was spawned from this pane's recovery panel (open-
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
@@ -241,7 +250,7 @@ interface Props {
   pollIntervalMs: number;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, onSpawned, pollIntervalMs }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs }: Props) {
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
   // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
@@ -338,7 +347,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // its underline on. So a right-click on an UNDECORATED path candidate offers
   // no copy item, matching what the pane shows (the menu never claims a token
   // the highlighting did not).
-  const hoveredTokenRef = useRef<{ text: string; kind: 'url' | 'path' } | null>(null);
+  const hoveredTokenRef = useRef<{ text: string; kind: 'url' | 'path' | 'issue' } | null>(null);
   // WARDEN-1293: the token under the cursor AT THE MOMENT OF THE RIGHT-CLICK.
   // This is state, not a ref-read at select time, and the distinction is the
   // whole fix: opening the Radix menu moves focus off the terminal, xterm fires
@@ -348,7 +357,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // in the contextmenu handler — which runs BEFORE the leave — and the menu
   // items read the latch. State (not a ref) because the menu's CONTENT depends
   // on it: a render must follow the latch or the items would be a frame stale.
-  const [menuToken, setMenuToken] = useState<{ text: string; kind: 'url' | 'path' } | null>(null);
+  const [menuToken, setMenuToken] = useState<{ text: string; kind: 'url' | 'path' | 'issue' } | null>(null);
   // WARDEN-1293: whether the terminal had a selection at right-click time. Same
   // latch-on-contextmenu reasoning as menuToken — `disabled` must be decided
   // when the menu OPENS, so a "Copy" that would do nothing is never offered as
@@ -385,6 +394,24 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // trigger — same latest-value mirror pattern as copyOnSelectRef above.
   const hostRef = useRef(host);
   hostRef.current = host;
+
+  // WARDEN-1388: the issue-link integration's three live facts — master toggle,
+  // tracker mappings, and THIS pane's project — mirrored into refs for the
+  // link provider, which is registered ONCE in the mount effect below and
+  // reads them per provideLinks call. Reading prefs directly in that closure
+  // would capture the MOUNT-TIME values (same hazard WARDEN-1244 fixed for
+  // notifyErrors): the refs are what make a Settings save apply to
+  // already-open panes without tearing down the terminal. Assigned during
+  // render, the same latest-value mirror pattern as copyOnSelectRef above.
+  const issueLinksEnabledRef = useRef(issueLinksEnabled === true);
+  issueLinksEnabledRef.current = issueLinksEnabled === true;
+  const issueLinkTrackersRef = useRef<IssueLinkEntry[]>(issueLinkTrackers ?? []);
+  issueLinkTrackersRef.current = issueLinkTrackers ?? [];
+  // The pane's project (strict, case-sensitive) — from the chat prop, exactly
+  // what buildChat put there (src/chatMeta.js). Undefined/null for non-yatfa
+  // panes → issueEntriesForProject yields [] → no linkification.
+  const chatProjectRef = useRef(chat?.project);
+  chatProjectRef.current = chat?.project;
 
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
@@ -723,7 +750,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     };
 
     // xterm calls provideLinks only for visible viewport lines (lazy), so existence
-    // probes are inherently limited to what's on screen. Two kinds of links come
+    // probes are inherently limited to what's on screen. Three kinds of links come
     // out of this one provider (so a pane never hosts two link mechanisms):
     //   - URLs (WARDEN-1256): decorated at CONSTRUCTION time — a URL is valid by
     //     construction, no async probe, so the underline + pointer + tooltip are
@@ -731,6 +758,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     //   - File paths (WARDEN-227): each candidate starts with NO decorations and
     //     the (mutable, tracked) decorations object flips to underline+pointer
     //     once the async check confirms a real file — non-blocking.
+    //   - Issue keys (WARDEN-1388): decorated at CONSTRUCTION time like URLs —
+    //     a configured key is valid by construction. STRICTLY GATED: candidates
+    //     exist only while the integration toggle is on AND this pane's project
+    //     has a configured tracker mapping; otherwise this layer contributes
+    //     nothing at all and the provider output is byte-identical to pre-1388.
     const linkProvider = term.registerLinkProvider({
       provideLinks(bufferLineNumber: number, callback) {
         // bufferLineNumber is 1-based (matches the range `y`); buffer line indexing
@@ -745,11 +777,32 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         // (and neighbouring tokens are unaffected). 0-based index
         // bufferLineNumber is the line AFTER the 1-based bufferLineNumber.
         const nextLine = term.buffer.active.getLine(bufferLineNumber);
-        const urls = findUrlCandidates(text, { wrappedAtEol: !!nextLine?.isWrapped });
+        const wrappedAtEol = !!nextLine?.isWrapped;
+        const urls = findUrlCandidates(text, { wrappedAtEol });
+        // WARDEN-1388: the issue layer's scope is resolved per call from the
+        // live refs — an unknown pane project, a disabled integration, or a
+        // project with no mapping all land on "no issue layer". Exactly ONE
+        // entry per project (the sanitizer dedupes), so the first match is the
+        // pane's whole mapping.
+        const issueEntry = issueLinksEnabledRef.current
+          ? (issueEntriesForProject(issueLinkTrackersRef.current, chatProjectRef.current)[0] ?? null)
+          : null;
+        const urlMasked = maskUrls(text);
         // findPathCandidates masks http(s) URLs out first (url-links.ts), so its
         // candidates can never land inside a URL — the matcher-level precedence.
-        const candidates = findPathCandidates(text);
-        if (!urls.length && !candidates.length) { callback(undefined); return; }
+        // (Feeding it the already-masked line is equivalent: maskUrls is
+        // idempotent — masking a masked line finds nothing new to blank.)
+        const candidates = findPathCandidates(urlMasked);
+        // WARDEN-1388: the issue matcher runs over the line with URL spans AND
+        // path-candidate spans blanked (mask-then-subtract, the established
+        // same-length trick) — an issue candidate can never overlap a URL or
+        // path link, structurally. With the integration off this whole layer
+        // is skipped: no extra masking work, zero candidates, byte-identical
+        // provider output.
+        const issues = issueEntry
+          ? findIssueCandidates(maskSpans(urlMasked, candidates), [issueEntry], { wrappedAtEol })
+          : [];
+        if (!urls.length && !candidates.length && !issues.length) { callback(undefined); return; }
         // URLs first in the array: on a line with both kinds, the URL wins any
         // range contest (they cannot overlap after masking — belt and braces).
         const urlLinks = urls.map((u) => ({
@@ -786,6 +839,40 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
             hideTooltip();
           },
         }));
+        // WARDEN-1388: issue keys — the URL contract end to end (construction-
+        // time decorations, modifier-gated activate, system-browser open), with
+        // the URL built from THIS pane's configured tracker mapping. No probe:
+        // a key carrying the pane project's configured prefix is valid by
+        // construction.
+        const issueLinks = issueEntry ? issues.map((c) => {
+          const url = issueTrackerUrl(issueEntry, c.key);
+          return {
+            range: {
+              start: { x: c.start + 1, y: bufferLineNumber },
+              end: { x: c.start + c.length, y: bufferLineNumber },
+            },
+            text: c.key,
+            decorations: { underline: true, pointerCursor: true },
+            activate(event: MouseEvent) {
+              // Same contract as URLs/paths: only the modifier-click acts; a
+              // plain click falls through to xterm (selection stays working).
+              if (!(event.metaKey || event.ctrlKey)) return;
+              // The tracker URL over the same system-browser bridge URLs use
+              // (shell.openExternal in main) — never an internal window.
+              void openExternalUrl(url);
+            },
+            hover(event: MouseEvent) {
+              hoveredLinkRef.current = c.key;
+              hoveredTokenRef.current = { text: c.key, kind: 'issue' };
+              showTooltip(event, isMac ? '⌘+Click to open issue' : 'Ctrl+Click to open issue');
+            },
+            leave() {
+              if (hoveredLinkRef.current === c.key) hoveredLinkRef.current = null;
+              if (hoveredTokenRef.current?.text === c.key) hoveredTokenRef.current = null;
+              hideTooltip();
+            },
+          };
+        }) : [];
         const links = candidates.map((c) => {
           const decorations = { underline: false, pointerCursor: false };
           const cached = existsCacheRef.current.get(c.path);
@@ -838,7 +925,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
             },
           };
         });
-        callback([...urlLinks, ...links]);
+        // Issue links LAST: URLs win any range contest first (WARDEN-1256),
+        // paths next; issue candidates cannot overlap either (they ran over
+        // both layers' masked line), so the order is precedence semantics, not
+        // correctness.
+        callback([...urlLinks, ...links, ...issueLinks]);
       },
     });
 
@@ -1353,7 +1444,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           {menuToken && (
             <>
               <ContextMenuItem onSelect={() => void copyTokenToClipboard(menuToken.text, notifyErrorsRef.current)}>
-                {menuToken.kind === 'url' ? 'Copy Link Address' : 'Copy File Path'}
+                {menuToken.kind === 'url' ? 'Copy Link Address' : menuToken.kind === 'issue' ? 'Copy Issue Key' : 'Copy File Path'}
               </ContextMenuItem>
               <ContextMenuSeparator />
             </>

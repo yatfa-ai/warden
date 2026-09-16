@@ -88,6 +88,14 @@ const GET_TOP_LEVEL_KEYS = [
   // assertions below are deliberately NOT loosened — they now pin the new
   // shape, bounds included.
   'bounds',
+  // WARDEN-1388 — the pin MOVED by exactly two ADDITIVE entries: the issue-key
+  // link integration's toggle + per-project tracker mapping (roadmap
+  // WARDEN-1386 slice 1). Registry orders 42/43, deliberately AFTER bounds(41)
+  // so the same additive-append discipline WARDEN-1331 established keeps every
+  // earlier position untouched — additive fields never insert into the pinned
+  // order, they extend its tail.
+  'issueLinksEnabled',
+  'issueLinkTrackers',
 ];
 
 // The EXACT nested llm key order GET emits today.
@@ -182,6 +190,10 @@ describe('/api/config GET default-resolution — the asymmetric rules (WARDEN-77
     // Array.isArray ? value : []
     assert.ok(Array.isArray(body.watchPatterns), 'watchPatterns coerced to array');
     assert.strictEqual(body.watchPatterns.length, 0, 'watchPatterns empty');
+    // WARDEN-1388 — the issue-key integration's defaults: OFF, no mappings.
+    assert.strictEqual(body.issueLinksEnabled, false, 'issueLinksEnabled defaults false (off by default)');
+    assert.ok(Array.isArray(body.issueLinkTrackers), 'issueLinkTrackers coerced to array');
+    assert.strictEqual(body.issueLinkTrackers.length, 0, 'issueLinkTrackers empty');
   });
 });
 
@@ -225,6 +237,14 @@ describe('/api/config GET shape — byte-identical key set + order (WARDEN-773)'
       watchPatterns: [{ id: 'w1', name: 'W', expression: 'x', mode: 'string', enabled: true }],
       telemetryIncidentsEnabled: false,
       telemetryNamesEnabled: false,
+      // WARDEN-1388 — the issue-key integration: seeded BOTH forms (a
+      // human-stated string entry and the structured storage shape) to prove
+      // the PUT guard normalizes both onto one wire shape.
+      issueLinksEnabled: true,
+      issueLinkTrackers: [
+        'warden=WARDEN@github.com/acme/warden/issues',
+        { project: 'yatfa', prefix: 'YATFA', tracker: 'tracker.example.com/browse' },
+      ],
     });
     const body = await get();
     assert.deepStrictEqual(Object.keys(body), GET_TOP_LEVEL_KEYS,
@@ -308,6 +328,55 @@ describe('/api/config PUT no-clobber — one save preserves all three stored sec
     assert.strictEqual(onDisk.llm.authToken, LLM_SECRET, 'llm.authToken survived the save');
     assert.strictEqual(onDisk.telemetryAuthToken, TELEMETRY_SECRET, 'telemetryAuthToken survived the save');
     assert.strictEqual(onDisk.webhookSecret, WEBHOOK_SECRET, 'webhookSecret survived the save');
+  });
+});
+
+// WARDEN-1388 — the issue-key integration's PUT guard (the `issueLinkTrackers`
+// descriptor, type `issueLinkTrackers`, mirroring the watchPatterns contract):
+// a sanitized array is persisted, a malformed-entry array is PARTIALLY applied
+// (good entries in, bad dropped — the sanitizeWatchPatterns discipline) and a
+// non-array is REFUSED outright (reported under WARDEN-1331's `refused` map,
+// stored value untouched). The GET emission shape was pinned above.
+describe('/api/config PUT issueLinkTrackers guard — sanitize-or-refuse (WARDEN-1388)', () => {
+  it('stores a valid mapping in sanitized structured form, toggle as-is', async () => {
+    const { res } = await put({
+      issueLinksEnabled: true,
+      issueLinkTrackers: ['warden=warden@github.com/acme/warden/issues/'],
+    });
+    assert.strictEqual(res.status, 200);
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.issueLinksEnabled, true, 'boolean persisted');
+    // Prefix uppercased, trailing slash stripped, string entry → structured.
+    assert.deepEqual(onDisk.issueLinkTrackers,
+      [{ project: 'warden', prefix: 'WARDEN', tracker: 'github.com/acme/warden/issues' }],
+      'the human-stated string entry is stored in the structured wire shape');
+    const body = await get();
+    assert.deepEqual(body.issueLinkTrackers, onDisk.issueLinkTrackers,
+      'GET serves exactly what was stored (arrayOrEmpty passthrough)');
+  });
+
+  it('drops malformed entries, keeps the well-formed ones (no whole-save failure)', async () => {
+    const { res } = await put({
+      issueLinkTrackers: [
+        'not-a-mapping',
+        { project: 'ok', prefix: 'OK', tracker: 'ok.io/p' },
+        { project: 'bad', prefix: '1BAD', tracker: 'ok.io/p' },
+      ],
+    });
+    assert.strictEqual(res.status, 200);
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.deepEqual(onDisk.issueLinkTrackers, [{ project: 'ok', prefix: 'OK', tracker: 'ok.io/p' }],
+      'bad entries dropped, good entry kept');
+  });
+
+  it('REFUSES a non-array outright and leaves the stored mapping untouched', async () => {
+    const { res, json } = await put({ issueLinkTrackers: { project: 'x' } });
+    assert.strictEqual(res.status, 200, 'the route still answers 200 (refusal is reported, not an error)');
+    assert.ok(json.refused && 'issueLinkTrackers' in json.refused,
+      'the refused value is reported under the WARDEN-1331 refused map');
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.deepEqual(onDisk.issueLinkTrackers, [{ project: 'ok', prefix: 'OK', tracker: 'ok.io/p' }],
+      'the previous mapping survived the refused write');
   });
 });
 
