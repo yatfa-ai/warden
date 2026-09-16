@@ -38,7 +38,7 @@ import { appendEvent } from './activity.js';
 import { capturePanes } from './chats.js';
 import { resize, attachStream, probeSession } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
-import { subscribePanes, unsubscribePanes, isCompanionTransportEnabled } from './companion.js';
+import { subscribePanes, unsubscribePanes, isCompanionTransportEnabled, isCompanionExcludedHost } from './companion.js';
 import { loopMonitor } from './loop-monitor.js';
 
 // The host sentinel for "run on this machine, not over SSH" (mirrors server.js's
@@ -209,7 +209,11 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     // watching the same host share one subscription whose pane set is the union.
     // LOCAL + flag-off hosts are excluded (their poll path is unchanged).
     const syncMonitorSubscription = async (chat, subscribe) => {
-      if (!chat || !isCompanionTransportEnabled() || chat.host === LOCAL) return;
+      // WARDEN-1390: an excluded host never gets pane-push subscriptions —
+      // subscribe/unsubscribe ARE channel RPCs, so the per-host exclusion is
+      // part of this gate exactly as the LOCAL + flag-off arms are. Its panes
+      // keep the plain poll path.
+      if (!chat || !isCompanionTransportEnabled() || chat.host === LOCAL || isCompanionExcludedHost(chat.host)) return;
       try {
         if (subscribe) await subscribePanes(chat.host, [chat], cfg);
         else await unsubscribePanes(chat.host, [chat.key], cfg);
@@ -408,8 +412,10 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           // (chat.id) still resolves, and drop the ref by chat.KEY — subscribePanes
           // keys refs by chat.key (describePanes), so the add/drop stay balanced
           // whatever id form the client sent. (WARDEN-413 reviewer minor finding.)
+          // WARDEN-1390: excluded hosts are dropped from the grouping — no
+          // teardown unsubscribe is ever sent to them (zero channel RPCs).
           const chat = known.find((c) => c.key === k || c.id === k);
-          if (chat && chat.host !== LOCAL) (byHost[chat.host] ||= []).push(chat.key);
+          if (chat && chat.host !== LOCAL && !isCompanionExcludedHost(chat.host)) (byHost[chat.host] ||= []).push(chat.key);
         }
         for (const [host, keys] of Object.entries(byHost)) {
           unsubscribePanes(host, keys, cfg).catch(() => {});

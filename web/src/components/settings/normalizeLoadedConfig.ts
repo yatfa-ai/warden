@@ -105,6 +105,12 @@ export function normalizeLoadedConfig(rawConfigData: any): ConfigData {
     ),
     companionTransportEnabled: configData.companionTransportEnabled ?? true,
     companionTransportOverridden: configData.companionTransportOverridden ?? false,
+    // WARDEN-1390: sanitized on the PUT boundary, so the GET response is
+    // already well-formed. Defensive ?? [] keeps an older backend (no
+    // companionExcludedHosts field) safely empty → nothing excluded.
+    companionExcludedHosts: Array.isArray(configData.companionExcludedHosts)
+      ? configData.companionExcludedHosts
+      : [],
     confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
     notifyChatOps: configData.notifyChatOps ?? true,
     notifyErrors: configData.notifyErrors ?? true,

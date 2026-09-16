@@ -269,6 +269,19 @@ export const SETTINGS_SECTIONS = [
       },
       // The env-override disclosure is prose beneath the row, not a control.
       { terms: ['env override', 'WARDEN_COMPANION_TRANSPORT'] },
+      // WARDEN-1390 — the per-host opt-out row.
+      {
+        anchorId: 'companionExcludedHosts',
+        terms: [
+          'Companion excluded hosts',
+          'exclude',
+          'per-host',
+          'windows',
+          'pty',
+          'raw ssh',
+          'default ssh path',
+        ],
+      },
     ],
   },
   {

@@ -365,8 +365,15 @@ func TestAttachStartOnAnUnsupportedPlatformIsActionable(t *testing.T) {
 		t.Fatal("a platform without PTY support must return an error")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "WARDEN_COMPANION_TRANSPORT=0") {
-		t.Fatalf("the error must tell the user how to reach the default SSH path: %q", msg)
+	// WARDEN-1390: the no-PTY remedy must name the PER-HOST control — a Windows
+	// host must be excludable alone, not force the fleet-global toggle off. The
+	// stable fragment pins the copy to the per-host remedy (the env-var toggle
+	// is at most a secondary mention now).
+	if !strings.Contains(msg, "Exclude this host in Warden Settings") {
+		t.Fatalf("the error must tell the user how to exclude this host in Settings (per-host remedy): %q", msg)
+	}
+	if !strings.Contains(msg, "Companion excluded hosts") {
+		t.Fatalf("the error must name the Companion excluded hosts setting: %q", msg)
 	}
 }
 

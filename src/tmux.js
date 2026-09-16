@@ -3,7 +3,7 @@
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
 import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd, buildAttachCommand, buildAttachRemoteScript, buildAttachInteractiveCommand, buildRunCommand } from './ssh.js';
-import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey, attachSession as companionAttachSession, execInContext } from './companion.js';
+import { isCompanionTransportEnabled, isCompanionExcludedHost, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey, attachSession as companionAttachSession, execInContext } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -52,7 +52,7 @@ const COMPANION_READ_TIMEOUT_MS = 30000; // parity with run()'s default (ssh.js)
 
 export async function read(chat, cfg, lines = 500, deps = {}) {
   const args = ['capture-pane', '-t', sess(chat, cfg), '-p', '-e', '-S', `-${lines}`, '-E', '-'];
-  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(chat.host)) {
     // container deliberately UNSET: the docker-exec prefix is already inside the
     // script (bare `docker exec <c> tmux …`, no in-container shell — see above).
     const r = await (deps.companionExec ?? execInContext)(
@@ -143,7 +143,7 @@ async function sendViaRunTmux(chat, cfg, text, deps) {
 
 export async function send(chat, cfg, text, deps = {}) {
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (chat.host !== '(local)' && isEnabled()) {
+  if (chat.host !== '(local)' && isEnabled() && !isCompanionExcludedHost(chat.host)) {
     const res = await (deps.companionSend ?? companionSend)(chat.host, {
       container: chat.container || null,
       session: sess(chat, cfg),
@@ -174,7 +174,7 @@ export async function send(chat, cfg, text, deps = {}) {
 export async function sendKey(chat, cfg, k, deps = {}) {
   if (!ALLOWED_KEYS.has(k)) throw new Error(`unsupported key "${k}". allowed: ${[...ALLOWED_KEYS].join(', ')}`);
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (chat.host !== '(local)' && isEnabled()) {
+  if (chat.host !== '(local)' && isEnabled() && !isCompanionExcludedHost(chat.host)) {
     const res = await (deps.companionSendKey ?? companionSendKey)(chat.host, {
       container: chat.container || null,
       session: sess(chat, cfg),
@@ -233,7 +233,7 @@ async function probeViaCompanion(chat, cfg, deps) {
 
 // tmux is alive for this chat? (has-session exits 0 if yes)
 export async function hasSession(chat, cfg, deps = {}) {
-  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(chat.host)) {
     const r = await probeViaCompanion(chat, cfg, deps);
     return r.ok;
   }
@@ -257,7 +257,7 @@ export async function hasSession(chat, cfg, deps = {}) {
 // (see companionHasSessionResultToProbe); the timeout then bounds nothing extra
 // (the channel has its own RPC timeout) but is accepted for signature parity.
 export async function probeSession(chat, cfg, { timeout = 8000 } = {}, deps = {}) {
-  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(chat.host)) {
     return probeViaCompanion(chat, cfg, deps);
   }
   const run = deps.runTmux ?? runTmux;
@@ -304,7 +304,7 @@ async function resizeViaCompanion(chat, cfg, deps) {
 // even though set-option window-size latest takes no geometry — the ConPTY SIGWINCH
 // is what actually resizes; this just unlocks the window to follow it.
 export async function resize(chat, cfg, _cols, _rows, deps = {}) {
-  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+  if (chat.host !== '(local)' && isCompanionTransportEnabled() && !isCompanionExcludedHost(chat.host)) {
     await resizeViaCompanion(chat, cfg, deps);
     return;
   }
@@ -348,7 +348,7 @@ export async function spawn(chat, _cfg, deps = {}) {
   // companion path). companion-or-fail: spawnSession returns {ok:false} with an
   // actionable error and never silently falls back to runTmux here.
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (chat.host !== '(local)' && isEnabled()) {
+  if (chat.host !== '(local)' && isEnabled() && !isCompanionExcludedHost(chat.host)) {
     const r = await (deps.spawnSession ?? spawnSession)(chat.host, {
       container: chat.container || null,
       session: s,
@@ -375,7 +375,7 @@ export async function spawn(chat, _cfg, deps = {}) {
 export async function kill(chat, cfg, deps = {}) {
   const s = sess(chat, cfg);
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (chat.host !== '(local)' && isEnabled()) {
+  if (chat.host !== '(local)' && isEnabled() && !isCompanionExcludedHost(chat.host)) {
     await (deps.killSession ?? killSession)(chat.host, {
       container: chat.container || null,
       session: s,
@@ -423,7 +423,7 @@ export function attachArgs(chat, cfg) {
 // input, and routes a startup failure into onExit. server.js is UNCHANGED.
 export function attachStream(chat, cfg, { cols = 100, rows = 30 } = {}, deps = {}) {
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (chat.host !== '(local)' && isEnabled()) {
+  if (chat.host !== '(local)' && isEnabled() && !isCompanionExcludedHost(chat.host)) {
     return (deps.companionAttachSession ?? companionAttachSession)(chat.host, {
       script: buildAttachRemoteScript(buildAttachCommand(chat, attachArgs(chat, cfg))),
       cols,
@@ -551,7 +551,7 @@ export function attachInteractiveCompanion(host, script, cfg = {}, deps = {}) {
 // attachInteractiveTmux); production callers omit it.
 export function attachInteractive(chat, cfg, deps = {}) {
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (chat.host !== '(local)' && isEnabled()) {
+  if (chat.host !== '(local)' && isEnabled() && !isCompanionExcludedHost(chat.host)) {
     return (deps.attachInteractiveCompanion ?? attachInteractiveCompanion)(
       chat.host,
       buildAttachRemoteScript(buildAttachInteractiveCommand(chat, attachArgs(chat, cfg))),

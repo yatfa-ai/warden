@@ -548,25 +548,28 @@ describe('afterSave — the post-save side-effects (Correction 2)', () => {
   // dep — the HTTP test observes only the two most observable ones (process.send
   // + companion env) end-to-end. WARDEN-1274: this pipeline had a FOURTH step,
   // restartAttentionPoll, retired with the server-side attention webhook sweep.
-  it('invokes all three deps in order with the right arguments', () => {
+  it('invokes all four deps in order with the right arguments', () => {
     const calls = [];
-    const cfg = { companionTransportEnabled: true, telemetryIncidentsEnabled: true };
+    const cfg = { companionTransportEnabled: true, companionExcludedHosts: ['win-box'], telemetryIncidentsEnabled: true };
     afterSave(cfg, {
       forwardTelemetryConfig: (c) => calls.push(['forwardTelemetryConfig', c === cfg]),
       applyCompanionToggle: (enabled, opts) => calls.push(['applyCompanionToggle', enabled, opts]),
+      applyCompanionExclusions: (hosts) => calls.push(['applyCompanionExclusions', hosts]),
       restartBudgetPoll: () => calls.push(['restartBudgetPoll']),
       companionOverridden: false,
     });
     assert.deepStrictEqual(
       calls.map((c) => c[0]),
-      ['forwardTelemetryConfig', 'applyCompanionToggle', 'restartBudgetPoll'],
-      'all three side-effects fire in the declared order',
+      ['forwardTelemetryConfig', 'applyCompanionToggle', 'applyCompanionExclusions', 'restartBudgetPoll'],
+      'all four side-effects fire in the declared order (WARDEN-1390 added the exclusion applier)',
     );
     // forwardTelemetryConfig received the live cfg (it reads clamped values off it)
     assert.strictEqual(calls[0][1], true, 'forwardTelemetryConfig received cfg');
     // applyCompanionToggle received the toggle + the boot override flag
     assert.strictEqual(calls[1][1], true, 'applyCompanionToggle received companionTransportEnabled');
     assert.deepStrictEqual(calls[1][2], { override: false }, 'applyCompanionToggle received the override flag');
+    // applyCompanionExclusions received the per-host list (WARDEN-1390)
+    assert.deepStrictEqual(calls[2][1], ['win-box'], 'applyCompanionExclusions received companionExcludedHosts');
   });
 
   it('passes the operator-override flag through to applyCompanionToggle', () => {
@@ -576,6 +579,7 @@ describe('afterSave — the post-save side-effects (Correction 2)', () => {
       {
         forwardTelemetryConfig: () => {},
         applyCompanionToggle: (_e, opts) => { received = opts; },
+        applyCompanionExclusions: () => {},
         restartBudgetPoll: () => {},
         companionOverridden: true,
       },

@@ -25,7 +25,7 @@ import { resolveConsent } from './telemetry-consent.cjs';
 import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
 import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
 import { createPaneInputTelemetry } from './paneInputTelemetry.js';
-import { applyCompanionToggle } from './companion.js';
+import { applyCompanionToggle, applyCompanionExclusions } from './companion.js';
 import * as collections from './collections.js';
 // NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
 // Every in-memory catalogue read/write in this file goes through `chatCatalog`,
@@ -78,7 +78,7 @@ import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { isCompanionTransportEnabled, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, deliverRemoteScript, pingProbe } from './companion.js';
+import { isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, deliverRemoteScript, pingProbe } from './companion.js';
 import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 // WARDEN-1381 — the WebSocket layer (observe wss + streamWss + the upgrade router).
@@ -99,6 +99,11 @@ const LOCAL = '(local)';
 // every PUT /api/config so a flip takes effect on the next op, not on restart.
 const companionEnvOverridden = process.env.WARDEN_COMPANION_TRANSPORT !== undefined;
 applyCompanionToggle(cfg.companionTransportEnabled, { override: companionEnvOverridden });
+// WARDEN-1390: same boot-apply contract as the toggle above, for the per-host
+// exclusion list — serializes cfg.companionExcludedHosts into
+// WARDEN_COMPANION_EXCLUDED_HOSTS so every routing predicate (and the
+// /api/hosts/status reason) reads it without a restart-coupled cache.
+applyCompanionExclusions(cfg.companionExcludedHosts);
 
 const app = express();
 
@@ -811,7 +816,11 @@ export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
   const companionEligible = [];
   const skipped = [];
   for (const c of fleet) {
-    if (isCompanionTransportEnabled() && c.host !== LOCAL) companionEligible.push(c);
+    // WARDEN-1390: the per-host exclusion is part of eligibility — an excluded
+    // host's panes must ride raw SSH, and the sweep is only ever allowed to
+    // capture via the channel, so an excluded host lands in `skipped`
+    // (surfaced as sweep_skipped, never probed over the channel).
+    if (isCompanionTransportEnabled() && c.host !== LOCAL && !isCompanionExcludedHost(c.host)) companionEligible.push(c);
     else skipped.push(c);
   }
   // Reconcile establishes the pane-push subscription → the companion pushes paneDelta
@@ -1195,6 +1204,7 @@ app.put('/api/config', async (req, res) => {
     companionOverridden: companionEnvOverridden,
     forwardTelemetryConfig,
     applyCompanionToggle,
+    applyCompanionExclusions,
     restartBudgetPoll,
   });
   res.json({ ok: true, refused });
@@ -1232,6 +1242,7 @@ app.post('/api/config/reset', async (_req, res) => {
     companionOverridden: companionEnvOverridden,
     forwardTelemetryConfig,
     applyCompanionToggle,
+    applyCompanionExclusions,
     restartBudgetPoll,
   });
   res.json({ ok: true });

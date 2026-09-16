@@ -61,6 +61,8 @@ const DEFAULT_CONFIG: ConfigData = {
   tokenBudgetPerSessionThresholdTokens: 1_000_000,
   companionTransportEnabled: false,
   companionTransportOverridden: false,
+  // WARDEN-1390 — empty until the GET /api/config load populates it.
+  companionExcludedHosts: [],
   confirmDestructiveActions: true,
   notifyChatOps: true,
   notifyErrors: true,
