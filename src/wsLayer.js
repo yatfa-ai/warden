@@ -14,6 +14,14 @@
 // `setupWsLayer` so this module never imports server.js — the dependency stays
 // one-directional (server.js -> wsLayer.js), avoiding a cycle.
 //
+// WARDEN-1385 — `paneInputTelemetry` is an OPTIONAL injected producer (created
+// in server.js; tests omit it and the correlation calls vanish). When present
+// it sees the two server-side hops of a keystroke's journey: the WRITE leg
+// (WS message → pty.write done) and the ROUND-TRIP leg (pty.write done → that
+// pane's next output chunk — the tmux echo). It never alters the data path:
+// both note* calls are fire-and-forget, and a throwing producer is caught so
+// the observation of the path can never be the thing that breaks the path.
+//
 // The `server` the upgrade router binds to MUST be the same instance server.js
 // exports as `server` (the test seam: the suites listen on the exported instance
 // precisely so THIS module's upgrade handler answers them — app.listen() would
@@ -22,6 +30,7 @@
 // exactly this property.
 
 import { WebSocketServer } from 'ws';
+import { performance } from 'node:perf_hooks';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { createSession } from './sessions.js';
@@ -37,11 +46,18 @@ import { loopMonitor } from './loop-monitor.js';
 // already hardcode this same string).
 const LOCAL = '(local)';
 
+// WARDEN-1385 — the per-pane output coalescing window (ms). An 8ms batch floor
+// collapses the per-chunk WS framing three streaming agents otherwise produce
+// (~4,700 msgs/sec measured — one renderer main-thread wakeup each) while adding
+// an order-of-magnitude-below-perception delay to every frame. See the attach
+// handler's onData for the full mechanism note.
+const PANE_OUT_FLUSH_MS = 8;
+
 // Wire the WebSocket layer onto `server`. Creates both WebSocketServers, attaches
 // the observe + stream connection handlers and the `server.on('upgrade')` path
 // router (moved over verbatim), and returns the sockets. Nothing else in server.js
 // references them, so callers are free to ignore the return value.
-export function setupWsLayer({ server, cfg, resolve, chatCatalog }) {
+export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelemetry }) {
   const wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', async (ws, req) => {
@@ -296,10 +312,52 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog }) {
         // first PTY's data is dropped and its onExit can't touch the live entry.
         const entry = { pty, chat };
         attaches.set(m.id, entry);
-        pty.onData((d) => { if (attaches.get(m.id) === entry) send({ type: 'pty', id: m.id, data: d }); });
+        // WARDEN-1385 — PER-PANE OUTPUT COALESCING (the convicted mechanism's
+        // root fix). node-pty delivers tmux output in small chunks, and the
+        // naive path forwarded ONE WS message PER CHUNK. Measured on the
+        // probe (scripts/pane-latency-probe.mjs): three streaming agents
+        // produce ~4,700 messages/sec INTO the renderer — each one a
+        // main-thread wakeup (JSON.parse + handler + term.write) on the very
+        // thread that must process the user's keystroke and paint its echo.
+        // A plain ssh client ships the SAME bytes as one continuous stream;
+        // the per-chunk framing is warden's own invention, and it multiplies
+        // the renderer's felt-path load by an order of magnitude.
+        //
+        // The fix batches the chunks that arrive within one 8ms window into
+        // ONE message per pane. 8ms is an order of magnitude below the ~50ms
+        // perception floor the ticket pins (and the same internal-batching
+        // class every terminal emulator applies to its own writes), while the
+        // message-rate collapse is what removes the main-thread pressure.
+        // Byte order per pane is preserved exactly; xterm is chunk-boundary-
+        // agnostic and prefers fewer/larger writes; tmux redraws identically.
+        let outChunks = [];
+        let outTimer = null;
+        const flushOut = () => {
+          if (outTimer) { clearTimeout(outTimer); outTimer = null; }
+          if (attaches.get(m.id) !== entry) { outChunks = []; return; }
+          if (!outChunks.length) return;
+          const data = outChunks.join('');
+          outChunks = [];
+          send({ type: 'pty', id: m.id, data });
+        };
+        pty.onData((d) => {
+          if (attaches.get(m.id) !== entry) return;
+          // WARDEN-1385: the pane produced output while a keystroke may be in
+          // flight — the producer correlates write→output for the round-trip
+          // histogram. Must not shift the data path: fire-and-forget, caught.
+          try { paneInputTelemetry?.notePaneOutput(String(m.id)); } catch { /* observing must never break the path */ }
+          outChunks.push(d);
+          if (outChunks.length >= 64) { flushOut(); return; } // pathological-turn bound
+          if (!outTimer) outTimer = setTimeout(flushOut, PANE_OUT_FLUSH_MS);
+        });
         pty.onExit(async ({ exitCode }) => {
           if (attaches.get(m.id) !== entry) return; // stale — killed prior PTY; this exit is not the live session ending
           attaches.delete(m.id);
+          outChunks = []; // any unflushed output of a dead PTY is dead with it
+          // WARDEN-1385: the echo of any in-flight keystroke died with the PTY —
+          // drop the pending correlation (the ledger row is kept; it IS the
+          // evidence about the pane that just ended).
+          try { paneInputTelemetry?.dropPending(String(m.id)); } catch { /* noop */ }
           send({ type: 'ended', id: m.id, code: exitCode });
           await appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
         });
@@ -308,7 +366,14 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog }) {
         await appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
       } else if (m.type === 'input') {
         const a = attaches.get(m.id);
-        if (a) { try { a.pty.write(String(m.data || '')); } catch { /* noop */ } }
+        if (a) {
+          // WARDEN-1385: measure the WRITE leg (WS message → pty.write done) and
+          // open the pane's round-trip correlation. Fire-and-forget + caught:
+          // observing the path must never be the thing that breaks the path.
+          const t0 = performance.now();
+          try { a.pty.write(String(m.data || '')); } catch { /* noop */ }
+          try { paneInputTelemetry?.noteInputWritten(String(m.id), performance.now() - t0); } catch { /* noop */ }
+        }
       } else if (m.type === 'resize') {
         const c = Math.max(20, Math.floor(m.cols || 80));
         const r = Math.max(6, Math.floor(m.rows || 24));
@@ -319,7 +384,12 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog }) {
         }
       } else if (m.type === 'detach') {
         const a = attaches.get(m.id);
-        if (a) { try { a.pty.kill(); } catch { /* noop */ } attaches.delete(m.id); }
+        if (a) {
+          try { a.pty.kill(); } catch { /* noop */ }
+          attaches.delete(m.id);
+          // WARDEN-1385: same reasoning as the exit path — a killed PTY cannot echo.
+          try { paneInputTelemetry?.dropPending(String(m.id)); } catch { /* noop */ }
+        }
       }
     });
 

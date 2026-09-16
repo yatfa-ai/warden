@@ -48,6 +48,7 @@ const {
   markerFileName,
   isCrashSentinelFile,
   detectCrashes,
+  describePaneLatencyCulprit,
 } = require('./crash-sentinel.cjs');
 // Telemetry PIPELINE assembly (WARDEN-486) + the CJS redact mirror + the pure
 // tier resolver (WARDEN-524). main.cjs constructs the pipeline with the REAL
@@ -381,6 +382,59 @@ function recordOperationalMetricsWindow(snapshot) {
     now: Date.now,
   });
   if (event) telemetryPipeline.record(event);
+}
+
+// WARDEN-1385 — the RENDERER's pane-latency window (web/src/lib/paneLatency.ts,
+// forwarded over the telemetry:renderer-metrics bridge). Same double gate as
+// the server windows: the sampler retains only fixed-size accumulators, and
+// THIS receipt refuses the operational-metrics category before anything is
+// built or recorded. Recorded with `runtime: 'renderer'` so the felt-path
+// histograms (echo e2e, paint, long tasks) are attributable to the surface the
+// user types on, beside the server's write/round-trip histograms.
+//
+// The accepted window is ALSO persisted (tiny, overwritten per window) as the
+// crash sentinel's culprit data: when the NEXT launch detects this instance
+// died unexpectedly, the last felt-latency state before the death is on disk
+// to be named alongside the crash (recordCrashCulprit below) — the
+// unexpected-termination class gets its own evidence loop instead of a bare
+// exit code. The file is written ONLY on accepted windows (consent-gated by
+// construction), so nothing out-of-consent is ever persisted.
+function recordRendererPaneMetrics(snapshot) {
+  if (resolveTelemetryConsent(telemetryPrefs)['operational-metrics'] !== true) return;
+  const event = buildOperationalMetricsEvent({
+    snapshot,
+    schemaVersion: SCHEMA_VERSION,
+    runtime: 'renderer',
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    now: Date.now,
+  });
+  if (!event) return;
+  telemetryPipeline.record(event);
+  persistLastPaneLatency(snapshot);
+}
+
+// WARDEN-1385 — crash-sentinel culprit data (userData/pane-latency-last.json).
+// Overwrite-per-write, aggregates only, bounded content (the window the sampler
+// flushes is fixed-size by construction). Every failure is warned and swallowed:
+// culprit data is additive evidence, never a crash of its own.
+function paneLatencyCulpritPath() {
+  try { return path.join(app.getPath('userData'), 'pane-latency-last.json'); }
+  catch { return null; }
+}
+
+function persistLastPaneLatency(snapshot) {
+  const file = paneLatencyCulpritPath();
+  if (!file) return;
+  try { fs.writeFileSync(file, JSON.stringify(snapshot)); }
+  catch (e) { console.warn('[warden:pane-latency] failed to persist culprit snapshot', e); }
+}
+
+function readLastPaneLatency() {
+  const file = paneLatencyCulpritPath();
+  if (!file) return null;
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return null; }
 }
 
 // WARDEN-1278 — turn a server-child STALL window (the 'telemetry-stalls' IPC
@@ -910,6 +964,14 @@ function readCrashSentinelMarkers() {
 function runCrashSentinelDetection() {
   const markers = readCrashSentinelMarkers();
   const { crashed } = detectCrashes(markers, isPidAlive);
+  if (crashed.length) {
+    // WARDEN-1385 — the death's own culprit data: name the last felt-latency
+    // window the dead instance persisted (if any) beside the crash, on the
+    // owner's local channel. Absent file → silent (nothing was ever measured;
+    // inventing an empty summary would fabricate a reading).
+    const culprit = describePaneLatencyCulprit(readLastPaneLatency());
+    if (culprit) console.warn(`[warden:crash-sentinel] unexpected termination — ${culprit}`);
+  }
   for (const marker of crashed) {
     try {
       telemetry.recordMainCrash();
@@ -1274,6 +1336,21 @@ ipcMain.handle('telemetry:set-context', (_event, ctx) => {
 ipcMain.on('telemetry:renderer-error', (_event, serialized) => {
   try {
     telemetry.recordRendererError(serialized);
+  } catch {
+    /* a telemetry forward must never crash the host */
+  }
+});
+
+// WARDEN-1385 — the renderer's folded pane-latency window (echo e2e / paint /
+// long-task histograms, aggregates only, no pane keys by construction).
+// Fire-and-forget `send`, same discipline as the error forward above: main is
+// the consent gate (recordRendererPaneMetrics refuses the operational-metrics
+// category), so the renderer forwarding unconditionally captures nothing until
+// the user opts in. A malformed snapshot yields null from the builder and is
+// dropped here — never trusted because it came from our own window.
+ipcMain.on('telemetry:renderer-metrics', (_event, snapshot) => {
+  try {
+    recordRendererPaneMetrics(snapshot);
   } catch {
     /* a telemetry forward must never crash the host */
   }

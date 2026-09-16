@@ -4,10 +4,11 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
+import { getPaneLatencySampler } from '@/lib/paneLatency';
+import { openExternalUrl, forwardPaneMetrics } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { findUrlCandidates } from '@/lib/url-links';
-import { openExternalUrl } from '@/lib/electron';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
@@ -433,6 +434,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const terminalPalette = getThemeById(terminalThemeId)?.xterm ?? getThemeById('github-dark')!.xterm;
 
   useEffect(() => {
+    // WARDEN-1385: the app-level latency sampler (build-once; the transport is
+    // the Electron bridge — a no-op in a plain browser).
+    const paneLatency = getPaneLatencySampler((snap) => forwardPaneMetrics(snap));
     const term = new Terminal({
       fontFamily: safeFontFamily,
       fontSize: safeFontSize, convertEol: false, scrollback: safeScrollback,
@@ -489,7 +493,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // and-release, and the byte-transparent PTY transport delivers it here. The
     // handler honors SET and ignores QUERY (never reads the local clipboard).
     const osc52 = term.parser.registerOscHandler(52, handleOsc52);
-    term.onData((d) => streamApi.send({ type: 'input', id, data: d }));
+    // WARDEN-1385: mark the keystroke BEFORE it leaves the renderer, so the
+    // sampler's e2e leg covers the full felt path (this tick → echo arrives).
+    term.onData((d) => { paneLatency.noteInput(id); streamApi.send({ type: 'input', id, data: d }); });
     // WARDEN-920: a cols/rows change no longer ships straight to the PTY. Every
     // change re-arms the scheduler's trailing settle window and only the geometry
     // that survives it is announced (and only if it differs from what the PTY was
@@ -861,9 +867,20 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   }, [id]);
 
   useEffect(() => {
+    // WARDEN-1385: the app-level latency sampler (build-once; the transport is
+    // the Electron bridge — a no-op in a plain browser).
+    const paneLatency = getPaneLatencySampler((snap) => forwardPaneMetrics(snap));
     return streamApi.on(id, (m) => {
       const term = termRef.current; if (!term) return;
-      if (m.type === 'pty') { term.write(m.data); setPhase('connected'); }
+      if (m.type === 'pty') {
+        // WARDEN-1385: the first frame after a keystroke closes the e2e leg
+        // (keystroke → frame arrived) and its `painted` callback closes the
+        // paint leg (frame arrived → xterm processed the write) when xterm is
+        // done. Frames with no pending input cost one Map probe.
+        const f = paneLatency.frame(id);
+        term.write(m.data, f ? f.painted : undefined);
+        setPhase('connected');
+      }
       else if (m.type === 'attached') { setPhase('connected'); }
       else if (m.type === 'session_dead') { setPhase('session_dead'); }
       else if (m.type === 'host_unreachable') { setPhase('host_unreachable'); }
