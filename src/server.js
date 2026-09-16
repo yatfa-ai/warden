@@ -24,6 +24,7 @@ import { resolveConsent } from './telemetry-consent.cjs';
 // (the operational-metrics consent category; see src/fileExistsTelemetry.js).
 import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
 import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
+import { createPaneInputTelemetry } from './paneInputTelemetry.js';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 // NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
@@ -429,6 +430,29 @@ app.get('/api/diagnostics/stalls', async (req, res) => {
       stats: loopMonitor.stats(),
       stalls,
       session: loopMonitor.stalls().slice(-limit).reverse(),
+      timestamp: Date.now(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// WARDEN-1385 — pane-input latency, the owner's on-demand read surface: the
+// per-PANE round-trip ledger (which pane, how slow, how stale) plus the
+// current aggregate window for the two server-side hops (pane-input-write,
+// pane-input-roundtrip). This is the local half of the attribution story —
+// pane KEYS may appear here because this surface is the owner's, exactly like
+// stalls.jsonl + /api/diagnostics/stalls; the TELEMETRY channel still carries
+// only the closed-set hop histograms, never a pane key (WARDEN-443).
+// Read-only: it snapshots the live window without flushing it, so curling this
+// endpoint mid-window never perturbs or splits the telemetry window.
+app.get('/api/diagnostics/pane-latency', (req, res) => {
+  try {
+    res.json({
+      recording: paneInputTelemetry.isEnabled(),
+      ledger: paneInputTelemetry.ledgerSnapshot(),
+      window: paneInputTelemetry.windowSnapshot(),
+      pending: paneInputTelemetry.pendingCount(),
       timestamp: Date.now(),
     });
   } catch (e) {
@@ -1255,6 +1279,29 @@ const serverStallTelemetry = createServerStallTelemetry({
   },
 });
 serverStallTelemetry.start();
+
+// WARDEN-1385 — the pane-input telemetry producer: the two SERVER-side hops of
+// a keystroke's journey (write leg + tmux round trip), folded into the same
+// operational-metrics channel as the file-exists probes. The RENDERER half of
+// the felt path (keystroke→echo e2e, the paint leg, main-thread health) is
+// measured in web/src/lib/paneLatency.ts and arrives at main over its own IPC
+// bridge — the two histograms are read beside each other to attribute a slow
+// echo to input write, tmux round trip, WS delivery or renderer paint.
+//
+// Same three properties as the two producers above: consent resolved LIVE
+// through the one authority, the windowed snapshot forwarded to the Electron
+// main process over the fork's IPC channel, and the same process.send guard
+// for standalone `node src/server` runs. Started after the WS layer is wired
+// (below) so the correlation object exists before the first attach; the
+// producer is handed to setupWsLayer, which correlates per pane.
+const paneInputTelemetry = createPaneInputTelemetry({
+  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
+  send: (snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-metrics', snapshot });
+  },
+});
+paneInputTelemetry.start();
 
 // Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
@@ -2790,7 +2837,7 @@ const server = http.createServer(app);
 // Binds both WS servers (observe + stream) and the shared `upgrade` router to THIS
 // http instance — the SAME `server` exported below (the test seam): app.listen()
 // would create a different server with no WS routing.
-setupWsLayer({ server, cfg, resolve, chatCatalog });
+setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelemetry });
 
 // Rotate old activity events + directives on startup (async + atomic — WARDEN-831)
 try { await rotateEvents(); } catch { /* ignore */ }
@@ -3243,6 +3290,10 @@ export { fileExistsTelemetry };
 // into the producer's internals or waiting 5 minutes for a timer.
 export { serverStallTelemetry };
 
+// WARDEN-1385 — exported on the same reasoning: the pane-latency integration
+// test and the diagnostics endpoint drive the REAL producer (noteInputWritten →
+// notePaneOutput → windowSnapshot/flushNow) rather than a parallel copy.
+export { paneInputTelemetry };
 // WARDEN-1278 — test seams for src/server-stall-telemetry.test.js, which drives
 // the REAL setOnStall callback to prove the owner's local channels (stalls.jsonl,
 // the stderr line, /api/diagnostics/stalls) are byte-untouched by the additive

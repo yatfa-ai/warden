@@ -107,3 +107,34 @@ test('the builder never fabricates: hostile operation names pass through only to
   assert.ok(event, 'shape-valid snapshot builds');
   assert.equal(validateEvent(event), false, 'the wire validator rejects the hostile key');
 });
+
+// WARDEN-1385 — the optional `runtime` param: the renderer bridge records the
+// felt-path windows with runtime 'renderer' so they are attributable to the
+// surface the user types on; the default stays 'main' (byte-identical for the
+// existing server-child receipt), and an unrecognized value falls back rather
+// than fabricating a runtime the schema never named.
+test('runtime param: renderer window builds schema-valid with runtime renderer', () => {
+  const event = buildOperationalMetricsEvent({
+    snapshot: realSnapshot(),
+    schemaVersion: SCHEMA_VERSION,
+    runtime: 'renderer',
+    appVersion: '0.1.73',
+    platform: 'win32',
+    now: () => TS,
+  });
+  assert.ok(event);
+  assert.equal(event.runtime, 'renderer');
+  assert.equal(validateEvent(event), true, 'renderer runtime passes the canonical wire validator');
+});
+
+test('runtime param: server is honored, garbage falls back to main', () => {
+  const serverEvent = buildOperationalMetricsEvent({
+    snapshot: realSnapshot(), schemaVersion: SCHEMA_VERSION, runtime: 'server', now: () => TS,
+  });
+  assert.equal(serverEvent.runtime, 'server');
+  const garbageEvent = buildOperationalMetricsEvent({
+    snapshot: realSnapshot(), schemaVersion: SCHEMA_VERSION, runtime: 'not-a-runtime', now: () => TS,
+  });
+  assert.equal(garbageEvent.runtime, 'main', 'unrecognized runtime falls back to main');
+  assert.equal(validateEvent(garbageEvent), true);
+});

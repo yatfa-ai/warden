@@ -293,6 +293,11 @@ interface WardenTelemetryBridge {
   // WARDEN-637 — forward a serialized renderer JS error { name, message, stack }
   // to main's consent-gated source. Fire-and-forget (send); resolves to void.
   reportError: (serialized: RendererErrorPayload) => void;
+  // WARDEN-1385 — forward a folded pane-latency window (aggregate histograms
+  // over the felt input path: echo e2e, paint, long tasks). Fire-and-forget
+  // (send); MAIN is the consent gate (the receipt handler refuses the
+  // operational-metrics category exactly like the server windows' receipt).
+  reportPaneMetrics: (snapshot: unknown) => void;
 }
 
 /** A renderer-process error serialized for the telemetry forward (WARDEN-637). */
@@ -495,6 +500,19 @@ export function forwardRendererError(error: unknown, componentStack?: string | n
     b.reportError(serializeErrorForTelemetry(error, componentStack));
   } catch (e) {
     console.warn('[warden:electron] forwardRendererError failed', e);
+  }
+}
+
+// WARDEN-1385 — forward a folded pane-latency window to main's receipt handler
+// (which consent-gates before recording). A clean no-op when the bridge or the
+// method is absent (browser/dev/smoke) — never throws into the caller.
+export function forwardPaneMetrics(snapshot: unknown): void {
+  const b = telemetryBridge();
+  if (!b || typeof b.reportPaneMetrics !== 'function') return;
+  try {
+    b.reportPaneMetrics(snapshot);
+  } catch (e) {
+    console.warn('[warden:electron] forwardPaneMetrics failed', e);
   }
 }
 
