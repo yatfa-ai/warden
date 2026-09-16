@@ -28,7 +28,7 @@
 //
 // Run: node uiStore.test.mjs   (or: npm test, from web/)
 import { transformWithOxc } from 'vite';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -105,6 +105,15 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     // WARDEN-1375 (slice 7): same compile-locked snapshot field.
     agentFilter: s.agentFilter,
     agentSort: s.agentSort,
+    // WARDEN-1383 (slice 8): the eight spawn-family snapshot fields.
+    defaultNewChatPreset: s.defaultNewChatPreset,
+    defaultNewChatPresetByHost: s.defaultNewChatPresetByHost,
+    defaultNewChatHost: s.defaultNewChatHost,
+    defaultNewChatCwd: s.defaultNewChatCwd,
+    defaultNewChatCwdByHost: s.defaultNewChatCwdByHost,
+    customPresets: s.customPresets,
+    defaultShell: s.defaultShell,
+    defaultShellByHost: s.defaultShellByHost,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -1006,6 +1015,282 @@ test('the pair is independent of the other migrated facts', () => {
   store.getState().setTimestampFormat('absolute');
   assert.equal(store.getState().agentFilter, 'manual');
   assert.equal(store.getState().agentSort, 'name');
+});
+
+// ─── the new-chats spawn family (WARDEN-1383, roadmap WARDEN-1204 slice 8) ───
+//
+// Eight facts — defaultNewChatPreset, defaultNewChatPresetByHost,
+// defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost,
+// customPresets, defaultShell, defaultShellByHost — that NewChatForm read
+// through a PRIVATE `useState(() => loadUi())` while NewChatsSection wrote
+// them through the (now-retired) NewChatsPrefs bag. One home now: the store.
+console.log('\ncreateUiStore — the spawn family seeds from storage.ts, never from re-declared defaults');
+test('a fresh store seeds the eight spawn facts from DEFAULT_UI (not local literals)', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().defaultNewChatPreset, 'claude');
+  assert.equal(store.getState().defaultNewChatPreset, DEFAULT_UI.defaultNewChatPreset);
+  assert.deepEqual(store.getState().defaultNewChatPresetByHost, {});
+  assert.deepEqual(store.getState().defaultNewChatPresetByHost, DEFAULT_UI.defaultNewChatPresetByHost);
+  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().defaultNewChatHost, DEFAULT_UI.defaultNewChatHost);
+  assert.equal(store.getState().defaultNewChatCwd, '');
+  assert.equal(store.getState().defaultNewChatCwd, DEFAULT_UI.defaultNewChatCwd);
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, {});
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, DEFAULT_UI.defaultNewChatCwdByHost);
+  assert.deepEqual(store.getState().customPresets, []);
+  assert.deepEqual(store.getState().customPresets, DEFAULT_UI.customPresets);
+  assert.equal(store.getState().defaultShell, '');
+  assert.equal(store.getState().defaultShell, DEFAULT_UI.defaultShell);
+  assert.deepEqual(store.getState().defaultShellByHost, {});
+  assert.deepEqual(store.getState().defaultShellByHost, DEFAULT_UI.defaultShellByHost);
+});
+test('a fresh store seeds the eight from the PERSISTED payload when one exists (incl. shape of the maps and the preset list)', () => {
+  reset();
+  saveUi({
+    ...loadUi(),
+    defaultNewChatPreset: 'codex',
+    defaultNewChatPresetByHost: { 'box-1': 'claude' },
+    defaultNewChatHost: 'box-1',
+    defaultNewChatCwd: '/srv/work',
+    defaultNewChatCwdByHost: { 'box-1': '/srv/work/agents' },
+    customPresets: [{ name: 'codex', cmd: 'codex --full-auto' }],
+    defaultShell: 'zsh',
+    defaultShellByHost: { 'box-1': 'fish' },
+  });
+  const store = createUiStore();
+  assert.equal(store.getState().defaultNewChatPreset, 'codex');
+  assert.deepEqual(store.getState().defaultNewChatPresetByHost, { 'box-1': 'claude' });
+  assert.equal(store.getState().defaultNewChatHost, 'box-1');
+  assert.equal(store.getState().defaultNewChatCwd, '/srv/work');
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, { 'box-1': '/srv/work/agents' });
+  // The array shape survives: each entry keeps its {name, cmd} pair.
+  assert.deepEqual(store.getState().customPresets, [{ name: 'codex', cmd: 'codex --full-auto' }]);
+  assert.equal(store.getState().defaultShell, 'zsh');
+  assert.deepEqual(store.getState().defaultShellByHost, { 'box-1': 'fish' });
+});
+test("the seed runs through loadUi's sanitizers (a bogus cwd map entry and a blank shell both fall back)", () => {
+  reset();
+  // parseObjectMap's coerceNonEmptyString drops the blank cwd value (a blank
+  // per-host entry must never seed the spawn field empty), and a '' global
+  // defaultShell is dropped by loadUi's own blank-dropping — both the same
+  // normalizers App's retired lazy initializers inherited.
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    defaultNewChatCwdByHost: { 'box-1': '   ' },
+    defaultNewChatCwd: '/srv/work',
+    defaultShell: '',
+  }));
+  const store = createUiStore();
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, {});
+  assert.equal(store.getState().defaultNewChatCwd, '/srv/work');
+  assert.equal(store.getState().defaultShell, '');
+});
+test('an explicit seed overrides the persisted read for the eight (so a test needs no localStorage)', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultNewChatHost: 'box-1', defaultShell: 'zsh', customPresets: [{ name: 'codex', cmd: 'codex' }] });
+  const store = createUiStore({
+    defaultNewChatPreset: 'shell',
+    defaultNewChatPresetByHost: { 'box-1': 'claude' },
+    defaultNewChatHost: 'box-2',
+    defaultNewChatCwd: '/tmp',
+    defaultNewChatCwdByHost: { 'box-2': '/var/tmp' },
+    customPresets: [{ name: 'aider', cmd: 'aider' }],
+    defaultShell: 'bash',
+    defaultShellByHost: { 'box-2': 'fish' },
+  });
+  assert.equal(store.getState().defaultNewChatPreset, 'shell');
+  assert.deepEqual(store.getState().defaultNewChatPresetByHost, { 'box-1': 'claude' });
+  assert.equal(store.getState().defaultNewChatHost, 'box-2');
+  assert.equal(store.getState().defaultNewChatCwd, '/tmp');
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, { 'box-2': '/var/tmp' });
+  assert.deepEqual(store.getState().customPresets, [{ name: 'aider', cmd: 'aider' }]);
+  assert.equal(store.getState().defaultShell, 'bash');
+  assert.deepEqual(store.getState().defaultShellByHost, { 'box-2': 'fish' });
+});
+
+console.log('\nthe spawn-family setters — the store is the live copy, and they do NOT write localStorage');
+test('each of the eight setters replaces its value and notifies subscribers', () => {
+  reset();
+  const store = createUiStore();
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push(s.defaultNewChatPreset));
+  store.getState().setDefaultNewChatPreset('codex');
+  unsubscribe();
+  assert.deepEqual(seen, ['codex']);
+  assert.equal(store.getState().defaultNewChatPreset, 'codex');
+
+  const seenMap = [];
+  const unsubMap = store.subscribe((s) => seenMap.push(s.defaultNewChatCwdByHost));
+  store.getState().setDefaultNewChatCwdByHost({ 'box-1': '/srv' });
+  unsubMap();
+  assert.equal(seenMap.length, 1);
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, { 'box-1': '/srv' });
+
+  const seenPresets = [];
+  const unsubPresets = store.subscribe((s) => seenPresets.push(s.customPresets));
+  store.getState().setCustomPresets([{ name: 'codex', cmd: 'codex' }]);
+  unsubPresets();
+  assert.equal(seenPresets.length, 1);
+  assert.deepEqual(store.getState().customPresets, [{ name: 'codex', cmd: 'codex' }]);
+
+  store.getState().setDefaultNewChatPresetByHost({ 'box-1': 'aider' });
+  assert.deepEqual(store.getState().defaultNewChatPresetByHost, { 'box-1': 'aider' });
+  store.getState().setDefaultNewChatHost('box-1');
+  assert.equal(store.getState().defaultNewChatHost, 'box-1');
+  store.getState().setDefaultNewChatCwd('/srv/work');
+  assert.equal(store.getState().defaultNewChatCwd, '/srv/work');
+  store.getState().setDefaultShell('zsh');
+  assert.equal(store.getState().defaultShell, 'zsh');
+  store.getState().setDefaultShellByHost({ 'box-1': 'fish' });
+  assert.deepEqual(store.getState().defaultShellByHost, { 'box-1': 'fish' });
+});
+test('the eight setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setDefaultNewChatPreset('codex');
+  store.getState().setDefaultNewChatPresetByHost({ 'box-1': 'claude' });
+  store.getState().setDefaultNewChatHost('box-1');
+  store.getState().setDefaultNewChatCwd('/srv/work');
+  store.getState().setDefaultNewChatCwdByHost({ 'box-1': '/srv' });
+  store.getState().setCustomPresets([{ name: 'codex', cmd: 'codex' }]);
+  store.getState().setDefaultShell('zsh');
+  store.getState().setDefaultShellByHost({ 'box-1': 'fish' });
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the eight action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore();
+  const before = {
+    preset: store.getState().setDefaultNewChatPreset,
+    presetByHost: store.getState().setDefaultNewChatPresetByHost,
+    host: store.getState().setDefaultNewChatHost,
+    cwd: store.getState().setDefaultNewChatCwd,
+    cwdByHost: store.getState().setDefaultNewChatCwdByHost,
+    customPresets: store.getState().setCustomPresets,
+    shell: store.getState().setDefaultShell,
+    shellByHost: store.getState().setDefaultShellByHost,
+  };
+  store.getState().setDefaultNewChatPreset('codex');
+  store.getState().setDefaultNewChatPresetByHost({});
+  store.getState().setDefaultNewChatHost('box-1');
+  store.getState().setDefaultNewChatCwd('/x');
+  store.getState().setDefaultNewChatCwdByHost({});
+  store.getState().setCustomPresets([]);
+  store.getState().setDefaultShell('zsh');
+  store.getState().setDefaultShellByHost({});
+  assert.equal(store.getState().setDefaultNewChatPreset, before.preset);
+  assert.equal(store.getState().setDefaultNewChatPresetByHost, before.presetByHost);
+  assert.equal(store.getState().setDefaultNewChatHost, before.host);
+  assert.equal(store.getState().setDefaultNewChatCwd, before.cwd);
+  assert.equal(store.getState().setDefaultNewChatCwdByHost, before.cwdByHost);
+  assert.equal(store.getState().setCustomPresets, before.customPresets);
+  assert.equal(store.getState().setDefaultShell, before.shell);
+  assert.equal(store.getState().setDefaultShellByHost, before.shellByHost);
+});
+
+console.log('\nround trip: Settings → New Chats → store → App snapshot → the saveUi effect → loadUi');
+test('every spawn-family fact survives a restart through the real chain', () => {
+  reset();
+  const store = createUiStore();
+  // NewChatsSection's writes: the CRUD + per-host maps + the three globals.
+  store.getState().setDefaultNewChatPreset('codex');
+  store.getState().setDefaultNewChatPresetByHost({ 'box-1': 'claude' });
+  store.getState().setDefaultNewChatHost('box-1');
+  store.getState().setDefaultNewChatCwd('/srv/work');
+  store.getState().setDefaultNewChatCwdByHost({ 'box-1': '/srv/work/agents' });
+  store.getState().setCustomPresets([{ name: 'codex', cmd: 'codex --full-auto' }]);
+  store.getState().setDefaultShell('zsh');
+  store.getState().setDefaultShellByHost({ 'box-1': 'fish' });
+  flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
+  const persisted = loadUi();                  // next launch
+  assert.equal(persisted.defaultNewChatPreset, 'codex');
+  assert.deepEqual(persisted.defaultNewChatPresetByHost, { 'box-1': 'claude' });
+  assert.equal(persisted.defaultNewChatHost, 'box-1');
+  assert.equal(persisted.defaultNewChatCwd, '/srv/work');
+  assert.deepEqual(persisted.defaultNewChatCwdByHost, { 'box-1': '/srv/work/agents' });
+  assert.deepEqual(persisted.customPresets, [{ name: 'codex', cmd: 'codex --full-auto' }]);
+  assert.equal(persisted.defaultShell, 'zsh');
+  assert.deepEqual(persisted.defaultShellByHost, { 'box-1': 'fish' });
+  // And the next launch's store seeds from exactly that.
+  const next = createUiStore().getState();
+  assert.equal(next.defaultNewChatPreset, 'codex');
+  assert.equal(next.defaultNewChatHost, 'box-1');
+  assert.deepEqual(next.customPresets, [{ name: 'codex', cmd: 'codex --full-auto' }]);
+});
+test('the reset path restores all eight defaults through the store-backed setters', () => {
+  reset();
+  const store = createUiStore({
+    defaultNewChatPreset: 'codex',
+    defaultNewChatPresetByHost: { 'box-1': 'claude' },
+    defaultNewChatHost: 'box-1',
+    defaultNewChatCwd: '/srv/work',
+    defaultNewChatCwdByHost: { 'box-1': '/srv' },
+    customPresets: [{ name: 'codex', cmd: 'codex' }],
+    defaultShell: 'zsh',
+    defaultShellByHost: { 'box-1': 'fish' },
+  });
+  // App's resetSetters entries are `defaultNewChatPreset: setDefaultNewChatPreset`
+  // (…and siblings) — the SAME setters, now backed by the store, called with
+  // resetUiPrefDefaults()' values.
+  store.getState().setDefaultNewChatPreset(DEFAULT_UI.defaultNewChatPreset);
+  store.getState().setDefaultNewChatPresetByHost(DEFAULT_UI.defaultNewChatPresetByHost);
+  store.getState().setDefaultNewChatHost(DEFAULT_UI.defaultNewChatHost);
+  store.getState().setDefaultNewChatCwd(DEFAULT_UI.defaultNewChatCwd);
+  store.getState().setDefaultNewChatCwdByHost(DEFAULT_UI.defaultNewChatCwdByHost);
+  store.getState().setCustomPresets(DEFAULT_UI.customPresets);
+  store.getState().setDefaultShell(DEFAULT_UI.defaultShell);
+  store.getState().setDefaultShellByHost(DEFAULT_UI.defaultShellByHost);
+  flushSnapshotToDisk(store);
+  assert.equal(store.getState().defaultNewChatPreset, 'claude');
+  assert.deepEqual(store.getState().defaultNewChatPresetByHost, {});
+  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().defaultNewChatCwd, '');
+  assert.deepEqual(store.getState().defaultNewChatCwdByHost, {});
+  assert.deepEqual(store.getState().customPresets, []);
+  assert.equal(store.getState().defaultShell, '');
+  assert.deepEqual(store.getState().defaultShellByHost, {});
+  assert.equal(loadUi().defaultNewChatPreset, 'claude');
+  assert.equal(loadUi().defaultNewChatHost, '(local)');
+});
+test('the family is independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setDefaultNewChatHost('box-1');
+  store.getState().setDefaultNewChatPreset('codex');
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().timestampFormat, 'relative');
+  assert.deepEqual(store.getState().hostLabels, {});
+});
+
+console.log('\nstructural guard: components never read persisted state directly — they subscribe');
+test("no file under web/src/components/ contains 'loadUi(' (the read-axis analogue of the PERSISTED_PREF_KEYS compile-lock)", () => {
+  // The invariant this guards: a persisted client fact has ONE place it is
+  // defined and ONE way it is read — the store (or App's composition root).
+  // A component that calls loadUi() directly is exactly the second read
+  // channel this slice retired (NewChatForm.tsx:55 did `useState(() =>
+  // loadUi())` for eight facts while Settings wrote them through the store-
+  // threaded bag). Mutation-check: restoring that call must turn this leg red.
+  const walk = (dir) => {
+    const out = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walk(p));
+      else out.push(p);
+    }
+    return out;
+  };
+  const offenders = walk(join(__dirname, 'src', 'components'))
+    .filter((p) => /\.(ts|tsx)$/.test(p))
+    .filter((p) => readFileSync(p, 'utf8').includes('loadUi('));
+  assert.deepEqual(
+    offenders.map((p) => p.slice(__dirname.length + 1)),
+    [],
+    'component file(s) read persisted state via loadUi( directly — subscribe to the uiStore instead',
+  );
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

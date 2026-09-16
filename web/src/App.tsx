@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type CustomPreset, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -450,26 +450,38 @@ function App() {
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
   // saveUi effect below, never sent to the backend. defaultNewChatPreset is a
   // reserved built-in name ('claude' | 'shell') or a custom preset name.
-  const [defaultNewChatPreset, setDefaultNewChatPreset] = useState<string>(() => uiState.defaultNewChatPreset ?? 'claude');
-  const [defaultNewChatHost, setDefaultNewChatHost] = useState(() => uiState.defaultNewChatHost ?? THIS_MACHINE);
-  // Default working directory pre-filled in the ＋ new chat spawn form
-  // (WARDEN-311). Blank → the host's home directory (today's behavior). Pure
-  // client-side pref (like the new-chat host above): persisted by the saveUi
-  // effect below, never sent to the backend.
-  const [defaultNewChatCwd, setDefaultNewChatCwd] = useState(() => uiState.defaultNewChatCwd ?? '');
-  // Per-host cwd overrides for the ＋ new chat spawn form (WARDEN-336). Keys are
-  // host strings ('(local)' / SSH host name); a host with no entry falls through
-  // to defaultNewChatCwd above, then blank. Pure client-side pref like the global
-  // cwd above: persisted by the saveUi effect below, never sent to the backend.
-  const [defaultNewChatCwdByHost, setDefaultNewChatCwdByHost] = useState<Record<string, string>>(() => uiState.defaultNewChatCwdByHost ?? {});
-  // Per-host agent-type (preset) overrides for the ＋ new chat spawn form
-  // (WARDEN-352 — mirrors the cwd map above). Keys are host strings; a host with
-  // no entry (or one naming a since-deleted preset, dropped on load) falls
-  // through to defaultNewChatPreset, then 'claude'. Pure client-side pref like
-  // the cwd map above: persisted by the saveUi effect below, never sent to the
-  // backend.
-  const [defaultNewChatPresetByHost, setDefaultNewChatPresetByHost] = useState<Record<string, string>>(() => uiState.defaultNewChatPresetByHost ?? {});
-  const [customPresets, setCustomPresets] = useState<CustomPreset[]>(() => uiState.customPresets ?? []);
+  //
+  // WARDEN-1383 (roadmap WARDEN-1204 slice 8) — the LAST facts migrated off
+  // App-owned useState + a second read channel onto the shared client-state
+  // store (lib/uiStore.ts), following `snippets` through `agentSort`: the
+  // eight new-chats spawn facts (preset + per-host map, host, cwd + per-host
+  // map, customPresets, shell + per-host map). NewChatForm (the reader) used
+  // to do a PRIVATE `useState(() => loadUi())` here while NewChatsSection
+  // (the writer) received the same facts through the NewChatsPrefs bag —
+  // one value, two channels. Both now SUBSCRIBE directly, the bag interface
+  // is retired, and uiStore.test.mjs's guard keeps `loadUi(` out of
+  // web/src/components/ so the invariant is enforced, not remembered.
+  //
+  // App still subscribes for the same two single-writer reasons as `snippets`:
+  // (1) each value must appear in the PersistedPrefSnapshot below so the ONE
+  // compile-locked saveUi effect keeps writing it, and (2) the reset partition
+  // (resetSetters) must keep a setter for each. The write path is unchanged end
+  // to end: store.setX → this subscription re-renders App → the snapshot's
+  // field changes → useConfigPersistence's effect fires → persistUiState →
+  // localStorage. The store seeds itself from loadUi() at module load, the same
+  // persisted read the useState lazy initializers did.
+  const defaultNewChatPreset = useDefaultNewChatPreset();
+  const setDefaultNewChatPreset = useSetDefaultNewChatPreset();
+  const defaultNewChatHost = useDefaultNewChatHost();
+  const setDefaultNewChatHost = useSetDefaultNewChatHost();
+  const defaultNewChatCwd = useDefaultNewChatCwd();
+  const setDefaultNewChatCwd = useSetDefaultNewChatCwd();
+  const defaultNewChatCwdByHost = useDefaultNewChatCwdByHost();
+  const setDefaultNewChatCwdByHost = useSetDefaultNewChatCwdByHost();
+  const defaultNewChatPresetByHost = useDefaultNewChatPresetByHost();
+  const setDefaultNewChatPresetByHost = useSetDefaultNewChatPresetByHost();
+  const customPresets = useCustomPresets();
+  const setCustomPresets = useSetCustomPresets();
   // Saved instruction snippets (WARDEN-323): a named, reusable intervention
   // library surfaced at the Broadcast dialog (insert-only) and a focused pane's
   // context menu (one-click send). Pure client-side localStorage pref like the
@@ -501,13 +513,16 @@ function App() {
   // into defaultShell on load). Blank means "no explicit shell" → the host
   // launches its own login shell. Pure client-side pref (like the new-chat prefs
   // above): persisted by the saveUi effect below, never sent to the backend.
-  const [defaultShell, setDefaultShell] = useState(() => uiState.defaultShell ?? '');
+  // Store-backed since WARDEN-1383 (slice 8) like the rest of the spawn family.
+  const defaultShell = useDefaultShell();
+  const setDefaultShell = useSetDefaultShell();
   // Per-host default-shell overrides (WARDEN-429 — mirrors the cwd/preset maps
   // above). Keys are host strings ('(local)' / SSH host name); a host with no
   // entry (or an empty value, dropped on load) falls through to defaultShell,
   // then blank (host login shell). Pure client-side pref like defaultShell
   // above: persisted by the saveUi effect below, never sent to the backend.
-  const [defaultShellByHost, setDefaultShellByHost] = useState<Record<string, string>>(() => uiState.defaultShellByHost ?? {});
+  const defaultShellByHost = useDefaultShellByHost();
+  const setDefaultShellByHost = useSetDefaultShellByHost();
   // "Remember window position and size" is an Electron-main-owned pref, NOT a
   // renderer localStorage pref like the ones above: the OS window bounds must be
   // readable at createWindow() time (before this renderer loads), so the flag +
@@ -1916,16 +1931,10 @@ function App() {
             launchAtLogin, setLaunchAtLogin,
             closeToTray, setCloseToTray,
           }}
-          newChats={{
-            defaultNewChatPreset, setDefaultNewChatPreset,
-            defaultNewChatPresetByHost, setDefaultNewChatPresetByHost,
-            defaultNewChatHost, setDefaultNewChatHost,
-            defaultNewChatCwd, setDefaultNewChatCwd,
-            defaultNewChatCwdByHost, setDefaultNewChatCwdByHost,
-            customPresets, setCustomPresets,
-            defaultShell, setDefaultShell,
-            defaultShellByHost, setDefaultShellByHost,
-          }}
+          // WARDEN-1383 (roadmap WARDEN-1204 slice 8): no `newChats` group —
+          // NewChatsSection subscribes to the shared client-state store
+          // (lib/uiStore.ts) directly, like SnippetsSection (WARDEN-1271) and
+          // the six terminal prefs (WARDEN-1322) before it.
           alerts={{
             attentionDesktopAlerts, setAttentionDesktopAlerts,
             attentionStates, setAttentionStates,
