@@ -52,6 +52,7 @@ import {
   type Snippet,
   type TerminalCursorStyle,
   type OnExitBehavior,
+  type CustomPreset,
 } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
@@ -196,6 +197,53 @@ export interface UiStoreState {
   agentSort: AgentSort;
   /** Set the sidebar fleet sort. The persisted write follows via App's snapshot. */
   setAgentSort: (sort: AgentSort) => void;
+  /**
+   * The new-chats spawn family (roadmap WARDEN-1204 slice 8, WARDEN-1383) —
+   * the default agent type / host / cwd / shell pre-filled in the ＋ new chat
+   * form, their per-host overrides, and the user-defined custom presets.
+   * Exactly TWO reading surfaces and ONE writing surface each, which is what
+   * made this the last surviving second-read-channel in web/src:
+   * NewChatForm (the reader) did a PRIVATE `useState(() => loadUi())` while
+   * NewChatsSection (the writer) got the same facts threaded through the
+   * `NewChatsPrefs` bag — one value, two channels. Both now subscribe here
+   * (App too, via keep-local-names, for the snapshot + resetSetters), the
+   * bag interface is retired, and the guard test in uiStore.test.mjs keeps
+   * `loadUi(` out of web/src/components/ for good. All eight are pure client
+   * localStorage prefs — shared + persisted client state, WARDEN-832 row 2.
+   * Defaults mirror DEFAULT_UI ('claude', '(local)', '', {}, []), seeded
+   * ??-only like every other fact.
+   */
+  defaultNewChatPreset: string;
+  /** Set the default spawn agent type. The persisted write follows via App's snapshot. */
+  setDefaultNewChatPreset: (v: string) => void;
+  /** Per-host spawn agent-type overrides ('(local)' / SSH host → preset name). */
+  defaultNewChatPresetByHost: Record<string, string>;
+  /** Replace the per-host preset map. The persisted write follows via App's snapshot. */
+  setDefaultNewChatPresetByHost: (v: Record<string, string>) => void;
+  /** The host the ＋ new chat form pre-selects ('(local)' or an SSH host). */
+  defaultNewChatHost: string;
+  /** Set the default spawn host. The persisted write follows via App's snapshot. */
+  setDefaultNewChatHost: (v: string) => void;
+  /** The cwd pre-filled in the spawn form. Blank = the host's home directory. */
+  defaultNewChatCwd: string;
+  /** Set the global default spawn cwd. The persisted write follows via App's snapshot. */
+  setDefaultNewChatCwd: (v: string) => void;
+  /** Per-host spawn cwd overrides (host → cwd path). */
+  defaultNewChatCwdByHost: Record<string, string>;
+  /** Replace the per-host cwd map. The persisted write follows via App's snapshot. */
+  setDefaultNewChatCwdByHost: (v: Record<string, string>) => void;
+  /** The user-defined quick-fill presets (named commands beyond claude/shell). */
+  customPresets: CustomPreset[];
+  /** Replace the custom-preset list (Settings CRUD). The persisted write follows via App's snapshot. */
+  setCustomPresets: (v: CustomPreset[]) => void;
+  /** The default shell the spawn form's shell preset + App's split button open. Blank = host login shell. */
+  defaultShell: string;
+  /** Set the global default shell. The persisted write follows via App's snapshot. */
+  setDefaultShell: (v: string) => void;
+  /** Per-host default-shell overrides (host → shell name). */
+  defaultShellByHost: Record<string, string>;
+  /** Replace the per-host shell map. The persisted write follows via App's snapshot. */
+  setDefaultShellByHost: (v: Record<string, string>) => void;
 }
 
 /**
@@ -222,6 +270,14 @@ export type UiStoreSeed = Partial<
     | 'hostLabels'
     | 'agentFilter'
     | 'agentSort'
+    | 'defaultNewChatPreset'
+    | 'defaultNewChatPresetByHost'
+    | 'defaultNewChatHost'
+    | 'defaultNewChatCwd'
+    | 'defaultNewChatCwdByHost'
+    | 'customPresets'
+    | 'defaultShell'
+    | 'defaultShellByHost'
   >
 >;
 
@@ -284,6 +340,28 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setAgentFilter: (agentFilter) => set({ agentFilter }),
     agentSort: seed.agentSort ?? persisted.agentSort ?? 'manual',
     setAgentSort: (agentSort) => set({ agentSort }),
+    // WARDEN-1383 (roadmap WARDEN-1204 slice 8): the new-chats spawn family,
+    // ??-only — every literal below mirrors DEFAULT_UI (pinned against it by
+    // uiStore.test.mjs), exactly as the App useStates they replaced seeded
+    // (`uiState.X ?? <default>`). '' IS the default for the cwd/shell facts,
+    // and {} / [] are the already-shaped empties for the maps and the preset
+    // list — no terminalFontFamily-style truthiness exception here.
+    defaultNewChatPreset: seed.defaultNewChatPreset ?? persisted.defaultNewChatPreset ?? 'claude',
+    setDefaultNewChatPreset: (defaultNewChatPreset) => set({ defaultNewChatPreset }),
+    defaultNewChatPresetByHost: seed.defaultNewChatPresetByHost ?? persisted.defaultNewChatPresetByHost ?? {},
+    setDefaultNewChatPresetByHost: (defaultNewChatPresetByHost) => set({ defaultNewChatPresetByHost }),
+    defaultNewChatHost: seed.defaultNewChatHost ?? persisted.defaultNewChatHost ?? '(local)',
+    setDefaultNewChatHost: (defaultNewChatHost) => set({ defaultNewChatHost }),
+    defaultNewChatCwd: seed.defaultNewChatCwd ?? persisted.defaultNewChatCwd ?? '',
+    setDefaultNewChatCwd: (defaultNewChatCwd) => set({ defaultNewChatCwd }),
+    defaultNewChatCwdByHost: seed.defaultNewChatCwdByHost ?? persisted.defaultNewChatCwdByHost ?? {},
+    setDefaultNewChatCwdByHost: (defaultNewChatCwdByHost) => set({ defaultNewChatCwdByHost }),
+    customPresets: seed.customPresets ?? persisted.customPresets ?? [],
+    setCustomPresets: (customPresets) => set({ customPresets }),
+    defaultShell: seed.defaultShell ?? persisted.defaultShell ?? '',
+    setDefaultShell: (defaultShell) => set({ defaultShell }),
+    defaultShellByHost: seed.defaultShellByHost ?? persisted.defaultShellByHost ?? {},
+    setDefaultShellByHost: (defaultShellByHost) => set({ defaultShellByHost }),
   }));
 }
 
@@ -490,4 +568,93 @@ export function useAgentSort(): AgentSort {
  */
 export function useSetAgentSort(): (sort: AgentSort) => void {
   return useUiStore((s) => s.setAgentSort);
+}
+
+// ─── The new-chats spawn family (WARDEN-1383, roadmap WARDEN-1204 slice 8) ───
+//
+// NewChatForm (the reader) and NewChatsSection (the writer) subscribe here
+// instead of NewChatForm's private `loadUi()` + the NewChatsPrefs bag —
+// one home, one read channel. App subscribes too (keep-local-names) purely
+// for the snapshot + resetSetters, as with every migrated fact. All setters
+// are stable across renders (zustand actions are created once with the
+// store), so they are safe in React dependency arrays.
+
+/** The default spawn agent type ('claude' | 'shell' | a custom preset name). */
+export function useDefaultNewChatPreset(): string {
+  return useUiStore((s) => s.defaultNewChatPreset);
+}
+
+/** The default-spawn-preset setter (NewChatsSection; also App's resetSetters). Stable across renders. */
+export function useSetDefaultNewChatPreset(): (v: string) => void {
+  return useUiStore((s) => s.setDefaultNewChatPreset);
+}
+
+/** The per-host spawn agent-type override map. */
+export function useDefaultNewChatPresetByHost(): Record<string, string> {
+  return useUiStore((s) => s.defaultNewChatPresetByHost);
+}
+
+/** The per-host preset-map setter. Stable across renders. */
+export function useSetDefaultNewChatPresetByHost(): (v: Record<string, string>) => void {
+  return useUiStore((s) => s.setDefaultNewChatPresetByHost);
+}
+
+/** The host the spawn form pre-selects ('(local)' or an SSH host). */
+export function useDefaultNewChatHost(): string {
+  return useUiStore((s) => s.defaultNewChatHost);
+}
+
+/** The default-spawn-host setter. Stable across renders. */
+export function useSetDefaultNewChatHost(): (v: string) => void {
+  return useUiStore((s) => s.setDefaultNewChatHost);
+}
+
+/** The cwd pre-filled in the spawn form (blank = the host's home directory). */
+export function useDefaultNewChatCwd(): string {
+  return useUiStore((s) => s.defaultNewChatCwd);
+}
+
+/** The global default-cwd setter. Stable across renders. */
+export function useSetDefaultNewChatCwd(): (v: string) => void {
+  return useUiStore((s) => s.setDefaultNewChatCwd);
+}
+
+/** The per-host spawn cwd override map. */
+export function useDefaultNewChatCwdByHost(): Record<string, string> {
+  return useUiStore((s) => s.defaultNewChatCwdByHost);
+}
+
+/** The per-host cwd-map setter. Stable across renders. */
+export function useSetDefaultNewChatCwdByHost(): (v: Record<string, string>) => void {
+  return useUiStore((s) => s.setDefaultNewChatCwdByHost);
+}
+
+/** The user-defined quick-fill presets (named commands beyond claude/shell). */
+export function useCustomPresets(): CustomPreset[] {
+  return useUiStore((s) => s.customPresets);
+}
+
+/** The custom-preset list setter (NewChatsSection's CRUD is the only writer). Stable across renders. */
+export function useSetCustomPresets(): (v: CustomPreset[]) => void {
+  return useUiStore((s) => s.setCustomPresets);
+}
+
+/** The default shell the shell preset + App's split button open (blank = host login shell). */
+export function useDefaultShell(): string {
+  return useUiStore((s) => s.defaultShell);
+}
+
+/** The global default-shell setter. Stable across renders. */
+export function useSetDefaultShell(): (v: string) => void {
+  return useUiStore((s) => s.setDefaultShell);
+}
+
+/** The per-host default-shell override map. */
+export function useDefaultShellByHost(): Record<string, string> {
+  return useUiStore((s) => s.defaultShellByHost);
+}
+
+/** The per-host shell-map setter. Stable across renders. */
+export function useSetDefaultShellByHost(): (v: Record<string, string>) => void {
+  return useUiStore((s) => s.setDefaultShellByHost);
 }
