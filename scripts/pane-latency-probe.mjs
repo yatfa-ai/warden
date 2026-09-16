@@ -5,8 +5,18 @@
 // local tmux, under escalating load, and reports per-hop attribution by
 // combining the two measurement halves:
 //
-//   client leg  — keystroke sent → first pty frame back (the e2e the user
-//                 feels; measured in THIS process, the renderer's stand-in)
+//   client leg  — keystroke sent → THAT pane's next frame (the e2e the user
+//                 feels; measured in THIS process, the renderer's stand-in).
+//                 Frames are counted PER PANE: under many-panes/streaming
+//                 load, another pane's output must never resolve the wait —
+//                 a global frame count degenerates to the poll floor there
+//                 (it measures nothing about the typed pane).
+//                 Caveat, disclosed: when the TYPED pane itself streams
+//                 (stream-same / flood-same), its next frame may be the
+//                 stream's own output, so those readings are a lower bound
+//                 (the production sampler's latest-wins correlation shares
+//                 this property). The cross-pane scenarios — the workload
+//                 the ticket names — measure the true echo.
 //   server legs — write (WS→pty.write) + round-trip (pty.write→next frame)
 //                 from GET /api/diagnostics/pane-latency (the producer window)
 //
@@ -102,19 +112,22 @@ const pct = (values, p) => {
 
 function connect(url) {
   const ws = new WebSocket(url);
-  const state = { frames: 0 };
-  const waitFrames = async (n, timeoutMs = 8000) => {
+  const state = { framesByPane: Object.create(null) };
+  // Per-pane frame accounting + a 2ms poll: the wait must resolve on the
+  // TYPED pane's frame only, and the poll floor must sit far under the
+  // ~50ms perception floor so it cannot mask the signal it exists to see.
+  const waitPaneFrames = async (paneId, minCount, timeoutMs = 8000) => {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (state.frames >= n) return;
-      await new Promise((r) => setTimeout(r, 10));
+      if ((state.framesByPane[paneId] || 0) >= minCount) return;
+      await new Promise((r) => setTimeout(r, 2));
     }
-    throw new Error(`timed out waiting for ${n} frames (got ${state.frames})`);
+    throw new Error(`timed out waiting for frame ${minCount} of pane ${paneId} (got ${state.framesByPane[paneId] || 0})`);
   };
   const opened = new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   ws.on('message', (raw) => {
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
-    if (m.type === 'pty') state.frames += 1;
+    if (m.type === 'pty') state.framesByPane[m.id] = (state.framesByPane[m.id] || 0) + 1;
     const cb = state.waiting?.get(m.type);
     if (cb) { state.waiting.delete(m.type); cb(m); }
   });
@@ -124,14 +137,15 @@ function connect(url) {
     state.waiting.set(type, (m) => { clearTimeout(t); resolve(m); });
   });
   const send = (obj) => ws.send(JSON.stringify(obj));
-  return { ws, opened, send, once, waitFrames, state };
+  return { ws, opened, send, once, waitPaneFrames, state };
 }
 
-// Type ONE keystroke and time it until the pane's next frame arrives.
+// Type ONE keystroke and time it until THAT pane's next frame arrives.
 async function typeOnce(c, id) {
+  const before = c.state.framesByPane[id] || 0;
   const t0 = performance.now();
   c.send({ type: 'input', id, data: 'x' });
-  await c.waitFrames(c.state.frames + 1);
+  await c.waitPaneFrames(id, before + 1);
   return performance.now() - t0;
 }
 
@@ -234,7 +248,7 @@ const floodSetup = (secs) => async (c) => {
   return async () => { /* floods are time-bounded by `timeout` */ };
 };
 
-const monitorStormSetup = (manyPanesResult) => async (c) => {
+const monitorStormSetup = async (c) => {
   const teardown = await manyPanesSetup(c);
   // The 2s monitor tick for all 8 panes: capturePanes → big snapshot JSON on
   // the SAME socket the keystrokes ride.
@@ -243,33 +257,25 @@ const monitorStormSetup = (manyPanesResult) => async (c) => {
   return async () => { for (const id of ids) c.send({ type: 'unmonitor', id }); await teardown(); };
 };
 
-// eslint-disable-next-line no-unused-vars
-const _ = monitorStormSetup;
-
 console.log('\nPane input latency probe — WARDEN-1385');
 console.log('======================================');
 
-const idle = await runScenario('idle (1 pane, quiet)', idleSetup, ids[0]);
+await runScenario('idle (1 pane, quiet)', idleSetup, ids[0]);
 
-// eslint-disable-next-line no-unused-vars
-const streamSame = await runScenario('stream-same (typing INTO a streaming pane)',
+await runScenario('stream-same (typing INTO a streaming pane)',
   streamSameSetup, ids[0]);
 
-// eslint-disable-next-line no-unused-vars
-const many = await runScenario('many-panes (8 attached, 3 streaming)',
+await runScenario('many-panes (8 attached, 3 streaming)',
   manyPanesSetup, ids[0]);
 
-// eslint-disable-next-line no-unused-vars
-const flood = await runScenario('flood (3 panes at full output rate, type into a quiet pane)',
+await runScenario('flood (3 panes at full output rate, type into a quiet pane)',
   floodSetup(14), ids[0]);
 
-// eslint-disable-next-line no-unused-vars
-const floodSame = await runScenario('flood-same (type INTO a pane at full output rate)',
+await runScenario('flood-same (type INTO a pane at full output rate)',
   floodSetup(14), ids[1]);
 
-// eslint-disable-next-line no-unused-vars
-const storm = await runScenario('monitor-storm (many-panes + 2s snapshots on the same socket)',
-  monitorStormSetup(manyPanesSetup), ids[0]);
+await runScenario('monitor-storm (many-panes + 2s snapshots on the same socket)',
+  monitorStormSetup, ids[0]);
 
 // Server legs for the whole run (the producer window is cumulative until flush).
 const endpoint = await fetchEndpoint(port);
