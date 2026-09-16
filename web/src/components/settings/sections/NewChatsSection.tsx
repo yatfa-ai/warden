@@ -1,9 +1,13 @@
 // New Chats section — pure client localStorage prefs (default agent type, host,
-// cwd, shell, custom presets). Receives its pref group from App via SettingsPage
-// plus `availableHosts` (the only non-client input — it comes from the backend
-// /api/ssh-hosts load). The custom-preset CRUD + per-host setters are relocated
-// here verbatim from SettingsPage (WARDEN-664): each operates only on props this
-// section already receives, so behavior is unchanged.
+// cwd, shell, custom presets). SUBSCRIBES to the shared client-state store
+// (lib/uiStore.ts) for the whole spawn family (WARDEN-1383, roadmap
+// WARDEN-1204 slice 8) instead of receiving a threaded pref bag, exactly as
+// SnippetsSection (WARDEN-1271) and AppearanceSection (WARDEN-1322) do.
+// `availableHosts` is the only prop left — the only non-client input, from the
+// backend /api/ssh-hosts load — plus the `hidden` toggle. The custom-preset
+// CRUD + per-host setters are relocated here verbatim from SettingsPage
+// (WARDEN-664): each operates only on store facts this section already
+// subscribes to, so behavior is unchanged.
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
@@ -25,23 +29,48 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { PresetRow } from '../rows/PresetRow';
 import { SettingsSection } from '../SettingsSection';
 import { ClientPrefResetToDefaultButton } from '../rows/ResetToDefaultButton';
-import { type NewChatsPrefs } from '../types';
+import {
+  useDefaultNewChatPreset,
+  useSetDefaultNewChatPreset,
+  useDefaultNewChatPresetByHost,
+  useSetDefaultNewChatPresetByHost,
+  useDefaultNewChatHost,
+  useSetDefaultNewChatHost,
+  useDefaultNewChatCwd,
+  useSetDefaultNewChatCwd,
+  useDefaultNewChatCwdByHost,
+  useSetDefaultNewChatCwdByHost,
+  useCustomPresets,
+  useSetCustomPresets,
+  useDefaultShell,
+  useSetDefaultShell,
+  useDefaultShellByHost,
+  useSetDefaultShellByHost,
+} from '@/lib/uiStore';
 
-export type NewChatsSectionProps = NewChatsPrefs & { availableHosts: string[]; hidden: boolean };
+export type NewChatsSectionProps = { availableHosts: string[]; hidden: boolean };
 
-export function NewChatsSection(props: NewChatsSectionProps) {
-  const {
-    defaultNewChatPreset, setDefaultNewChatPreset,
-    defaultNewChatPresetByHost, setDefaultNewChatPresetByHost,
-    defaultNewChatHost, setDefaultNewChatHost,
-    defaultNewChatCwd, setDefaultNewChatCwd,
-    defaultNewChatCwdByHost, setDefaultNewChatCwdByHost,
-    customPresets, setCustomPresets,
-    defaultShell, setDefaultShell,
-    defaultShellByHost, setDefaultShellByHost,
-    availableHosts,
-    hidden,
-  } = props;
+export function NewChatsSection({ availableHosts, hidden }: NewChatsSectionProps) {
+  // WARDEN-1383 (slice 8): the spawn family's ONE home is the store — these
+  // subscriptions replace the NewChatsPrefs bag this section used to receive,
+  // under the SAME local names so every handler body and rendered control
+  // below is byte-identical.
+  const defaultNewChatPreset = useDefaultNewChatPreset();
+  const setDefaultNewChatPreset = useSetDefaultNewChatPreset();
+  const defaultNewChatPresetByHost = useDefaultNewChatPresetByHost();
+  const setDefaultNewChatPresetByHost = useSetDefaultNewChatPresetByHost();
+  const defaultNewChatHost = useDefaultNewChatHost();
+  const setDefaultNewChatHost = useSetDefaultNewChatHost();
+  const defaultNewChatCwd = useDefaultNewChatCwd();
+  const setDefaultNewChatCwd = useSetDefaultNewChatCwd();
+  const defaultNewChatCwdByHost = useDefaultNewChatCwdByHost();
+  const setDefaultNewChatCwdByHost = useSetDefaultNewChatCwdByHost();
+  const customPresets = useCustomPresets();
+  const setCustomPresets = useSetCustomPresets();
+  const defaultShell = useDefaultShell();
+  const setDefaultShell = useSetDefaultShell();
+  const defaultShellByHost = useDefaultShellByHost();
+  const setDefaultShellByHost = useSetDefaultShellByHost();
 
   // --- Custom spawn-preset management (create / rename / delete) -------------
   // All pure client-side: edits apply instantly via setCustomPresets and are

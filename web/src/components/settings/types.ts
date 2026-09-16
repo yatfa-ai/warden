@@ -7,8 +7,8 @@
 //                       atomically via PUT /api/config by the useBackendConfig
 //                       seam. Owned INSIDE SettingsPage (never threaded from App).
 //
-//   - CLIENT prefs    → the `*Prefs` groups (AppearancePrefs, NewChatsPrefs,
-//                       DesktopAlertPrefs). Pure localStorage prefs owned by App
+//   - CLIENT prefs    → the `*Prefs` groups (AppearancePrefs, DesktopAlertPrefs).
+//                       Pure localStorage prefs owned by App
 //                       and persisted by App's saveUi effect. Threaded into
 //                       SettingsPage as grouped props.
 //
@@ -182,7 +182,6 @@ import type { Density } from '@/lib/density';
 import type {
   RestoreOnStartup,
   PaneLayout,
-  CustomPreset,
 } from '@/lib/storage';
 import type { HostLabels } from '@/lib/chatDisplay';
 
@@ -214,30 +213,16 @@ export interface AppearancePrefs {
   setCloseToTray: (v: boolean) => void;
 }
 
-/**
- * New-chat spawn defaults + custom presets + default shell — all pure client
- * localStorage. (availableHosts is NOT here: it comes from the backend
- * /api/ssh-hosts load inside useBackendConfig, so SettingsPage adds it when
- * assembling the section props.)
- */
-export interface NewChatsPrefs {
-  defaultNewChatPreset: string;
-  setDefaultNewChatPreset: (v: string) => void;
-  defaultNewChatPresetByHost: Record<string, string>;
-  setDefaultNewChatPresetByHost: (v: Record<string, string>) => void;
-  defaultNewChatHost: string;
-  setDefaultNewChatHost: (v: string) => void;
-  defaultNewChatCwd: string;
-  setDefaultNewChatCwd: (v: string) => void;
-  defaultNewChatCwdByHost: Record<string, string>;
-  setDefaultNewChatCwdByHost: (v: Record<string, string>) => void;
-  customPresets: CustomPreset[];
-  setCustomPresets: (v: CustomPreset[]) => void;
-  defaultShell: string;
-  setDefaultShell: (v: string) => void;
-  defaultShellByHost: Record<string, string>;
-  setDefaultShellByHost: (v: Record<string, string>) => void;
-}
+// NOTE (WARDEN-1383, roadmap WARDEN-1204 slice 8): there is no `NewChatsPrefs`
+// group here any more. The new-chats spawn family (default agent type / host /
+// cwd / shell, their per-host maps, and customPresets) was the last pref group
+// with a SECOND read channel — NewChatForm did a private lazy-useState read of
+// loadUi while this bag threaded the writer's values — so it migrated onto
+// the shared client-state store (lib/uiStore.ts): NewChatsSection and
+// NewChatForm SUBSCRIBE to it directly and the bag is retired. Its persistence
+// sink is unchanged; only the SHARING channel differs. The same happened to
+// `SnippetsPrefs` (WARDEN-1271, below) and to six pairs of `AppearancePrefs`
+// (WARDEN-1322).
 
 // NOTE (WARDEN-1271): there is no `SnippetsPrefs` group here any more. The
 // instruction-snippet library (WARDEN-323) was the first fact migrated onto the

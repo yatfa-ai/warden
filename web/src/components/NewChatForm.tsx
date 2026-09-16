@@ -4,10 +4,19 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { postJson, fetchBounded } from '@/lib/api';
-import { loadUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
 import { groupByHost, summarizeHostLoad, resourceTone, type HostLoadSummary } from '@/lib/healthUtils';
 import { mergeHostList } from '@/lib/hostList';
+import {
+  useDefaultNewChatPreset,
+  useDefaultNewChatPresetByHost,
+  useDefaultNewChatHost,
+  useDefaultNewChatCwd,
+  useDefaultNewChatCwdByHost,
+  useCustomPresets,
+  useDefaultShell,
+  useDefaultShellByHost,
+} from '@/lib/uiStore';
 
 const THIS_MACHINE = '(local)';
 
@@ -49,20 +58,34 @@ function hostOptionChildren(label: string, load?: HostLoadSummary): ReactNode {
 export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) {
   // Pre-fill from the saved default-new-chat prefs (Settings → New Chats). These
   // are pure client-side localStorage values; if unset they fall back to the
-  // prior hard-coded behavior (claude preset, this machine). Lazy initializers
-  // so loadUi() runs once on mount — not on every render/keystroke — matching
-  // App.tsx's lazy-init pattern for client prefs.
-  const [initialUi] = useState(() => loadUi());
+  // prior hard-coded behavior (claude preset, this machine). SUBSCRIBED, not
+  // read: WARDEN-1383 (roadmap WARDEN-1204 slice 8) moved this form off its
+  // private `useState(() => loadUi)` read — the last component-level persisted-
+  // state read in web/src — onto the shared client-state store (lib/uiStore.ts),
+  // the same facts Settings' NewChatsSection writes. Freshness is now
+  // structural: the subscription is mount-independent, so a Settings edit is
+  // reflected here even if this always-mounted form never unmounts (the old
+  // read was correct only because opening Settings happened to unmount this
+  // form via the full-page view switch). Resolution logic, lazy field seeds,
+  // host-change re-seed, and post-submit re-seed are all unchanged.
+  const defaultNewChatPreset = useDefaultNewChatPreset();
+  const defaultNewChatPresetByHost = useDefaultNewChatPresetByHost();
+  const defaultNewChatHost = useDefaultNewChatHost();
+  const defaultNewChatCwd = useDefaultNewChatCwd();
+  const defaultNewChatCwdByHost = useDefaultNewChatCwdByHost();
+  const customPresets = useCustomPresets();
+  const defaultShell = useDefaultShell();
+  const defaultShellByHost = useDefaultShellByHost();
   // Resolve the default cwd for a given host: a per-host override
   // (defaultNewChatCwdByHost) wins, falling back to the global defaultNewChatCwd,
   // then blank (the host's home directory). A host with no override falls through
   // to today's exact behavior — WARDEN-336 extends WARDEN-311's single global
   // default to a per-host map. Used to (re-)seed the cwd field on mount, on host
-  // change, and after submit. Memoized: it depends only on the mount-once
-  // initialUi (stable), so it has a stable identity and is safe in effect deps.
+  // change, and after submit. Memoized on the subscribed values (which change
+  // only on a Settings write), so the identity stays stable and effect-safe.
   const cwdFor = useCallback(
-    (h: string) => initialUi.defaultNewChatCwdByHost?.[h] ?? initialUi.defaultNewChatCwd ?? '',
-    [initialUi],
+    (h: string) => defaultNewChatCwdByHost?.[h] ?? defaultNewChatCwd ?? '',
+    [defaultNewChatCwdByHost, defaultNewChatCwd],
   );
   // Resolve the default agent-type (preset) for a given host (WARDEN-352 — the
   // preset mirror of cwdFor from WARDEN-336): a per-host override
@@ -71,11 +94,11 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   // value naming a since-deleted preset (parsePresetByHost), so a host with no
   // valid override falls through to today's exact behavior. Used to (re-)seed
   // the preset field on mount, on host change, and after submit — so every
-  // defaultable spawn field tracks the selected host. Memoized like cwdFor: it
-  // depends only on the mount-once initialUi (stable), safe in effect deps.
+  // defaultable spawn field tracks the selected host. Memoized like cwdFor on
+  // the subscribed values, safe in effect deps.
   const presetFor = useCallback(
-    (h: string) => initialUi.defaultNewChatPresetByHost?.[h] ?? initialUi.defaultNewChatPreset ?? 'claude',
-    [initialUi],
+    (h: string) => defaultNewChatPresetByHost?.[h] ?? defaultNewChatPreset ?? 'claude',
+    [defaultNewChatPresetByHost, defaultNewChatPreset],
   );
   // Resolve the default shell for a given host (WARDEN-429 — the shell mirror of
   // cwdFor/presetFor): a per-host override (defaultShellByHost) wins, falling
@@ -86,11 +109,11 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   // with no override falls through to the global default, then blank. Used to
   // (re-)seed the command field when the shell preset is selected — on mount, on
   // host change, and after submit — so the shell terminal opens the resolved
-  // shell, not a hardcoded 'bash'. Memoized like cwdFor/presetFor: it depends
-  // only on the mount-once initialUi (stable), safe in effect deps.
+  // shell, not a hardcoded 'bash'. Memoized like cwdFor/presetFor on the
+  // subscribed values, safe in effect deps.
   const shellFor = useCallback(
-    (h: string) => initialUi.defaultShellByHost?.[h] ?? initialUi.defaultShell ?? '',
-    [initialUi],
+    (h: string) => defaultShellByHost?.[h] ?? defaultShell ?? '',
+    [defaultShellByHost, defaultShell],
   );
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
@@ -101,22 +124,23 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   // can't go stale across spawns.
   const [hostLoad, setHostLoad] = useState<Record<string, HostLoadSummary>>({});
   const [claudePath, setClaudePath] = useState('claude');
-  const [host, setHost] = useState(() => initialUi.defaultNewChatHost ?? THIS_MACHINE);
+  const [host, setHost] = useState(() => defaultNewChatHost ?? THIS_MACHINE);
   // preset is a built-in name ('claude' | 'shell') or a custom preset name.
   // Host-aware (WARDEN-352): pre-fill the agent type for the INITIAL host (the
   // saved defaultNewChatHost), resolved via presetFor so a per-host override
   // seeds the field immediately on first open — mirroring cwd's host-aware init
-  // above. loadUi already dropped any per-host value naming a since-deleted
-  // preset, so presetFor falls through to the global default, then 'claude'.
-  const [preset, setPreset] = useState<string>(() => presetFor(initialUi.defaultNewChatHost ?? THIS_MACHINE));
-  const [customPresets] = useState(() => initialUi.customPresets ?? []);
+  // above. A persisted per-host value naming a since-deleted preset is already
+  // dropped by loadUi's sanitizer inside the store seed, so presetFor falls
+  // through to the global default, then 'claude'.
+  const [preset, setPreset] = useState<string>(() => presetFor(defaultNewChatHost ?? THIS_MACHINE));
   const [session, setSession] = useState('');
   // cwd pre-fills HOST-AWARE (WARDEN-336): the default for the INITIAL host
   // (the saved defaultNewChatHost), resolved via cwdFor so a per-host override
-  // seeds the field immediately on first open. Lazy init runs loadUi() once on
-  // mount (matching the host/preset lazy-inits above); the value is still
-  // editable per-spawn, submit trims it, and switching host re-seeds it (below).
-  const [cwd, setCwd] = useState(() => cwdFor(initialUi.defaultNewChatHost ?? THIS_MACHINE));
+  // seeds the field immediately on first open. The lazy init captures the
+  // subscribed values once on mount (matching the host/preset lazy-inits
+  // above); the value is still editable per-spawn, submit trims it, and
+  // switching host re-seeds it (below).
+  const [cwd, setCwd] = useState(() => cwdFor(defaultNewChatHost ?? THIS_MACHINE));
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
