@@ -28,7 +28,7 @@
 // non-numeric window stamps). The event carries AGGREGATES ONLY — counts,
 // ratios, latencies, and constant kebab-case operation literals; there is no
 // free-text field anywhere in the shape.
-function buildOperationalMetricsEvent({ snapshot, schemaVersion, appVersion, platform, now }) {
+function buildOperationalMetricsEvent({ snapshot, schemaVersion, appVersion, platform, now, runtime }) {
   if (!snapshot || typeof snapshot !== 'object') return null;
   const {
     startedAt, endedAt, boundaries, operations, rejected,
@@ -41,7 +41,13 @@ function buildOperationalMetricsEvent({ snapshot, schemaVersion, appVersion, pla
   const event = {
     schemaVersion,
     type: 'operational-metrics',
-    runtime: 'main',
+    // WARDEN-1385 — the window's origin runtime. The schema's Runtime enum is
+    // main | renderer | server; the default stays 'main' (byte-identical for
+    // the existing server-child receipt), and the renderer bridge passes
+    // 'renderer' so the felt-path histograms are attributable to the surface
+    // the user types on. Anything else falls back to 'main' rather than
+    // fabricating a runtime the schema never named.
+    runtime: runtime === 'renderer' || runtime === 'server' ? runtime : 'main',
     timestamp: ts,
     windowStartedAt: startedAt,
     windowEndedAt: endedAt,

@@ -125,4 +125,14 @@ contextBridge.exposeInMainWorld('wardenTelemetry', {
   // main world and CAN hear them; it feature-detects this bridge and no-ops in
   // dev/smoke. This method is the IPC seam the web bundle forwards through.
   reportError: (serialized) => ipcRenderer.send('telemetry:renderer-error', serialized),
+
+  // WARDEN-1385 — forward a folded pane-latency window (aggregate histograms
+  // only: counts, min/avg/max, fixed-boundary buckets over closed kebab-case
+  // operation literals). Fire-and-forget via `send`, mirroring reportError:
+  // no response is needed, and main is the consent gate — the receipt handler
+  // refuses the operational-metrics category exactly like the server windows'
+  // receipt (mid-flip re-check), and the pipeline's redact → validate remain
+  // the wire's last line of defense. The snapshot can never carry a pane key:
+  // the sampler folds into fixed-size accumulators keyed by constant literals.
+  reportPaneMetrics: (snapshot) => ipcRenderer.send('telemetry:renderer-metrics', snapshot),
 });

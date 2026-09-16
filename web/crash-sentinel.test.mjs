@@ -27,6 +27,7 @@ const {
   pidFromFileName,
   isCrashSentinelFile,
   detectCrashes,
+  describePaneLatencyCulprit,
 } = require('../electron/crash-sentinel.cjs');
 
 let passed = 0;
@@ -215,5 +216,48 @@ test('DONE #2 + #6 combined: a clean quit removes only the quitter; the killed i
 function parseMarkerVia(v) {
   return parseMarker(v);
 }
+
+
+// --- WARDEN-1385 — the unexpected-termination class's own culprit data -------
+console.log('\ndescribePaneLatencyCulprit — the death’s last felt-latency window');
+
+test('null on absent / unreadable snapshot (nothing measured \u2260 an empty summary)', () => {
+  assert.equal(describePaneLatencyCulprit(null), null);
+  assert.equal(describePaneLatencyCulprit(undefined), null);
+  assert.equal(describePaneLatencyCulprit('junk'), null);
+  assert.equal(describePaneLatencyCulprit({}), null, 'no operations array \u2192 silent');
+  assert.equal(describePaneLatencyCulprit({ operations: [] }), null, 'empty window \u2192 silent');
+});
+
+test('names each operation with count, max, and per-bucket counts (aggregates only)', () => {
+  const snapshot = {
+    startedAt: 1_000,
+    endedAt: 61_000,
+    boundaries: [50, 100],
+    operations: [
+      { operation: 'pane-echo-e2e', count: 3, okCount: 3, failCount: 0,
+        min: 40, avg: 80, max: 120, buckets: [1, 1, 1] },
+      { operation: 'renderer-long-task', count: 1, okCount: 1, failCount: 0,
+        min: 90, avg: 90, max: 90, buckets: [0, 1, 0] },
+    ],
+    rejected: 0,
+  };
+  const line = describePaneLatencyCulprit(snapshot);
+  assert.ok(line.includes('pane-echo-e2e n=3 max=120ms'), line);
+  assert.ok(line.includes('renderer-long-task n=1 max=90ms'), line);
+  assert.ok(line.includes('<=50:1') && line.includes('<=100:1') && line.includes('<=inf:1'), line);
+  assert.ok(line.includes('ended'), line);
+  assert.equal(line.includes('undefined'), false, 'never leaks a raw undefined');
+});
+
+test('a malformed op inside the window is skipped, never a crash', () => {
+  const line = describePaneLatencyCulprit({
+    operations: [null, 'junk', { count: 'NaN' }, { operation: 'pane-echo-e2e', count: 2, max: 55, buckets: [2, 0] }],
+    endedAt: 'not-a-date',
+  });
+  assert.ok(line);
+  assert.ok(line.includes('pane-echo-e2e n=2 max=55ms'), line);
+  assert.ok(line.includes('ended unknown'), 'unparseable endedAt reads as unknown');
+});
 
 console.log(`\n✓ CRASH-SENTINEL TESTS PASS (${passed})`);

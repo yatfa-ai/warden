@@ -129,6 +129,53 @@ function detectCrashes(markers, isAlive) {
   return { crashed, survivors };
 }
 
+// ---------------------------------------------------------------------------
+// WARDEN-1385 — the unexpected-termination class's own culprit data.
+//
+// The crash event the sentinel emits is a fixed shape (reason/exitCode) — the
+// last FELT-LATENCY state before the death cannot ride it, and must not (the
+// schema is a cross-repo contract). Instead main persists the last accepted
+// pane-latency window (userData/pane-latency-last.json, overwritten per
+// window, consent-gated by construction) and, when THIS pass detects a dead
+// instance, names that window's shape on STDERR — the owner's local channel —
+// so a death that happened during a latency degradation carries the evidence
+// of what the user was feeling when it died, not just that it died.
+//
+// Pure: the decision lives here (testable under node --test, the crash-
+// sentinel discipline); main.cjs wires fs + console to it.
+
+/**
+ * Build the one-line culprit summary from a persisted pane-latency window.
+ * Returns a STRING (never null — "no window on disk" is itself the fact), or
+ * null when the caller should stay silent (the file is absent or unreadable —
+ * i.e. telemetry consent was never on, so there is nothing to say and inventing
+ * an empty summary would fabricate a measurement).
+ *
+ * Shape: a compact per-operation line — `pane-echo-e2e n=12 p<boundaries…`;
+ * counts and bucket indices only, no content, no identifiers.
+ */
+function describePaneLatencyCulprit(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  if (!Array.isArray(snapshot.operations)) return null;
+  const boundaries = Array.isArray(snapshot.boundaries) ? snapshot.boundaries : [];
+  const parts = [];
+  for (const op of snapshot.operations) {
+    if (!op || typeof op !== 'object' || typeof op.operation !== 'string') continue;
+    const count = typeof op.count === 'number' && Number.isFinite(op.count) ? op.count : 0;
+    // Compact histogram: per-bucket counts as `b<bound>=<n>…`, overflow last.
+    const buckets = Array.isArray(op.buckets)
+      ? op.buckets.map((n, i) => `<=${i < boundaries.length ? boundaries[i] : 'inf'}:${typeof n === 'number' ? n : 0}`).join(',')
+      : 'na';
+    const max = typeof op.max === 'number' && Number.isFinite(op.max) ? Math.round(op.max) : null;
+    parts.push(`${op.operation} n=${count} max=${max === null ? 'na' : max + 'ms'} [${buckets}]`);
+  }
+  if (!parts.length) return null;
+  const ended = typeof snapshot.endedAt === 'number' && Number.isFinite(snapshot.endedAt)
+    ? new Date(snapshot.endedAt).toISOString()
+    : 'unknown';
+  return `last pane-latency window (ended ${ended}): ${parts.join(' | ')}`;
+}
+
 module.exports = {
   CRASH_SENTINEL_PREFIX,
   CRASH_SENTINEL_SUFFIX,
@@ -137,4 +184,5 @@ module.exports = {
   pidFromFileName,
   isCrashSentinelFile,
   detectCrashes,
+  describePaneLatencyCulprit,
 };
