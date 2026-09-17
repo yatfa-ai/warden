@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 import { useHostLabels } from '@/lib/uiStore';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
@@ -75,12 +76,19 @@ interface Props {
   // human opens/switches agent panes (the popover on the header badge dismisses on every
   // pane switch). Optional so the component degrades gracefully without it (no tab).
   attention?: AttentionListProps;
+  // WARDEN-1394 — the fleet-scoped tracker entries for the markdown issue-key
+  // linkifier, ambiguity-filtered upstream (App: unambiguousPrefixEntries over
+  // the normalized config mapping, gated on issueLinksEnabled). Threaded to the
+  // ObserverPanel (message bodies) and DirectiveHistory (directive text) mounts.
+  // Optional/undefined (the default while the integration is off) renders both
+  // surfaces byte-identically to before this prop existed.
+  issueEntries?: IssueLinkEntry[];
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention, issueEntries }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
@@ -630,7 +638,7 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (
               <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-                <ObserverPanel sessionId={id} onActivity={() => bumpActivity(id)} />
+                <ObserverPanel sessionId={id} onActivity={() => bumpActivity(id)} issueEntries={issueEntries} />
               </div>
             ))}
           </div>
@@ -654,6 +662,7 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
           <DirectiveHistory
             agentFilter={dirAgentFilter} setAgentFilter={setDirAgentFilter}
             hostFilter={dirHostFilter} setHostFilter={setDirHostFilter}
+            issueEntries={issueEntries}
           />
         </div>
       )}

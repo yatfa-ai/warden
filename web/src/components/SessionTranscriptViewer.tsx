@@ -23,6 +23,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EyeIcon, AlertCircleIcon, Loader2Icon, SearchIcon, ChevronUpIcon, ChevronDownIcon, XIcon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 import { cn } from '@/lib/utils';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
@@ -46,6 +47,11 @@ interface SessionTranscriptViewerProps {
   onOpenChange: (open: boolean) => void;
   // The session to read. null keeps the dialog closed without firing a fetch.
   session: { id: string; host: string; label: string } | null;
+  // WARDEN-1394 — the fleet-scoped tracker entries for the markdown issue-key
+  // linkifier (ambiguity-filtered upstream). Undefined (the default while the
+  // integration is off) renders transcript messages byte-identically to before
+  // this prop existed.
+  issueEntries?: IssueLinkEntry[];
 }
 
 // Read-only transcript viewer for any past Claude session (WARDEN-233). Opens from
@@ -53,7 +59,7 @@ interface SessionTranscriptViewerProps {
 // (text via ObserverMarkdown) — a plain fetch, no process is spawned. Mirrors the
 // DiffViewer/FileViewer shape (Dialog + ScrollArea + loading/error/empty/ready),
 // since a capped transcript is bounded read-only content, not an unbounded surface.
-export function SessionTranscriptViewer({ open, onOpenChange, session }: SessionTranscriptViewerProps) {
+export function SessionTranscriptViewer({ open, onOpenChange, session, issueEntries }: SessionTranscriptViewerProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error' | 'empty'>('loading');
   const hostLabels = useHostLabels();
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
@@ -511,6 +517,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session }: Session
                       if (el) bubbleRefs.current.set(i, el);
                       else bubbleRefs.current.delete(i);
                     }}
+                    issueEntries={issueEntries}
                   />
                 ))}
               </>
@@ -530,12 +537,16 @@ function MessageBubble({
   message,
   isActive,
   bubbleRef,
+  issueEntries,
 }: {
   message: TranscriptMessage;
   // WARDEN-513: ring the active search match + register its node so ↑/↓ can scroll
   // it into view. Both optional so non-search callers render unchanged.
   isActive?: boolean;
   bubbleRef?: (el: HTMLDivElement | null) => void;
+  // WARDEN-1394 — markdown issue-key linkifier entries (pass-through from the
+  // viewer; undefined while the integration is off).
+  issueEntries?: IssueLinkEntry[];
 }) {
   // WARDEN-1342 (slice 4): the bubble subscribes to the shared timestamp pref;
   // formatTs stays a pure (mode-explicit) function for testability.
@@ -570,7 +581,7 @@ function MessageBubble({
                 </IconTooltip>
               ) : null}
             </div>
-            <ObserverMarkdown>{message.text}</ObserverMarkdown>
+            <ObserverMarkdown issueEntries={issueEntries}>{message.text}</ObserverMarkdown>
           </div>
         </div>
       </ContextMenuTrigger>

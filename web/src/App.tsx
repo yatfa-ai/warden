@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
-import { normalizeIssueLinkEntries, type IssueLinkEntry } from '@/lib/issue-links';
+import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
@@ -1734,6 +1734,20 @@ function App() {
   // config.json bypasses that, and GET is a raw arrayOrEmpty passthrough — the
   // frontend filters rather than trusting.
   const [issueLinkTrackers, setIssueLinkTrackers] = useState<IssueLinkEntry[]>([]);
+  // WARDEN-1394 (slice 2 of roadmap WARDEN-1386): the markdown issue-key
+  // linkifier's entry set, threaded to the fleet-level markdown surfaces
+  // (observer messages, directive text, transcript messages). Unlike the
+  // terminal (strict per-pane project scoping via issueEntriesForProject), the
+  // markdown path consults EVERY configured entry whose prefix is unique across
+  // the set — messages are fleet-level, so cross-project references are
+  // legitimate and the prefix→tracker mapping is human-stated config; a prefix
+  // mapped under two projects links nowhere (ambiguity is honest silence).
+  // Gated on the integration toggle so OFF (the default) yields [] — no plugin
+  // registration in MarkdownBody, byte-identical rendering. Recomputed each
+  // render (cheap; a filter over a handful of entries).
+  const markdownIssueEntries = displaySettings.issueLinksEnabled
+    ? unambiguousPrefixEntries(issueLinkTrackers)
+    : [];
   // Resize drag state
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [isResizingObserver, setIsResizingObserver] = useState(false);
@@ -1977,6 +1991,7 @@ function App() {
           showHostTags={displaySettings.showHostTags}
           budget={tokenBudget}
           initialSortUsage={chatBrowserSortUsage}
+          issueEntries={markdownIssueEntries}
         />
       ) : (
         <>
@@ -2105,7 +2120,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} />
+            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
@@ -2142,6 +2157,7 @@ function App() {
         open={!!viewingSession}
         onOpenChange={(o) => { if (!o) setViewingSession(null); }}
         session={viewingSession}
+        issueEntries={markdownIssueEntries}
       />
       <ConfirmDialog
         open={killTarget !== null}

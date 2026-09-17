@@ -115,6 +115,24 @@ export function issueTrackerUrl(entry: IssueLinkEntry, key: string): string {
   return `https://${base}/${key}`;
 }
 
+// Markdown-surface scoping (WARDEN-1394, slice 2 of roadmap WARDEN-1386): the
+// entries whose PREFIX is unique across the whole configured set. Markdown
+// message bodies (observer messages, directive text, transcript messages) are
+// fleet-level surfaces — an agent working in ANY project may legitimately
+// cross-reference another project's tickets, and the prefix→tracker mapping is
+// human-stated configuration rather than something inferred from the key text,
+// so consulting every configured entry on these surfaces is not inference. The
+// one ambiguity that stays unresolved: where the SAME prefix is mapped under
+// TWO projects (e.g. `WARDEN` for both `warden` and `acme`), markdown surfaces
+// link that prefix NOWHERE — ambiguity is honest silence, never a guess at
+// which tracker the author meant. Strict per-project scoping stays the
+// terminal's contract (issueEntriesForProject — untouched).
+export function unambiguousPrefixEntries(entries: IssueLinkEntry[]): IssueLinkEntry[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) counts.set(e.prefix, (counts.get(e.prefix) ?? 0) + 1);
+  return entries.filter((e) => counts.get(e.prefix) === 1);
+}
+
 // Find every configured-prefix issue key on a single terminal line (already
 // right-trimmed via IBufferLine.translateToString — this function trims
 // defensively itself, and only whole tokens ever match, so indices into the
