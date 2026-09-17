@@ -81,8 +81,10 @@ export function applyCompanionToggle(enabled, { override = false, env = process.
 //     applyCompanionToggle never clobbers an operator-set value).
 //   • WARDEN_COMPANION_EXCLUDED_HOSTS is RUNTIME STATE written from the
 //     persisted config: applyCompanionExclusions OVERWRITES it at boot and on
-//     every PUT /api/config, so the UI list always wins. Setting it by hand is
-//     still possible as a boot-time mechanism, but the next Save replaces it.
+//     every PUT /api/config, so the UI list always wins. That makes hand-setting
+//     it effective ONLY in CLI processes (which read the env var but never apply
+//     the config): the server process clobbers it at boot, and an empty
+//     persisted list DELETES the variable outright.
 // The separator constraint (entries must not contain ',') is enforced by the
 // PUT sanitizer (sanitizeCompanionExcludedHosts in config-schema.js — the one
 // definition), so the env serialization can never be ambiguous.
@@ -155,8 +157,10 @@ function releaseExcludedHostState(host) {
       try { cached.kill(); } catch { /* best-effort */ }
     }
     // An in-flight bootstrap Promise is not killable; deleting the entry drops
-    // the reference, and its settle path re-checks the cache the same way a
-    // concurrent death does.
+    // it, and getChannel's settle path re-checks the cache BY IDENTITY and
+    // kills the superseded channel instead of caching it — the success-path
+    // twin of the failure-path identity check it has always run. Pinned by the
+    // release-race regression test in companion-excluded-hosts.test.js.
   }
   companionStatus.delete(host);
   companionOps.delete(host);
@@ -1043,6 +1047,22 @@ export async function getChannel(host, cfg = {}, deps = {}) {
   setCompanionStatus(host, { state: 'bootstrapping' });
   const bootstrapPromise = bootstrapChannel(host, cfg, deps)
     .then((channel) => {
+      // WARDEN-1390: the cache entry may have been REPLACED while this bootstrap
+      // was in flight — most notably releaseExcludedHostState dropping it because
+      // the host was excluded mid-bootstrap. Only the SURVIVING entry wins: a
+      // superseded bootstrap kills its channel instead of resurrecting a live
+      // connection to a host the user just excluded. This is the same identity
+      // check the failure path below has always run — this is its success-path
+      // twin. The killed channel is still returned so an op that raced the
+      // exclusion (gate-checked before it landed) fails on a dead channel rather
+      // than silently riding a live one; no status write happens (the reader
+      // reports the exclusion reason for an excluded host anyway).
+      if (channelCache.get(host) !== bootstrapPromise) {
+        if (typeof channel.kill === 'function') {
+          try { channel.kill(); } catch { /* best-effort */ }
+        }
+        return channel;
+      }
       channelCache.set(host, channel);
       // WARDEN-878: successful bootstrap → active + the version the ping just
       // verified. pingOnce confirms the host's companion reports manifest.version,

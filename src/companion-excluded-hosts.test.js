@@ -140,6 +140,45 @@ function healthyRecorder() {
   };
 }
 
+// A fakeTransport twin whose PING response is held until releasePing() — the
+// harness for the mid-bootstrap exclusion race: the bootstrap is in flight
+// (its ping unanswered, its promise cached) when the host gets excluded, and
+// the ping only answers afterwards. onKilled counts transport kills so the
+// test can prove the superseded channel's ssh process actually died.
+function heldPingTransport(recorder, onKilled = () => {}) {
+  const state = { released: false, held: [] };
+  const t = fakeTransport(recorder);
+  let lineCB = null;
+  const origOnLine = t.onLine.bind(t);
+  const origWrite = t.write.bind(t);
+  t.onLine = (cb) => { lineCB = cb; origOnLine(cb); };
+  t.write = (line) => {
+    const req = JSON.parse(line);
+    if (req.method === 'ping' && !state.released) { t.writes.push(req); state.held.push(req); return; }
+    origWrite(line);
+  };
+  t.kill = () => { onKilled(); };
+  t.releasePing = () => {
+    state.released = true;
+    for (const req of state.held) {
+      const resp = recorder(req);
+      if (resp) setImmediate(() => { if (lineCB) lineCB(JSON.stringify(resp)); });
+    }
+    state.held = [];
+  };
+  return t;
+}
+
+// Poll until a condition holds (the bootstrap's progress from `getChannel()`
+// to the in-flight ping crosses several async seams — don't count ticks).
+async function until(fn, what, ms = 2000) {
+  const start = Date.now();
+  while (!fn()) {
+    if (Date.now() - start > ms) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
 // Seam bundle with per-host fake channels so a test can assert exactly which
 // host a call touched, plus raw-path recorders.
 function makeDeps() {
@@ -615,6 +654,38 @@ describe('WARDEN-1390 release: applying an exclusion tears down the host live st
     assert.strictEqual(_getPaneSubscriptionsForTests()[OTHER], undefined, 'the pane subscription is released');
     assert.strictEqual(hasFreshPaneDelta(OTHER), false, 'the delta cache is cleared');
     assert.strictEqual((_getCompanionOpsForTests().get(OTHER)), undefined, 'the op tallies are cleared');
+  });
+
+  it('an exclusion landing MID-BOOTSTRAP is not resurrected when the bootstrap settles (release race)', async () => {
+    // The regression for the review's reproduced race: getChannel caches the
+    // bootstrap PROMISE; releaseExcludedHostState deletes it (a promise is not
+    // killable); when the ping then answers, the settle path must NOT cache the
+    // channel anyway — pre-fix it did, resurrecting a live ssh channel (and an
+    // 'active' status stamp) for a host the user just excluded.
+    const { deps } = makeDeps();
+    let transportKills = 0;
+    const transport = heldPingTransport(healthyRecorder(), () => { transportKills += 1; });
+    const raceDeps = { ...deps, spawnChannel: () => transport };
+    process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+    applyCompanionExclusions([]);
+    const RACE = 'race-host';
+
+    const pending = getChannel(RACE, { connectTimeout: 1 }, raceDeps); // bootstrap in flight
+    await until(() => transport.writes.some((w) => w.method === 'ping'), 'ping to be held in flight');
+    assert.ok(_channelCacheHasForTests(RACE), 'precondition: bootstrap promise cached');
+    assert.strictEqual(getCompanionStatus(RACE).state, 'bootstrapping', 'precondition: bootstrapping');
+
+    applyCompanionExclusions([RACE]); // the exclusion lands MID-BOOTSTRAP
+
+    assert.strictEqual(_channelCacheHasForTests(RACE), false, 'the release dropped the in-flight bootstrap promise');
+    transport.releasePing(); // the ping answers AFTER the exclusion
+    const channel = await pending;
+    assert.strictEqual(_channelCacheHasForTests(RACE), false,
+      'the settled bootstrap must NOT resurrect a cache entry for an excluded host');
+    assert.strictEqual(channel.dead, true, 'the superseded channel is KILLED (no lingering ssh process)');
+    assert.ok(transportKills >= 1, 'the kill reached the transport (the ssh process + remote companion die with it)');
+    assert.deepStrictEqual(getCompanionStatus(RACE), { state: 'inactive', reason: 'excluded-by-setting' },
+      'the status surface still reads the exclusion, never a resurrected active stamp');
   });
 
   it('re-applying the same list does not re-clear state a re-engaged host built', async () => {
