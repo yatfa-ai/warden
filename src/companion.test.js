@@ -31,6 +31,10 @@ import {
   CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
   pingProbe,
   isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
+  applyCompanionExclusions,
+  // WARDEN-1399: bootstrap-failure cooldown — policy under test + the per-host
+  // record probe that lets a test age the record past the window (no sleeps).
+  BOOTSTRAP_RETRY_COOLDOWN_MS, _bootstrapFailureForTests,
   projectSpawnModel, _resetChannelCacheForTests,
   getCompanionStatus, getAllCompanionStatuses,
   _getCompanionOpsForTests,
@@ -1636,6 +1640,197 @@ describe('getChannel / bootstrap orchestration', () => {
     await getChannel('prod-reap-samever', {}, deps);
     assert.strictEqual(runScripts.length, 1, 'only the probe ran (no reap on a same-version re-bootstrap)');
     assert.strictEqual(runScripts[0], buildProbeScript(remoteBinaryPath(TEST_VER)), 'the single runFn call is the probe');
+  });
+});
+
+// ----------------- bootstrap-failure cooldown (WARDEN-1399) -----------------
+// The lifecycle tick (60s, unconditional over every host) and the pane sweep
+// drive gated ops with no user gesture; before 1399 a downed host paid a FULL
+// raw-ssh bootstrap attempt on every tick, forever, and each attempt stamped
+// bootstrapping → error so the host dot flapped and lastErrorAt churned. The
+// cooldown makes getChannel rethrow the cached error inside the window: at most
+// one probe per window, gated ops fail fast, the dot stays red-steady.
+describe('getChannel bootstrap-failure cooldown (WARDEN-1399)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  // The defect is framed with the transport ON (the lifecycle tick routes gated
+  // ops through getChannel only when the toggle is on), and the red-steady-dot
+  // assertions read getCompanionStatus — which short-circuits to 'inactive'
+  // while the env toggle is off. Save/restore so nothing leaks across suites.
+  let savedToggleEnv;
+  before(() => { savedToggleEnv = process.env.WARDEN_COMPANION_TRANSPORT; });
+  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
+  after(() => {
+    if (savedToggleEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedToggleEnv;
+  });
+
+  // A probe that always refuses — the connection-refused shape a downed host
+  // returns in milliseconds, the storm driver. Deliberately NOT
+  // fakeDeps({ run: … }): fakeDeps spreads overrides OVER its counting legs, so
+  // a replaced `run` would report calls.run === 0 forever. This helper keeps the
+  // counters wired to the failing legs.
+  const failingDeps = (stderrFor = () => 'Connection refused') => {
+    const calls = { run: 0, upload: 0, spawnChannel: 0 };
+    let attempt = 0;
+    const deps = {
+      manifest: TEST_MANIFEST,
+      run: async () => { attempt++; calls.run++; return { ok: false, code: 255, stderr: stderrFor(attempt) }; },
+      upload: async () => { calls.upload++; return { ok: true }; },
+      spawnChannel: () => { calls.spawnChannel++; return healthyTransport(); },
+    };
+    return { deps, calls };
+  };
+
+  it('suppresses a retry WITHIN the cooldown: same error object, zero probe/spawn/upload legs, no status churn', async () => {
+    const { deps, calls } = failingDeps();
+    let firstErr;
+    await assert.rejects(() => getChannel('storm-1', {}, deps), (e) => { firstErr = e; return true; });
+    assert.strictEqual(calls.run, 1, 'exactly one probe attempt');
+    assert.strictEqual(getCompanionStatus('storm-1').state, 'error', 'precondition: the failure surfaced');
+    const statusAfterFirst = getCompanionStatus('storm-1');
+
+    let secondErr;
+    await assert.rejects(() => getChannel('storm-1', {}, deps), (e) => { secondErr = e; return true; });
+    assert.strictEqual(secondErr, firstErr,
+      'the SAME error object is rethrown — {ok:false} envelope + recovery hint byte-identical to a real failure');
+    assert.ok(secondErr instanceof CompanionTransportError);
+    assert.ok(secondErr.recovery.includes('WARDEN_COMPANION_TRANSPORT=0'), 'recovery hint intact');
+    assert.strictEqual(calls.run, 1, 'NO second probe within the cooldown (the retry storm is bounded)');
+    assert.strictEqual(calls.spawnChannel, 0, 'no spawn attempt while suppressed');
+    assert.strictEqual(calls.upload, 0, 'no upload attempt while suppressed');
+    assert.deepStrictEqual(getCompanionStatus('storm-1'), statusAfterFirst,
+      'NO status write during suppression — the dot stays red-steady, lastErrorAt unchanged');
+    assert.strictEqual(_channelCacheHasForTests('storm-1'), false,
+      'suppression leaves no cache entry (nothing to leak, nothing to coalesce onto)');
+  });
+
+  it('a caller arriving DURING an in-flight bootstrap coalesces onto it — never suppressed, stale record or not', async () => {
+    // The suppression check must sit AFTER the cache check: with a bootstrap
+    // promise cached, a second caller awaits it rather than throwing the stale
+    // error. Here a (fresh) record exists from step 1 — expired before step 3 —
+    // and the coalescing second caller never even reads it.
+    const fail = failingDeps();
+    await assert.rejects(() => getChannel('storm-flight', {}, fail.deps), () => true);
+    assert.ok(_bootstrapFailureForTests('storm-flight'), 'precondition: a failure record is stamped');
+
+    // Age the record past the window so a NEW bootstrap MAY start...
+    _bootstrapFailureForTests('storm-flight').at -= BOOTSTRAP_RETRY_COOLDOWN_MS + 1;
+
+    // ...hold its ping in flight, then race a second caller at it.
+    let releasePing = false;
+    const held = fakeTransport((req) => {
+      if (req.method === 'ping' && !releasePing) return null; // hold the ping
+      return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover'] } };
+    });
+    let spawns = 0;
+    const deps = {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }),
+      upload: async () => ({ ok: true }),
+      spawnChannel: () => { spawns++; return held; },
+    };
+    const first = getChannel('storm-flight', {}, deps);
+    assert.ok(_channelCacheHasForTests('storm-flight'), 'the bootstrap promise is cached (in flight)');
+    const second = getChannel('storm-flight', {}, deps); // arrives mid-flight
+    releasePing = true;
+    const [a, b] = await Promise.all([first, second]);
+    assert.strictEqual(a, b, 'both callers got the SAME channel — coalesced, not suppressed');
+    assert.strictEqual(spawns, 1, 'exactly one bootstrap spawn (the second caller awaited the first)');
+  });
+
+  it('after the cooldown expires the next call retries — and success clears the record (transparent recovery)', async () => {
+    const { deps, calls } = failingDeps();
+    await assert.rejects(() => getChannel('storm-expiry', {}, deps), () => true);
+    assert.ok(_bootstrapFailureForTests('storm-expiry'), 'precondition: record stamped');
+    assert.strictEqual(calls.run, 1);
+
+    // Age the record past the window, then heal the host.
+    _bootstrapFailureForTests('storm-expiry').at -= BOOTSTRAP_RETRY_COOLDOWN_MS + 1;
+    const healed = fakeDeps();
+    const ch = await getChannel('storm-expiry', {}, healed.deps);
+    assert.ok(ch instanceof CompanionChannel, 'the recovery probe bootstrapped a live channel');
+    assert.ok(healed.calls.run >= 1, 'a genuine probe ran (the retry happened)');
+    assert.strictEqual(_bootstrapFailureForTests('storm-expiry'), undefined, 'success cleared the record');
+    assert.strictEqual(getCompanionStatus('storm-expiry').state, 'active', 'status reflects the recovery');
+  });
+
+  it('a retry that fails AGAIN re-stamps the record (fresh at, new error) and suppression resumes', async () => {
+    // The natural-expiry contract has teeth in both directions: expiry admits
+    // ONE re-attempt (which IS the recovery probe); if the host is still down,
+    // that failure starts a NEW window — the storm stays bounded at one attempt
+    // per window, indefinitely, with no timers.
+    const { deps, calls } = failingDeps((n) => `refused-${n}`);
+    let firstErr;
+    await assert.rejects(() => getChannel('storm-restamp', {}, deps), (e) => { firstErr = e; return true; });
+    const rec1 = _bootstrapFailureForTests('storm-restamp');
+    assert.ok(rec1, 'precondition: record stamped');
+    rec1.at -= BOOTSTRAP_RETRY_COOLDOWN_MS + 1; // expire the window
+
+    let secondErr;
+    await assert.rejects(() => getChannel('storm-restamp', {}, deps), (e) => { secondErr = e; return true; });
+    assert.notStrictEqual(secondErr, firstErr, 'a genuine re-attempt → a NEW error');
+    assert.ok(secondErr.message.includes('refused-2'), `the new error is the new probe's: ${secondErr.message}`);
+    assert.strictEqual(calls.run, 2, 'exactly two probe attempts so far');
+    const rec2 = _bootstrapFailureForTests('storm-restamp');
+    assert.ok(rec2.at > rec1.at, 're-stamped with a FRESH timestamp (a new window began)');
+    assert.strictEqual(rec2.err, secondErr, 'the record now carries the newest error');
+
+    let thirdErr;
+    await assert.rejects(() => getChannel('storm-restamp', {}, deps), (e) => { thirdErr = e; return true; });
+    assert.strictEqual(thirdErr, secondErr, 'suppression resumed with the re-stamped error');
+    assert.strictEqual(calls.run, 2, 'no third probe within the new window');
+  });
+
+  it('uninstallCompanion clears the record — the next op after a removal retries immediately', async () => {
+    const { deps } = failingDeps();
+    await assert.rejects(() => getChannel('storm-uninstall', {}, deps), () => true);
+    assert.ok(_bootstrapFailureForTests('storm-uninstall'), 'precondition: record stamped');
+
+    const res = await uninstallCompanion('storm-uninstall', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+    });
+    assert.strictEqual(res.ok, true, 'precondition: uninstall succeeded');
+    assert.strictEqual(_bootstrapFailureForTests('storm-uninstall'), undefined, 'uninstall cleared the record');
+
+    const healed = fakeDeps();
+    const ch = await getChannel('storm-uninstall', {}, healed.deps);
+    assert.ok(ch instanceof CompanionChannel, 'the next op got a fair bootstrap attempt (not suppressed)');
+  });
+
+  it('excluding a host clears the record (releaseExcludedHostState) — re-inclusion retries immediately', async () => {
+    // Env plumbing per the WARDEN-1390 suite: exclusions ride an env var that
+    // applyCompanionExclusions owns; save/restore so nothing leaks.
+    const savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+    try {
+      process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+      applyCompanionExclusions([]);
+      const { deps } = failingDeps();
+      await assert.rejects(() => getChannel('storm-excl', {}, deps), () => true);
+      assert.ok(_bootstrapFailureForTests('storm-excl'), 'precondition: record stamped');
+
+      applyCompanionExclusions(['storm-excl']); // exclusion mid-cooldown
+      assert.strictEqual(_bootstrapFailureForTests('storm-excl'), undefined,
+        'the release path cleared the failure record');
+
+      applyCompanionExclusions([]); // re-include
+      const healed = fakeDeps();
+      const ch = await getChannel('storm-excl', {}, healed.deps);
+      assert.ok(ch instanceof CompanionChannel, 'a re-included host retries immediately (no stale suppression window)');
+    } finally {
+      if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+      else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
+      applyCompanionExclusions([]);
+    }
+  });
+
+  it('_resetChannelCacheForTests clears the failure map too (same reset contract)', async () => {
+    const { deps } = failingDeps();
+    await assert.rejects(() => getChannel('storm-reset', {}, deps), () => true);
+    assert.ok(_bootstrapFailureForTests('storm-reset'), 'precondition: record stamped');
+    _resetChannelCacheForTests();
+    assert.strictEqual(_bootstrapFailureForTests('storm-reset'), undefined, 'reset cleared the record');
   });
 });
 
