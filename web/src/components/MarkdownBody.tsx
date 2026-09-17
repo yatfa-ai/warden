@@ -1,10 +1,14 @@
 import { useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { PluggableList } from 'unified';
 import { Button } from '@/components/ui/button';
 import { CheckIcon, CopyIcon } from 'lucide-react';
 import { resolveDocRelative } from '@/lib/docLinks';
 import { copyText } from '@/lib/clipboard';
+import { openExternalUrl } from '@/lib/electron';
+import { remarkIssueLinks, ISSUE_LINK_MARKER } from '@/lib/remarkIssueLinks';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 
 // A fenced code block with a language label + copy button. The raw text and
 // language are pulled from the `<code>` child react-markdown renders inside the
@@ -54,18 +58,34 @@ function CodeBlock({ language, children }: { language?: string; children: string
 // href (http(s), mailto, anchors, …) — links render exactly as before:
 // `target="_blank" rel="noreferrer noopener"`. ObserverMarkdown and
 // DirectiveHistory pass neither prop, so they are byte-for-byte unchanged.
+//
+// Issue-key links (WARDEN-1394, slice 2 of roadmap WARDEN-1386): when
+// `issueEntries` is non-empty, the `remarkIssueLinks` plugin linkifies
+// recognized issue keys (same matcher + tracker URL builder as the terminal's
+// linkifier, WARDEN-1388) and marks every minted link with `data-issue-link`.
+// The `a:` renderer routes ONLY marked links onto the openExternalUrl click
+// contract — one click in the system browser, never an internal Electron
+// window; preventDefault stops the in-app navigation while `href` stays for
+// copy-link/context-menu. Absent/empty `issueEntries` (the default, and every
+// pre-slice caller including FileViewer's rendered docs) registers no plugin
+// and renders byte-identically to before this prop existed.
 export function MarkdownBody({
   children,
   baseFilePath,
   onOpenPath,
+  issueEntries,
 }: {
   children: string;
   baseFilePath?: string;
   onOpenPath?: (resolvedPath: string) => void;
+  issueEntries?: IssueLinkEntry[];
 }) {
+  const remarkPlugins: PluggableList = issueEntries?.length
+    ? [remarkGfm, [remarkIssueLinks, issueEntries]]
+    : [remarkGfm];
   return (
     <Markdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={remarkPlugins}
       components={{
         h1: ({ children }) => <h1 className="text-base font-semibold">{children}</h1>,
         h2: ({ children }) => <h2 className="text-base font-semibold">{children}</h2>,
@@ -74,7 +94,28 @@ export function MarkdownBody({
         h5: ({ children }) => <h5 className="text-xs font-semibold">{children}</h5>,
         h6: ({ children }) => <h6 className="text-xs font-semibold text-muted-foreground">{children}</h6>,
         p: ({ children }) => <p className="m-0">{children}</p>,
-        a: ({ children, href }) => {
+        a: ({ children, href, node }) => {
+          // Issue-key links (WARDEN-1394): only links the remarkIssueLinks
+          // plugin minted carry the data-issue-link marker — a hand-written
+          // markdown link to the same tracker URL never does, so it keeps the
+          // plain-`<a>` behavior below. Click contract: openExternalUrl (the
+          // system browser — never an internal Electron window), preventDefault
+          // so the browser does not ALSO navigate; href kept for copy-link.
+          if (href && node?.properties && ISSUE_LINK_MARKER in node.properties) {
+            return (
+              <a
+                href={href}
+                data-issue-link={String(node.properties[ISSUE_LINK_MARKER] ?? '')}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openExternalUrl(href);
+                }}
+                className="text-primary underline underline-offset-2"
+              >
+                {children}
+              </a>
+            );
+          }
           // Resolve relative file refs (./x, ../y, dir/z.md) against the doc's
           // dir ONLY when both opt-in props are present; null otherwise (every
           // non-relative href, or no-resolver contexts like ObserverMarkdown).

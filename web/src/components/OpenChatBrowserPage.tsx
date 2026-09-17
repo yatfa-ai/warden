@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/context-menu';
 import { ArrowLeft, EyeIcon } from 'lucide-react';
 import { SessionTranscriptViewer } from './SessionTranscriptViewer';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 import { StatusDot } from '@/components/StatusDot';
 import type { Chat } from '@/lib/types';
 // Shared pure display helpers live in @/lib/chatDisplay so the sidebar and this
@@ -201,6 +202,11 @@ interface Props {
   // online/unknown hosts are never hidden. Off by default, so the chip row is
   // unchanged unless the human opts in. Visibility only — never deselects.
   hideOfflineHosts?: boolean;
+  // WARDEN-1394 — the fleet-scoped tracker entries for the markdown issue-key
+  // linkifier, threaded to this page's SessionTranscriptViewer mount.
+  // Undefined (the default while the integration is off) renders transcript
+  // messages byte-identically to before this prop existed.
+  issueEntries?: IssueLinkEntry[];
 }
 
 // Full-page replacement for the former Open Chat browser modal. Mirrors the
@@ -209,7 +215,7 @@ interface Props {
 // sets chatBrowserOpen; the back button / Escape clears it. Per WARDEN-68 Rule 7
 // the browser is a real UI surface (unbounded list + search), so it must be a
 // page, not a blocking Dialog.
-export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, showHostTags, budget, initialSortUsage, hideOfflineHosts }: Props) {
+export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, showHostTags, budget, initialSortUsage, hideOfflineHosts, issueEntries }: Props) {
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
@@ -821,6 +827,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         open={!!viewing}
         onOpenChange={(o) => { if (!o) setViewing(null); }}
         session={viewing}
+        issueEntries={issueEntries}
       />
     </div>
   );

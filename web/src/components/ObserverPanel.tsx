@@ -28,6 +28,7 @@ import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import { copyText as clipboardCopy } from '@/lib/clipboard';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -95,6 +96,11 @@ interface Props {
   // session the agent is actively producing output to is never idle. Read through
   // a ref inside the memoized `connect` so adding it never resubscribes the WS.
   onActivity?: () => void;
+  // WARDEN-1394 — configured tracker entries for the markdown issue-key
+  // linkifier (fleet-scoped, already ambiguity-filtered upstream). Undefined
+  // (the default while the integration is off) renders message bodies
+  // byte-identically to before this prop existed.
+  issueEntries?: IssueLinkEntry[];
 }
 
 const MAX_COMPOSER_HEIGHT = 160; // px — must match the `max-h-40` class (10rem)
@@ -148,7 +154,7 @@ function convertMessage(item: Item): ThreadMessageLike {
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId, onActivity }: Props) {
+export function ObserverPanel({ sessionId, onActivity, issueEntries }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -691,6 +697,7 @@ export function ObserverPanel({ sessionId, onActivity }: Props) {
                           }
                           onRegenerate={regenerate}
                           notifySuccess={prefs.notifySuccess}
+                          issueEntries={issueEntries}
                         />
                       );
                     if (item.kind === 'tool') return <ToolChip key={message.id} name={item.name} arg={item.arg} notifySuccess={prefs.notifySuccess} />;
@@ -868,11 +875,13 @@ function ObserverEntry({
   canRegenerate,
   onRegenerate,
   notifySuccess,
+  issueEntries,
 }: {
   item: Extract<Item, { kind: 'observer' }>;
   canRegenerate: boolean;
   onRegenerate: () => void;
   notifySuccess: boolean;
+  issueEntries?: IssueLinkEntry[];
 }) {
   return (
     <MessagePrimitive.Root className="group/msg relative flex items-start gap-2">
@@ -885,7 +894,7 @@ function ObserverEntry({
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div className="rounded-2xl rounded-tl-sm border bg-muted/40 px-3 py-2">
-              {item.text.trim() ? <ObserverMarkdown>{item.text}</ObserverMarkdown> : null}
+              {item.text.trim() ? <ObserverMarkdown issueEntries={issueEntries}>{item.text}</ObserverMarkdown> : null}
               {/*
                 WARDEN-1163 — the cause, in front of the developer using this
                 product. Rendered alongside partial text too: a stream that

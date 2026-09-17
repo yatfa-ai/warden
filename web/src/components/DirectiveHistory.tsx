@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
+import type { IssueLinkEntry } from '@/lib/issue-links';
 import { useHostLabels } from '@/lib/uiStore';
 import type { Directive } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -50,6 +51,7 @@ const DIRECTIVES_FEED = {
 export function DirectiveHistory({
   agentFilter, setAgentFilter,
   hostFilter, setHostFilter,
+  issueEntries,
 }: {
   // WARDEN-879: the two filters are now OWNED by ObserverTabs (persisted across
   // restart via loadObs/saveObs) and passed in as controlled props. The Selects
@@ -59,6 +61,11 @@ export function DirectiveHistory({
   setAgentFilter: (v: string) => void;
   hostFilter: string;
   setHostFilter: (v: string) => void;
+  // WARDEN-1394 — configured tracker entries for the markdown issue-key
+  // linkifier (fleet-scoped, already ambiguity-filtered upstream). Undefined
+  // (the default while the integration is off) renders directive text
+  // byte-identically to before this prop existed.
+  issueEntries?: IssueLinkEntry[];
 }) {
   const [limit, setLimit] = useState(100);
   // Re-render once per second so the "Updated Ns ago" label stays fresh.
@@ -245,6 +252,7 @@ export function DirectiveHistory({
                       directive={d}
                       setAgentFilter={setAgentFilter}
                       setHostFilter={setHostFilter}
+                      issueEntries={issueEntries}
                     />
                   ))}
                 </div>
@@ -261,10 +269,12 @@ function DirectiveEntry({
   directive,
   setAgentFilter,
   setHostFilter,
+  issueEntries,
 }: {
   directive: Directive;
   setAgentFilter: (v: string) => void;
   setHostFilter: (v: string) => void;
+  issueEntries?: IssueLinkEntry[];
 }) {
   const hostLabels = useHostLabels();
   // WARDEN-1342 (slice 4): the leaf that renders the directive timestamps
@@ -290,7 +300,7 @@ function DirectiveEntry({
           </div>
           {/* Full directive text in a scrollable block — not a truncated snippet. */}
           <div className="max-h-64 overflow-y-auto rounded-md bg-muted/30 p-2 text-sm">
-            <MarkdownBody>{directive.text}</MarkdownBody>
+            <MarkdownBody issueEntries={issueEntries}>{directive.text}</MarkdownBody>
           </div>
         </div>
       </ContextMenuTrigger>
