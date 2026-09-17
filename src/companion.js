@@ -167,6 +167,11 @@ function releaseExcludedHostState(host) {
   paneSubscriptions.delete(host);
   agentStateWatched.delete(host);
   paneDeltaCache.delete(host);
+  // WARDEN-1399: the failure cooldown is part of the per-host state family — a
+  // host excluded mid-cooldown then re-included must retry immediately, not
+  // inherit a stale suppression window (the WARDEN-1390 exclusion-mid-bootstrap
+  // race proves exclusion is a live path here).
+  bootstrapFailures.delete(host);
 }
 
 // src/companion.js -> ../companion/dist. Works in dev (repo root) and in the
@@ -742,6 +747,28 @@ export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn
 
 const channelCache = new Map(); // host -> CompanionChannel
 
+// WARDEN-1399 — per-host bootstrap-FAILURE cooldown (the retry-storm bound).
+// getChannel bootstraps on demand, and two AUTOMATIC clocks drive gated ops with
+// no user gesture: the unconditional 60s lifecycle tick (server.js
+// LIFECYCLE_INTERVAL_MS → discoverAll over every configured host) and the pane
+// sweep for engaged hosts. On a downed host that meant a full raw-ssh bootstrap
+// attempt (probe → upload → spawn+ping) on EVERY tick, forever — plus a status
+// write per attempt (bootstrapping → error) that made the host dot flap
+// yellow→red and churned lastError/lastErrorAt, and a full probe timeout hung in
+// front of every user gesture against the host. This map is the negative cache:
+// host → { at, err } stamped when a bootstrap throws. While a record is younger
+// than BOOTSTRAP_RETRY_COOLDOWN_MS, getChannel rethrows the SAME error object
+// immediately — no probe, no spawn, no status write — so the fleet pays at most
+// one bootstrap attempt per window per host, gated ops fail fast with the cached
+// message + recovery hint, and the dot stays red-steady. No timers: the record
+// expires NATURALLY (the first call after the window re-attempts, which IS the
+// recovery probe), exactly like hostStatus.js's deliberate non-unref — a timer
+// must never keep the event loop alive. Cleared on bootstrap success, on
+// uninstall, and on exclusion (releaseExcludedHostState), so a recovered /
+// removed / re-included host retries immediately.
+export const BOOTSTRAP_RETRY_COOLDOWN_MS = 60_000; // one lifecycle tick
+const bootstrapFailures = new Map(); // host -> { at, err }
+
 // --------------------- per-host transport status (WARDEN-878) --------------------
 // WARDEN-270 Visibility: the human must be able to see, per host, whether the
 // companion transport is working — active (with version), bootstrapping, or
@@ -894,6 +921,7 @@ export function _resetChannelCacheForTests() {
   channelCache.clear();
   companionStatus.clear(); // WARDEN-878: clear captured per-host status too
   companionOps.clear(); // WARDEN-1312: clear op tallies too (same reset contract)
+  bootstrapFailures.clear(); // WARDEN-1399: clear failure-cooldown records too (same reset contract)
 }
 
 // Test-only: whether a host currently has a cached channel/bootstrap — so
@@ -901,6 +929,14 @@ export function _resetChannelCacheForTests() {
 // BEFORE the uninstall script runs) is unit-testable. Not for production use.
 export function _channelCacheHasForTests(host) {
   return channelCache.has(host);
+}
+
+// Test-only: the host's bootstrap-failure cooldown record ({at, err}) or
+// undefined — lets a test read it and AGE the `at` stamp past
+// BOOTSTRAP_RETRY_COOLDOWN_MS to prove natural expiry + retry-after-expiry
+// without sleeping. Not for production use. (WARDEN-1399)
+export function _bootstrapFailureForTests(host) {
+  return bootstrapFailures.get(host);
 }
 
 // Ping the channel once. Returns {ok:true} | {ok:false, reason:'mismatch', got}
@@ -1027,7 +1063,13 @@ async function bootstrapChannel(host, cfg, deps) {
 // lifecycle poll for one host) coalesce onto ONE in-flight bootstrap by caching
 // the bootstrap *promise*: the second caller awaits the first's bootstrap rather
 // than starting its own, so no ssh + companion process leaks. On failure the
-// promise is dropped so a later call can retry (no cached rejection).
+// promise is dropped so a later call can retry (no cached rejection) — and
+// WARDEN-1399 throttles that retry: a bootstrap failure starts a per-host
+// cooldown (bootstrapFailures) during which getChannel rethrows the cached error
+// without probing, so the unconditional 60s lifecycle tick and pane sweeps
+// cannot storm a downed host with full raw-ssh bootstrap attempts. The coalesce
+// check runs FIRST — a caller arriving during an in-flight bootstrap always
+// awaits it, suppressed or not.
 export async function getChannel(host, cfg = {}, deps = {}) {
   if (host === LOCAL) {
     throw new CompanionTransportError(host, 'companion transport serves remote hosts only, not (local)');
@@ -1038,6 +1080,18 @@ export async function getChannel(host, cfg = {}, deps = {}) {
     // (existing.dead) falls through to a fresh bootstrap below.
     if (typeof existing.then === 'function') return existing; // bootstrap in flight — await it
     if (!existing.dead) return existing;                      // live channel — reuse
+  }
+  // WARDEN-1399: consult the failure cooldown BEFORE any bootstrap work — after
+  // the cache check above (a caller must coalesce onto an in-flight bootstrap,
+  // fresh or stale record alike) and before the bootstrapping status stamp below
+  // (suppression is a red-steady state: no new status write, no lastErrorAt
+  // churn). Rethrowing the SAME error object keeps the op layer's {ok:false}
+  // envelope + formatCompanionError rendering byte-identical to a real failure.
+  // Outside the window (or no record): fall through — the re-attempt below IS
+  // the recovery probe.
+  const failure = bootstrapFailures.get(host);
+  if (failure && Date.now() - failure.at < BOOTSTRAP_RETRY_COOLDOWN_MS) {
+    throw failure.err;
   }
   // WARDEN-878: mark bootstrapping BEFORE the promise is created so the host
   // reads "bootstrapping" (not "inactive") on the status surface while the first
@@ -1064,6 +1118,9 @@ export async function getChannel(host, cfg = {}, deps = {}) {
         return channel;
       }
       channelCache.set(host, channel);
+      // WARDEN-1399: a successful bootstrap proves the host is back — clear the
+      // failure record so nothing suppresses the now-live channel path.
+      bootstrapFailures.delete(host);
       // WARDEN-878: successful bootstrap → active + the version the ping just
       // verified. pingOnce confirms the host's companion reports manifest.version,
       // so the active version IS the manifest version (deps.manifest when a test
@@ -1074,7 +1131,17 @@ export async function getChannel(host, cfg = {}, deps = {}) {
       return channel;
     })
     .catch((err) => {
-      if (channelCache.get(host) === bootstrapPromise) channelCache.delete(host);
+      if (channelCache.get(host) === bootstrapPromise) {
+        channelCache.delete(host);
+        // WARDEN-1399: stamp the failure cooldown — but ONLY for a non-superseded
+        // bootstrap. A bootstrap whose cache entry was replaced (exclusion landed
+        // mid-flight, the WARDEN-1390 release race) must NOT leave a suppression
+        // window behind: releaseExcludedHostState has already cleared the host's
+        // state, and a host re-included within the cooldown must retry
+        // immediately, not inherit a stale record from a bootstrap that was
+        // abandoned on its behalf.
+        bootstrapFailures.set(host, { at: Date.now(), err });
+      }
       // WARDEN-878 (THE TRAP): channelCache.delete above means an errored host
       // leaves NO cache entry — reading the cache alone would show "no companion"
       // for exactly the hosts that most need a status. Capture the error at the
@@ -1142,6 +1209,10 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
   // numbers still rode along on any future re-bootstrap's status. Mirrors the
   // companionOps.clear() in _resetChannelCacheForTests.
   companionOps.delete(host);
+  // Invalidate the bootstrap-failure cooldown too (WARDEN-1399): a host the
+  // operator just uninstalled must get a fair bootstrap attempt on the next op,
+  // not fail fast off a record left by the failure that preceded the removal.
+  bootstrapFailures.delete(host);
   // Resolve the manifest version → remote path (companion.js:116) and run the
   // uninstall script via the same runFn/defaultRun path the probe uses. The
   // version is validated hex, safe to interpolate.
