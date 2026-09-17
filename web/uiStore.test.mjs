@@ -1327,4 +1327,76 @@ test("'saveUi(' lives in exactly ONE production call site — useConfigPersisten
   );
 });
 
+console.log('\nstructural guard: the ObsUi namespace (warden:observer:v1) reads and writes through the same discipline');
+test("'loadObs(' is read in exactly ONE component file — ObserverTabs.tsx — via exactly ONE call, the boot re-read (the ObsUi read-axis twin of the loadUi guard)", () => {
+  // The invariant this guards (WARDEN-1397, client-state slice 10): the second
+  // storage namespace is seeded ONCE per ObserverTabs mount — `const [obsSeed] =
+  // useState(loadObs)` — and the only other sanctioned read is the boot effect's
+  // deliberate post-refresh re-read (`const stored = loadObs();`), both inside
+  // ObserverTabs.tsx. The pre-slice shape was 10 per-field lazy useState seeds,
+  // each a separate JSON.parse of the same warden:observer:v1 document. The seed
+  // rides as a BARE function reference — no call parens — so the literal
+  // 'loadObs(' census counts exactly ONE occurrence in web/src/components/: the
+  // boot re-read. Mutation-check (verified red): restoring any per-field lazy
+  // seed that calls loadObs takes the occurrence count to 2 and turns the count
+  // leg red; a read in any OTHER component file breaks the file-set leg.
+  const walk = (dir) => {
+    const out = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walk(p));
+      else out.push(p);
+    }
+    return out;
+  };
+  const readers = walk(join(__dirname, 'src', 'components'))
+    .filter((p) => /\.(ts|tsx)$/.test(p))
+    .filter((p) => readFileSync(p, 'utf8').includes('loadObs('));
+  assert.deepEqual(
+    readers.map((p) => p.slice(__dirname.length + 1)),
+    ['src/components/ObserverTabs.tsx'],
+    "component file(s) read ObsUi via loadObs( directly — ObserverTabs.tsx's single mount seed + boot re-read is the one sanctioned reader",
+  );
+  const occurrences = readFileSync(join(__dirname, 'src', 'components', 'ObserverTabs.tsx'), 'utf8').split('loadObs(').length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "ObserverTabs.tsx must hold exactly ONE loadObs( call — the boot effect's deliberate post-refresh re-read; the mount seed rides as the bare useState(loadObs) reference, so a second occurrence is a restored per-field lazy seed (the per-field re-parse shape slice 10 retired)",
+  );
+});
+
+test("'saveObs(' lives in exactly TWO production call sites — ObserverTabs.tsx (the compile-locked save effect) + App.tsx (the Settings-reset disk write) — plus its storage.ts definition (the ObsUi write-axis twin of the saveUi guard)", () => {
+  // The invariant this guards (WARDEN-832's "one writer per fact", applied to
+  // the SECOND storage namespace; WARDEN-1397 slice 10): ObsUi has exactly two
+  // writers, each with a distinct role — ObserverTabs' booted-gated saveObs
+  // effect, the live-pref writer whose payload is now the `satisfies
+  // Required<ObsUi>` compile-locked bag (so a field can only reach disk through
+  // the bag), and App's reset write — `saveObs(resetObsPrefsPreservingWorkspace(
+  // loadObs()))`, the disk half of Settings → Reset (WARDEN-981), deliberately
+  // separated from the live half (see App's reset comment). Same file-set
+  // convention as the saveUi guard above: storage.ts matches the pattern
+  // because it holds the `export function saveObs(` definition itself, and
+  // tests are excluded (all suites live in web/*.test.mjs, outside src/, but
+  // the exclusion is kept defensive). Mutation-check (verified red): adding a
+  // third saveObs( call site — e.g. a component writing ObsUi directly,
+  // bypassing the bag — turns this leg red.
+  const walk = (dir) => {
+    const out = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walk(p));
+      else out.push(p);
+    }
+    return out;
+  };
+  const files = walk(join(__dirname, 'src'))
+    .filter((p) => /\.(ts|tsx)$/.test(p) && !/\.test\.(ts|tsx|mjs)$/.test(p))
+    .filter((p) => readFileSync(p, 'utf8').includes('saveObs('));
+  assert.deepEqual(
+    files.map((p) => p.slice(__dirname.length + 1)).sort(),
+    ['src/App.tsx', 'src/components/ObserverTabs.tsx', 'src/lib/storage.ts'],
+    "saveObs( must appear in exactly TWO production call sites (ObserverTabs.tsx's compile-locked save effect + App.tsx's Settings-reset disk write) plus its storage.ts definition — a third writer bypasses the Required<ObsUi> save bag",
+  );
+});
+
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EmptyState } from './EmptyState';
 import { loadObs, saveObs, resetObsPrefDefaults } from '@/lib/storage';
-import type { ObsResetKey } from '@/lib/storage';
+import type { ObsResetKey, ObsUi } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import {
   ContextMenu,
@@ -91,25 +91,45 @@ interface Props {
 export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention, issueEntries }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
-  const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
-  const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
-  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention'>(() => loadObs().viewMode || 'sessions');
-  // WARDEN-879: Activity + Directives tab filters persist alongside viewMode,
-  // hydrated from loadObs() (each field defaults to 'all' when never saved) and
-  // saved on every change via the saveObs effect below. Owned here (not in the
-  // children) so a warden restart reopens each tab with its view-shaping filters
-  // intact — mirroring how viewMode/openIds/activeId already ride this path.
-  // `act*` = Activity tab (type/agent/host); `dir*` = Directives tab (agent/host).
-  const [actTypeFilter, setActTypeFilter] = useState<string>(() => loadObs().activityFilters?.type ?? 'all');
-  const [actAgentFilter, setActAgentFilter] = useState<string>(() => loadObs().activityFilters?.agent ?? 'all');
-  const [actHostFilter, setActHostFilter] = useState<string>(() => loadObs().activityFilters?.host ?? 'all');
-  const [dirAgentFilter, setDirAgentFilter] = useState<string>(() => loadObs().directiveFilters?.agent ?? 'all');
-  const [dirHostFilter, setDirHostFilter] = useState<string>(() => loadObs().directiveFilters?.host ?? 'all');
-  // WARDEN-971: `attn*` = Attention tab (agent/host) — the third peer tab brought to
-  // filter parity with its two siblings, on the identical own-it-here + persist-via-
-  // saveObs path.
-  const [attnAgentFilter, setAttnAgentFilter] = useState<string>(() => loadObs().attentionFilters?.agent ?? 'all');
-  const [attnHostFilter, setAttnHostFilter] = useState<string>(() => loadObs().attentionFilters?.host ?? 'all');
+  // WARDEN-1397 (client-state slice 10): ONE seed read of the ObsUi document.
+  // loadObs is pure — a JSON.parse of the versioned warden:observer:v1 key — and
+  // between this mount and the boot effect's re-read below nothing else writes
+  // that key (this component's saveObs effect is booted-gated; App's only other
+  // write is the Settings-page reset, which unmounts the full-page dashboard so
+  // the panel re-seeds on remount — see App's reset comment). So every persisted
+  // field initializes from this single `obsSeed` instead of re-parsing the same
+  // document once per field (the 10 per-field lazy useState seeds this replaces
+  // each cost their own JSON.parse). The seed rides as a BARE function reference
+  // — React's lazy initializer calls it exactly once, no arguments.
+  const [obsSeed] = useState(loadObs);
+  const [openIds, setOpenIds] = useState<string[]>(obsSeed.openIds);
+  const [activeId, setActiveId] = useState<string | null>(obsSeed.activeId);
+  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention'>(obsSeed.viewMode || 'sessions');
+  // The three per-tab filter SHAPES as object-valued states — WARDEN-879: the
+  // Activity (type/agent/host) + Directives (agent/host) tab filters, WARDEN-971:
+  // the Attention pair — one state per persisted shape instead of seven per-field
+  // scalars. Collapsing them is what lets the saveObs effect below derive BOTH
+  // its payload AND its dep array from one compile-locked bag rather than an
+  // 11-entry hand-list. Each field defaults to 'all' when never saved, exactly as
+  // the per-field seeds did. Owned here (not in the children) so a warden restart
+  // reopens each tab with its view-shaping filters intact — mirroring how
+  // viewMode/openIds/activeId already ride this path.
+  const [activityFilters, setActivityFilters] = useState<NonNullable<ObsUi['activityFilters']>>(obsSeed.activityFilters ?? { type: 'all', agent: 'all', host: 'all' });
+  const [directiveFilters, setDirectiveFilters] = useState<NonNullable<ObsUi['directiveFilters']>>(obsSeed.directiveFilters ?? { agent: 'all', host: 'all' });
+  const [attentionFilters, setAttentionFilters] = useState<NonNullable<ObsUi['attentionFilters']>>(obsSeed.attentionFilters ?? { agent: 'all', host: 'all' });
+  // The children keep their exact controlled-prop contract — scalar value plus a
+  // `(v: string) => void` setter — through these spread-updater adapters, so the
+  // three tab components are untouched. useCallback keeps each identity as stable
+  // as the bare useState setters it replaces; the spread is what replaces the
+  // parent object on every scalar write, which is precisely the per-key change
+  // signal the saveObs effect's Object.values dep array reads.
+  const setActTypeFilter = useCallback((v: string) => setActivityFilters((p) => ({ ...p, type: v })), []);
+  const setActAgentFilter = useCallback((v: string) => setActivityFilters((p) => ({ ...p, agent: v })), []);
+  const setActHostFilter = useCallback((v: string) => setActivityFilters((p) => ({ ...p, host: v })), []);
+  const setDirAgentFilter = useCallback((v: string) => setDirectiveFilters((p) => ({ ...p, agent: v })), []);
+  const setDirHostFilter = useCallback((v: string) => setDirectiveFilters((p) => ({ ...p, host: v })), []);
+  const setAttnAgentFilter = useCallback((v: string) => setAttentionFilters((p) => ({ ...p, agent: v })), []);
+  const setAttnHostFilter = useCallback((v: string) => setAttentionFilters((p) => ({ ...p, host: v })), []);
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -270,17 +290,38 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
     })();
   }, [refresh]);
 
+  // WARDEN-1397 (slice 10): the ObsUi SAVE BAG — the second namespace's twin of
+  // useConfigPersistence's PersistedPrefSnapshot lock. `satisfies Required<ObsUi>`
+  // turns a field added to ObsUi but missing from this bag into a missing-property
+  // COMPILE error — the dropped-key failure class (WARDEN-442/468/500 for UiState)
+  // cannot recur here: every ObsUi field except openIds/activeId is optional in
+  // storage.ts, so a field dropped from the old hand-assembled payload literal was
+  // type-valid and silently never persisted again, and a dep dropped from the old
+  // 11-entry hand-list silently stopped the effect from firing. No key-list
+  // constant is needed (unlike PersistedPrefSnapshot): ObsUi is ALL persisted —
+  // OBS_PRESERVED_KEYS / OBS_RESET_KEYS already partition it exhaustively for the
+  // reset axis — so the bag IS the payload, and enumerating its keys again would
+  // only mint a third hand-list to keep in sync. Assembled in render scope (like
+  // the snapshot in useConfigPersistence) so the effect body and its dep array
+  // read the SAME object.
+  const obsBag = {
+    openIds, activeId, viewMode,
+    activityFilters, directiveFilters, attentionFilters,
+  } satisfies Required<ObsUi>;
   useEffect(() => {
-    if (booted) saveObs({
-      openIds, activeId, viewMode,
-      // WARDEN-879: persist the Activity + Directives tab filters into the
-      // activityFilters/directiveFilters shapes loadObs() reads back.
-      // WARDEN-971: and the Attention tab's pair alongside them.
-      activityFilters: { type: actTypeFilter, agent: actAgentFilter, host: actHostFilter },
-      directiveFilters: { agent: dirAgentFilter, host: dirHostFilter },
-      attentionFilters: { agent: attnAgentFilter, host: attnHostFilter },
-    });
-  }, [openIds, activeId, viewMode, booted, actTypeFilter, actAgentFilter, actHostFilter, dirAgentFilter, dirHostFilter, attnAgentFilter, attnHostFilter]);
+    if (booted) saveObs(obsBag);
+    // The dependency is every VALUE of obsBag — derived from the same compile-
+    // locked object as the payload, not a second hand-list — plus booted (the
+    // write gate). Object.values yields a per-key Object.is comparison, so the
+    // effect re-fires only when a persisted field actually changes. Firing-set
+    // equivalence with the prior 11-scalar hand-list, field by field: openIds/
+    // activeId/viewMode compare exactly as before; each of the seven filter
+    // scalars lives in exactly one of the three filter objects and is written
+    // ONLY through a spread-updater (or the reset's whole-object snap), so a
+    // scalar changed ⇔ its parent object was replaced ⇔ its Object.values slot
+    // changed — identical firing set (11 scalar deps → 6 bag values + booted).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design: the dep set is every value of the ObsUi save bag (one per ObsUi key), derived from the same type-checked source as the payload. Completeness is compile-enforced (a field in ObsUi but missing from obsBag is a TS error), not literal-enumerable — so a forgotten field can no longer silently drop out of the dep array (the WARDEN-442/468/500 class, ObsUi twin).
+  }, [booted, ...Object.values(obsBag)]);
 
   // Seamless resume: when a session bound to an agent chat becomes active,
   // reconnect to that chat (open its pane on the right host) exactly once. This
@@ -341,21 +382,17 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
     if (resetToken === undefined || resetToken === lastResetTokenRef.current) return;
     lastResetTokenRef.current = resetToken;
     const d = resetObsPrefDefaults();
+    // The setter map keeps its ObsResetKey-keyed shape — the live-panel twin of
+    // App's resetSetters guard, so a future ObsUi pref added to OBS_RESET_KEYS
+    // but not wired to live state HERE is a missing-property compile error — but
+    // each arm is now a single whole-object snap into the matching filter state
+    // (the same objects the saveObs bag persists). `d` is a fresh factory build,
+    // so handing its sub-objects to state aliases nothing.
     const obsResetSetters: { [K in ObsResetKey]: () => void } = {
       viewMode: () => setViewMode(d.viewMode),
-      activityFilters: () => {
-        setActTypeFilter(d.activityFilters.type);
-        setActAgentFilter(d.activityFilters.agent);
-        setActHostFilter(d.activityFilters.host);
-      },
-      directiveFilters: () => {
-        setDirAgentFilter(d.directiveFilters.agent);
-        setDirHostFilter(d.directiveFilters.host);
-      },
-      attentionFilters: () => {
-        setAttnAgentFilter(d.attentionFilters.agent);
-        setAttnHostFilter(d.attentionFilters.host);
-      },
+      activityFilters: () => setActivityFilters(d.activityFilters),
+      directiveFilters: () => setDirectiveFilters(d.directiveFilters),
+      attentionFilters: () => setAttentionFilters(d.attentionFilters),
     };
     for (const apply of Object.values(obsResetSetters)) apply();
   }, [resetToken]);
@@ -649,9 +686,9 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
       {viewMode === 'activity' && (
         <div className="flex-1 min-h-0">
           <ActivityTimeline
-            typeFilter={actTypeFilter} setTypeFilter={setActTypeFilter}
-            agentFilter={actAgentFilter} setAgentFilter={setActAgentFilter}
-            hostFilter={actHostFilter} setHostFilter={setActHostFilter}
+            typeFilter={activityFilters.type} setTypeFilter={setActTypeFilter}
+            agentFilter={activityFilters.agent} setAgentFilter={setActAgentFilter}
+            hostFilter={activityFilters.host} setHostFilter={setActHostFilter}
           />
         </div>
       )}
@@ -660,8 +697,8 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
       {viewMode === 'directives' && (
         <div className="flex-1 min-h-0">
           <DirectiveHistory
-            agentFilter={dirAgentFilter} setAgentFilter={setDirAgentFilter}
-            hostFilter={dirHostFilter} setHostFilter={setDirHostFilter}
+            agentFilter={directiveFilters.agent} setAgentFilter={setDirAgentFilter}
+            hostFilter={directiveFilters.host} setHostFilter={setDirHostFilter}
             issueEntries={issueEntries}
           />
         </div>
@@ -679,8 +716,8 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
         <div className="flex-1 min-h-0">
           <AttentionView
             {...attention}
-            agentFilter={attnAgentFilter} setAgentFilter={setAttnAgentFilter}
-            hostFilter={attnHostFilter} setHostFilter={setAttnHostFilter}
+            agentFilter={attentionFilters.agent} setAgentFilter={setAttnAgentFilter}
+            hostFilter={attentionFilters.host} setHostFilter={setAttnHostFilter}
           />
         </div>
       )}
