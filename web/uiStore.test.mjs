@@ -1293,4 +1293,38 @@ test("no file under web/src/components/ contains 'loadUi(' (the read-axis analog
   );
 });
 
+test("'saveUi(' lives in exactly ONE production call site — useConfigPersistence.ts — plus its storage.ts definition (the write-axis analogue of the guard above)", () => {
+  // The invariant this guards (WARDEN-832's "one writer per fact", write
+  // axis): a persisted client fact has ONE writer — the compile-locked
+  // saveUi effect in useConfigPersistence. App's theme effect once carried a
+  // second writer (`saveUi({ ...loadUi(), theme })`) that bypassed
+  // persistUiState — a writer with a different payload shape for the same
+  // fact, so a future normalization or empty-mode carry-forward rule added
+  // there would silently not apply to theme. Mutation-check: restoring that
+  // call in App.tsx must turn this leg red.
+  //
+  // The census asserts the exact expected FILE SET rather than a fragile
+  // count: storage.ts matches the pattern too because it holds the
+  // `export function saveUi(` definition itself, and useConfigPersistence.ts
+  // is the ONE production caller. Tests are excluded (all suites live in
+  // web/*.test.mjs, outside src/, but the exclusion is kept defensive).
+  const walk = (dir) => {
+    const out = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walk(p));
+      else out.push(p);
+    }
+    return out;
+  };
+  const files = walk(join(__dirname, 'src'))
+    .filter((p) => /\.(ts|tsx)$/.test(p) && !/\.test\.(ts|tsx|mjs)$/.test(p))
+    .filter((p) => readFileSync(p, 'utf8').includes('saveUi('));
+  assert.deepEqual(
+    files.map((p) => p.slice(__dirname.length + 1)).sort(),
+    ['src/lib/storage.ts', 'src/lib/useConfigPersistence.ts'],
+    "saveUi( must appear in exactly ONE production call site (useConfigPersistence.ts) plus its storage.ts definition — a second writer bypasses persistUiState's normalization + empty-mode carry-forward",
+  );
+});
+
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

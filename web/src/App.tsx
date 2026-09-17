@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
@@ -673,7 +673,8 @@ function App() {
     if (focused) stampLastSeen(focused);
   }, [focused]);
 
-  // apply theme on mount and when theme changes
+  // apply theme on mount and when theme changes (theme itself persists via the
+  // single compile-locked saveUi effect in useConfigPersistence)
   useEffect(() => {
     // Apply theme immediately: sets the [data-theme] attribute (selecting the
     // matching CSS token block) and toggles `.dark` from the theme's mode.
@@ -681,7 +682,6 @@ function App() {
     // Keep the resolved concrete theme id in sync so the terminal pane (which
     // derives its xterm palette from it) follows a manual theme change live.
     setResolvedThemeId(resolveThemeId(theme));
-    saveUi({ ...loadUi(), theme });
 
     // If system mode, listen for system theme changes. The `theme` state stays
     // 'system' here (chrome re-paints via applyTheme's direct DOM attribute set),
