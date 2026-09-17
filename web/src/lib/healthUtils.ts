@@ -202,6 +202,13 @@ export interface CompanionStatus {
   state: CompanionState;
   /** Ping-verified companion manifest version (active only). */
   version?: string;
+  /**
+   * WHY the host is in its current state, when the server says so — today only
+   * `inactive` carries one: 'excluded-by-setting' (WARDEN-1390: the host is on
+   * the companionExcludedHosts list, so its panes deliberately ride the default
+   * SSH path). Absent on every other state, mirroring the server shape.
+   */
+  reason?: string;
   /** Actionable last bootstrap error + recovery hint (error only). */
   lastError?: string;
   /** Epoch ms of the last failure (error only). */
@@ -233,6 +240,7 @@ export function normalizeCompanionStatus(raw: unknown): CompanionStatus {
     : 'inactive';
   const out: CompanionStatus = { state };
   if (typeof r.version === 'string') out.version = r.version;
+  if (typeof r.reason === 'string') out.reason = r.reason;
   if (typeof r.lastError === 'string') out.lastError = r.lastError;
   if (typeof r.lastErrorAt === 'number') out.lastErrorAt = r.lastErrorAt;
   const ops = normalizeCompanionOps(r.ops);

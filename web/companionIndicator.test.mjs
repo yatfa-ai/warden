@@ -136,6 +136,29 @@ try {
     assert.equal(render(undefined), '');
   });
 
+  console.log('\nexcluded-by-setting renders the muted WHY (WARDEN-1390)');
+  test('inactive + excluded-by-setting renders a muted ring dot + the short "excluded" tag', () => {
+    const html = render({ state: 'inactive', reason: 'excluded-by-setting' });
+    assert.notEqual(html, '', 'an exclusion is actionable state — the row must say WHY, not look broken');
+    assert.ok(html.includes('border-muted-foreground'), 'muted ring — deliberate, non-alarming');
+    assert.ok(!html.includes('bg-red-500') && !html.includes('bg-yellow-500'),
+      'the exclusion is not an error color');
+    const suffix = suffixSpan(html);
+    assert.ok(suffix, 'the short tag rendered');
+    assert.equal(suffix.text, 'excluded');
+    for (const token of ['min-w-0', 'max-w-24', 'truncate']) {
+      assert.ok(suffix.class.split(' ').includes(token), `tag keeps the bounded-suffix contract (${token})`);
+    }
+    assert.match(ariaLabel(html), /Companion excluded for this host/);
+    assert.match(ariaLabel(html), /Companion excluded hosts/);
+  });
+  test('inactive WITHOUT a reason still renders nothing (LOCAL / never-engaged)', () => {
+    assert.equal(render({ state: 'inactive' }), '');
+  });
+  test('inactive with an unknown reason renders nothing (only known reasons are actionable)', () => {
+    assert.equal(render({ state: 'inactive', reason: 'something-else' }), '');
+  });
+
   console.log('\nstate vocabulary unchanged (WARDEN-878)');
   test('bootstrapping: yellow pulse, ops suffix still bounded', () => {
     const html = render({ state: 'bootstrapping', ops: HEAVY });

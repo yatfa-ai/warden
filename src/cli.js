@@ -7,7 +7,7 @@ import { load, save, configPath, cachePath } from './config.js';
 import { discover, discoverAll, resolveChatWithRefresh, agentTarget } from './chats.js';
 import { read, send, sendKey, attachInteractive, attachInteractiveCompanion } from './tmux.js';
 import { run, attach, buildAttachRemoteScript } from './ssh.js';
-import { deliverRemoteScript, isCompanionTransportEnabled } from './companion.js';
+import { deliverRemoteScript, isCompanionTransportEnabled, isCompanionExcludedHost } from './companion.js';
 import { atomicWriteJson, readJsonDefensiveSync } from './persist.js';
 
 // ---------- tiny ANSI ----------
@@ -205,9 +205,10 @@ export async function cmdDash(argv, cfg, deps = {}) {
   }
   const session = flags.session || 'warden';
 
-  // Companion routing guard: REMOTE host + toggle on (LOCAL never routes through
-  // the companion — same guard shape as every gated sibling in tmux.js).
-  const useCompanion = (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && host !== '(local)';
+  // Companion routing guard: REMOTE host + toggle on + host not excluded (LOCAL
+  // never routes through the companion — same guard shape as every gated sibling
+  // in tmux.js; the per-host exclusion is the WARDEN-1390 opt-out).
+  const useCompanion = (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && host !== '(local)' && !isCompanionExcludedHost(host);
 
   // Preflight: dash builds a tmux session ON THE HOST, so the host needs tmux
   // (yatfa containers have tmux, but the host itself usually doesn't). The web
@@ -223,7 +224,8 @@ export async function cmdDash(argv, cfg, deps = {}) {
       if (!pf.ok) {
         fail(`companion preflight on ${host} failed: ${(pf.stderr || '').trim() || `exit ${pf.code}`}\n` +
             `    (companion-or-fail: dash never falls back to raw SSH while the toggle reads on.\n` +
-            `     fix the channel, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.)`);
+            `     fix the channel, set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path,\n` +
+            `     or exclude this host in Settings → Performance ("Companion excluded hosts") to route just it over the default SSH path.)`);
         return;
       }
     } else {

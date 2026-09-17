@@ -121,6 +121,12 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
   // operator-set at boot — then the env var wins and the toggle is inert.
   companionTransportEnabled: boolean;
   companionTransportOverridden: boolean;
+  // Per-host companion-transport opt-out (WARDEN-1390): bare SSH host aliases,
+  // matched exactly against the host string. An excluded host routes over the
+  // default SSH path while every other host keeps the channel — so a Windows
+  // host (no companion PTY, ever) doesn't force the fleet-global toggle off.
+  // Empty array = nothing excluded = behavior identical to the plain toggle.
+  companionExcludedHosts: string[];
   confirmDestructiveActions: boolean;
   notifyChatOps: boolean;
   notifyErrors: boolean;

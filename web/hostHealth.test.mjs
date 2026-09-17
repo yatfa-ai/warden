@@ -460,6 +460,15 @@ test('an error state carries its lastError + lastErrorAt', () => {
 test('bootstrapping passes through', () => {
   assert.deepEqual(normalizeCompanionStatus({ state: 'bootstrapping' }), { state: 'bootstrapping' });
 });
+test('the excluded-by-setting reason is carried through (WARDEN-1390)', () => {
+  assert.deepEqual(
+    normalizeCompanionStatus({ state: 'inactive', reason: 'excluded-by-setting' }),
+    { state: 'inactive', reason: 'excluded-by-setting' },
+  );
+});
+test('a non-string reason is dropped (only correctly-typed fields carried)', () => {
+  assert.deepEqual(normalizeCompanionStatus({ state: 'inactive', reason: 42 }), { state: 'inactive' });
+});
 test('an unknown state string collapses to inactive (never crashes the render)', () => {
   assert.deepEqual(normalizeCompanionStatus({ state: 'on-fire' }), { state: 'inactive' });
 });

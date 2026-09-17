@@ -316,7 +316,7 @@ test('every field the affordance is wired to exists in the registry', () => {
   const registryKeys = new Set(CONFIG_FIELDS.map((f) => f.key));
   const wiredPaths = [
     'showHostTags', 'showTypeBadges', 'showStatusIndicators', 'showProjectBadges', 'hideOfflineHosts',
-    'confirmDestructiveActions', 'companionTransportEnabled',
+    'confirmDestructiveActions', 'companionTransportEnabled', 'companionExcludedHosts',
     'healthWarningThresholdMin', 'healthCriticalThresholdMin',
     'tokenBudgetEnabled', 'tokenBudgetThresholdTokens', 'tokenBudgetWindowHours',
     'tokenBudgetPerSessionThresholdTokens',

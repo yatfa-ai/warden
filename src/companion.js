@@ -33,6 +33,7 @@ import { spawn } from 'node:child_process';
 import { run as defaultRun, SSH_BIN, buildSshArgv, shellQuote } from './ssh.js';
 import { buildChat, sortChats, parseActivityTimestamp, paneTarget } from './chatMeta.js';
 import { loopMonitor } from './loop-monitor.js';
+import { sanitizeCompanionExcludedHosts } from './config-schema.js';
 
 const LOCAL = '(local)';
 const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
@@ -61,6 +62,111 @@ export function isCompanionTransportEnabled(env = process.env) {
 export function applyCompanionToggle(enabled, { override = false, env = process.env } = {}) {
   if (!override) env.WARDEN_COMPANION_TRANSPORT = enabled ? '1' : '0';
   return env.WARDEN_COMPANION_TRANSPORT === '1';
+}
+
+// ------------------- per-host exclusion (WARDEN-1390) -----------------------
+// The transport toggle is FLEET-GLOBAL, but the reason to opt a host out is
+// PER-HOST: a Windows companion can never carry a host-side PTY
+// (companion/pty_windows.go hostPTYSupported=false — no pure-Go ConPTY, and CGO
+// would break the dependency-free-static-binary boundary), so the user must be
+// able to exclude exactly that host while every other host keeps riding the
+// channel. `companionExcludedHosts` (persisted config, default []) is that
+// per-host opt-out.
+//
+// The exclusion rides the SAME env-var runtime channel the toggle drives
+// (WARDEN_COMPANION_EXCLUDED_HOSTS, comma-separated), so every routing site
+// composes it onto its existing gate with a one-line change and no signature
+// churn. SEMANTICS DIFFER from the toggle's env var, deliberately:
+//   • WARDEN_COMPANION_TRANSPORT is an OPERATOR OVERRIDE (env wins over the UI;
+//     applyCompanionToggle never clobbers an operator-set value).
+//   • WARDEN_COMPANION_EXCLUDED_HOSTS is RUNTIME STATE written from the
+//     persisted config: applyCompanionExclusions OVERWRITES it at boot and on
+//     every PUT /api/config, so the UI list always wins. That makes hand-setting
+//     it effective ONLY in CLI processes (which read the env var but never apply
+//     the config): the server process clobbers it at boot, and an empty
+//     persisted list DELETES the variable outright.
+// The separator constraint (entries must not contain ',') is enforced by the
+// PUT sanitizer (sanitizeCompanionExcludedHosts in config-schema.js — the one
+// definition), so the env serialization can never be ambiguous.
+//
+// Empty list ⇒ the key is deleted and every predicate below reads false:
+// routing is byte-identical to the pre-exclusion transport.
+
+// Parse the env-serialized exclusion list. Trimmed entries, empties dropped —
+// the reader side of the writer below (tolerant of stray whitespace; the strict
+// validation happens on WRITE, at the PUT boundary).
+function parseCompanionExcludedHosts(env = process.env) {
+  return String(env.WARDEN_COMPANION_EXCLUDED_HOSTS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// The host-aware half of every companion routing gate:
+//   <site guard> = isCompanionTransportEnabled() && !isCompanionExcludedHost(host)
+// An excluded host routes over the DEFAULT SSH path at every op family (this is
+// the point — the Windows host keeps raw-ssh attach), so this predicate must
+// never THROW and must default to false (not excluded) on any odd input. LOCAL
+// is never routed through the companion by the call sites (they all check the
+// LOCAL sentinel first), so no special case here — exact string match only.
+export function isCompanionExcludedHost(host, env = process.env) {
+  if (typeof host !== 'string' || host.length === 0) return false;
+  return parseCompanionExcludedHosts(env).includes(host.trim());
+}
+
+// Drive the env gate from the persisted config — the applyCompanionToggle
+// counterpart for the exclusion list. Called at server boot and on every
+// afterSave (PUT /api/config + /api/config/reset), so a Settings edit takes
+// effect on the next op without a restart. ALWAYS overwrites (runtime state —
+// see the block comment above), and ALWAYS writes through the PUT sanitizer so
+// the env var can only ever hold a well-formed, comma-free list (a hand-edited
+// config.json that slipped a bad entry past load degrades to NO exclusions
+// rather than injecting an arbitrary string into the environment).
+//
+// DELIBERATE EXTRA: a host that is NEWLY excluded (present now, absent at the
+// previous apply) has any live companion state torn down — cached channel
+// killed + every per-host map (status, op tallies, pane-push subscriptions,
+// agent-state refs, delta cache) cleared — so an exclusion is complete and
+// immediate: no lingering ssh process, no more pane pushes, no stale tallies.
+// Un-excluding needs nothing: the maps are empty, the next op re-bootstraps.
+// Returns the sanitized list that is now in force.
+let _appliedExclusions = [];
+export function applyCompanionExclusions(rawHosts, { env = process.env } = {}) {
+  const list = sanitizeCompanionExcludedHosts(rawHosts) ?? [];
+  const previous = new Set(_appliedExclusions);
+  for (const host of list) {
+    if (!previous.has(host)) releaseExcludedHostState(host);
+  }
+  _appliedExclusions = list;
+  if (list.length === 0) delete env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+  else env.WARDEN_COMPANION_EXCLUDED_HOSTS = list.join(',');
+  return list;
+}
+
+// Tear down EVERY companion-side state a host can hold. Called for newly
+// excluded hosts (see applyCompanionExclusions) so the exclusion leaves zero
+// live state behind: a killed channel ends the ssh process AND the remote
+// companion with it (no more pane pushes), and the cleared maps mean nothing
+// re-subscribes or re-tallies until the host is un-excluded and re-engaged.
+// Best-effort per item: a kill failure must not block clearing the maps.
+function releaseExcludedHostState(host) {
+  const cached = channelCache.get(host);
+  if (cached) {
+    channelCache.delete(host);
+    if (cached && typeof cached.then !== 'function' && typeof cached.kill === 'function') {
+      try { cached.kill(); } catch { /* best-effort */ }
+    }
+    // An in-flight bootstrap Promise is not killable; deleting the entry drops
+    // it, and getChannel's settle path re-checks the cache BY IDENTITY and
+    // kills the superseded channel instead of caching it — the success-path
+    // twin of the failure-path identity check it has always run. Pinned by the
+    // release-race regression test in companion-excluded-hosts.test.js.
+  }
+  companionStatus.delete(host);
+  companionOps.delete(host);
+  paneSubscriptions.delete(host);
+  agentStateWatched.delete(host);
+  paneDeltaCache.delete(host);
 }
 
 // src/companion.js -> ../companion/dist. Works in dev (repo root) and in the
@@ -265,7 +371,7 @@ export class CompanionTransportError extends Error {
     this.host = host;
     this.reason = reason;
     this.recovery = recovery ||
-      `Set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path, or verify the host is reachable (ssh ${host}).`;
+      `Set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path, exclude this host in Settings → Performance ("Companion excluded hosts") to route just it over the default SSH path, or verify the host is reachable (ssh ${host}).`;
   }
 }
 
@@ -739,19 +845,37 @@ function joinCompanionOps(host, status) {
 // disabled (toggle off), for LOCAL (the companion is remote-only), or for a host
 // no companion op has engaged yet, so a reader never mistakes "not applicable /
 // not yet" for an error. (WARDEN-878)
+//
+// WARDEN-1390: a host on the companionExcludedHosts list reports
+// {state:'inactive', reason:'excluded-by-setting'} — the host row's indicator
+// then says WHY the channel is dark for this host (a user choice, visible in
+// Settings) instead of the bare "not yet engaged" inactive. The toggle-off
+// branch keeps its reason-less shape (byte-identical contract with the
+// pre-exclusion status map and its deepStrictEqual pins); only the excluded
+// branch adds the reason.
 export function getCompanionStatus(host) {
   if (!isCompanionTransportEnabled()) return { state: 'inactive' };
   if (host === LOCAL) return { state: 'inactive' };
+  if (isCompanionExcludedHost(host)) return { state: 'inactive', reason: 'excluded-by-setting' };
   return joinCompanionOps(host, companionStatus.get(host) ?? { state: 'inactive' });
 }
 
 // Read every host's status (host -> status object). Empty when the transport is
 // disabled (the toggle check short-circuits, so stale entries from a prior
 // enabled-window never leak out while off). (WARDEN-878)
+//
+// WARDEN-1390: an EXCLUDED host's entry (only reachable if it engaged before
+// being excluded and the entry has not been released yet) reads as inactive
+// with the excluded-by-setting reason, mirroring getCompanionStatus — the
+// aggregated shape must never contradict the per-host read for the same host.
 export function getAllCompanionStatuses() {
   if (!isCompanionTransportEnabled()) return {};
   const out = {};
-  for (const [host, status] of companionStatus) out[host] = joinCompanionOps(host, status);
+  for (const [host, status] of companionStatus) {
+    out[host] = isCompanionExcludedHost(host)
+      ? { state: 'inactive', reason: 'excluded-by-setting' }
+      : joinCompanionOps(host, status);
+  }
   return out;
 }
 
@@ -923,6 +1047,22 @@ export async function getChannel(host, cfg = {}, deps = {}) {
   setCompanionStatus(host, { state: 'bootstrapping' });
   const bootstrapPromise = bootstrapChannel(host, cfg, deps)
     .then((channel) => {
+      // WARDEN-1390: the cache entry may have been REPLACED while this bootstrap
+      // was in flight — most notably releaseExcludedHostState dropping it because
+      // the host was excluded mid-bootstrap. Only the SURVIVING entry wins: a
+      // superseded bootstrap kills its channel instead of resurrecting a live
+      // connection to a host the user just excluded. This is the same identity
+      // check the failure path below has always run — this is its success-path
+      // twin. The killed channel is still returned so an op that raced the
+      // exclusion (gate-checked before it landed) fails on a dead channel rather
+      // than silently riding a live one; no status write happens (the reader
+      // reports the exclusion reason for an excluded host anyway).
+      if (channelCache.get(host) !== bootstrapPromise) {
+        if (typeof channel.kill === 'function') {
+          try { channel.kill(); } catch { /* best-effort */ }
+        }
+        return channel;
+      }
       channelCache.set(host, channel);
       // WARDEN-878: successful bootstrap → active + the version the ping just
       // verified. pingOnce confirms the host's companion reports manifest.version,
@@ -1050,6 +1190,18 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
 //             mapCmdError, which deliberately OMITS the op name (WARDEN-933).
 async function companionOp(host, cfg, deps, { refuse, run, fail }) {
   if (host === LOCAL) return refuse();
+  // WARDEN-1390 backstop: every routing site already gates on the per-host
+  // exclusion BEFORE choosing the companion path (an excluded host must ride
+  // the DEFAULT SSH path, which the site performs itself). A call reaching here
+  // anyway means a site was missed or a direct channel leg bypassed its gate —
+  // surface the exclusion-specific remedy (remove the host from the Settings
+  // list; toggling the transport off would be the wrong advice) instead of
+  // silently opening a channel the user excluded. Companion-or-fail: never a
+  // quiet second transport where an explicit user choice is being violated.
+  if (isCompanionExcludedHost(host)) {
+    return fail(new CompanionTransportError(host, 'this host is excluded from companion transport by the companionExcludedHosts setting',
+      `Remove ${host} from Settings → Performance ("Companion excluded hosts") to route it over the companion channel again (it is currently served by the default SSH path).`));
+  }
   try {
     const channel = await getChannel(host, cfg, deps);
     return await run(channel);
@@ -1417,7 +1569,7 @@ export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}
           ok: false,
           code: -1,
           stdout: '',
-          stderr: `companion binary on ${host} is too old: it does not advertise the 'exec' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.`,
+          stderr: `companion binary on ${host} is too old: it does not advertise the 'exec' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to route just it over the default SSH path.`,
         };
       }
       const timeoutMs = opts.timeout ?? 8000;
@@ -1568,7 +1720,15 @@ function liveChannelFor(host) {
 // parity, and non-fallthrough to the default path without real ssh.
 export async function deliverRemoteScript(host, fullScript, { innerScript, container = '', timeout = 8000, run: defaultPathRun } = {}, cfg = {}, deps = {}) {
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (isEnabled()) {
+  // WARDEN-1390: the per-host exclusion is part of the routing decision, not a
+  // failure. An excluded host takes the default run() path here (the raw-ssh
+  // delivery the caller would have gotten with the transport off) — the
+  // script-delivery legs this helper routes (git routes, claude-sessions,
+  // observer tails, file read/exists, pane-container walk) keep working for a
+  // Windows host the user has excluded, which is the entire point of the
+  // per-host opt-out. The companionOp backstop inside execInContext still
+  // refuses an excluded host, so a missed gate can never open a channel here.
+  if (isEnabled() && !isCompanionExcludedHost(host)) {
     return (deps.execInContext ?? execInContext)(host, innerScript ?? fullScript, { container, timeout }, cfg, deps);
   }
   const runFn = defaultPathRun ?? deps.run ?? defaultRun;
@@ -1636,7 +1796,7 @@ export async function writeFileToHost(host, { script, container, buf } = {}, cfg
           ok: false,
           code: -1,
           stdout: '',
-          stderr: `companion binary on ${host} is too old: it does not advertise the 'writeFile' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, or set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.`,
+          stderr: `companion binary on ${host} is too old: it does not advertise the 'writeFile' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to route just it over the default SSH path.`,
         };
       }
       const timeoutMs = opts.timeout ?? 60000;
@@ -1731,7 +1891,7 @@ export function encodeAttachInput(s) {
 export function attachUnsupportedMessage(host, methods, version) {
   return `companion binary on ${host} is too old or cannot serve an attach: it does not advertise the 'attachStart' RPC (ping methods: ${(methods || []).join(', ') || 'none'}). ` +
     `If the binary is stale, remove ~/.warden/companion-${version} on the host and retry so the bootstrap re-uploads the current one. ` +
-    `If the host is Windows the companion cannot allocate a PTY there — set WARDEN_COMPANION_TRANSPORT=0 (or turn the Settings toggle off) to attach over the default SSH path.`;
+    `If the host is Windows the companion cannot allocate a PTY there — exclude this host in Settings → Performance ("Companion excluded hosts") to attach over the default SSH path (the fleet-global WARDEN_COMPANION_TRANSPORT=0 toggle also works, but turns the channel off for every host).`;
 }
 
 // CompanionAttachSession is the IPty-compatible handle attachSession() returns.
@@ -2000,6 +2160,16 @@ export class CompanionAttachSession {
 // passes; the async path then settles it as an exit. Never guesses.
 export function attachPreflight(host, deps = {}) {
   if (host === LOCAL) throw new Error(LOCAL_REFUSAL);
+  // WARDEN-1390: an excluded host must never open a channel, even if a caller
+  // bypassed its routing gate — the preflight is the one synchronous throw
+  // point every companion attach passes through (server.js turns it into an
+  // attach_error frame). The remedy names the per-host setting, not the
+  // fleet-global toggle: the user's exclusion choice is being violated, so the
+  // fix is to remove the exclusion, and the default SSH path they wanted is
+  // what the caller's gate should have chosen.
+  if (isCompanionExcludedHost(host)) {
+    throw new Error(`companion attach is excluded for ${host} by the companionExcludedHosts setting — remove it from Settings → Performance ("Companion excluded hosts") to restore companion attach (it is currently served by the default SSH path).`);
+  }
   const cached = channelCache.get(host);
   // Not a live channel (absent, a bootstrap promise, or dead) → nothing known
   // yet; let the async path decide rather than inventing a verdict.
@@ -2049,7 +2219,7 @@ export function attachSession(host, { script, cols = 100, rows = 30, term } = {}
       // for attach, where the verdict is a hard, actionable error).
       methods = await channelMethodsStrict(channel, opts);
     } catch (e) {
-      throw new Error(`companion attach on ${host} could not verify the binary's capabilities (ping failed: ${e && e.message ? e.message : e}). Retry the pane, or set WARDEN_COMPANION_TRANSPORT=0 to attach over the default SSH path.`);
+      throw new Error(`companion attach on ${host} could not verify the binary's capabilities (ping failed: ${e && e.message ? e.message : e}). Retry the pane, set WARDEN_COMPANION_TRANSPORT=0 to attach over the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to attach just it over the default SSH path.`);
     }
     if (!methods.includes('attachStart')) {
       // NO graceful degradation, deliberately: a silent per-open raw-SSH fallback
@@ -2286,7 +2456,15 @@ async function syncSubscriptionOnce(host, cfg, opts = {}, deps = {}) {
   const sub = paneSubscriptions.get(host);
   const panes = sub ? [...sub.values()].map((e) => e.descriptor) : [];
   try {
-    const channel = await getChannel(host, cfg, deps);
+    // WARDEN-1390: an excluded host must never BOOTSTRAP a channel. The only
+    // way a sync runs for one is the release leg (unsubscribePanes draining a
+    // subscription taken before the exclusion) — serve it from the live channel
+    // only; with no live channel there is nothing to release anyway (the
+    // channel died, and the remote pusher died with it).
+    const channel = isCompanionExcludedHost(host)
+      ? liveChannelFor(host)
+      : await getChannel(host, cfg, deps);
+    if (!channel) return { host, ok: true, subscribed: false, excluded: true };
     const methods = await channelMethods(channel, opts);
     if (!methods.includes('subscribePanes')) {
       // Stale cached binary (predates WARDEN-413): degrade to the existing poll
@@ -2337,6 +2515,13 @@ function syncSubscription(host, cfg, opts = {}, deps = {}) {
 export async function subscribePanes(host, list, cfg = {}, opts = {}, deps = {}) {
   if (host === LOCAL) {
     return { host, ok: false, error: 'companion transport does not apply to the local host', subscribed: false };
+  }
+  // WARDEN-1390: an excluded host is never subscribed — backstop for the
+  // wsLayer gate (syncMonitorSubscription) and reconcilePaneSubscriptions'
+  // grouping, so a missed caller cannot put pushes on a host the user
+  // excluded. The ref map is NOT touched (nothing to release later).
+  if (isCompanionExcludedHost(host)) {
+    return { host, ok: false, error: `companion transport is excluded for ${host} (Settings → Performance: "Companion excluded hosts"); panes keep polling over the default SSH path`, subscribed: false };
   }
   let sub = paneSubscriptions.get(host);
   if (!sub) { sub = new Map(); paneSubscriptions.set(host, sub); }
@@ -2421,7 +2606,11 @@ export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, dep
   const byHost = new Map();
   const seenKey = new Set();
   for (const c of chats || []) {
-    if (c.host === LOCAL) continue;
+    // WARDEN-1390: an excluded host never subscribes (its panes keep polling
+    // over the default SSH path) and any TTL refs it still holds drain below —
+    // the unsubscribe release runs against the live channel only, so the
+    // exclusion can never provoke a fresh bootstrap to it.
+    if (c.host === LOCAL || isCompanionExcludedHost(c.host)) continue;
     const dedupe = `${c.host}\0${c.key}`;
     if (seenKey.has(dedupe)) continue;
     seenKey.add(dedupe);

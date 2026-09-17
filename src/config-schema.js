@@ -28,6 +28,41 @@ import { sanitizeWatchPatterns } from './agentState.js';
 // `issueLinkTrackers` descriptor's PUT guard below delegates to it, the same
 // one-sanitizer-one-descriptor shape as watchPatterns above.
 import { sanitizeIssueLinkTrackers } from './issueLinks.js';
+
+// WARDEN-1390 — the per-host companion-transport exclusion list (a pure PUT
+// sanitizer + serializer, kept HERE beside the registry that drives it, and
+// imported by src/companion.js so the env-var writer can never emit an entry
+// this guard would refuse).
+//
+// The constraint that shapes it: the applied list is serialized into
+// WARDEN_COMPANION_EXCLUDED_HOSTS as a comma-separated env var (the runtime
+// channel every routing predicate reads), so an entry containing ',' would make
+// the serialization ambiguous — that entry is REFUSED, along with anything
+// non-string, empty after trimming, longer than an SSH alias has any business
+// being, or carrying newline/control characters (paste artifacts that would
+// otherwise match no real host and silently NOT exclude it — a dropped
+// exclusion is invisible breakage, so the whole field is refused rather than
+// silently cleaned). Valid entries are trimmed and de-duplicated.
+export const COMPANION_EXCLUDED_HOST_MAX = 200;
+export const COMPANION_EXCLUDED_HOST_MAX_COUNT = 100;
+
+export function sanitizeCompanionExcludedHosts(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') return null;
+    const host = entry.trim();
+    if (host.length === 0) return null;
+    if (host.length > COMPANION_EXCLUDED_HOST_MAX) return null;
+    // ',' is the env serialization separator; newline/CR/control chars are
+    // paste artifacts that would silently match no real host. All refused.
+    if (host.includes(',') || /[\n\r\x00-\x1f\x7f]/.test(host)) return null;
+    if (out.includes(host)) continue;
+    if (out.length >= COMPANION_EXCLUDED_HOST_MAX_COUNT) return null;
+    out.push(host);
+  }
+  return out;
+}
 // WARDEN-1116 — THE telemetry consent authority. Its category registry DRIVES the
 // telemetry consent fields below, so adding a category is one entry there rather
 // than a new descriptor (plus a new GET key, a new PUT guard, a new default…)
@@ -350,6 +385,29 @@ export const CONFIG_FIELDS = [
     // operator override (force on/off regardless of the UI). Remote-only by
     // design — local hosts never route through it.
   },
+  {
+    key: 'companionExcludedHosts',
+    default: [],
+    exposure: 'public',
+    type: 'companionExcludedHosts',
+    resolve: 'arrayOrEmpty',
+    order: 19,
+    // Per-host companion-transport opt-out (WARDEN-1390). The toggle above is
+    // fleet-global, but the reason to opt out is per-host: a Windows companion
+    // can never carry a host-side PTY (companion/pty_windows.go), and the
+    // user must be able to exclude exactly that host while every other host
+    // keeps riding the channel. Each entry is a bare SSH host alias, matched
+    // exactly against the host string the routing sites hold (the same bare
+    // strings cfg.hosts carries; LOCAL is unreachable — sites check it first).
+    // Empty by default ⇒ routing is byte-identical to the pre-exclusion
+    // transport. Applied at boot + on every PUT by applyCompanionExclusions
+    // (src/companion.js), which serializes the list into
+    // WARDEN_COMPANION_EXCLUDED_HOSTS for the routing predicates; a newly
+    // excluded host's live channel + subscription state is torn down on apply.
+    // Sanitized on PUT via sanitizeCompanionExcludedHosts: entries must be
+    // comma-free, non-empty strings (whole field refused otherwise — a
+    // silently-dropped exclusion would be invisible breakage).
+  },
   // Optional telemetry — OFF BY DEFAULT, INDEPENDENT PER-CATEGORY consent
   // (WARDEN-1116 / roadmap WARDEN-446 / design WARDEN-443 Principle 2). Nothing
   // leaves the machine until the user explicitly turns a category on in Settings;
@@ -646,6 +704,7 @@ const VALID_TYPES = new Set([
   'array', 'number', 'string', 'boolean', 'oneOf',
   'nullablePositiveNumber', 'flooredNumber', 'watchPatterns', 'secret', 'llm',
   'issueLinkTrackers',
+  'companionExcludedHosts',
 ]);
 const VALID_RESOLVES = new Set(['identity', 'neqFalse', 'eqTrue', 'orEmpty', 'arrayOrEmpty']);
 const VALID_EXPOSURES = new Set(['public', 'secret', 'derived', 'internal']);
@@ -1002,6 +1061,18 @@ function applyField(d, target, value, refused, refuseKey) {
       else note();
       return;
     }
+    case 'companionExcludedHosts': {
+      // WARDEN-1390: the per-host exclusion list. WHOLE-FIELD refusal (not
+      // entry-dropping like watchPatterns) on any malformed entry: a silently
+      // dropped exclusion is invisible breakage — the user believes a host is
+      // excluded, the Windows host rides the channel, attach breaks with the
+      // old fleet-global remedy copy. A refusal rides the `refused` map the
+      // PUT response reports, so the warning is visible.
+      const cleaned = sanitizeCompanionExcludedHosts(value);
+      if (cleaned) target[key] = cleaned;
+      else note();
+      return;
+    }
     case 'secret':
       // NO-CLOBBER: only a non-empty string overwrites the stored secret, so an
       // untouched password field (GET never seeds cleartext) survives a save.
@@ -1116,6 +1187,8 @@ export function migrateConfig(raw) {
 //                                    IPC payload (incl. cleartext authToken) to
 //                                    the Electron main process (WARDEN-524/569).
 //   applyCompanionToggle           — the live companion-transport toggle fn.
+//   applyCompanionExclusions       — the per-host companion-exclusion applier
+//                                    (env re-serialization + state release).
 //   restartBudgetPoll             — the live budget-poll restart fn.
 //   companionOverridden            — the boot snapshot of the env override.
 // ---------------------------------------------------------------------------
@@ -1123,5 +1196,10 @@ export function migrateConfig(raw) {
 export function afterSave(cfg, deps) {
   deps.forwardTelemetryConfig(cfg);
   deps.applyCompanionToggle(cfg.companionTransportEnabled, { override: deps.companionOverridden });
+  // WARDEN-1390: re-serialize the per-host exclusion list into the env gate the
+  // routing predicates read (and release any newly excluded host's live
+  // companion state). Same live-apply contract as the toggle above: boot +
+  // every afterSave, effective on the next op.
+  deps.applyCompanionExclusions(cfg.companionExcludedHosts);
   deps.restartBudgetPoll();
 }

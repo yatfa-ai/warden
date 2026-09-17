@@ -39,7 +39,7 @@
 import { spawn } from 'node:child_process';
 import { captureAndSettle } from './childCapture.js';
 import { shellQuote, runWithPool } from './ssh.js';
-import { isCompanionTransportEnabled, deliverRemoteScript } from './companion.js';
+import { isCompanionTransportEnabled, isCompanionExcludedHost, deliverRemoteScript } from './companion.js';
 
 const LOCAL = '(local)';
 
@@ -264,7 +264,7 @@ function runWalk(host, script, cfg, deps = {}) {
     });
   }
   const companionOn = (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)();
-  return companionOn
+  return companionOn && !isCompanionExcludedHost(host)
     ? (deps.deliverRemoteScript ?? deliverRemoteScript)(host, script, { timeout: WALK_TIMEOUT_MS }, cfg, deps)
     : (deps.runWithPool ?? runWithPool)(host, script, { timeout: WALK_TIMEOUT_MS }, cfg);
 }

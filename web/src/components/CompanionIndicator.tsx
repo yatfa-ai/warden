@@ -33,16 +33,22 @@ import type { CompanionStatus } from '@/lib/healthUtils';
  * class contract and the short-form text; do not loosen them without
  * re-measuring the row in a browser.
  *
- * Renders ONLY for active/bootstrapping/error. `inactive` (LOCAL, or a host no
- * companion op has engaged yet) renders nothing — the indicator appears ONLY when
- * there is actionable state to read, so a healthy fleet isn't blanketed in gray
- * dots. The `companion` field is itself absent entirely when the transport is
+ * Renders ONLY for active/bootstrapping/error, plus the WARDEN-1390 excluded
+ * case. `inactive` (LOCAL, or a host no companion op has engaged yet) renders
+ * nothing — the indicator appears ONLY when there is actionable state to read,
+ * so a healthy fleet isn't blanketed in gray dots. `inactive` WITH the
+ * 'excluded-by-setting' reason DOES render: the channel being dark for that
+ * host is a deliberate user choice (Settings → Performance: Companion excluded
+ * hosts), and an unexplained dark row would read as broken — so it gets a
+ * muted (deliberately non-alarming) ring dot + the short per-host remedy.
+ * The `companion` field is itself absent entirely when the transport is
  * disabled (the server omits it), so a toggle-off fleet shows no indicators.
  *
  * Reuses the themed StatusDot primitive (WARDEN-68 Rule 3): the connectivity
  * dot's green-solid / red-square vocabulary transfers directly — active is the
  * "working" green solid, error the "bad" red square, and bootstrapping gets the
- * pulse variant (its literal meaning: an in-flight connection).
+ * pulse variant (its literal meaning: an in-flight connection). The excluded
+ * state uses the muted ring — "off, on purpose", not an error color.
  */
 
 /** Full activity summary for the accessible label, e.g.
@@ -74,6 +80,26 @@ function companionOpsShort(ops: CompanionStatus['ops']): string | null {
 }
 
 export function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
+  // WARDEN-1390: an excluded host is inactive ON PURPOSE — render the muted
+  // "excluded by setting" indicator so the host row says WHY the channel is
+  // dark instead of looking broken. Same layout budget as the error case:
+  // short visible text, full story in the accessible label.
+  if (companion?.state === 'inactive' && companion.reason === 'excluded-by-setting') {
+    const excludedLabel = 'Companion excluded for this host by the "Companion excluded hosts" setting (Settings → Performance) — operations here ride the default SSH path';
+    return (
+      <span className="inline-flex min-w-0 items-center gap-1">
+        <StatusDot
+          tone="muted"
+          variant="ring"
+          label={excludedLabel}
+          title={excludedLabel}
+        />
+        <span className="text-[10px] text-muted-foreground min-w-0 max-w-24 truncate">
+          excluded
+        </span>
+      </span>
+    );
+  }
   if (!companion || companion.state === 'inactive') return null;
   const tone: StatusTone = companion.state === 'active' ? 'green'
     : companion.state === 'bootstrapping' ? 'yellow'

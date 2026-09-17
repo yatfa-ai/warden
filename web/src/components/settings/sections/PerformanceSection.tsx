@@ -3,6 +3,7 @@
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
@@ -49,6 +50,41 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
           Unset the variable and restart Warden to control it here.
         </p>
       )}
+
+      {/* WARDEN-1390 — the PER-HOST opt-out. The toggle above is fleet-global, but
+          the reason to opt out is usually one host (a Windows companion can never
+          carry a PTY), so this list excludes exactly those hosts while every other
+          host keeps riding the channel. Comma-separated aliases, parsed to the
+          string[] the backend persists; the server refuses malformed entries
+          (commas/newlines/control characters — a dropped exclusion would be
+          invisible breakage) and the save flow reports the refusal. */}
+      <div className="flex flex-col gap-2 pt-1">
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="companionExcludedHosts">Companion excluded hosts</Label>
+          <ConfigResetToDefaultButton label="Companion excluded hosts" path="companionExcludedHosts" config={config} setConfig={setConfig} />
+        </div>
+        <Input
+          id="companionExcludedHosts"
+          value={(config.companionExcludedHosts ?? []).join(', ')}
+          onChange={(e) => setConfig({
+            ...config,
+            companionExcludedHosts: e.target.value
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean),
+          })}
+          placeholder="e.g. win-box, build-agent (comma-separated host aliases)"
+        />
+        <p className="text-xs text-muted-foreground">
+          Hosts listed here never use the companion transport — they keep the default
+          SSH path for every operation (attach, capture, exec, …), while all other
+          hosts keep riding the persistent channel. Use this for hosts where the
+          companion cannot deliver (a Windows companion cannot allocate a PTY, so
+          interactive attach there requires the default path). Enter bare SSH host
+          aliases, comma-separated. Takes effect on the next operation; a newly
+          excluded host's live channel is closed immediately.
+        </p>
+      </div>
     </SettingsSection>
   );
 }

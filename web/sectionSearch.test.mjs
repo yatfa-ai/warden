@@ -222,6 +222,7 @@ const SHIPPED_LABELS = [
   ['tokenbudget', 'Per-session threshold (tokens)'],
 
   ['performance', 'Companion transport'],
+  ['performance', 'Companion excluded hosts'],
 
   // The consent switches render from the registry (lib/telemetry/consent.ts,
   // WARDEN-1116) — authored as data, so their SOURCE is the module.
@@ -849,7 +850,7 @@ test('WARDEN-887 shipped search table is unregressed', () => {
   assert.deepEqual(ids('kill'), ['safety', 'tokenbudget']);
   assert.deepEqual(ids('webhook'), ['notifications']);
   assert.deepEqual(ids('telemetry'), ['telemetry']);
-  assert.deepEqual(ids('host'), ['hosts', 'display', 'newchats']);
+  assert.deepEqual(ids('host'), ['hosts', 'performance', 'display', 'newchats']);
   assert.deepEqual(ids('zzz'), []);
   assert.equal(searchSections('').length, SETTINGS_SECTIONS.length);
 });

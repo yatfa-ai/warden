@@ -8,7 +8,7 @@ import { loadCatalog, stampCatalogActivity } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats, windowActivityToMs, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
-import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, deliverRemoteScript, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
+import { isCompanionTransportEnabled, isCompanionExcludedHost, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, deliverRemoteScript, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
@@ -258,7 +258,7 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
   // discoverViaCompanion / runWithPool are injectable so a test can assert
   // delegation AND non-fallthrough to the default path without real ssh.
   const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
-  if (host !== LOCAL && isEnabled()) {
+  if (host !== LOCAL && isEnabled() && !isCompanionExcludedHost(host)) {
     return (deps.discoverViaCompanion ?? discoverViaCompanion)(host, cfg, opts);
   }
 
@@ -359,7 +359,7 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
 // the read here would strengthen nothing. Toggle OFF keeps every leg
 // byte-for-byte on its pre-1371 transport.
 function viaCompanion(host, deps = {}) {
-  return host !== LOCAL && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)();
+  return host !== LOCAL && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(host);
 }
 
 export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
@@ -696,7 +696,7 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
     // unchanged and remains the default. companion-or-fail: on failure we DO
     // NOT fall back to raw SSH — the error is surfaced and the panes map is
     // simply empty for this host (opt out via the env var).
-    if (isCompanionTransportEnabled()) {
+    if (isCompanionTransportEnabled() && !isCompanionExcludedHost(host)) {
       // WARDEN-413: if a live subscription is pushing fresh deltas for this host,
       // render from the in-memory delta cache and SKIP the capturePanes RPC — the
       // success gate (idle companion host -> ZERO capturePanes RPCs per monitor

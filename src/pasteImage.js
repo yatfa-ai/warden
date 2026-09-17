@@ -57,7 +57,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn as defaultSpawn } from 'node:child_process';
 import { buildSshArgv, shellQuote, SSH_BIN } from './ssh.js';
-import { isCompanionTransportEnabled, writeFileToHost } from './companion.js';
+import { isCompanionTransportEnabled, isCompanionExcludedHost, writeFileToHost } from './companion.js';
 import { resolvePaneContainer } from './paneContainer.js';
 
 const LOCAL = '(local)';
@@ -467,7 +467,7 @@ export async function deliverPastedImage(chat, cfg = {}, buf, deps = {}) {
   // another machine, and the roadmap governs reaches between hosts. The ssh path
   // remains the DEFAULT (toggle off) and is byte-identical to what shipped in
   // WARDEN-1282.
-  if (!isLocal && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
+  if (!isLocal && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(chat.host)) {
     const r = await (deps.writeFileToHost ?? writeFileToHost)(
       chat.host,
       { script: buildReceiveScript(dest), container, buf },
