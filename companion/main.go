@@ -32,7 +32,8 @@
 // attachStart (WARDEN-1295) is the second, and the only STREAM: it allocates a
 // host-side PTY, ACKs an {sid}, then pushes attachData (base64 PTY output) until
 // an attachExit. It is what lets warden's live web pane stop spawning a raw
-// `ssh -tt` child per open. Both emitters share the one writeLine mutex, and
+// `ssh -tt` child per open. Both emitters' lines interleave safely through the
+// single outbound queue's writer (WARDEN-1402, outbound.go), and
 // warden fans the two event names apart by `event` on its single handler slot.
 package main
 
@@ -148,18 +149,31 @@ func main() {
 	// per-line cap well above the 64KB default so large fleets don't truncate.
 	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 
-	// All stdout writes go through one encoder + mutex so the subscription
-	// watcher's unsolicited paneDelta events can never interleave half-lines with
-	// RPC responses (both go through writeLine). Requests are read serially today;
-	// only the watcher goroutine runs concurrently, and it shares this mutex.
-	var outMu sync.Mutex
-	enc := json.NewEncoder(os.Stdout)
-	writeLine := func(v any) {
-		outMu.Lock()
-		defer outMu.Unlock()
-		_ = enc.Encode(v) // json.Encoder appends the newline delimiter
-	}
+	// All stdout writes used to funnel through one mutex-guarded encoder, and
+	// the serial dispatch loop blocked inside write(response) whenever the
+	// channel backpressured — keystrokes sat unread in stdin behind a stuck
+	// loop (WARDEN-1402: measured 100% echo loss under flood with a slow
+	// drain; live telemetry shows every channel passenger — exec RPCs
+	// included — degrading together in 2-10s bursts). The writer goroutine +
+	// two-class queue in outbound.go now own stdout: producers enqueue and
+	// return, the echo of a recently-typed pane overtakes flooding panes'
+	// bulk, the bulk queue caps with backpressure on the PTY producers, and
+	// AIMD pacing bounds the kernel-side backlog that manufactured the
+	// multi-second tail. Responses (the dispatch loop's writes) NEVER block —
+	// that property is the fix.
+	//
+	// The interactive classification consults the attach registry: a pane with
+	// a recent keystroke is one whose next output chunk is that keystroke's
+	// echo.
+	out := newOutboundQueue(func(sid string) bool { return recentInput(sid, inputEchoWindow) })
+	go out.serve(bufio.NewWriter(os.Stdout), nil)
+
+	writeLine := func(v any) { out.enqueueLine(v) }
+	// write is the dispatch loop's response helper — the same call shape every
+	// handler below already uses. It enqueues and returns: under a saturated
+	// channel the loop keeps reading stdin while the writer drains behind it.
 	write := func(r Response) { writeLine(r) }
+	writeAttachData := func(sid string, b []byte) { out.enqueueAttachData(sid, b) }
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -283,7 +297,7 @@ func main() {
 			// under it, ACK {sid} IMMEDIATELY, and only THEN start the output
 			// pump — the subscribePanes ACK-then-stream contract, tightened so
 			// no attachData can reach the client before it knows the sid.
-			sid, launch, err := startAttach(req.Params, writeLine)
+			sid, launch, err := startAttach(req.Params, writeLine, writeAttachData)
 			if err != nil {
 				// Platform without a PTY, or a spawn failure. Surfaced as an
 				// ordinary {ok:false} so warden maps it to its existing
