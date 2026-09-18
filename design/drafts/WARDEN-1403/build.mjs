@@ -288,7 +288,7 @@ const ledger = {
 .led-pre{color:var(--muted)}
 .led-pre .pre-m{display:none}
 .led-gut{display:flex;gap:5px;flex:none;font-size:10px;color:var(--muted)}
-.led-gut .g-host{color:var(--muted);opacity:.92}
+.led-gut .g-host{color:var(--muted)}
 .led-acts{display:none;gap:1px;flex:none;align-items:center}
 .led-acts .icobtn{font-size:10px;padding:0 2px}
 .led-row:hover .led-gut{display:none}
