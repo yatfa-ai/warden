@@ -26,6 +26,11 @@ import { routeOperationKey, REQUEST_MAX_OPERATIONS } from './requestTelemetry.js
  *     that un-routed request still builds an event that passes
  *     validateBaseEvent (the regression leg for the defect this ticket was
  *     parked on: one garbage request must never void the real route metrics);
+ *   • a HEAD request — served by the GET handler with req.method staying
+ *     'HEAD' — folds under the route's `get-` key; NO `head-*` key ever
+ *     appears (the audit's blocking finding: unaliased head-* twins were a
+ *     route.methods-invisible growth axis that could exhaust maxOperations
+ *     and reach the unsendable __other__ accumulator);
  *   • the derived SIZING TRIPWIRE — the live route table's distinct pattern
  *     keys (walked from the REAL router, including the nested git router)
  *     fit under the producer's maxOperations WITH room for the unmatched
@@ -111,6 +116,28 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
       'the concrete id can never ride a key');
   });
 
+  it('a HEAD request folds under the GET key — no head-* key ever appears', async () => {
+    // The audit-blocking leg: Express serves every GET route's HEAD variant
+    // through the GET handler with req.method staying 'HEAD' — a runtime key
+    // source the route table's methods census never sees. routeOperationKey
+    // aliases 'head' onto 'get', so the observation must land in the route's
+    // existing `get-` row and NO `head-*` key may exist (an unaliased head-*
+    // twin per GET route is the growth axis that could exhaust
+    // REQUEST_MAX_OPERATIONS and reach the unsendable __other__ accumulator).
+    const res = await fetch(`${baseUrl}/api/health`, { method: 'HEAD' });
+    assert.equal(res.status, 200);
+
+    const snap = requestTelemetry.flushNow();
+    assert.ok(snap, 'the window must flush');
+    const healthOp = snap.operations.find((o) => o.operation === 'get-api-health');
+    assert.ok(healthOp && healthOp.count >= 1,
+      `the HEAD observation folded under get-api-health (got: ${snap.operations.map((o) => o.operation).join(', ')})`);
+    assert.equal(snap.operations.some((o) => o.operation.startsWith('head-')), false,
+      `no head-* key may ever be emitted (got: ${snap.operations.map((o) => o.operation).join(', ')})`);
+    assert.equal(JSON.stringify(snap).includes('"head-'), false,
+      'no head-* key may ever appear anywhere in the snapshot');
+  });
+
   it('an un-routed /api request folds to unmatched — and the mixed window still passes validateBaseEvent', async () => {
     // The regression leg for the defect this ticket was parked on: real route
     // traffic + one garbage request must deliver BOTH — the garbage under the
@@ -155,6 +182,12 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
     // hides its 15 routes from a top-level-only walk). Derived, never frozen:
     // a sibling PR that adds routes moves this number and this test still
     // passes until the budget is genuinely exhausted.
+    // COMPLETE because of the HEAD alias: every GET route also serves HEAD
+    // with req.method='HEAD' — a variant route.methods never lists — but
+    // routeOperationKey aliases 'head' onto the route's `get-` key, so
+    // deriving the census through THE SAME MAPPER the producer folds with
+    // yields exactly the reachable key set. (Auto-OPTIONS answers never
+    // match a route, so they fold to the budgeted unmatched sink.)
     function collectRoutes(stack, out = []) {
       for (const layer of stack) {
         if (layer && layer.route) out.push(layer.route);

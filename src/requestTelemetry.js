@@ -44,7 +44,12 @@
 //   • REQUEST_MAX_OPERATIONS is sized above the live route census + the
 //     unmatched sink, so the aggregator's internal overflow accumulator is
 //     never reached (src/request-telemetry-http.test.js asserts this as a
-//     derived sizing tripwire, not a frozen count).
+//     derived sizing tripwire, not a frozen count). The census is COMPLETE:
+//     Express serves HEAD through the GET handler with req.method staying
+//     'HEAD', so routeOperationKey aliases 'head' onto the route's `get-`
+//     key — without that alias every GET route would carry an uncounted
+//     `head-*` twin (a growth axis route.methods never reports), and enough
+//     distinct keys would reach the reserved accumulator and void the window.
 //
 // CONSENT: recording is gated LIVE on the `operational-metrics` category (no
 // new category, no new checkbox). When the category is off (the default),
@@ -79,8 +84,11 @@ export const UNMATCHED_OPERATION = 'unmatched';
 // census (56 /api route patterns + the non-API '/' at the time of writing —
 // the tripwire test derives it, it is never trusted from prose) PLUS the
 // `unmatched` sink, so the aggregator's internal — and unsendable — reserved
-// overflow key is structurally unreachable. The wire caps one event at 129
-// operations (schema MAX_OPERATIONS_PER_EVENT): 96 + 1 reserved = 97 ≤ 129.
+// overflow key is structurally unreachable. The census counts the REACHABLE
+// set: HEAD requests are aliased onto their GET key by routeOperationKey
+// (they run the GET handler), and auto-OPTIONS answers never match a route,
+// so they fold into the budgeted unmatched sink. The wire caps one event at
+// 129 operations (schema MAX_OPERATIONS_PER_EVENT): 96 + 1 reserved = 97 ≤ 129.
 export const REQUEST_MAX_OPERATIONS = 96;
 
 // The schema validator's operation-name pattern, mirrored locally (canonical
@@ -128,6 +136,19 @@ const MAX_ROUTE_SEGMENTS = 6;
 export function routeOperationKey(method, routePath) {
   const verb = String(method ?? '').toLowerCase();
   if (!HTTP_VERB_RE.test(verb)) return UNMATCHED_OPERATION;
+  // Express serves every GET route's HEAD variant through the SAME GET
+  // handler (router v2: Route.prototype.dispatch normalizes 'head' → 'get'
+  // internally) with req.method staying 'HEAD' — semantically it is the SAME
+  // operation on the same resource, so it folds under the route's `get-` key.
+  // Without this alias HEAD would mint a `head-*` key for every
+  // GET-addressable route: a growth axis the route table's own `route.methods`
+  // census never sees, big enough to exhaust REQUEST_MAX_OPERATIONS and reach
+  // the aggregator's unsendable `__other__` accumulator — which voids whole
+  // windows. With it, the census (derived through THIS mapper) is the
+  // complete reachable key space. (OPTIONS needs no alias: the router answers
+  // auto-OPTIONS without matching any route, so req.route stays undefined and
+  // the request folds to the unmatched sink — one bounded key, in budget.)
+  const verbKey = verb === 'head' ? 'get' : verb;
   // `req.route.path` is a string for pattern routes; Express regex/array
   // routes carry a RegExp/array there instead — nothing derivable, sink.
   if (typeof routePath !== 'string' || routePath.length === 0) return UNMATCHED_OPERATION;
@@ -141,7 +162,7 @@ export function routeOperationKey(method, routePath) {
     }
     mapped.push(STATIC_SEGMENT_RE.test(seg) ? seg : 'id');
   }
-  const key = mapped.length ? `${verb}-${mapped.join('-')}` : `${verb}-root`;
+  const key = mapped.length ? `${verbKey}-${mapped.join('-')}` : `${verbKey}-root`;
   return OP_NAME_RE.test(key) && key.length <= OP_NAME_MAX_LENGTH ? key : UNMATCHED_OPERATION;
 }
 

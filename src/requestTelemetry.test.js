@@ -15,6 +15,10 @@ import assert from 'node:assert/strict';
 //   • the CLOSED-SET key mapping — static kebab segments stay verbatim, a
 //     `:param` folds to `id`, and a HOSTILE id-bearing path can never ride a
 //     key (digit/uppercase/foreign-charset segments all fold to `id`);
+//   • the HEAD alias — Express serves HEAD through the GET handler with
+//     req.method staying 'HEAD', so it folds under the route's `get-` key;
+//     an unaliased `head-*` twin per GET route would be a census-invisible
+//     growth axis toward the unsendable `__other__` accumulator;
 //   • the `unmatched` sink — un-routed requests and any key failing the
 //     schema's operation-name shape fold under ONE regex-safe constant, and
 //     ⛔ NO snapshot ever carries the aggregator's reserved `__other__` (that
@@ -188,6 +192,31 @@ describe('closed-set route-pattern key mapping', () => {
   it('the verb is normalized to lowercase', () => {
     assert.equal(routeOperationKey('GET', '/api/health'), 'get-api-health');
     assert.equal(routeOperationKey('POST', '/api/health'), 'post-api-health');
+  });
+
+  it('HEAD folds under the GET route key — Express serves HEAD with the GET handler', () => {
+    // Express (router v2) dispatches HEAD through the route's GET handler with
+    // req.method staying 'HEAD'. Left unaliased, every GET-addressable route
+    // would carry an uncounted `head-*` twin: a runtime growth axis the route
+    // table's own route.methods census never reports — enough of them would
+    // exhaust REQUEST_MAX_OPERATIONS and reach the aggregator's unsendable
+    // `__other__` accumulator, voiding the whole window. Aliased, the census
+    // (derived through the same mapper) IS the reachable set.
+    assert.equal(routeOperationKey('HEAD', '/api/health'), 'get-api-health');
+    assert.equal(routeOperationKey('head', '/api/collections/:id/agents'), 'get-api-collections-id-agents');
+
+    // Through the producer's public surface: a HEAD observation must land in
+    // the GET key's row, and no `head-*` key may exist in the snapshot.
+    const { tel } = makeHarness();
+    assert.equal(tel.recordRequest('HEAD', '/api/health', 12, true), true);
+    const snap = tel.flushNow();
+    assert.ok(snap, 'the window must flush');
+    assert.ok(snap.operations.find((o) => o.operation === 'get-api-health' && o.count >= 1),
+      'the HEAD observation folded under get-api-health');
+    assert.equal(snap.operations.some((o) => o.operation.startsWith('head-')), false,
+      'no head-* key may ever be emitted');
+    assert.equal(JSON.stringify(snap).includes('"head-'), false,
+      'no head-* key may ever appear anywhere in the snapshot');
   });
 
   it('a root path maps to <verb>-root (unreachable under the /api/ scope, kept for safety)', () => {
