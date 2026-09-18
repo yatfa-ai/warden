@@ -30,7 +30,9 @@ import { routeOperationKey, REQUEST_MAX_OPERATIONS } from './requestTelemetry.js
  *     'HEAD' — folds under the route's `get-` key; NO `head-*` key ever
  *     appears (the audit's blocking finding: unaliased head-* twins were a
  *     route.methods-invisible growth axis that could exhaust maxOperations
- *     and reach the unsendable __other__ accumulator);
+ *     and reach the unsendable __other__ accumulator) — INCLUDING against a
+ *     POST-only route, where router v2's HEAD exemption sets req.route
+ *     before the 404 (the get- twin a declared-methods-only census misses);
  *   • the derived SIZING TRIPWIRE — the live route table's distinct pattern
  *     keys (walked from the REAL router, including the nested git router)
  *     fit under the producer's maxOperations WITH room for the unmatched
@@ -138,6 +140,42 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
       'no head-* key may ever appear anywhere in the snapshot');
   });
 
+  it('a HEAD request against a POST-only route folds to that route\'s get- twin (router v2\'s HEAD exemption)', async () => {
+    // The round-2 audit finding, pinned against the REAL wiring: router v2
+    // layer-matches ANY route whose path matches a HEAD request — even one
+    // that declares no GET — setting req.route BEFORE dispatch runs no
+    // handler and the request falls through to 404. The close-time fold
+    // fires with req.route set, and the HEAD alias lands the observation on
+    // the route's `get-` twin: a key a declared-methods-only census never
+    // derives. This mechanism is exactly what the sizing tripwire's twin
+    // derivation (the test below) depends on. /api/file-exists is POST-only
+    // (app.post('/api/file-exists', …) in src/server.js).
+    const res = await fetch(`${baseUrl}/api/file-exists`, { method: 'HEAD' });
+    assert.equal(res.status, 404, 'no GET handler exists — the router falls through to 404');
+
+    const snap = requestTelemetry.flushNow();
+    assert.ok(snap, 'the window must flush');
+    const twin = snap.operations.find((o) => o.operation === 'get-api-file-exists');
+    assert.ok(twin && twin.count >= 1,
+      `the HEAD observation folded under the POST-only route's get- twin (got: ${snap.operations.map((o) => o.operation).join(', ')})`);
+    assert.equal(snap.operations.some((o) => o.operation.startsWith('head-')), false,
+      `no head-* key may ever be emitted (got: ${snap.operations.map((o) => o.operation).join(', ')})`);
+
+    // The mixed window (HEAD-exemption twin + real traffic) must still be
+    // wire-valid: main builds exactly this event from exactly this snapshot
+    // shape, and one row failing the operation-name pattern would void the
+    // whole event.
+    const event = buildOperationalMetricsEvent({
+      snapshot: snap,
+      schemaVersion: SCHEMA_VERSION,
+      runtime: 'server',
+      now: () => 0,
+    });
+    assert.ok(event, 'the snapshot builds into an operational-metrics event');
+    assert.equal(validateBaseEvent(event), true,
+      'the window carrying a HEAD-exemption twin passes validateBaseEvent');
+  });
+
   it('an un-routed /api request folds to unmatched — and the mixed window still passes validateBaseEvent', async () => {
     // The regression leg for the defect this ticket was parked on: real route
     // traffic + one garbage request must deliver BOTH — the garbage under the
@@ -182,12 +220,18 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
     // hides its 15 routes from a top-level-only walk). Derived, never frozen:
     // a sibling PR that adds routes moves this number and this test still
     // passes until the budget is genuinely exhausted.
-    // COMPLETE because of the HEAD alias: every GET route also serves HEAD
-    // with req.method='HEAD' — a variant route.methods never lists — but
-    // routeOperationKey aliases 'head' onto the route's `get-` key, so
-    // deriving the census through THE SAME MAPPER the producer folds with
-    // yields exactly the reachable key set. (Auto-OPTIONS answers never
-    // match a route, so they fold to the budgeted unmatched sink.)
+    // REACHABLE, not COMPLETE-by-derivation — the reachable key space is TWO
+    // halves, both derived through THE SAME MAPPER the producer folds with:
+    // (1) each route's declared-method keys, and (2) the `get-` twin of EVERY
+    // route pattern. Router v2 layer-matches ANY route for a HEAD request
+    // (router/index.js: `if (!hasMethod && method !== 'HEAD') { match = false }`),
+    // so `req.route` is set even on routes that declare no GET — dispatch
+    // runs no handler, the request 404s, and the close-time fold still fires —
+    // and routeOperationKey aliases 'head' onto `get-`. The two halves
+    // coincide on GET-declaring routes; the twins of the NON-GET patterns are
+    // what a declared-methods-only census silently missed (the round-2 audit
+    // finding: 18 extra keys here). (Auto-OPTIONS answers never match a
+    // route, so they fold to the budgeted unmatched sink.)
     function collectRoutes(stack, out = []) {
       for (const layer of stack) {
         if (layer && layer.route) out.push(layer.route);
@@ -216,6 +260,11 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
           if (!route.methods[method]) continue;
           distinctKeys.add(routeOperationKey(method, pv));
         }
+        // The HEAD-exemption twin — derived for EVERY pattern, not just
+        // GET-declaring ones (see the comment above; for a GET-declaring
+        // route the key is already in the set from the loop just above —
+        // harmless).
+        distinctKeys.add(routeOperationKey('GET', pv));
       }
     }
     assert.ok(walkablePaths > 0, 'the walk actually found route layers');

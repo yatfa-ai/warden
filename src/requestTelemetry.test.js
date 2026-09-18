@@ -195,15 +195,23 @@ describe('closed-set route-pattern key mapping', () => {
   });
 
   it('HEAD folds under the GET route key — Express serves HEAD with the GET handler', () => {
-    // Express (router v2) dispatches HEAD through the route's GET handler with
-    // req.method staying 'HEAD'. Left unaliased, every GET-addressable route
-    // would carry an uncounted `head-*` twin: a runtime growth axis the route
-    // table's own route.methods census never reports — enough of them would
-    // exhaust REQUEST_MAX_OPERATIONS and reach the aggregator's unsendable
-    // `__other__` accumulator, voiding the whole window. Aliased, the census
-    // (derived through the same mapper) IS the reachable set.
+    // Express (router v2) serves HEAD with req.method staying 'HEAD' — on a
+    // GET route it runs the GET handler; on a route declaring no GET, the
+    // router's HEAD exemption still sets req.route before 404ing. Left
+    // unaliased, every addressable route would carry an uncounted `head-*`
+    // twin: a runtime growth axis the route table's own route.methods census
+    // never reports — enough of them would exhaust REQUEST_MAX_OPERATIONS
+    // and reach the aggregator's unsendable `__other__` accumulator, voiding
+    // the whole window. Aliased, HEAD contributes NO keys of its own — every
+    // HEAD observation lands on the route's `get-` key — so the reachable
+    // set is declared-method keys ∪ the `get-` twin of every pattern, which
+    // the HTTP suite's sizing tripwire derives through this same mapper.
     assert.equal(routeOperationKey('HEAD', '/api/health'), 'get-api-health');
     assert.equal(routeOperationKey('head', '/api/collections/:id/agents'), 'get-api-collections-id-agents');
+    // The HEAD-exemption twin: a POST-only route gets the same treatment —
+    // router v2 sets req.route on it for HEAD traffic too (see the
+    // HTTP suite's live pin).
+    assert.equal(routeOperationKey('HEAD', '/api/file-exists'), 'get-api-file-exists');
 
     // Through the producer's public surface: a HEAD observation must land in
     // the GET key's row, and no `head-*` key may exist in the snapshot.
