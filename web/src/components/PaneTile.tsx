@@ -9,7 +9,7 @@ import { openExternalUrl, forwardPaneMetrics } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { findUrlCandidates, maskUrls, maskSpans } from '@/lib/url-links';
-import { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, type IssueLinkEntry } from '@/lib/issue-links';
+import { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, shouldResolvePaneProject, type IssueLinkEntry } from '@/lib/issue-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
@@ -413,6 +413,44 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const chatProjectRef = useRef(chat?.project);
   chatProjectRef.current = chat?.project;
 
+  // WARDEN-1405: the manual-pane project fallback. A manual/tmux chat carries a
+  // PLACEHOLDER project ('local'/'manual' — the chats.js/server.js factories),
+  // so the strict scoping above correctly finds no mapping for the majority of
+  // panes: the matcher is right, the project INPUT is wrong. When the gate
+  // passes (integration on + mappings exist + container-less chat + own project
+  // unmapped — shouldResolvePaneProject), ONE bounded fetch asks the server
+  // which project this pane's foreground really belongs to: its docker-exec
+  // process tree (WARDEN-1377's resolver, 5-min TTL), parsed with the same
+  // container→project split every yatfa chat carries. ONE-SHOT per mount: the
+  // ref-guard means a later chat/config re-render never re-fetches, and the
+  // no-retry policy keeps a failed resolution silent — the server's honest
+  // none/ambiguous/failed arms leave this null and the second scope leg in the
+  // provider below reads [] (a guessed link must not appear).
+  const resolvedProjectRef = useRef<string | null>(null);
+  const resolvedProjectRequestedRef = useRef(false);
+  useEffect(() => {
+    if (resolvedProjectRequestedRef.current) return;
+    const c = chat;
+    if (!c || !shouldResolvePaneProject(c, issueLinksEnabled === true, issueLinkTrackers ?? [])) return;
+    resolvedProjectRequestedRef.current = true;
+    // ONE bounded attempt. Deliberately NO caller signal / cleanup: this effect's
+    // deps re-fire whenever the chats poll hands PaneTile a fresh chat object,
+    // and an abort-on-cleanup there would kill the in-flight one-shot the moment
+    // the next poll landed (observed live in QA: the gate passed, the fetch
+    // started, the 60s poll aborted it). The ref-guard already keeps the request
+    // single; fetchBounded's per-attempt deadline bounds it; `retries: 0` means a
+    // failed resolution stays silent — honest none, never a retry loop.
+    fetchBounded(`/api/pane-project?id=${encodeURIComponent(c.id)}`, { timeoutMs: 12_000, retries: 0 })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const body = await res.json().catch(() => null);
+        if (body?.state === 'resolved' && typeof body.project === 'string' && body.project) {
+          resolvedProjectRef.current = body.project;
+        }
+      })
+      .catch(() => { /* one-shot, no retry loop: silence stays silence */ });
+  }, [chat, issueLinksEnabled, issueLinkTrackers]);
+
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
   // an out-of-range size, so bound it at the use site — both the constructor
@@ -784,8 +822,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         // project with no mapping all land on "no issue layer". Exactly ONE
         // entry per project (the sanitizer dedupes), so the first match is the
         // pane's whole mapping.
+        // WARDEN-1405 adds ONE fallback leg for manual panes: when the pane's
+        // own (placeholder) project has no mapping but the one-shot
+        // /api/pane-project resolution landed a REAL project, that project's
+        // entry is consulted. The fallback is per-ENTRY (first leg's [0] ?? second
+        // leg's [0]), never a `??` on the project string — the placeholders
+        // ('manual'/'local') are truthy, so a string-level fallback could never
+        // fire. With the integration off, or once the first leg matches, the
+        // second leg is never evaluated — byte-identical to pre-1405 there.
         const issueEntry = issueLinksEnabledRef.current
-          ? (issueEntriesForProject(issueLinkTrackersRef.current, chatProjectRef.current)[0] ?? null)
+          ? (issueEntriesForProject(issueLinkTrackersRef.current, chatProjectRef.current)[0]
+            ?? issueEntriesForProject(issueLinkTrackersRef.current, resolvedProjectRef.current)[0]
+            ?? null)
           : null;
         const urlMasked = maskUrls(text);
         // findPathCandidates masks http(s) URLs out first (url-links.ts), so its
