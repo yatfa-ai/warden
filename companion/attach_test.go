@@ -80,7 +80,13 @@ func startForTest(t *testing.T, sink *collectLines, p attachStartParams) string 
 	if err != nil {
 		t.Fatalf("marshal params: %v", err)
 	}
-	sid, launch, err := startAttach(raw, sink.write)
+	sid, launch, err := startAttach(raw, sink.write, func(sid string, b []byte) {
+		// The production writeAttachData hands raw bytes to the outbound
+		// queue (outbound.go); the sink bridge re-encodes them as the same
+		// attachDataEvent the queue's writer would emit, so dataString() and
+		// the exit/event assertions below keep reading one shape.
+		sink.write(attachDataEvent{Event: "attachData", Sid: sid, Data: base64.StdEncoding.EncodeToString(b)})
+	})
 	if err != nil {
 		t.Fatalf("startAttach: %v", err)
 	}
@@ -340,7 +346,7 @@ func TestAttachStreamsBytesExactly(t *testing.T) {
 // it up front so the failure names itself.
 func TestAttachStartRejectsAnEmptyScript(t *testing.T) {
 	sink := &collectLines{}
-	if _, _, err := startAttach(json.RawMessage(`{"cols":80,"rows":24}`), sink.write); err == nil {
+	if _, _, err := startAttach(json.RawMessage(`{"cols":80,"rows":24}`), sink.write, nil); err == nil {
 		t.Fatal("expected an error for an empty script")
 	}
 }
@@ -351,7 +357,7 @@ func TestAttachStartRejectsAnEmptyScript(t *testing.T) {
 // contract: a supported host really can allocate.
 func TestAttachStartOnAnUnsupportedPlatformIsActionable(t *testing.T) {
 	sink := &collectLines{}
-	sid, launch, err := startAttach(json.RawMessage(`{"script":"true","cols":80,"rows":24}`), sink.write)
+	sid, launch, err := startAttach(json.RawMessage(`{"script":"true","cols":80,"rows":24}`), sink.write, nil)
 	if hostPTYSupported {
 		if err != nil {
 			t.Fatalf("a host with PTY support must allocate: %v", err)
