@@ -735,3 +735,165 @@ describe('WARDEN-1376 — runtime tag + suspension discrimination', () => {
     assert.equal(buildStallRecord({ lagMs: 100, timestamp: 0, runtime: 'main' }).runtime, 'main');
   });
 });
+
+// ==========================================================================
+// WARDEN-1406 — post-creation arming seam + wall-domain predicate args.
+// The shared singleton is created with NO options, so the server fork arms the
+// two discriminators through setSuspendPolicy instead of create-time opts. The
+// tick also hands the predicate the WALL-CLOCK bounds of the tick gap as extra
+// arguments — the load-bearing clock-domain conversion (suspend windows are
+// wall stamps; the lag math is monotonic) that main's two-argument predicate
+// ignores and the server's compares wall vs wall.
+// ==========================================================================
+describe('WARDEN-1406 — setSuspendPolicy (post-creation arming) + wall bounds', () => {
+  it('created-with-no-opts stays unarmed, and config reflects arming through the seam', () => {
+    const { monitor } = makeMonitor({});
+    assert.equal(monitor.config.maxCredibleLagMs, null, 'the server default is byte-for-byte');
+    assert.equal(monitor.config.suspendAware, false);
+    monitor.setSuspendPolicy({ maxCredibleLagMs: 60000, isSuspendBoundary: () => false });
+    assert.equal(monitor.config.maxCredibleLagMs, 60000, 'config is a getter — it tracks the seam');
+    assert.equal(monitor.config.suspendAware, true);
+  });
+
+  it('arms the ceiling post-creation: a 12-hour lag skips with suspendedSkips counted', () => {
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.setSuspendPolicy({ maxCredibleLagMs: 60000 });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(1000 + 43474684); // the live dataset's 12-hour sleep, verbatim
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 0, 'the sleep artifact must not become a server stall');
+    assert.equal(monitor.stats().suspendedSkips, 1);
+    assert.equal(monitor.stats().stalls, 0);
+  });
+
+  it('hands the predicate the WALL bounds of the tick gap as extra arguments', () => {
+    let seen = null;
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.setSuspendPolicy({
+      isSuspendBoundary: (from, to, wallFrom, wallTo) => {
+        seen = { from, to, wallFrom, wallTo };
+        return false; // report — the point is the arguments, not the verdict
+      },
+    });
+    monitor.start(); // lastTick=1000, lastWall = base + 1000
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(3000); // overdue = 5000 - 2000 - 1000 = 2000 → a stall
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'a false predicate reports the stall');
+    // Monotonic pair exactly as before; wall pair is the PREVIOUS tick's wall
+    // stamp and this tick's — the wall image of the gap the block occupied.
+    // Wider than the lag window by at most one heartbeat at the start edge,
+    // never narrower.
+    assert.deepEqual(seen, {
+      from: 3000,
+      to: 5000,
+      wallFrom: 1_700_000_000_000 + 2000,
+      wallTo: 1_700_000_000_000 + 5000,
+    });
+  });
+
+  it('a wall-domain predicate (the server-side shape) skips a lag whose wall gap spans a suspend', () => {
+    // The exact shape src/server.js arms: suspend windows in WALL time, the
+    // predicate compares the wall pair only.
+    const suspendWindows = [{ from: 1_700_000_000_000 + 5000, to: 1_700_000_000_000 + 61000 }];
+    const isSuspendBoundary = (from, to, wallFrom, wallTo) =>
+      suspendWindows.some((w) => w.from < wallTo && w.to >= wallFrom);
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.setSuspendPolicy({ isSuspendBoundary });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick(); // tick at 2000 — wall 1.7e12+2000
+    clock.advance(61300 - 2000);
+    monitor.tick(); // wake tick — wall 1.7e12+61300, wall gap (…+2000, …+61300) spans the window
+    monitor.stop();
+    assert.equal(stalls.length, 0, 'the sleep measured in the wall domain is skipped');
+    assert.equal(monitor.stats().suspendedSkips, 1);
+  });
+
+  it('a wall-domain predicate reports a genuine post-wake block (resume-instant touching counts, later does not)', () => {
+    const resumeAt = 1_700_000_000_000 + 61000;
+    const suspendWindows = [{ from: 1_700_000_000_000 + 5000, to: resumeAt }];
+    const isSuspendBoundary = (from, to, wallFrom, wallTo) =>
+      suspendWindows.some((w) => w.from < wallTo && w.to >= wallFrom);
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.setSuspendPolicy({ isSuspendBoundary });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(61300 - 2000);
+    monitor.tick(); // wake tick — skipped (its wall gap touches the resume instant)
+    clock.advance(1000 + 1500);
+    monitor.tick(); // a genuine post-wake block — wall gap starts strictly after the resume
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'post-wake real blocks stay visible');
+    assert.equal(stalls[0].lagMs, 1500);
+    assert.equal(monitor.stats().suspendedSkips, 1);
+  });
+
+  it('a THROWING predicate armed through the seam degrades to recording the stall', () => {
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.setSuspendPolicy({ isSuspendBoundary: () => { throw new Error('boom'); } });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(1000 + 2000);
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'a broken discriminator must not swallow real stalls');
+  });
+
+  it("main's two-argument predicate signature keeps working through the seam (extra args ignored)", () => {
+    const suspendWindows = [{ from: 5000, to: 61000 }];
+    const isSuspendBoundary = (from, to) =>
+      suspendWindows.some((w) => w.from < to && w.to >= from); // exactly main.cjs's arrow
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.setSuspendPolicy({ isSuspendBoundary });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(61300 - 2000);
+    monitor.tick();
+    monitor.stop();
+    assert.equal(stalls.length, 0, 'the 2-arg predicate is called with the same monotonic pair as before');
+    assert.equal(monitor.stats().suspendedSkips, 1);
+  });
+
+  it('invalid values disarm the matching knob instead of half-arming it', () => {
+    const { monitor } = makeMonitor({});
+    monitor.setSuspendPolicy({ maxCredibleLagMs: 60000, isSuspendBoundary: () => true });
+    assert.equal(monitor.config.maxCredibleLagMs, 60000);
+    assert.equal(monitor.config.suspendAware, true);
+    monitor.setSuspendPolicy({ maxCredibleLagMs: 0, isSuspendBoundary: 'nope' });
+    assert.equal(monitor.config.maxCredibleLagMs, null, 'a non-positive ceiling disarms');
+    assert.equal(monitor.config.suspendAware, false, 'a non-function predicate disarms');
+    // Keys left absent keep their current value; a non-object argument is a no-op.
+    monitor.setSuspendPolicy({ maxCredibleLagMs: 1000 });
+    assert.equal(monitor.config.maxCredibleLagMs, 1000);
+    monitor.setSuspendPolicy(null);
+    monitor.setSuspendPolicy('nope');
+    assert.equal(monitor.config.maxCredibleLagMs, 1000, 'a malformed call changes nothing');
+  });
+
+  it('arming through the seam while started takes effect on the next tick', () => {
+    // The seam exists because the singleton is LONG-LIVED: the policy can land
+    // after start() and must be read per tick, not captured once.
+    const { monitor, clock, stalls } = makeMonitor({});
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+    clock.advance(1000 + 43474684);
+    monitor.tick(); // unarmed yet — today's behavior: a record
+    monitor.setSuspendPolicy({ maxCredibleLagMs: 60000 });
+    clock.advance(1000 + 43474684);
+    monitor.tick(); // armed now — a skip
+    monitor.stop();
+    assert.equal(stalls.length, 1, 'the pre-arm tick reported as always');
+    assert.equal(monitor.stats().suspendedSkips, 1, 'the post-arm tick skipped');
+    assert.equal(monitor.stats().stalls, 1);
+  });
+});

@@ -140,4 +140,65 @@ test('the default clock is the wall clock (production wiring needs no now)', () 
   assert.equal(sc.stats().closedWindows, 1);
 });
 
+// ==========================================================================
+// WARDEN-1406 — authoritative stamps, closed-window return, ingest + snapshot.
+// main forwards the stamps it observes to the server fork over IPC, and the
+// fork feeds them into a tracker of its own; these cover the APIs that make
+// that possible without re-deriving a second set of boundary semantics.
+// ==========================================================================
+
+test('onSuspend/onResume accept authoritative stamps instead of sampling now()', () => {
+  const sc = createSuspendClock({ now: () => 999_999 }); // a WRONG clock on purpose
+  sc.onSuspend(1000);
+  const closed = sc.onResume(61000);
+  assert.deepEqual(closed, { from: 1000, to: 61000 }, 'the forwarded stamps, not the local clock');
+});
+
+test('onResume returns the window it just closed, and null when there was nothing to close', () => {
+  const clock = fakeClock();
+  const sc = createSuspendClock({ now: clock.now });
+  assert.equal(sc.onResume(), null, 'a resume with no tracked suspend returns null');
+  sc.onSuspend(); clock.advance(4000);
+  const closed = sc.onResume();
+  assert.deepEqual(closed, { from: 1000, to: 5000 });
+});
+
+test('ingestWindow feeds an already-closed window and honors the same boundary semantics', () => {
+  const sc = createSuspendClock();
+  sc.ingestWindow({ from: 5000, to: 61000 });
+  assert.equal(sc.spansSuspend(5500, 62000), true);
+  assert.equal(sc.spansSuspend(61001, 63000), false, 'strictly after the resume does not span');
+  assert.equal(sc.spansSuspend(0, 4999), false, 'pre-suspend does not span');
+  assert.equal(sc.stats().suspendedNow, false, 'ingesting does not open a suspend');
+});
+
+test('ingestWindow validates and never corrupts the store', () => {
+  const sc = createSuspendClock();
+  assert.equal(sc.ingestWindow(null), null);
+  assert.equal(sc.ingestWindow('nope'), null);
+  assert.equal(sc.ingestWindow({ from: 'a', to: 5 }), null);
+  assert.equal(sc.ingestWindow({ from: 9, to: 4 }), null, 'inverted window refused');
+  assert.equal(sc.ingestWindow({ from: 7, to: 7 }).from, 7, 'degenerate but well-formed is kept');
+  assert.equal(sc.stats().closedWindows, 1);
+});
+
+test('ingest history is bounded by the same cap as live tracking', () => {
+  const sc = createSuspendClock({ maxWindows: 3 });
+  for (let i = 0; i < 10; i++) sc.ingestWindow({ from: i * 10, to: i * 10 + 5 });
+  assert.equal(sc.stats().closedWindows, 3, 'only the newest are retained');
+});
+
+test('snapshot hands back the full replay state: closed windows + any in-flight suspend', () => {
+  const clock = fakeClock();
+  const sc = createSuspendClock({ now: clock.now });
+  assert.deepEqual(sc.snapshot(), { closed: [], openFrom: null }, 'a fresh tracker replays nothing');
+  sc.onSuspend(); clock.advance(10); sc.onResume(); // [1000, 1010]
+  clock.advance(10);
+  sc.onSuspend(); // open at 1020
+  const snap = sc.snapshot();
+  assert.deepEqual(snap.closed, [{ from: 1000, to: 1010 }]);
+  assert.equal(snap.openFrom, 1020);
+  assert.notEqual(snap.closed[0], sc.snapshot().closed[0], 'copies, not live references');
+});
+
 console.log(`\n✓ SUSPEND-CLOCK TESTS PASS (${passed})`);

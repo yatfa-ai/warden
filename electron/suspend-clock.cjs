@@ -52,18 +52,54 @@ function createSuspendClock(opts) {
   // itself, not a second concurrent sleep.
   let openFrom = null;
 
-  function onSuspend() {
+  // WARDEN-1406 — `at` is an optional AUTHORITATIVE stamp: electron/main.cjs
+  // forwards the suspend instant to the server fork over IPC, and the fork
+  // replays it here so both processes track the SAME wall-clock window (the
+  // fork's own now() at message-receive time would drift from the event it
+  // describes, and is frozen along with the machine mid-sleep anyway).
+  function onSuspend(at) {
     if (openFrom != null) return; // idempotent: already suspended
-    openFrom = now();
+    openFrom = typeof at === 'number' ? at : now();
   }
 
-  function onResume() {
-    if (openFrom == null) return; // a resume with no tracked suspend — ignore
+  // WARDEN-1406 — returns the closed window (or null when there was nothing to
+  // close), so the caller that just observed the resume can FORWARD the exact
+  // window without reaching back into the tracker's internals.
+  function onResume(to) {
+    if (openFrom == null) return null; // a resume with no tracked suspend — ignore
     const from = openFrom;
     openFrom = null;
-    const to = now();
-    windows.push({ from, to });
+    const toStamp = typeof to === 'number' ? to : now();
+    windows.push({ from, to: toStamp });
     while (windows.length > maxWindows) windows.shift();
+    return { from, to: toStamp };
+  }
+
+  // WARDEN-1406 — ingest an ALREADY-CLOSED window from an authoritative source.
+  // This is the replay path: a consumer that joins late (the server fork is
+  // spawned at app boot, after main may already hold suspend history) is fed
+  // the retained windows verbatim instead of re-deriving them from its own
+  // clock, which never saw the events. Validated, bounded by the same cap, and
+  // deliberately NOT clearing any in-flight suspend — replay targets a fresh
+  // tracker; the live open/close messages carry their own lifecycle.
+  function ingestWindow(w) {
+    if (!w || typeof w !== 'object') return null;
+    if (typeof w.from !== 'number' || typeof w.to !== 'number') return null;
+    if (!(w.to >= w.from)) return null; // inverted or degenerate — not a window
+    const window = { from: w.from, to: w.to };
+    windows.push(window);
+    while (windows.length > maxWindows) windows.shift();
+    return window;
+  }
+
+  // WARDEN-1406 — read accessor for exactly that replay: the retained closed
+  // windows (copies, oldest first) and the in-flight suspend's start stamp, so
+  // a spawner can hand a late-joining consumer the whole history in one shot.
+  function snapshot() {
+    return {
+      closed: windows.map((w) => ({ from: w.from, to: w.to })),
+      openFrom,
+    };
   }
 
   // True iff the half-open query range (from, to) overlaps any suspend window
@@ -89,7 +125,7 @@ function createSuspendClock(opts) {
     return { closedWindows: windows.length, suspendedNow: openFrom != null };
   }
 
-  return { onSuspend, onResume, spansSuspend, stats };
+  return { onSuspend, onResume, spansSuspend, stats, ingestWindow, snapshot };
 }
 
 module.exports = { createSuspendClock, DEFAULT_MAX_WINDOWS };

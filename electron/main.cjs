@@ -158,6 +158,21 @@ const suspendClock = createSuspendClock({ now: () => Date.now() });
 const MAX_CREDIBLE_LAG_MS = 60000;
 let mainLoopMonitor = null;
 
+// WARDEN-1406 — forward an authoritative suspend-window message to the server
+// fork. The fork cannot see powerMonitor (only main can), so main is the
+// source of truth for when the machine slept; without these windows the child
+// arms no predicate it could trust and its own sleeps keep reading as freezes.
+// Best-effort and guarded: the fork may not exist yet (a suspend before boot
+// finishes), may have died, or its channel may be closed — a missed message
+// costs at most one misread window and must never break the host.
+function sendSuspendToServer(msg) {
+  try {
+    if (serverProcess && serverProcess.connected && typeof serverProcess.send === 'function') {
+      serverProcess.send(msg);
+    }
+  } catch { /* never the host's problem */ }
+}
+
 // Start the main-process loop monitor. Post-ready (dynamic ESM import of the
 // shared src/ modules — the same move main already makes for the telemetry
 // transport and the stall-journal read). A failure degrades to "no local main
@@ -1375,8 +1390,27 @@ app.whenReady().then(async () => {
   // clear the marker, tear down — best-effort, each guarded, because the OS
   // may kill us mid-flight anyway.
   try {
-    powerMonitor.on('suspend', () => { try { suspendClock.onSuspend(); } catch { /* never the host's problem */ } });
-    powerMonitor.on('resume', () => { try { suspendClock.onResume(); } catch { /* never the host's problem */ } });
+    powerMonitor.on('suspend', () => {
+      try {
+        // WARDEN-1406 — one authoritative stamp, two consumers: the local
+        // suspendClock AND the fork (open marker). Stamping here (rather than
+        // letting each consumer call Date.now()) keeps both sides' windows on
+        // the same instant, and the fork's tracker accepts an explicit stamp
+        // for exactly this reason.
+        const at = Date.now();
+        suspendClock.onSuspend(at);
+        sendSuspendToServer({ type: 'telemetry-suspend-open', at });
+      } catch { /* never the host's problem */ }
+    });
+    powerMonitor.on('resume', () => {
+      try {
+        const to = Date.now();
+        // onResume returns the window it just closed (WARDEN-1406) — forwarded
+        // verbatim so the fork's tracker holds the SAME {from, to} main's does.
+        const closed = suspendClock.onResume(to);
+        if (closed) sendSuspendToServer({ type: 'telemetry-suspend-close', from: closed.from, to: closed.to });
+      } catch { /* never the host's problem */ }
+    });
     powerMonitor.on('shutdown', () => {
       isQuitting = true;
       try { clearThisInstanceMarker(); } catch { /* best effort */ }
@@ -1419,6 +1453,23 @@ app.whenReady().then(async () => {
     env: { ...process.env, PORT: String(PORT) },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
   });
+  // WARDEN-1406 — replay the suspend history ONCE at fork spawn. The fork is
+  // born at app boot with no memory of any suspend that happened before it
+  // existed (a crash-restart after the lid was closed, or the same session's
+  // earlier doze cycles), so its discrimination would start blank and the first
+  // post-spawn sleep could still read as a freeze. The replay carries the
+  // retained closed windows plus any in-flight suspend; the child applies them
+  // into the same pure tracker main uses. Node buffers fork IPC until the
+  // child registers its listener, so ordering (replay before any live
+  // open/close) is guaranteed.
+  try {
+    const snap = suspendClock.snapshot();
+    sendSuspendToServer({
+      type: 'telemetry-suspend-replay',
+      windows: snap.closed,
+      openAt: snap.openFrom,
+    });
+  } catch { /* best effort — the child degrades to ceiling-only discrimination */ }
   serverProcess.stdout.on('data', (d) => console.log(`[server] ${d.toString().trim()}`));
   serverProcess.stderr.on('data', (d) => console.error(`[server] ${d.toString().trim()}`));
   serverProcess.on('exit', (code) => {

@@ -312,19 +312,39 @@ export function formatStallLine(record) {
  *                                          SUSPENSION, not a stall (default: no
  *                                          ceiling — the server keeps today's
  *                                          behavior; main opts in — WARDEN-1376)
- * @param {(from: number, to: number) => boolean} [opts.isSuspendBoundary]
+ * @param {(from: number, to: number, wallFrom?: number, wallTo?: number) => boolean} [opts.isSuspendBoundary]
  *                                          predicate the tick consults: a lag
  *                                          window spanning a suspend→resume is
  *                                          the wake tick (and its resume storm),
- *                                          not a loop block (WARDEN-1376)
+ *                                          not a loop block (WARDEN-1376).
+ *                                          WARDEN-1406 — called with FOUR
+ *                                          arguments: the monotonic (from, to)
+ *                                          it always received, plus the
+ *                                          WALL-CLOCK bounds of the same tick
+ *                                          gap. Suspend windows arrive in wall
+ *                                          time while the lag math is
+ *                                          monotonic, so a domain-aware caller
+ *                                          compares wall vs wall via the last
+ *                                          two arguments; main's two-argument
+ *                                          predicate keeps working unchanged
+ *                                          (extra args ignored). Both
+ *                                          discriminators can also be armed
+ *                                          post-creation via
+ *                                          `setSuspendPolicy` — the seam the
+ *                                          server fork uses, since the shared
+ *                                          singleton is created with no opts.
  */
 export function createLoopMonitor(opts = {}) {
   const heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const thresholdMs = opts.thresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
   const runtime = typeof opts.runtime === 'string' && opts.runtime ? opts.runtime : STALL_RUNTIME;
-  const maxCredibleLagMs =
+  // WARDEN-1406 — these two are `let`, not const: the server fork arms them
+  // POST-creation through setSuspendPolicy, because the shared singleton this
+  // module exports is created with no opts (main passes them at create time
+  // instead — both paths run the same validation).
+  let maxCredibleLagMs =
     typeof opts.maxCredibleLagMs === 'number' && opts.maxCredibleLagMs > 0 ? opts.maxCredibleLagMs : null;
-  const isSuspendBoundary = typeof opts.isSuspendBoundary === 'function' ? opts.isSuspendBoundary : null;
+  let isSuspendBoundary = typeof opts.isSuspendBoundary === 'function' ? opts.isSuspendBoundary : null;
   const spanRingSize = Math.max(1, opts.spanRingSize ?? DEFAULT_SPAN_RING_SIZE);
   const stallRingSize = Math.max(1, opts.stallRingSize ?? DEFAULT_STALL_RING_SIZE);
   const syncFloorMs = opts.syncFloorMs ?? DEFAULT_SYNC_FLOOR_MS;
@@ -353,6 +373,12 @@ export function createLoopMonitor(opts = {}) {
 
   let timer = null;
   let lastTickAt = 0;
+  // WARDEN-1406 — the WALL clock at the previous tick. The lag math above is
+  // monotonic, but suspend windows arrive in wall time (powerMonitor stamps
+  // forwarded by main), so the suspension predicate needs the lag window in
+  // BOTH domains. Sampled per tick — one wall read per second on a path that
+  // already reads the monotonic clock, and no allocation.
+  let lastWallAt = 0;
   let startedAtWall = 0;
   const stats = {
     ticks: 0, stalls: 0, worstLagMs: 0, spansRecorded: 0,
@@ -449,6 +475,17 @@ export function createLoopMonitor(opts = {}) {
     const t = now();
     const prev = lastTickAt;
     lastTickAt = t;
+    // WARDEN-1406 — the wall-clock bounds of this tick gap, sampled here so the
+    // predicate is handed them alongside the monotonic pair. The wall span
+    // (prevWallAt, wallNow] is the WHOLE interval the block could have occupied
+    // — never narrower than the lag window's wall image (it is wider by at most
+    // one heartbeat at the start edge), which makes the boundary skip
+    // conservative in the direction that matters: it may absorb one marginal
+    // stall that ended just before a suspend began, and it can never report a
+    // sleep as a stall.
+    const wallNow = wallClock();
+    const prevWallAt = lastWallAt;
+    lastWallAt = wallNow;
     stats.ticks++;
     // Take this window's sync aggregate and start a fresh one, on EVERY tick —
     // so a stall reports the synchronous work of the window it actually covers,
@@ -471,15 +508,21 @@ export function createLoopMonitor(opts = {}) {
     // one whose window spans a suspend→resume boundary, is the process having
     // been SUSPENDED (plus the OS resume storm on wake) — reported as neither a
     // stall nor a record. A broken predicate degrades to reporting the stall,
-    // never to silently swallowing it. Both opt-in: the server keeps today's
-    // behavior byte-for-byte until its wiring passes these options.
+    // never to silently swallowing it. Both opt-in, at create time (main's
+    // pattern) or post-creation through setSuspendPolicy (the server fork's —
+    // WARDEN-1406): an unarmed monitor keeps today's behavior byte-for-byte.
+    // WARDEN-1406 — the predicate is called with FOUR arguments: the monotonic
+    // (windowStart, t) it has always received, plus the WALL-CLOCK bounds of
+    // the same tick gap (see lastWallAt). A domain-aware caller (the server
+    // fork) compares wall vs wall; main's two-argument predicate ignores the
+    // extra arguments and is unchanged.
     if (maxCredibleLagMs != null && lagMs > maxCredibleLagMs) {
       stats.suspendedSkips++;
       return null;
     }
     if (isSuspendBoundary) {
       try {
-        if (isSuspendBoundary(windowStart, t)) {
+        if (isSuspendBoundary(windowStart, t, prevWallAt, wallNow)) {
           stats.suspendedSkips++;
           return null;
         }
@@ -515,6 +558,9 @@ export function createLoopMonitor(opts = {}) {
     if (timer) return timer;
     lastTickAt = now();
     startedAtWall = wallClock();
+    // WARDEN-1406 — seed the wall bookkeeping so the first stall decision never
+    // sees a zero as the previous tick's wall stamp.
+    lastWallAt = startedAtWall;
     timer = setInterval(tick, heartbeatMs);
     // Unref'd: the monitor must never be the reason the process stays alive.
     if (typeof timer.unref === 'function') timer.unref();
@@ -524,14 +570,40 @@ export function createLoopMonitor(opts = {}) {
   function stop() {
     if (timer) { clearInterval(timer); timer = null; }
     lastTickAt = 0;
+    lastWallAt = 0;
     syncAgg = new Map();
   }
 
   return {
     begin, end, recordSyncOp, trace, tick, start, stop,
     setOnStall(fn) { onStall = typeof fn === 'function' ? fn : null; },
+    // WARDEN-1406 — post-creation arming seam for the two suspension
+    // discriminators, mirroring setOnStall: the shared singleton this module
+    // exports is created with NO options (that is the point of a singleton),
+    // so main's create-time pattern cannot reach it. The server fork calls
+    // this once it has a suspend-window store to consult. Same validation as
+    // the create-time opts; a key left absent keeps its current value, an
+    // invalid value disarms that knob (never half-arms).
+    setSuspendPolicy(policy) {
+      if (!policy || typeof policy !== 'object') return;
+      if (policy.maxCredibleLagMs !== undefined) {
+        maxCredibleLagMs =
+          typeof policy.maxCredibleLagMs === 'number' && policy.maxCredibleLagMs > 0
+            ? policy.maxCredibleLagMs
+            : null;
+      }
+      if (policy.isSuspendBoundary !== undefined) {
+        isSuspendBoundary = typeof policy.isSuspendBoundary === 'function' ? policy.isSuspendBoundary : null;
+      }
+    },
     get started() { return timer != null; },
-    config: Object.freeze({ heartbeatMs, thresholdMs, syncFloorMs, spanRingSize, stallRingSize, runtime, maxCredibleLagMs, suspendAware: isSuspendBoundary != null }),
+    // WARDEN-1406 — a getter, not a frozen-once snapshot: post-creation arming
+    // through setSuspendPolicy must be visible here, both for the owner reading
+    // GET /api/diagnostics/stalls and for the tests that assert the arming
+    // condition. Frozen per read; the shape is unchanged.
+    get config() {
+      return Object.freeze({ heartbeatMs, thresholdMs, syncFloorMs, spanRingSize, stallRingSize, runtime, maxCredibleLagMs, suspendAware: isSuspendBoundary != null });
+    },
     stalls() { return stallRing.slice(); },
     stats() { return { ...stats, syncMsSeen: Math.round(stats.syncMsSeen), started: timer != null }; },
     // Test seam: the raw ring (with holes) the attributor reads.
@@ -622,6 +694,9 @@ export function instrumentSyncIo(monitor, targets = {}) {
 
 /**
  * The process-wide monitor. Inert (no timer, no sink) until the server child
- * calls start() — see startLoopMonitor in src/server.js.
+ * calls start() — see startLoopMonitor in src/server.js. Its suspension
+ * discriminators are likewise unarmed until the child's
+ * setupSuspensionDiscrimination passes them post-creation (WARDEN-1406); the
+ * standalone server keeps both defaults, byte for byte.
  */
 export const loopMonitor = createLoopMonitor();
