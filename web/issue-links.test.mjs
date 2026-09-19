@@ -39,7 +39,7 @@ const transpile = async (name, rewrite) => {
 };
 const { findUrlCandidates, maskUrls, maskSpans } = await transpile('url-links.ts');
 const { findPathCandidates } = await transpile('path-links.ts', { from: /from ['"]\.\/url-links['"]/, to: 'from "./url-links.mjs"' });
-const { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, normalizeIssueLinkEntries, shouldResolvePaneProject } = await transpile('issue-links.ts');
+const { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, normalizeIssueLinkEntries, shouldResolvePaneProject, paneIssueEntryFor } = await transpile('issue-links.ts');
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -57,6 +57,11 @@ const WARDEN_ENTRIES = [
   { project: 'warden', prefix: 'OPS', tracker: 'ops.internal:8443/browse' },
 ];
 const YATFA_ENTRIES = [{ project: 'yatfa', prefix: 'YATFA', tracker: 'yatfa.dev/issues' }];
+// BOTH mappings in one set — pins paneIssueEntryFor's LEG ORDER: when the pane's
+// own project AND the resolved project both have mappings, the OWN project's
+// entry must win (a swapped implementation would pass the single-mapping
+// fixtures below unchanged).
+const BOTH_ENTRIES = [...WARDEN_ENTRIES, ...YATFA_ENTRIES];
 
 // Just the keys recognized on a line (through the REAL precedence composition
 // PaneTile runs: maskUrls → findPathCandidates → maskSpans → findIssueCandidates).
@@ -240,6 +245,55 @@ test('shouldResolvePaneProject: yatfa/container panes never ask (their project I
 test('shouldResolvePaneProject: no chat at all is false', () => {
   assert.equal(shouldResolvePaneProject(null, true, WARDEN_ENTRIES), false);
   assert.equal(shouldResolvePaneProject(undefined, true, WARDEN_ENTRIES), false);
+});
+
+// WARDEN-1413 (slice 4): THE pane's issue-entry scope — the two-leg per-ENTRY
+// selection in ONE home, consumed by BOTH the linkifier's scope line and the
+// gated pane-header project label, so the label can never drift from what a
+// click actually opens. The four arms below are the ticket's pinned
+// honest-silence and mapping arms; the fifth pins the [0] selection; the
+// mutation check proves the fallback leg is load-bearing.
+console.log('\npaneIssueEntryFor — the two-leg scope both the linkifier and the header chip read');
+test('paneIssueEntryFor: empty entries → null (nothing configured, nothing announced)', () => {
+  assert.equal(paneIssueEntryFor([], 'warden', 'yatfa'), null);
+});
+test('paneIssueEntryFor: own project mapped → THAT entry, second leg never needed', () => {
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'warden', 'yatfa'), WARDEN_ENTRIES[0]);
+  assert.equal(paneIssueEntryFor(YATFA_ENTRIES, 'yatfa', null), YATFA_ENTRIES[0]);
+  // LEG ORDER, pinned: both legs have a mapping and the OWN project's wins.
+  assert.equal(paneIssueEntryFor(BOTH_ENTRIES, 'warden', 'yatfa'), WARDEN_ENTRIES[0],
+    'a pane whose own project is mapped never falls through to the resolved leg');
+  assert.equal(paneIssueEntryFor(BOTH_ENTRIES, 'yatfa', 'warden'), YATFA_ENTRIES[0]);
+});
+test('paneIssueEntryFor: own project unmapped + resolved project mapped → resolved\'s entry (the slice-3 fallback leg)', () => {
+  // The manual-pane shape: a truthy placeholder own project, one-shot
+  // /api/pane-project resolution landed a REAL mapped project.
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'manual', 'warden'), WARDEN_ENTRIES[0]);
+  assert.equal(paneIssueEntryFor(YATFA_ENTRIES, 'local', 'yatfa'), YATFA_ENTRIES[0]);
+});
+test('paneIssueEntryFor: honest silence — neither leg has a mapping → null', () => {
+  // Both unmapped (own placeholder + resolution failed → null resolved leg).
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'manual', null), null);
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'manual', undefined), null);
+  // Own project unmapped, resolved project ALSO unmapped.
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'manual', 'unknown-project'), null);
+  // A mapped RESOLVED project but null own project (chat metadata not loaded yet).
+  assert.equal(paneIssueEntryFor(YATFA_ENTRIES, null, 'yatfa'), YATFA_ENTRIES[0]);
+  // null/undefined own AND resolved — the ungated/pre-resolution state.
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, null, null), null);
+});
+test('paneIssueEntryFor: several entries for one project → the FIRST ([0]) — the provider\'s own selection', () => {
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'warden', null), WARDEN_ENTRIES[0],
+    'warden has two prefixes; the linkifier opens with entries[0]');
+});
+test('paneIssueEntryFor: mutation — deleting the fallback leg changes the manual-pane outcome', () => {
+  const firstLegOnly = (entries, project) =>
+    (project ? entries.filter((e) => e.project === project)[0] : undefined) ?? null;
+  assert.notEqual(firstLegOnly(WARDEN_ENTRIES, 'manual'),
+    paneIssueEntryFor(WARDEN_ENTRIES, 'manual', 'warden'),
+    'without leg 2 the helper degenerates to null for a manual pane; with it the resolved project wins');
+  assert.equal(firstLegOnly(WARDEN_ENTRIES, 'manual'), null);
+  assert.equal(paneIssueEntryFor(WARDEN_ENTRIES, 'manual', 'warden'), WARDEN_ENTRIES[0]);
 });
 
 console.log(`\n${passed} issue-links assertions passed`);
