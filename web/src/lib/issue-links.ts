@@ -105,6 +105,37 @@ export function issueEntriesForProject(entries: IssueLinkEntry[], project: strin
   return entries.filter((e) => e.project === project);
 }
 
+// WARDEN-1405 (slice 3 of roadmap WARDEN-1386): should THIS pane ask the server
+// which project its foreground really belongs to? The manual-pane gap: a
+// manual/tmux chat hardcodes a placeholder project ('local'/'manual' — the
+// chats.js/server.js factories), so strict per-project scoping correctly finds
+// no mapping for the MAJORITY of panes. The fix is to resolve the pane's REAL
+// project (its docker-exec container, parsed with the product's own
+// container→project parse) — but only for the panes where the answer can change
+// the outcome, which is exactly this gate:
+//
+//   enabled                — the integration toggle (off → no request ever)
+//   && entries.length > 0  — no mappings configured → nothing could linkify anyway
+//   && chat && !chat.container — yatfa/container panes never ask: their project
+//                            already IS the container parse (zero requests)
+//   && issueEntriesForProject(...) is empty — the pane's own project is unmapped
+//                            (the placeholder situation; a mapped pane needs no
+//                            fallback)
+//
+// Pure and unit-tested (web/issue-links.test.mjs); PaneTile consumes it as the
+// one-shot fetch gate feeding resolvedProjectRef.
+export function shouldResolvePaneProject(
+  chat: { container?: string | null; project?: string | null } | null | undefined,
+  enabled: boolean,
+  entries: IssueLinkEntry[],
+): boolean {
+  return !!enabled
+    && entries.length > 0
+    && !!chat
+    && !chat.container
+    && issueEntriesForProject(entries, chat.project).length === 0;
+}
+
 // The URL a modifier-click opens: the key appended to the configured tracker
 // base. One shape — `https://<tracker>/<KEY>` — by design (see module header):
 // the tracker carries the path, the key rides at the end. `issueTrackerUrl` is

@@ -35,6 +35,10 @@ import * as collections from './collections.js';
 // makes that single-owner invariant structural rather than a convention — the
 // same trick the `saveCatalog` note above plays for the disk catalogue.
 import { capturePanes, resolveChatWithRefresh, discoverAll } from './chats.js';
+// WARDEN-1405 — the manual-pane container resolver (proven on pasted-image
+// delivery, WARDEN-1377) plus its container→project half. Additive imports:
+// this file imported neither module before this slice.
+import { resolvePaneContainer, projectFromContainerResolution } from './paneContainer.js';
 // `run` is no longer imported: WARDEN-1284 routed the last four direct `run()`
 // call sites in this file (the file viewer read, the linkifier existence probe,
 // the session search + transcript reads, the tmux preflight) through
@@ -872,6 +876,47 @@ app.get('/api/pane-export', async (req, res) => {
       },
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/pane-project', async (req, res) => {
+  // WARDEN-1405 — WHICH project a pane's foreground really belongs to, for the
+  // issue-key linkifier's manual-pane fallback. A manual/tmux chat hardcodes a
+  // placeholder project ('local'/'manual' — the chats.js/server.js factories),
+  // so PaneTile's strict per-project scoping correctly linkifies nothing: the
+  // matcher is right, the pane's project INPUT is wrong. This endpoint answers
+  // the input question — and ONLY that question. The project→prefix→tracker
+  // LINK is never inferred here; it stays the human-stated issueLinkTrackers
+  // config. The container, when one can be proven, is read from the pane's own
+  // docker-exec process tree (resolvePaneContainer, WARDEN-1377 — 5-min TTL
+  // cache, never throws, honest none/ambiguous/failed), and container→project
+  // is chatMeta.parseContainerName — the same parse that puts a project on
+  // every yatfa chat.
+  //
+  // Contract (mirrors /api/pane-export's resolve(id) + 404 shape):
+  //   integration off            → { state: 'disabled' }          (gate FIRST —
+  //                                  the off state answers byte-identically even
+  //                                  against stray requests, and never walks)
+  //   unknown id                 → 404 { error }
+  //   chat.container set (yatfa) → { state: 'known', project }    (no walk —
+  //                                  its project already IS the container parse)
+  //   walk resolved              → { state: 'resolved', project, container }
+  //   walk none/ambiguous/failed → { state, project: null }       (honest
+  //                                  silence — a guessed link must not appear)
+  if (cfg.issueLinksEnabled !== true) return res.json({ state: 'disabled' });
+  const r = await resolve(String(req.query.id || ''));
+  if (r.error) return res.status(404).json(r);
+  const chat = r.chat;
+  if (chat.container) return res.json({ state: 'known', project: chat.project ?? null });
+  try {
+    const resolution = await resolvePaneContainer(chat, cfg);
+    if (resolution && resolution.state === 'resolved') {
+      return res.json({ state: 'resolved', project: projectFromContainerResolution(resolution), container: resolution.container });
+    }
+    return res.json({ state: resolution?.state ?? 'failed', project: null });
+  } catch (e) {
+    // resolvePaneContainer never throws by contract; this guard keeps a walk
+    // that somehow escapes that contract an honest failure, not a 500.
+    return res.json({ state: 'failed', project: null });
+  }
 });
 app.post('/api/send', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));

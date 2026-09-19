@@ -40,6 +40,11 @@ import { spawn } from 'node:child_process';
 import { captureAndSettle } from './childCapture.js';
 import { shellQuote, runWithPool } from './ssh.js';
 import { isCompanionTransportEnabled, isCompanionExcludedHost, deliverRemoteScript } from './companion.js';
+// WARDEN-1405 — the container→project parse is chatMeta.js's parseContainerName
+// (the product's own last-hyphen split, the one that puts a project on every
+// yatfa chat and the sidebar badge). chatMeta is dependency-free and imports
+// nothing, so this cannot cycle; paneContainer's other imports are untouched.
+import { parseContainerName } from './chatMeta.js';
 
 const LOCAL = '(local)';
 
@@ -201,6 +206,24 @@ export function resolveContainerFromTree(nodes) {
 }
 
 // ------------------------------ the resolver -------------------------------
+
+// WARDEN-1405 — the container→project half of a resolution, for /api/pane-project's
+// manual-pane fallback. Pure: reads ONE resolution object (the shape
+// resolvePaneContainer / resolveContainerFromTree produce) and answers WHICH
+// PROJECT this pane's foreground belongs to, via the product's own established
+// container→project parse (chatMeta.parseContainerName — the same last-hyphen
+// split that names the project on every yatfa chat and the sidebar badge).
+//
+// This does NOT infer the project→prefix→tracker LINK (that stays the human-stated
+// issueLinkTrackers config; the roadmap's no-inference rule is untouched) — it only
+// reads the container name the walk already resolved. The honest non-answers stay
+// honest: none / ambiguous / failed (and a missing container on any shape) yield
+// null, so an unresolved pane can never mint a project for the linkifier to guess
+// with — the same honest-silence rule the ambiguous walk applies to delivery.
+export function projectFromContainerResolution(resolution) {
+  if (!resolution || resolution.state !== 'resolved' || !resolution.container) return null;
+  return parseContainerName(resolution.container).project;
+}
 
 const resolutionCache = new Map(); // `${host}|${target}` → { at, resolution }
 

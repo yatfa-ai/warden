@@ -39,7 +39,7 @@ const transpile = async (name, rewrite) => {
 };
 const { findUrlCandidates, maskUrls, maskSpans } = await transpile('url-links.ts');
 const { findPathCandidates } = await transpile('path-links.ts', { from: /from ['"]\.\/url-links['"]/, to: 'from "./url-links.mjs"' });
-const { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, normalizeIssueLinkEntries } = await transpile('issue-links.ts');
+const { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, normalizeIssueLinkEntries, shouldResolvePaneProject } = await transpile('issue-links.ts');
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -209,6 +209,37 @@ test('normalizeIssueLinkEntries drops malformed entries (hand-edited config.json
   ]), [{ project: 'ok', prefix: 'P', tracker: 'host.io/path' }]);
   assert.deepEqual(normalizeIssueLinkEntries(undefined), []);
   assert.deepEqual(normalizeIssueLinkEntries('nope'), []);
+});
+
+// WARDEN-1405: the one-shot /api/pane-project fetch gate. True ONLY for the
+// panes where the resolved-project answer can change the outcome — a manual
+// (container-less) pane whose own project has no mapping, while the
+// integration is on and mappings exist at all. Every other population is
+// pinned FALSE: the toggle off (no request fired at all — the byte-identical
+// off state), a yatfa pane (its project already IS the container parse — zero
+// requests), and a pane whose own project is already mapped (nothing to
+// resolve).
+test('shouldResolvePaneProject: a mapped manual pane needs no resolution', () => {
+  assert.equal(shouldResolvePaneProject({ container: null, project: 'warden' }, true, WARDEN_ENTRIES), false);
+});
+test('shouldResolvePaneProject: an unmapped manual (container-less) pane is the one true case', () => {
+  assert.equal(shouldResolvePaneProject({ container: null, project: 'manual' }, true, WARDEN_ENTRIES), true);
+  assert.equal(shouldResolvePaneProject({ container: null, project: 'local' }, true, YATFA_ENTRIES), true);
+  assert.equal(shouldResolvePaneProject({ container: null }, true, WARDEN_ENTRIES), true);
+});
+test('shouldResolvePaneProject: the integration off fires no request', () => {
+  assert.equal(shouldResolvePaneProject({ container: null, project: 'manual' }, false, WARDEN_ENTRIES), false);
+});
+test('shouldResolvePaneProject: no configured entries — nothing could linkify anyway', () => {
+  assert.equal(shouldResolvePaneProject({ container: null, project: 'manual' }, true, []), false);
+});
+test('shouldResolvePaneProject: yatfa/container panes never ask (their project IS the container parse)', () => {
+  assert.equal(shouldResolvePaneProject({ container: 'yatfa-planner-2', project: 'yatfa-planner' }, true, WARDEN_ENTRIES), false);
+  assert.equal(shouldResolvePaneProject({ container: 'yatfa-planner-2', project: 'manual' }, true, WARDEN_ENTRIES), false);
+});
+test('shouldResolvePaneProject: no chat at all is false', () => {
+  assert.equal(shouldResolvePaneProject(null, true, WARDEN_ENTRIES), false);
+  assert.equal(shouldResolvePaneProject(undefined, true, WARDEN_ENTRIES), false);
 });
 
 console.log(`\n${passed} issue-links assertions passed`);

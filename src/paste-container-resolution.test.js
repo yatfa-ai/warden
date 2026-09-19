@@ -12,6 +12,7 @@ import {
   resolveContainerFromTree,
   resolvePaneContainer,
   clearPaneContainerCache,
+  projectFromContainerResolution,
   MAX_TREE_DEPTH,
   RESOLUTION_TTL_MS,
   WALK_TIMEOUT_MS,
@@ -290,6 +291,43 @@ describe('resolveContainerFromTree — the pane\u2019s current foreground chain 
     ]);
     assert.deepStrictEqual(r, { state: 'resolved', container: 'cOne' });
   });
+});
+
+describe('projectFromContainerResolution — the container→project half (WARDEN-1405)', () => {
+  // Real shapes: exactly the parses chatMeta.test.js pins for parseContainerName —
+  // the last-hyphen split that names the project on every yatfa chat.
+  it('a resolved container parses to its project (last-hyphen split)', () => {
+    assert.equal(projectFromContainerResolution({ state: 'resolved', container: 'myproj-worker' }), 'myproj');
+    assert.equal(projectFromContainerResolution({ state: 'resolved', container: 'multi-dash-project-planner' }), 'multi-dash-project');
+    assert.equal(projectFromContainerResolution({ state: 'resolved', container: 'barename' }), 'barename');
+  });
+
+  it('composed with the REAL resolver: the observed attach tree yields the parsed project', () => {
+    const nodes = parseTreeWalkOutput(WALK_SCRIPT_LIKE_OUTPUT());
+    const resolution = resolveContainerFromTree(nodes);
+    assert.deepStrictEqual(resolution, { state: 'resolved', container: 'yatfa-planner-2' });
+    assert.equal(projectFromContainerResolution(resolution), 'yatfa-planner');
+  });
+
+  it('the honest states never mint a project — null, not a guess', () => {
+    assert.equal(projectFromContainerResolution({ state: 'none' }), null);
+    assert.equal(projectFromContainerResolution({ state: 'ambiguous', containers: ['c1-a', 'c1-b'] }), null);
+    assert.equal(projectFromContainerResolution({ state: 'failed', reason: 'walk failed (exit -1)' }), null);
+  });
+
+  it('defensive shapes yield null too (missing container, non-object)', () => {
+    assert.equal(projectFromContainerResolution({ state: 'resolved' }), null);
+    assert.equal(projectFromContainerResolution({ state: 'resolved', container: '' }), null);
+    assert.equal(projectFromContainerResolution(null), null);
+    assert.equal(projectFromContainerResolution(undefined), null);
+    assert.equal(projectFromContainerResolution('resolved'), null);
+  });
+
+  // The walk output for the composed test: the observed two-level attach, as
+  // parseTreeWalkOutput consumes it.
+  function WALK_SCRIPT_LIKE_OUTPUT() {
+    return `0\t100\tSs\tbash\n1\t101\tS+\tzsh\n2\t102\tS+\t${OBSERVED_ATTACH}\n`;
+  }
 });
 
 describe('resolvePaneContainer — one walk per pane, cached; honest when it cannot walk', () => {
