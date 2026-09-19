@@ -25,6 +25,7 @@ import { resolveConsent } from './telemetry-consent.cjs';
 import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
 import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
 import { createPaneInputTelemetry } from './paneInputTelemetry.js';
+import { createRequestTelemetry } from './requestTelemetry.js';
 import { applyCompanionToggle, applyCompanionExclusions } from './companion.js';
 import * as collections from './collections.js';
 // NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
@@ -123,8 +124,30 @@ const app = express();
 // (`end` is idempotent, and node emits 'close' on a finished response AND on an
 // aborted one, so a span always closes.)
 app.use((req, res, next) => {
+  // WARDEN-1292 — one wall-clock timestamp at span-open: the request-telemetry
+  // fold below measures close − startedAt from the SAME instant the
+  // loop-monitor span opens, so the two instruments stay comparable.
+  const startedAt = Date.now();
   const span = loopMonitor.begin(`${req.method} ${requestLabelPath(req.path)}`);
-  res.on('close', () => loopMonitor.end(span));
+  res.on('close', () => {
+    loopMonitor.end(span);
+    // WARDEN-1292 — fold every /api request's duration + ok/fail verdict into
+    // the operational-metrics aggregate, keyed by the ROUTE PATTERN:
+    // req.route.path is the route table's own code literal by construction
+    // (undefined on un-routed requests, which fold to the producer's
+    // `unmatched` sink), and req.path carries no query string. Scoped to
+    // /api/ — static assets are out of this slice's territory. try/catch
+    // mirrors the stall-sink discipline below (:399): an exception in an
+    // event listener would be uncaught, and telemetry must never be able to
+    // take out the close path. `requestTelemetry` is declared further down —
+    // safe by the same lazy-reference pattern as wireStallSink: no request is
+    // served before module evaluation completes.
+    if (req.path.startsWith('/api/')) {
+      try {
+        requestTelemetry.recordRequest(req.method, req.route?.path, Date.now() - startedAt, res.statusCode < 500);
+      } catch { /* never the close path's problem */ }
+    }
+  });
   next();
 });
 app.use(express.json({ limit: '1mb' }));
@@ -1358,6 +1381,29 @@ const paneInputTelemetry = createPaneInputTelemetry({
   },
 });
 paneInputTelemetry.start();
+
+// WARDEN-1292 — the request-metrics producer: every /api request's duration +
+// ok/fail verdict, folded into the same operational-metrics channel as the
+// file-exists probes and the pane-input hops. The fold happens in the FIRST
+// middleware above (the loop-monitor span's close handler), keyed by the
+// route table's own pattern literal via src/requestTelemetry.js's closed-set
+// mapping — a concrete URL is never an input. Same three properties as the
+// producers above: consent resolved LIVE through the one authority (cfg is
+// mutated in place by applyConfigPut, so a Settings flip gates the very next
+// record()), the windowed snapshot forwarded to the Electron main process
+// over the fork's IPC channel, and the same process.send guard for standalone
+// `node src/server` runs. Started immediately: the interval is unref'd, so
+// importing server.js in a test never hangs on it. Declared AFTER the
+// middleware that references it — safe because no request is served before
+// module evaluation completes (same lazy-reference pattern as wireStallSink).
+const requestTelemetry = createRequestTelemetry({
+  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
+  send: (snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-metrics', snapshot });
+  },
+});
+requestTelemetry.start();
 
 // Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
@@ -3350,6 +3396,13 @@ export { serverStallTelemetry };
 // test and the diagnostics endpoint drive the REAL producer (noteInputWritten →
 // notePaneOutput → windowSnapshot/flushNow) rather than a parallel copy.
 export { paneInputTelemetry };
+
+// WARDEN-1292 — exported on the same reasoning: the request-telemetry HTTP
+// suites drive REAL /api traffic through the REAL middleware wiring and close
+// the window with flushNow(), rather than reaching into the producer's
+// internals or waiting 5 minutes for a timer.
+export { requestTelemetry };
+
 // WARDEN-1278 — test seams for src/server-stall-telemetry.test.js, which drives
 // the REAL setOnStall callback to prove the owner's local channels (stalls.jsonl,
 // the stderr line, /api/diagnostics/stalls) are byte-untouched by the additive
