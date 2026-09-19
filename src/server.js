@@ -84,6 +84,13 @@ import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRou
 // WARDEN-1381 — the WebSocket layer (observe wss + streamWss + the upgrade router).
 import { setupWsLayer } from './wsLayer.js';
 import { loopMonitor, instrumentSyncIo, formatStallLine } from './loop-monitor.js';
+// WARDEN-1406 — the SAME pure suspend-window tracker electron/main.cjs uses,
+// imported across the directory line deliberately: the module is dependency-free
+// by contract (no Electron import, no fs — see its header), so it is safe to
+// load in the server child, and reusing it is what keeps the boundary semantics
+// (resume-instant counts, suspend-instant doesn't, open window counts) in ONE
+// spec'd implementation instead of a drift-prone fork-side copy.
+import { createSuspendClock } from '../electron/suspend-clock.cjs';
 import { appendStall, readStalls, pruneStallLog, stallLogFile } from './stall-log.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 
@@ -419,6 +426,106 @@ function startLoopMonitor() {
   // Age out records older than 7 days, once, off the request path.
   pruneStallLog().catch((e) => console.warn(`[warden:stall] prune failed: ${e.message}`));
 }
+
+// ===========================================================================
+// WARDEN-1406 — suspension discrimination on the SERVER runtime.
+//
+// THE ARTIFACT THIS KILLS. The shared monitor's two suspension discriminators
+// (`maxCredibleLagMs` + `isSuspendBoundary`, WARDEN-1376) are opt-in, and main
+// has armed them since 0.1.70 — this runtime had not, so a machine SLEEP read
+// as a server freeze on every channel: the receiver's worst "stall" is a
+// 12.1-hour sleep, and all 7 server-stall events are single 43.9 min–12.1 h
+// windows with `unattributed` culprits. Main is the only process that SEES
+// powerMonitor suspend/resume, so it forwards the authoritative windows over
+// the fork IPC channel and this side arms the monitor with them:
+//
+//   • `telemetry-suspend-replay` — sent ONCE at fork spawn (main.cjs, right
+//     after fork()): the retained window history + any in-flight suspend. The
+//     fork starts with no memory of suspends that happened before it existed.
+//   • `telemetry-suspend-open` / `telemetry-suspend-close` — live, on every
+//     powerMonitor suspend/resume. The close carries the closed {from, to}.
+//
+// CLOCK DOMAINS — LOAD-BEARING. The monitor's lag math ticks MONOTONIC
+// performance.now(); suspend windows are WALL (Date.now()) stamps from main.
+// The monitor therefore hands the predicate the WALL-CLOCK bounds of the tick
+// gap as extra arguments (loop-monitor.js tick()), and the predicate below
+// compares wall vs wall. main's own two-argument loop-monitor predicate
+// compares monotonic tick values against wall windows — an accidental mix that
+// survives only because its magnitude ceiling is domain-independent. That mix
+// is NOT copied here. (Per-tick offset mapping would NOT work: the offset
+// changes ACROSS the sleep, so mapping the lag window's start with the
+// post-wake offset misplaces it by the whole sleep duration and the 12-hour
+// artifact would report exactly as before.)
+//
+// ARM ONLY WHEN FORKED. `typeof process.send === 'function'` is the same guard
+// every forward on this channel uses, read in the opposite direction: a
+// standalone `node src/server.js` has no parent to send it windows, so it keeps
+// today's byte-for-byte behavior — no ceiling, no predicate, no listener. In a
+// test runner the guard also reads false, so importing server.js arms nothing.
+// ===========================================================================
+const MAX_CREDIBLE_LAG_MS = 60000; // mirrors electron/main.cjs — no live process blocks this long
+
+// Module-level so a re-setup replaces the previous listener instead of stacking
+// (and so `dispose` can remove exactly what was registered).
+let suspendMessageHandler = null;
+
+function setupSuspensionDiscrimination({
+  forked = typeof process.send === 'function',
+  monitor = loopMonitor,
+  clock = createSuspendClock(),
+} = {}) {
+  if (!forked) return null; // standalone: today's behavior, byte for byte
+  if (suspendMessageHandler) process.removeListener('message', suspendMessageHandler);
+
+  suspendMessageHandler = (msg) => {
+    // The IPC channel carries several producers' messages; anything that is not
+    // one of ours — including a malformed one — is ignored, never thrown on.
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'telemetry-suspend-open') {
+      if (typeof msg.at === 'number') clock.onSuspend(msg.at);
+    } else if (msg.type === 'telemetry-suspend-close') {
+      // onResume, NOT ingestWindow: the close must CLEAR the in-flight open
+      // state (an open marker left standing would suppress every later stall
+      // forever), and the fork→main channel is ordered, so the matching open
+      // marker has already been applied. A close with no open on record is
+      // dropped — the tracker's own idempotent resume semantics.
+      if (typeof msg.from === 'number' && typeof msg.to === 'number') clock.onResume(msg.to);
+    } else if (msg.type === 'telemetry-suspend-replay') {
+      const replayed = Array.isArray(msg.windows) ? msg.windows : [];
+      for (const w of replayed) clock.ingestWindow(w);
+      if (typeof msg.openAt === 'number') clock.onSuspend(msg.openAt);
+    }
+  };
+  // The fork's FIRST 'message' listener — grep confirmed none existed before
+  // this slice; main.cjs's listener is on the parent side of the same channel.
+  process.on('message', suspendMessageHandler);
+
+  monitor.setSuspendPolicy({
+    maxCredibleLagMs: MAX_CREDIBLE_LAG_MS,
+    // The monotonic (from, to) pair is ignored on purpose — the wall bounds are
+    // the same intervals in the domain the suspend windows live in. A caller
+    // that somehow passes no wall bounds (never this monitor's tick) reads as
+    // "no windows span" — spansSuspend's own non-numeric contract — which is
+    // the monitor's fail-open direction: report the stall.
+    isSuspendBoundary: (from, to, wallFrom, wallTo) => clock.spansSuspend(wallFrom, wallTo),
+  });
+
+  return {
+    clock,
+    dispose() {
+      if (suspendMessageHandler) {
+        process.removeListener('message', suspendMessageHandler);
+        suspendMessageHandler = null;
+      }
+      monitor.setSuspendPolicy({ maxCredibleLagMs: null, isSuspendBoundary: null });
+    },
+  };
+}
+
+// Wire it once at module scope, next to the other IPC-channel wiring: the
+// arming is a property of HOW this process was started, not of when the HTTP
+// server starts listening.
+setupSuspensionDiscrimination();
 
 // Recorded server stalls — the owner-facing read surface for the durable log.
 // Reads the FILE (not just the in-process ring) so the evidence survives a
@@ -3323,6 +3430,17 @@ export function __startLoopMonitorForTest() {
   wireStallSink();
 }
 export { cfg };
+
+// WARDEN-1406 — test seam for src/server-suspend-arm.test.js: drives the REAL
+// arming path (the same function the module scope ran) with the forked flag
+// forced, an injectable monitor, and a returned { clock, dispose } so a test
+// can inspect the window store and clean the real process's listener up. In the
+// test runner `typeof process.send` is undefined, so the module-scope call
+// above armed nothing — the standalone-unarmed contract is asserted against
+// that live state.
+export function __setupSuspensionDiscriminationForTest(opts) {
+  return setupSuspensionDiscrimination(opts);
+}
 
 // The process-wide monitor, re-exported for the same test: test-fixtures/
 // stall-ipc-harness.mjs runs INSIDE a forked child and must reach the very same
