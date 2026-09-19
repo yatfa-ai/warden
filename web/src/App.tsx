@@ -21,7 +21,7 @@ import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWind
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -311,28 +311,23 @@ function App() {
   // keep the persisted snapshot + reset partition whole.
   const terminalFontSize = useTerminalFontSize();
   const setTerminalFontSize = useSetTerminalFontSize();
-  // Opt-in OS desktop alerts (WARDEN-259). Pure client-side pref (like
-  // terminalFontSize/scrollback): persisted by the saveUi effect below. Never sent
-  // to the backend.
-  //
-  // WARDEN-1274 — WHAT THIS STILL GATES, since the fleet ATTENTION alert it was
-  // named for is retired. Two live channels, and it is the ONLY opt-in on both:
-  //   1. The token-BUDGET OS notification (useTokenBudget → pickBudgetChannel):
-  //      hidden + this off resolves the channel to 'none', so the away-alarm the
-  //      founder relies on simply never fires. Removing this toggle would have
-  //      silently killed it.
-  //   2. The hidden-tab poll relaxation in useAttentionRollup, which keeps the
-  //      surviving WATCH ping able to fire while the human is away.
-  // So it is NOT a no-op knob — it gates working channels. Its Settings copy names
-  // those, not the removed attention alerts.
-  const [attentionDesktopAlerts, setAttentionDesktopAlerts] = useState(() => uiState.attentionDesktopAlerts ?? false);
+  // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the attention/notification pair
+  // migrated onto the shared store (see onExitBehavior above) — NotificationsSection
+  // (the writer), useAttentionRollup's three poller gates and useTokenBudget's
+  // OS-notification gate subscribe to it directly, and the DesktopAlertPrefs
+  // Settings bag is retired. App subscribes only to keep the persisted snapshot +
+  // reset partition whole. The WARDEN-1274 "what the master toggle still gates"
+  // note moved with the fact (see UiStoreState in lib/uiStore.ts).
+  const attentionDesktopAlerts = useAttentionDesktopAlerts();
+  const setAttentionDesktopAlerts = useSetAttentionDesktopAlerts();
   // Per-state Attention toggle (WARDEN-344): which pane states raise the badge.
   // Each defaults ON; persisted by the saveUi effect below and forwarded to the
   // AttentionBadge's useAttentionRollup. Purely a DISPLAY filter on the passive
   // readout since WARDEN-1274 retired the alert. WARDEN-1360: only the states the
   // passive readout can substantiate remain (stuck / done) — erroring / waiting /
   // blocked were substring guesses and their buckets (and knobs) are gone.
-  const [attentionStates, setAttentionStates] = useState(() => uiState.attentionStates ?? { stuck: true, done: true });
+  const attentionStates = useAttentionStates();
+  const setAttentionStates = useSetAttentionStates();
   // Per-chat watch state + single/bulk toggles + the derived O(1) lookup Set live
   // in useWatchState (WARDEN-696 slice 2). watchedChats is still persisted by the
   // saveUi effect below and wired into the attention rollup (composition root).
@@ -921,9 +916,11 @@ function App() {
   // setFileViewerViewMode — plus the six terminal setters this reset covers
   // since WARDEN-1322 (setTerminalFontSize/setTerminalScrollback/
   // setTerminalFontFamily/setTerminalCursorStyle/setCopyOnSelect/
-  // setOnExitBehavior) — are zustand actions created once with the store
-  // (lib/uiStore.ts) — so listing them in the dep array below costs nothing and
-  // keeps the lint rule satisfied honestly rather than by suppression.
+  // setOnExitBehavior), and the attention pair since WARDEN-1408
+  // (setAttentionDesktopAlerts/setAttentionStates) — are zustand actions
+  // created once with the store (lib/uiStore.ts) — so listing them in the dep
+  // array below costs nothing and keeps the lint rule satisfied honestly
+  // rather than by suppression.
   const resetUiPrefsToDefaults = useCallback(() => {
     const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
       // Appearance
@@ -995,7 +992,7 @@ function App() {
     // contract), so it joins clearWatchedChats outside the dep array.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
     setObserverResetToken((t) => t + 1);
-  }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior]);
+  }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1143,8 +1140,12 @@ function App() {
   useEffect(() => {
     setTelemetryContext({ chatName: focusedChat?.name });
   }, [focusedChat?.name]);
+  // WARDEN-1408 (slice 11): the persisted prefs the rollup gates on (the
+  // desktop-alerts opt-in + per-state filters) are subscribed INSIDE the hook
+  // from the shared store now — the runtime inputs (openPanes, watchedChats,
+  // onOpenChat, focusedPaneKey) stay explicit, exactly as they always were.
   const { rollup: attentionRollup, watchedStates: watchedAgentStates } = useAttentionRollup(
-    attentionDesktopAlerts, openPanes, attentionStates, watchedChats, openChat, focusedPaneKey,
+    openPanes, watchedChats, openChat, focusedPaneKey,
   );
   // WARDEN-417: surface the per-chat watch catch-up (unacked away misses, deep-linking
   // to each watched pane via openChat). WARDEN-476: pass the rollup's watched-states
@@ -1703,9 +1704,10 @@ function App() {
   // threshold crossing. onOpenSessions deep-links to the All Sessions usage view
   // (heaviest first) so a click lands on the offending session. The desktop
   // channel is gated on the same attentionDesktopAlerts opt-in the attention
-  // alerts respect.
+  // alerts respect — subscribed INSIDE the hook from the shared store since
+  // WARDEN-1408 (slice 11), so it is no longer an arg here.
   const openSessionsView = useCallback(() => { setChatBrowserSortUsage(true); setChatBrowserOpen(true); }, []);
-  const { budget: tokenBudget } = useTokenBudget({ attentionDesktopAlerts, onOpenSessions: openSessionsView, hostLabels });
+  const { budget: tokenBudget } = useTokenBudget({ onOpenSessions: openSessionsView, hostLabels });
   // Host connectivity statuses, sourced from the shared /api/hosts/status
   // singleton (useHostStatuses, WARDEN-237). One ref-counted, visibility-gated
   // poll backs every consumer — this App-level feed (host dots in the sidebar
@@ -1971,11 +1973,9 @@ function App() {
           // WARDEN-1383 (roadmap WARDEN-1204 slice 8): no `newChats` group —
           // NewChatsSection subscribes to the shared client-state store
           // (lib/uiStore.ts) directly, like SnippetsSection (WARDEN-1271) and
-          // the six terminal prefs (WARDEN-1322) before it.
-          alerts={{
-            attentionDesktopAlerts, setAttentionDesktopAlerts,
-            attentionStates, setAttentionStates,
-          }}
+          // the six terminal prefs (WARDEN-1322) before it. WARDEN-1408 (slice
+          // 11): no `alerts` group either — NotificationsSection subscribes to
+          // the store the same way, and the DesktopAlertPrefs bag is retired.
           resetUiPrefsToDefaults={resetUiPrefsToDefaults}
         />
       ) : chatBrowserOpen ? (

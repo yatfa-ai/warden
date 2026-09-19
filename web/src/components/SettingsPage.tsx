@@ -27,7 +27,6 @@ import { applyRowMatchHighlights, clearRowMatchHighlights } from '@/components/s
 import { SettingsSection } from '@/components/settings/SettingsSection';
 import {
   type AppearancePrefs,
-  type DesktopAlertPrefs,
 } from '@/components/settings/types';
 
 import { HostsSection } from '@/components/settings/sections/HostsSection';
@@ -65,8 +64,9 @@ interface Props {
   appearance: AppearancePrefs;
   // WARDEN-1383 (slice 8): no `newChats` group — NewChatsSection subscribes to
   // the shared client-state store (lib/uiStore.ts) directly, like
-  // SnippetsSection (WARDEN-1271) before it.
-  alerts: DesktopAlertPrefs;
+  // SnippetsSection (WARDEN-1271) before it. WARDEN-1408 (slice 11): no
+  // `alerts` group either — NotificationsSection subscribes to the store the
+  // same way, and the DesktopAlertPrefs bag is retired.
   resetUiPrefsToDefaults: () => void;
 }
 
@@ -83,7 +83,6 @@ export function SettingsPage({
   onClose,
   onConfigChange,
   appearance,
-  alerts,
   resetUiPrefsToDefaults,
 }: Props) {
   // The backend /api/config persistence seam: GET on mount, PUT on Save, the
@@ -351,7 +350,6 @@ export function SettingsPage({
                   <DisplaySection config={config} setConfig={setConfig} hidden={activeSection !== 'display'} />
                   <PatternsSection config={config} setConfig={setConfig} hidden={activeSection !== 'patterns'} />
                   <NotificationsSection
-                    {...alerts}
                     config={config}
                     setConfig={setConfig}
                     webhookSecretSet={webhookSecretSet}

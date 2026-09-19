@@ -14,12 +14,13 @@ import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
+import { useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates } from '@/lib/uiStore';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
 import { type WebhookTestVerdict } from '@/lib/webhook/testAlert';
-import { type ConfigData, type SetConfig, type DesktopAlertPrefs } from '../types';
+import { type ConfigData, type SetConfig } from '../types';
 
-export type NotificationsSectionProps = DesktopAlertPrefs & {
+export type NotificationsSectionProps = {
   config: ConfigData;
   setConfig: SetConfig;
   // Webhook write-only shared secret (WARDEN-555): GET returns only a masked
@@ -47,8 +48,6 @@ export type NotificationsSectionProps = DesktopAlertPrefs & {
 
 export function NotificationsSection(props: NotificationsSectionProps) {
   const {
-    attentionDesktopAlerts, setAttentionDesktopAlerts,
-    attentionStates, setAttentionStates,
     config, setConfig,
     webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput,
     webhookSecretPendingClear, removeWebhookSecret, undoRemoveWebhookSecret,
@@ -56,6 +55,18 @@ export function NotificationsSection(props: NotificationsSectionProps) {
     webhookTestVerdict, setWebhookTestVerdict,
     hidden,
   } = props;
+
+  // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the desktop-alert pair is
+  // subscribed from the shared client-state store (lib/uiStore.ts) — the same
+  // migration SnippetsSection (WARDEN-1271), the six terminal prefs (WARDEN-1322)
+  // and NewChatsSection (WARDEN-1383) took — instead of traveling through the
+  // retired DesktopAlertPrefs bag. Persistence is unchanged: App still carries
+  // both facts in its PersistedPrefSnapshot, so the ONE compile-locked saveUi
+  // effect remains the single writer.
+  const attentionDesktopAlerts = useAttentionDesktopAlerts();
+  const setAttentionDesktopAlerts = useSetAttentionDesktopAlerts();
+  const attentionStates = useAttentionStates();
+  const setAttentionStates = useSetAttentionStates();
 
   // WARDEN-883 — confirm the irreversible secret removal before queueing it.
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);

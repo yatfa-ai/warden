@@ -9,7 +9,8 @@
 //   - an in-app sonner toast (the "beautiful notification" surface) with a
 //     "View sessions" action that deep-links to the All Sessions usage view, AND
 //   - an OS desktop notification (the "while the founder is away" channel) when
-//     the human opted into desktop alerts (attentionDesktopAlerts).
+//     the human opted into desktop alerts (the uiStore attentionDesktopAlerts
+//     pref — subscribed internally, WARDEN-1408).
 //
 // Delivery rules (mirrors useAttentionRollup's away/at-Warden split so there is
 // never a double fire):
@@ -19,10 +20,10 @@
 //     (so the founder learns about it the moment they return), re-arming only
 //     after the budget recovers.
 //
-// The desktop master toggle (attentionDesktopAlerts) gates the OS notification —
-// the same opt-in the attention alerts respect. The budget's own master switch
-// (config.tokenBudgetEnabled) gates whether /api/budget reports an alerted state
-// at all; when off, this hook never fires.
+// The desktop master toggle (the uiStore attentionDesktopAlerts pref) gates the
+// OS notification — the same opt-in the attention alerts respect. The budget's
+// own master switch (config.tokenBudgetEnabled) gates whether /api/budget
+// reports an alerted state at all; when off, this hook never fires.
 import { useState, useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import {
@@ -35,6 +36,7 @@ import {
 import { fireBudgetNotification } from '@/lib/desktopAlerts';
 import { formatTokens } from '@/lib/formatTokens';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
+import { useAttentionDesktopAlerts } from '@/lib/uiStore';
 
 // Match the backend accumulator's beat. The endpoint is a cheap cache read, so
 // this stays light; aligning to BUDGET_INTERVAL_MS means a poll lands soon after
@@ -47,8 +49,6 @@ const BUDGET_POLL_MS = 120_000;
 const FETCH_OPTS = pollerFetchOptions(BUDGET_POLL_MS);
 
 export interface UseTokenBudgetArgs {
-  /** Master opt-in for OS desktop alerts (same toggle the attention alerts use). */
-  attentionDesktopAlerts?: boolean;
   /** Deep-link: open the All Sessions usage view (the offending session floats top). */
   onOpenSessions?: () => void;
   /** Per-host display labels (WARDEN-490) so the offender line names the friendly host. */
@@ -62,8 +62,14 @@ export interface UseTokenBudgetResult {
 }
 
 export function useTokenBudget(
-  { attentionDesktopAlerts = false, onOpenSessions, hostLabels }: UseTokenBudgetArgs = {},
+  { onOpenSessions, hostLabels }: UseTokenBudgetArgs = {},
 ): UseTokenBudgetResult {
+  // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the master desktop-alert opt-in
+  // is subscribed from the shared uiStore instead of arriving as an arg — the
+  // notification gate + the hidden-tick relaxation below re-evaluate through the
+  // subscription exactly as they did through the prop. Runtime callbacks
+  // (onOpenSessions, hostLabels) STAY explicit args — only the persisted pref moved.
+  const attentionDesktopAlerts = useAttentionDesktopAlerts();
   const [budget, setBudget] = useState<BudgetState>(EMPTY_BUDGET);
   const [loading, setLoading] = useState(true);
 

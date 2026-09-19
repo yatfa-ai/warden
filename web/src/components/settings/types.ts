@@ -7,7 +7,7 @@
 //                       atomically via PUT /api/config by the useBackendConfig
 //                       seam. Owned INSIDE SettingsPage (never threaded from App).
 //
-//   - CLIENT prefs    → the `*Prefs` groups (AppearancePrefs, DesktopAlertPrefs).
+//   - CLIENT prefs    → the `*Prefs` groups (AppearancePrefs).
 //                       Pure localStorage prefs owned by App
 //                       and persisted by App's saveUi effect. Threaded into
 //                       SettingsPage as grouped props.
@@ -227,8 +227,20 @@ export interface AppearancePrefs {
 // the shared client-state store (lib/uiStore.ts): NewChatsSection and
 // NewChatForm SUBSCRIBE to it directly and the bag is retired. Its persistence
 // sink is unchanged; only the SHARING channel differs. The same happened to
-// `SnippetsPrefs` (WARDEN-1271, below) and to six pairs of `AppearancePrefs`
-// (WARDEN-1322).
+// `SnippetsPrefs` (WARDEN-1271, below), to six pairs of `AppearancePrefs`
+// (WARDEN-1322), and — roadmap WARDEN-1204 slice 11, WARDEN-1408 — to
+// `DesktopAlertPrefs` itself (the note below).
+
+// NOTE (WARDEN-1408, roadmap WARDEN-1204 slice 11): there is no `DesktopAlertPrefs`
+// group here any more. The attention/notification pair (the master OS-desktop-alert
+// opt-in + the per-state Attention badge filters) read FIVE surfaces beyond its
+// writer's subscription — useAttentionRollup's three poller gates, useTokenBudget's
+// OS-notification gate, and App's persist/reset channels — so threading it through
+// App → SettingsPage → NotificationsSection was a pure pass-through carrier for
+// every one of those consumers. NotificationsSection (the writer) and each consumer
+// SUBSCRIBE to the shared client-state store (lib/uiStore.ts) directly now and the
+// bag interface is retired. Its persistence sink is unchanged; only the SHARING
+// channel differs.
 
 // NOTE (WARDEN-1271): there is no `SnippetsPrefs` group here any more. The
 // instruction-snippet library (WARDEN-323) was the first fact migrated onto the
@@ -250,27 +262,6 @@ export interface AppearancePrefs {
 // only by App and Settings and is never prop-drilled to PaneTile — its derived
 // product terminalThemeId remains an App-computed prop so an OS theme flip can
 // re-theme open panes live.
-
-/**
- * Desktop-alert client prefs for the Notifications section (the OS-notification
- * channel — a DIFFERENT channel + persistence path than the server-side toast
- * toggles, which live in `ConfigData`). Pure client localStorage.
- */
-export interface DesktopAlertPrefs {
-  // The master OS-notification opt-in. WARDEN-1274 retired the fleet attention
-  // alert it was named for; it now gates the surviving token-BUDGET notification
-  // and the hidden-tab poll relaxation the WATCH ping needs — so it still gates
-  // working channels and is NOT a no-op knob. Its four per-severity sub-toggles
-  // (alertCritical / alertWarning / alertDirective / alertError) routed the
-  // retired channel ONLY, and went with it.
-  attentionDesktopAlerts: boolean;
-  setAttentionDesktopAlerts: (v: boolean) => void;
-  // WARDEN-1360: only the states the passive readout can substantiate remain.
-  // erroring/waiting/blocked were substring guesses; their fields went with
-  // their rollup buckets (mirrors web/src/lib/storage.ts's UiState pref).
-  attentionStates: { stuck?: boolean; done?: boolean };
-  setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
-}
 
 /** Re-exported so sections that take a hostLabels pref share one type. */
 export type { HostLabels };
