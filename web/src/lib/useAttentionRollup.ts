@@ -26,7 +26,6 @@ import {
   buildAttentionRollup,
   isDoneTransition,
   type AttentionRollup,
-  type AttentionRollupOptions,
 } from '@/lib/attentionRollup';
 import {
   shouldFireWatch,
@@ -39,6 +38,7 @@ import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadStateEnteredAt, saveStateEnteredAt, computeEnteredAt } from '@/lib/stateDuration';
+import { useAttentionDesktopAlerts, useAttentionStates } from '@/lib/uiStore';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -164,15 +164,7 @@ function fireWatchInApp(
 }
 
 export function useAttentionRollup(
-  // WARDEN-1274: the master desktop-alert opt-in. It no longer gates any ATTENTION
-  // alert (that channel is retired) — here it does exactly one thing: relax the
-  // visibility gate on the three polls below so they keep ticking while Warden is
-  // hidden. That relaxation is what keeps the WATCH ping (a user-authored literal,
-  // a surviving channel) able to fire while the human is away. Do NOT reintroduce
-  // a rollup-diff alert behind it.
-  attentionDesktopAlerts = false,
   openPanes: string[] = [],
-  enabledStates?: AttentionRollupOptions['enabledStates'],
   // WARDEN-378: pane keys the human opted into per-chat "watch" — unioned into the
   // ?panes= poll so a watched chat is classified even when its pane is NOT open, and
   // diffed for a targeted ping when it newly needs the human.
@@ -190,6 +182,23 @@ export function useAttentionRollup(
   // + optional so existing call sites stay compatible.
   focusedPaneKey?: string | null,
 ): AttentionRollupState {
+  // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the two PERSISTED prefs this hook
+  // gates on are subscribed from the shared uiStore instead of arriving as
+  // parameters — the poller gates and the rollup aggregation re-evaluate through
+  // their own subscriptions, exactly as they did through props. The RUNTIME inputs
+  // above (openPanes / watchedChats / onOpenChat / focusedPaneKey) STAY explicit
+  // parameters — only persisted prefs moved. The per-fact hooks live in one place
+  // (uiStore.ts) so every surface reading these facts subscribes identically.
+  //
+  // WARDEN-1274: the master desktop-alert opt-in. It no longer gates any ATTENTION
+  // alert (that channel is retired) — here it does exactly one thing: relax the
+  // visibility gate on the three polls below so they keep ticking while Warden is
+  // hidden. That relaxation is what keeps the WATCH ping (a user-authored literal,
+  // a surviving channel) able to fire while the human is away. Do NOT reintroduce
+  // a rollup-diff alert behind it.
+  const attentionDesktopAlerts = useAttentionDesktopAlerts();
+  // WARDEN-344: which pane states the badge counts (stuck / done since WARDEN-1360).
+  const enabledStates = useAttentionStates();
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [agentStates, setAgentStates] = useState<AgentStateRow[]>([]);

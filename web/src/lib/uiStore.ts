@@ -244,6 +244,37 @@ export interface UiStoreState {
   defaultShellByHost: Record<string, string>;
   /** Replace the per-host shell map. The persisted write follows via App's snapshot. */
   setDefaultShellByHost: (v: Record<string, string>) => void;
+  /**
+   * The attention/notification pair (roadmap WARDEN-1204 slice 11, WARDEN-1408).
+   * The master OS-desktop-alert opt-in (WARDEN-259) plus the per-state Attention
+   * badge display filters (WARDEN-344). WARDEN-1274 is the reason the pair still
+   * exists and what the master toggle still gates — the fleet ATTENTION alert it
+   * was named for is retired, but TWO live channels remain and it is the ONLY
+   * opt-in on both:
+   *   1. The token-BUDGET OS notification (useTokenBudget → pickBudgetChannel):
+   *      hidden + this off resolves the channel to 'none', so the away-alarm
+   *      simply never fires. Removing this toggle would have silently killed it.
+   *   2. The hidden-tab poll relaxation in useAttentionRollup, which keeps the
+   *      surviving WATCH ping able to fire while the human is away.
+   * So it is NOT a no-op knob — it gates working channels; the Settings copy in
+   * NotificationsSection names those, not the removed attention alerts.
+   *
+   * Reading surfaces beyond the writer's own subscription: useAttentionRollup's
+   * three poller gates (the runWhileHidden relaxation above), useTokenBudget's
+   * OS-notification gate, and App's persist/reset channels. NotificationsSection
+   * (the writer) and each consumer SUBSCRIBE here directly since WARDEN-1408 —
+   * the DesktopAlertPrefs Settings props bag is retired. Defaults mirror
+   * DEFAULT_UI (false / { stuck: true, done: true }), seeded ??-only like every
+   * other fact — loadUi's sanitizers (`=== true` for the opt-in, `!== false`
+   * per state) already normalize a persisted payload.
+   */
+  attentionDesktopAlerts: boolean;
+  /** Set the master desktop-alert opt-in. The persisted write follows via App's snapshot. */
+  setAttentionDesktopAlerts: (v: boolean) => void;
+  /** Per-state Attention badge display filters (stuck / done since WARDEN-1360; each defaults ON). */
+  attentionStates: { stuck?: boolean; done?: boolean };
+  /** Replace the per-state filter bag. The persisted write follows via App's snapshot. */
+  setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
 }
 
 /**
@@ -278,6 +309,8 @@ export type UiStoreSeed = Partial<
     | 'customPresets'
     | 'defaultShell'
     | 'defaultShellByHost'
+    | 'attentionDesktopAlerts'
+    | 'attentionStates'
   >
 >;
 
@@ -362,6 +395,18 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setDefaultShell: (defaultShell) => set({ defaultShell }),
     defaultShellByHost: seed.defaultShellByHost ?? persisted.defaultShellByHost ?? {},
     setDefaultShellByHost: (defaultShellByHost) => set({ defaultShellByHost }),
+    // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the attention/notification
+    // pair, ??-only — the literals below mirror DEFAULT_UI (pinned against it
+    // by uiStore.test.mjs), exactly as the App useStates they replaced seeded
+    // (`uiState.attentionDesktopAlerts ?? false` /
+    // `uiState.attentionStates ?? { stuck: true, done: true }`). loadUi's own
+    // sanitizers (`=== true` for the opt-in; `!== false` per state) already
+    // normalize a persisted payload, so there is no terminalFontFamily-style
+    // truthiness exception here either.
+    attentionDesktopAlerts: seed.attentionDesktopAlerts ?? persisted.attentionDesktopAlerts ?? false,
+    setAttentionDesktopAlerts: (attentionDesktopAlerts) => set({ attentionDesktopAlerts }),
+    attentionStates: seed.attentionStates ?? persisted.attentionStates ?? { stuck: true, done: true },
+    setAttentionStates: (attentionStates) => set({ attentionStates }),
   }));
 }
 
@@ -657,4 +702,44 @@ export function useDefaultShellByHost(): Record<string, string> {
 /** The per-host shell-map setter. Stable across renders. */
 export function useSetDefaultShellByHost(): (v: Record<string, string>) => void {
   return useUiStore((s) => s.setDefaultShellByHost);
+}
+
+// ─── The attention/notification pair (WARDEN-1408, roadmap WARDEN-1204 slice 11) ───
+//
+// NotificationsSection (the writer), useAttentionRollup's three poller gates
+// (the hidden-tab relaxation that keeps the WATCH ping alive while away) and
+// useTokenBudget's OS-notification gate subscribe here instead of receiving
+// the pair through the retired DesktopAlertPrefs bag. App subscribes too
+// (keep-local-names) purely for the snapshot + resetSetters, as with every
+// migrated fact. Both setters are stable across renders (zustand actions are
+// created once with the store), so they are safe in React dependency arrays.
+
+/**
+ * The master OS-desktop-alerts opt-in (WARDEN-259). Since WARDEN-1274 it gates
+ * exactly two live channels: the token-budget OS notification and the
+ * hidden-tab poll relaxation the per-chat WATCH ping needs (see the
+ * UiStoreState doc above for the full story).
+ */
+export function useAttentionDesktopAlerts(): boolean {
+  return useUiStore((s) => s.attentionDesktopAlerts);
+}
+
+/** The desktop-alerts setter (NotificationsSection; also App's resetSetters). Stable across renders. */
+export function useSetAttentionDesktopAlerts(): (v: boolean) => void {
+  return useUiStore((s) => s.setAttentionDesktopAlerts);
+}
+
+/**
+ * The per-state Attention badge display filters (WARDEN-344; stuck/done since
+ * WARDEN-1360). Purely a DISPLAY filter on the passive readout — each state
+ * defaults ON, only an explicit false silences it (mirrors
+ * buildAttentionRollup's `enabledStates[k] !== false` semantics).
+ */
+export function useAttentionStates(): { stuck?: boolean; done?: boolean } {
+  return useUiStore((s) => s.attentionStates);
+}
+
+/** The per-state-filter setter (NotificationsSection; also App's resetSetters). Stable across renders. */
+export function useSetAttentionStates(): (v: { stuck?: boolean; done?: boolean }) => void {
+  return useUiStore((s) => s.setAttentionStates);
 }

@@ -114,6 +114,10 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     customPresets: s.customPresets,
     defaultShell: s.defaultShell,
     defaultShellByHost: s.defaultShellByHost,
+    // WARDEN-1408 (slice 11): the attention/notification pair — same
+    // compile-locked snapshot fields.
+    attentionDesktopAlerts: s.attentionDesktopAlerts,
+    attentionStates: s.attentionStates,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -1264,6 +1268,128 @@ test('the family is independent of the other migrated facts', () => {
   assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().timestampFormat, 'relative');
   assert.deepEqual(store.getState().hostLabels, {});
+});
+
+// ─── the attention/notification pair (WARDEN-1408, roadmap WARDEN-1204 slice 11) ───
+//
+// Two facts — the master OS-desktop-alert opt-in (attentionDesktopAlerts) and
+// the per-state Attention badge display filters (attentionStates) — that FIVE
+// surfaces beyond the writer's subscription read: useAttentionRollup's three
+// poller gates (the hidden-tab relaxation keeping the WATCH ping alive),
+// useTokenBudget's OS-notification gate, and App's persist/reset channels.
+// NotificationsSection (the writer) and each consumer subscribe here now; the
+// DesktopAlertPrefs Settings props bag is retired.
+console.log('\ncreateUiStore — the attention pair seeds from storage.ts, never from re-declared defaults');
+test('a fresh store seeds the pair from DEFAULT_UI on a clean install (not local literals)', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().attentionDesktopAlerts, false);
+  assert.equal(store.getState().attentionDesktopAlerts, DEFAULT_UI.attentionDesktopAlerts);
+  assert.deepEqual(store.getState().attentionStates, { stuck: true, done: true });
+  assert.deepEqual(store.getState().attentionStates, DEFAULT_UI.attentionStates);
+});
+test('a fresh store seeds the pair from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({ ...loadUi(), attentionDesktopAlerts: true, attentionStates: { stuck: false, done: true } });
+  const store = createUiStore();
+  assert.equal(store.getState().attentionDesktopAlerts, true);
+  assert.deepEqual(store.getState().attentionStates, { stuck: false, done: true });
+});
+test("the seed runs through loadUi's sanitizers (only an explicit true opts in; only an explicit false silences a state)", () => {
+  reset();
+  // A corrupt/legacy payload: the opt-in is a string, the stuck filter is a
+  // string, done is missing entirely.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], attentionDesktopAlerts: 'yes', attentionStates: { stuck: 'no' } }));
+  const store = createUiStore();
+  // attentionDesktopAlerts' `=== true` sanitizer keeps the conservative OFF…
+  assert.equal(store.getState().attentionDesktopAlerts, false);
+  // …while attentionStates' `!== false` semantics keep every state ON
+  // (a partial payload never drops a state silently — and buildAttentionRollup's
+  // enabledStates[k] !== false reads the same shape).
+  assert.deepEqual(store.getState().attentionStates, { stuck: true, done: true });
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage) — the UiStoreSeed addition', () => {
+  reset();
+  saveUi({ ...loadUi(), attentionDesktopAlerts: true, attentionStates: { stuck: false } });
+  const store = createUiStore({ attentionDesktopAlerts: false, attentionStates: { stuck: true, done: false } });
+  assert.equal(store.getState().attentionDesktopAlerts, false);
+  assert.deepEqual(store.getState().attentionStates, { stuck: true, done: false });
+});
+
+console.log("\nsetAttentionDesktopAlerts/setAttentionStates — the section's writes, and they do NOT touch localStorage");
+test('the setters replace the pair, and a subscriber is notified (the SHARING channel every consumer reads)', () => {
+  reset();
+  const store = createUiStore({ attentionDesktopAlerts: false, attentionStates: { stuck: true, done: true } });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push([s.attentionDesktopAlerts, { ...s.attentionStates }]));
+  store.getState().setAttentionDesktopAlerts(true);            // NotificationsSection's master toggle
+  store.getState().setAttentionStates({ stuck: false, done: true }); // its per-state toggles
+  unsubscribe();
+  assert.deepEqual(seen, [[true, { stuck: true, done: true }], [true, { stuck: false, done: true }]]);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setAttentionDesktopAlerts(false);
+  assert.equal(seen.length, 2);
+});
+test('the setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ attentionDesktopAlerts: false, attentionStates: { stuck: true, done: true } });
+  store.getState().setAttentionDesktopAlerts(true);
+  store.getState().setAttentionStates({ stuck: false });
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the two action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore();
+  const beforeAlerts = store.getState().setAttentionDesktopAlerts;
+  const beforeStates = store.getState().setAttentionStates;
+  beforeAlerts(true);
+  beforeStates({ stuck: false });
+  assert.equal(store.getState().setAttentionDesktopAlerts, beforeAlerts);
+  assert.equal(store.getState().setAttentionStates, beforeStates);
+});
+
+console.log('\nround trip: Settings → Notifications → store → App snapshot → the saveUi effect → loadUi');
+test('the pair survives a restart through the real chain', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().attentionDesktopAlerts, false);
+  assert.deepEqual(store.getState().attentionStates, { stuck: true, done: true });
+  store.getState().setAttentionDesktopAlerts(true);            // the master toggle
+  store.getState().setAttentionStates({ stuck: false, done: true }); // the per-state toggles
+  flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
+  const persisted = loadUi();                  // next launch
+  assert.equal(persisted.attentionDesktopAlerts, true);
+  assert.deepEqual(persisted.attentionStates, { stuck: false, done: true });
+  // And the next launch's store seeds from exactly that.
+  const next = createUiStore().getState();
+  assert.equal(next.attentionDesktopAlerts, true);
+  assert.deepEqual(next.attentionStates, { stuck: false, done: true });
+});
+test('the reset path restores both defaults through the store-backed setters', () => {
+  reset();
+  const store = createUiStore({ attentionDesktopAlerts: true, attentionStates: { stuck: false, done: false } });
+  // App's resetSetters entries are `attentionDesktopAlerts:
+  // setAttentionDesktopAlerts` / `attentionStates: setAttentionStates` — the
+  // SAME setters, now backed by the store, called with resetUiPrefDefaults()' values.
+  store.getState().setAttentionDesktopAlerts(DEFAULT_UI.attentionDesktopAlerts);
+  store.getState().setAttentionStates(DEFAULT_UI.attentionStates);
+  flushSnapshotToDisk(store);
+  assert.equal(store.getState().attentionDesktopAlerts, false);
+  assert.deepEqual(store.getState().attentionStates, { stuck: true, done: true });
+  assert.equal(loadUi().attentionDesktopAlerts, false);
+  assert.deepEqual(loadUi().attentionStates, { stuck: true, done: true });
+});
+test('the pair is independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore({ attentionDesktopAlerts: true });
+  store.getState().setAttentionStates({ stuck: false });
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  store.getState().setAttentionDesktopAlerts(false);
+  assert.deepEqual(store.getState().attentionStates, { stuck: false });
 });
 
 console.log('\nstructural guard: components never read persisted state directly — they subscribe');
