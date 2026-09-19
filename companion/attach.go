@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ------------------------------- attachSession -------------------------------
@@ -29,7 +30,9 @@ import (
 // ACK-THEN-STREAM is the subscribePanes contract (main.go:216-227), tightened:
 // the output pump is launched only AFTER the {sid} ACK has been written, so the
 // client can never receive an attachData for an sid it has not yet learned. The
-// serial dispatch loop plus the shared writeLine mutex give the rest for free.
+// outbound queue's single writer goroutine (WARDEN-1402, outbound.go) keeps the
+// rest for free: every line is emitted whole, and no producer — the serial
+// dispatch loop included — ever blocks on output I/O.
 //
 // BASE64 FRAMING is not a preference: the channel is newline-delimited JSON, and
 // raw PTY bytes are arbitrary binary (control sequences, partial UTF-8 mid-chunk,
@@ -121,6 +124,38 @@ var (
 	attachSeq      atomic.Uint64
 )
 
+// The WARDEN-1402 echo-priority registry: per attach session, when its last
+// keystroke was written. The outbound queue consults it (recentInput) to route
+// a pane's next output chunk — that keystroke's echo — onto the interactive
+// class so it overtakes other panes' flooding output. Map entries are bounded
+// by live sessions: noteAttachInput stamps only registered sids, and
+// dropAttachSession (session end / kill) removes the entry.
+var (
+	inputMu     sync.Mutex
+	lastInputAt = map[string]time.Time{}
+)
+
+func noteAttachInput(sid string) {
+	attachMu.Lock()
+	_, live := attachSessions[sid]
+	attachMu.Unlock()
+	if !live {
+		return
+	}
+	inputMu.Lock()
+	lastInputAt[sid] = time.Now()
+	inputMu.Unlock()
+}
+
+// recentInput reports whether sid received a keystroke within window. An
+// unknown (or already-reaped) sid is false — its output is ordinary bulk.
+func recentInput(sid string, window time.Duration) bool {
+	inputMu.Lock()
+	at, ok := lastInputAt[sid]
+	inputMu.Unlock()
+	return ok && time.Since(at) <= window
+}
+
 // attachReadChunk is the pty read buffer size. Generous enough that a full-screen
 // tmux repaint (a `clear` + redraw of a 200x50 pane with colors) lands in one or
 // two events rather than dozens of base64 lines.
@@ -158,8 +193,12 @@ func getAttachSession(sid string) *attachSession {
 
 func dropAttachSession(sid string) {
 	attachMu.Lock()
-	defer attachMu.Unlock()
 	delete(attachSessions, sid)
+	attachMu.Unlock()
+	// The echo-priority stamp is meaningless once the session is gone.
+	inputMu.Lock()
+	delete(lastInputAt, sid)
+	inputMu.Unlock()
 }
 
 // startAttach allocates the host PTY and REGISTERS the session, returning the
@@ -169,7 +208,12 @@ func dropAttachSession(sid string) {
 // An error (no PTY on this platform, spawn failure) returns before anything is
 // registered and surfaces as an {ok:false} attachStart — which warden maps to
 // its existing attach_error path (server.js:2873-2877). Never a silent fallback.
-func startAttach(params json.RawMessage, writeLine func(any)) (string, func(), error) {
+//
+// writeAttachData is the WARDEN-1402 outbound path for pane output: raw bytes
+// into the two-class queue (the echo of a recently-typed pane overtakes other
+// panes' bulk there) instead of a pre-encoded line through the old shared
+// encoder.
+func startAttach(params json.RawMessage, writeLine func(any), writeAttachData func(sid string, b []byte)) (string, func(), error) {
 	var p attachStartParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -189,23 +233,21 @@ func startAttach(params json.RawMessage, writeLine func(any)) (string, func(), e
 	attachMu.Lock()
 	attachSessions[s.sid] = s
 	attachMu.Unlock()
-	return s.sid, func() { go s.pump(writeLine) }, nil
+	return s.sid, func() { go s.pump(writeLine, writeAttachData) }, nil
 }
 
-// pump streams PTY output as base64 attachData events until the terminal closes,
-// then reaps the child and emits exactly one attachExit. Runs in its own
-// goroutine; writeLine is the shared mutex-guarded encoder, so an event line can
-// never interleave with an RPC response or with another session's event.
-func (s *attachSession) pump(writeLine func(any)) {
+// pump streams PTY output through the outbound queue as attachData events until
+// the terminal closes, then reaps the child and emits exactly one attachExit.
+// Runs in its own goroutine. The queue (outbound.go) owns line interleaving —
+// base64 encoding and the write itself happen in the single writer goroutine,
+// so a saturated channel can never block THIS loop, only park it on the bulk
+// byte cap (backpressure on the PTY producer, where it belongs).
+func (s *attachSession) pump(writeLine func(any), writeAttachData func(sid string, b []byte)) {
 	buf := make([]byte, attachReadChunk)
 	for {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
-			writeLine(attachDataEvent{
-				Event: "attachData",
-				Sid:   s.sid,
-				Data:  base64.StdEncoding.EncodeToString(buf[:n]),
-			})
+			writeAttachData(s.sid, buf[:n])
 		}
 		if err != nil {
 			// EOF / EIO — the slave side closed (the child exited, or we killed
@@ -248,6 +290,10 @@ func attachInput(params json.RawMessage) error {
 	if len(data) == 0 {
 		return nil
 	}
+	// WARDEN-1402: stamp the keystroke BEFORE the PTY write so the outbound
+	// queue classifies this pane's next output chunk as the echo (interactive
+	// — it overtakes other panes' bulk) for the echo window that follows.
+	noteAttachInput(p.Sid)
 	if _, err := s.pty.Write(data); err != nil {
 		return fmt.Errorf("attachInput write failed: %s", err)
 	}
