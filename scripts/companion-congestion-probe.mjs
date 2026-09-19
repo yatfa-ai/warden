@@ -74,7 +74,7 @@ function pump() {
     for (;;) {
       const b = child.stdout.read();
       if (!b) break;
-      drained = Buffer.concat([drained, b]);
+      accPush(b);
     }
     drainLines();
     return;
@@ -88,17 +88,40 @@ function pump() {
     const b = child.stdout.read(1024);
     if (!b) return;
     budget -= b.length;
-    drained = Buffer.concat([drained, b]);
+    accPush(b);
     drainLines();
   }
 }
-// Line splitter over everything the throttle has allowed through so far.
-let drained = Buffer.alloc(0);
+// Line accumulator over everything the throttle has allowed through so far.
+// AMORTIZED on purpose: this used to concatenate a fresh Buffer per read and
+// rescan the whole accumulator per read — O(n²) in the bytes drained — which
+// stalled THIS harness's own event loop for seconds at a time in the 64KB/s
+// scenario. The daemon's writes then blocked on a reader that had stopped,
+// and every tail measurement inherited harness-side stalls of its own making
+// (seen on the WARDEN-1402 rework's A/B: one 4.6KB daemon write blocked
+// 2.24s against a 64KB/s drain — the reader was stalled, not the link). Same
+// read cadence and budget semantics; only the buffering is fixed.
+const acc = { buf: Buffer.alloc(1 << 16), filled: 0, scanned: 0 };
+function accPush(b) {
+  if (acc.filled + b.length > acc.buf.length) {
+    acc.buf.copy(acc.buf, 0, acc.scanned, acc.filled); // drop the consumed prefix
+    acc.filled -= acc.scanned;
+    acc.scanned = 0;
+    if (acc.filled + b.length > acc.buf.length) {
+      const grown = Buffer.alloc(Math.max(acc.buf.length * 2, acc.filled + b.length));
+      acc.buf.copy(grown, 0, 0, acc.filled);
+      acc.buf = grown;
+    }
+  }
+  b.copy(acc.buf, acc.filled);
+  acc.filled += b.length;
+}
 function drainLines() {
-  let idx;
-  while ((idx = drained.indexOf(0x0a)) >= 0) {
-    const line = drained.subarray(0, idx).toString('utf8');
-    drained = drained.subarray(idx + 1);
+  for (;;) {
+    const idx = acc.buf.subarray(acc.scanned, acc.filled).indexOf(0x0a);
+    if (idx < 0) return;
+    const line = acc.buf.toString('utf8', acc.scanned, acc.scanned + idx);
+    acc.scanned += idx + 1;
     if (lineCb && line.length) lineCb(line);
   }
 }
