@@ -9,7 +9,7 @@ import { openExternalUrl, forwardPaneMetrics } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { findUrlCandidates, maskUrls, maskSpans } from '@/lib/url-links';
-import { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, shouldResolvePaneProject, type IssueLinkEntry } from '@/lib/issue-links';
+import { findIssueCandidates, issueTrackerUrl, paneIssueEntryFor, shouldResolvePaneProject, type IssueLinkEntry } from '@/lib/issue-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
@@ -427,6 +427,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // none/ambiguous/failed arms leave this null and the second scope leg in the
   // provider below reads [] (a guessed link must not appear).
   const resolvedProjectRef = useRef<string | null>(null);
+  // WARDEN-1413: render-time mirror of the ref, read by the gated pane-header
+  // project label. A ref alone cannot re-render; this state is written ONLY
+  // inside the same resolved arm of the one-shot fetch below (never on mount,
+  // never when the gate refuses), so the off state — no fetch, no state write,
+  // header DOM byte-identical — is unchanged. No cleanup added to the effect:
+  // its documented no-abort design is the slice-3 QA lesson (an abort-on-
+  // cleanup killed the in-flight one-shot when the next chats poll re-fired
+  // the deps), and a state write on an unmounted pane is a React-18 no-op.
+  const [resolvedProject, setResolvedProject] = useState<string | null>(null);
   const resolvedProjectRequestedRef = useRef(false);
   useEffect(() => {
     if (resolvedProjectRequestedRef.current) return;
@@ -446,6 +455,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         const body = await res.json().catch(() => null);
         if (body?.state === 'resolved' && typeof body.project === 'string' && body.project) {
           resolvedProjectRef.current = body.project;
+          setResolvedProject(body.project);
         }
       })
       .catch(() => { /* one-shot, no retry loop: silence stays silence */ });
@@ -825,15 +835,13 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         // WARDEN-1405 adds ONE fallback leg for manual panes: when the pane's
         // own (placeholder) project has no mapping but the one-shot
         // /api/pane-project resolution landed a REAL project, that project's
-        // entry is consulted. The fallback is per-ENTRY (first leg's [0] ?? second
-        // leg's [0]), never a `??` on the project string — the placeholders
-        // ('manual'/'local') are truthy, so a string-level fallback could never
-        // fire. With the integration off, or once the first leg matches, the
-        // second leg is never evaluated — byte-identical to pre-1405 there.
+        // entry is consulted. WARDEN-1413 moves the two-leg per-ENTRY selection
+        // into paneIssueEntryFor so the pane-header project label reads the
+        // SAME expression — the label can never drift from what a click opens.
+        // With the integration off, or once the first leg matches, the second
+        // leg is never evaluated — byte-identical to pre-1405 there.
         const issueEntry = issueLinksEnabledRef.current
-          ? (issueEntriesForProject(issueLinkTrackersRef.current, chatProjectRef.current)[0]
-            ?? issueEntriesForProject(issueLinkTrackersRef.current, resolvedProjectRef.current)[0]
-            ?? null)
+          ? paneIssueEntryFor(issueLinkTrackersRef.current, chatProjectRef.current, resolvedProjectRef.current)
           : null;
         const urlMasked = maskUrls(text);
         // findPathCandidates masks http(s) URLs out first (url-links.ts), so its
@@ -1326,6 +1334,22 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const isUserChat = !chat || chat.kind === 'tmux';
   const hostTag = showHostTags !== false && isUserChat ? hostTagOf(chat?.host ?? host ?? '', hostLabels) : '';
 
+  // WARDEN-1413: the pane-header project label — WHICH tracker this pane's
+  // issue keys open, shown before a person clicks. Rendered from the SAME
+  // paneIssueEntryFor the link provider's scope line reads (shared helper),
+  // so the chip can never announce a project whose keys would not linkify.
+  // Strictly gated on the integration toggle: off → null → no chip and the
+  // header DOM is byte-identical (the toggle also gates the fetch and the
+  // state write, so an off pane never reaches here with data). Honest silence:
+  // null whenever neither leg has a mapping (unmapped/ambiguous/none/failed)
+  // — announcing an address space with no mapping would point a person
+  // somewhere no click goes. The tooltip is built at construction time from
+  // the entry (issueTrackerUrl — the same builder the click uses, no async
+  // probe): `Issue keys here open https://<tracker>/<PREFIX>-…`.
+  const headerEntry = issueLinksEnabled === true
+    ? paneIssueEntryFor(issueLinkTrackers ?? [], chat?.project, resolvedProject)
+    : null;
+
   return (
     <>
     <ContextMenu>
@@ -1363,6 +1387,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           {label || id}
           {hostTag && <span className="ml-1 text-[10px] text-muted-foreground">{hostTag}</span>}
         </span>
+        {headerEntry && (
+          <span
+            className="text-[10px] text-muted-foreground shrink-0"
+            title={`Issue keys here open ${issueTrackerUrl(headerEntry, `${headerEntry.prefix}-…`)}`}
+          >{headerEntry.project}</span>
+        )}
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
         <Btn title="search" active={showSearch} onClick={() => setShowSearch(!showSearch)}>⌕</Btn>
         <Btn title="clear" onClick={() => termRef.current?.clear()}>⊘</Btn>

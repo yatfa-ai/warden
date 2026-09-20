@@ -136,6 +136,30 @@ export function shouldResolvePaneProject(
     && issueEntriesForProject(entries, chat.project).length === 0;
 }
 
+// WARDEN-1413 (slice 4 of roadmap WARDEN-1386): THE pane's issue-entry scope in
+// one home, so the pane-header project label can never drift from what a click
+// actually opens. The same two-leg per-ENTRY selection the linkifier has run
+// since WARDEN-1405 — the pane's OWN project's entry first, else the one-shot
+// /api/pane-project resolved project's entry — deliberately per-ENTRY
+// ([0] ?? [0]), never a `??` on the project string: the manual-pane placeholders
+// ('manual'/'local') are truthy, so a string-level fallback could never fire.
+// An empty/unknown project yields [] inside issueEntriesForProject, so null /
+// undefined / placeholder projects need no special-casing here. Honest silence
+// by construction: null when neither leg has a mapping, exactly the panes where
+// keys do not linkify (the header chip consumes this and stays label-less
+// there). Pure and unit-tested; consumers are PaneTile's link-provider scope
+// line (the expression this replaced, byte-identical) and the gated header chip.
+export function paneIssueEntryFor(
+  entries: IssueLinkEntry[],
+  project: string | null | undefined,
+  resolvedProject: string | null | undefined,
+): IssueLinkEntry | null {
+  if (!entries.length) return null;
+  return issueEntriesForProject(entries, project)[0]
+    ?? issueEntriesForProject(entries, resolvedProject)[0]
+    ?? null;
+}
+
 // The URL a modifier-click opens: the key appended to the configured tracker
 // base. One shape — `https://<tracker>/<KEY>` — by design (see module header):
 // the tracker carries the path, the key rides at the end. `issueTrackerUrl` is
