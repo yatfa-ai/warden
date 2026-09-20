@@ -55,7 +55,7 @@ package main
 //     mid-item wait out a full merged item (~64KB wire) — and even
 //     slice-granular re-checks left the echo waiting inside one 24KB-raw
 //     slice's token installments and pipe drain (1-1.5s per slice at the
-//     64KB/s floor). serve() now re-checks BEFORE EACH 4KB-raw write unit and
+//     64KB/s floor). serve() now re-checks BEFORE EACH 3KB-raw write unit and
 //     parks a bulk item's unwritten remainder at the head of bulk (order
 //     preserved) whenever a DIFFERENT pane's interactive item waits, so the
 //     echo's writer-side wait is one unit. And pacing pays in token-sized
@@ -494,36 +494,62 @@ func (q *outboundQueue) take() *outItem {
 	return it
 }
 
-// interactiveHeadSid reports the sid of the interactive queue's head ("" when
-// none). The writer consults it BETWEEN WRITE UNITS of an in-flight bulk
-// item: a DIFFERENT pane's interactive item waiting ahead of this item's
-// remainder is the signal to preempt (see serve); a same-sid head is the
-// signal NOT to —
-// the remainder was produced before that item, and parking it in bulk would
-// let take() write the pane's own stream out of order.
-func (q *outboundQueue) interactiveHeadSid() string {
+// preemptBulkForEcho decides — ATOMICALLY, under ONE hold of q.mu — whether
+// the writer's in-flight bulk remainder may park at the head of bulk so a
+// queued interactive item can be served first, and parks it in that same hold
+// when it may. The atomicity is the fix: the decision READS q.inter and the
+// park WRITES the bulk head, and an echo enqueued between those two steps
+// lands in the one blind spot migration cannot cover —
+// migrateBulkToInteractiveLocked hoists only QUEUED bulk, and the remainder
+// is still in the writer's hand — so the echo would enqueue behind nothing,
+// take() would serve it ahead of its own predecessor bytes, and the pane's
+// stream would corrupt (per-sid reordering, the exact invariant the two-class
+// design exists to protect). The old shape held that window open between two
+// lock acquisitions (interactiveHeadSid, then requeueBulkHead); q.mu guards
+// both q.inter and the bulk head, so one hold closes it.
+//
+// The refusal rule is pane-WIDE, not a head check. The remainder precedes
+// EVERY item of its pane that is queued interactive — its echo, and any bulk
+// chunk an earlier echo's migration hoisted in ahead of that echo — wherever
+// those items sit in the queue. A head-only check is order-blind to them: with
+// another pane's echo at the head and this pane's echo behind it (the pane has
+// no queued bulk to hoist — its output is all in flight), the head says
+// "preempt" while parking would put the remainder BELOW its own echo, and
+// take() serves the interactive queue first. So: refuse while ANY same-sid
+// item sits in q.inter, whatever its class flag and position; preempt only
+// when the pane has nothing queued interactive AND another pane's
+// ATTACHDATA item actually heads the queue. A LINE at the head (sid "" —
+// responses, paneDelta, sentinel) does not preempt, exactly as the old
+// head-sid read treated it: lines are not preemption triggers, and the
+// writer finishing its remainder in place keeps their dispatch order anyway.
+// Refusing leaves the queue byte-identical — the writer simply keeps the
+// remainder, whose units each re-decide.
+func (q *outboundQueue) preemptBulkForEcho(sid string, data []byte) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.inter) == 0 {
-		return ""
+	if len(q.inter) == 0 || q.inter[0].sid == "" {
+		return false
 	}
-	return q.inter[0].sid
+	for _, it := range q.inter {
+		if it.sid == sid {
+			return false // the pane's own item is queued interactive: the remainder precedes it
+		}
+	}
+	q.requeueBulkHeadLocked(sid, data)
+	return true
 }
 
-// requeueBulkHead parks an in-flight bulk attachData item's unwritten RAW
-// remainder at the HEAD of the bulk queue. The head, because every item behind
-// it was produced after it — its production order within bulk is exactly
-// preserved, and any same-sid bulk item still queued behind it stays behind it.
-// The writer preempted this item mid-unit because another pane's interactive
-// item was waiting; this is where the remainder waits to resume. Byte
-// accounting mirrors take()'s bulk branch (which subtracted len(data) when the
-// item left the queue). The writer is the only caller and never waits on this
-// queue, so no condition broadcast is needed here — a producer that woke on
-// take()'s space broadcast re-checks the caps in its own loop and re-parks if
-// the re-added bytes closed the gap again.
-func (q *outboundQueue) requeueBulkHead(sid string, data []byte) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+// requeueBulkHeadLocked parks an in-flight bulk attachData item's unwritten
+// RAW remainder at the HEAD of the bulk queue. The head, because every item
+// behind it was produced after it — its production order within bulk is
+// exactly preserved, and any same-sid bulk item still queued behind it stays
+// behind it. Byte accounting mirrors take()'s bulk branch (which subtracted
+// len(data) when the item left the queue). Callers must hold q.mu; the writer
+// reaches this only through preemptBulkForEcho, which owns the decision — a
+// producer that woke on take()'s space broadcast re-checks the caps in its own
+// loop and re-parks if the re-added bytes closed the gap again, so no
+// condition broadcast is needed here.
+func (q *outboundQueue) requeueBulkHeadLocked(sid string, data []byte) {
 	q.bulk = append([]*outItem{{sid: sid, data: data}}, q.bulk...)
 	q.bulkBytes += len(data)
 }
@@ -555,14 +581,19 @@ func (q *outboundQueue) hasDemand() bool {
 //     cost 1-1.5s of drain and an echo arriving mid-slice waited it all out —
 //     both measured in the rework A/B). If a DIFFERENT pane's interactive
 //     item is waiting, the unwritten RAW remainder parks at the head of bulk
-//     (its production order — see requeueBulkHead) and the echo is served
-//     now; the echo's worst writer-side wait is one 4KB-raw unit. A same-sid
-//     interactive item does NOT preempt: the remainder precedes it in
-//     production order (the pane's echo follows its own stream — that
-//     ordering is migrateBulkToInteractiveLocked's whole job), and parking in
-//     bulk would corrupt it. Interactive items are never preempted at all:
-//     their remainders cannot park without reordering same-sid successors,
-//     and nothing outranks them anyway.
+//     (its production order — see preemptBulkForEcho) and the echo is served
+//     now; the echo's worst writer-side wait is one 3KB-raw unit. A same-sid
+//     interactive item ANYWHERE in the interactive queue — not merely at its
+//     head — refuses the preempt: the remainder precedes it in production
+//     order (the pane's echo follows its own stream — that ordering is
+//     migrateBulkToInteractiveLocked's whole job), and parking below any
+//     queued same-sid item would let take() serve that item first, corrupting
+//     the pane's stream. The check and the park are ONE lock hold
+//     (preemptBulkForEcho): an echo enqueued between a read of the queue and
+//     the park would land in the blind spot migration cannot hoist (the
+//     remainder is not yet queued). Interactive items are never preempted at
+//     all: their remainders cannot park without reordering same-sid
+//     successors, and nothing outranks them anyway.
 //
 //   - attachData is ENCODED PER UNIT (raw data sliced, each unit's attachData
 //     line rendered fresh) so the preemptable remainder is RAW bytes — a
@@ -606,7 +637,7 @@ func (q *outboundQueue) serve(w *bufio.Writer, clock func() time.Time) {
 				t0 := clock()
 				_, _ = w.Write(it.line[:m])
 				_ = w.Flush()
-				p.observe(clock().Sub(t0), m, false) // a line in flight IS demand
+				p.observe(clock().Sub(t0), m, it.inter || q.hasDemand()) // a line in flight IS demand
 				it.line = it.line[m:]
 			}
 			continue
@@ -615,13 +646,15 @@ func (q *outboundQueue) serve(w *bufio.Writer, clock func() time.Time) {
 		// preempt check runs before EACH unit (see the block comment above).
 		for len(it.data) > 0 {
 			if !it.inter {
-				if head := q.interactiveHeadSid(); head != "" && head != it.sid {
-					q.requeueBulkHead(it.sid, it.data)
+				// ONE atomic decision+park (see preemptBulkForEcho): a split
+				// check-then-park let a same-sid echo enqueue in the gap and
+				// jump the parked remainder.
+				if q.preemptBulkForEcho(it.sid, it.data) {
 					it.data = nil
 					break
 				}
 			}
-			rawCap := paceMinChunk * 3 / 4 // 4KB raw → ~5.5KB wire + envelope
+			rawCap := paceMinChunk * 3 / 4 // 3KB raw → ~4.1KB wire + envelope
 			if rawCap > len(it.data) {
 				rawCap = len(it.data)
 			}

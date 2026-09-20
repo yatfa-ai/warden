@@ -330,10 +330,11 @@ func TestBulkRemainderParksAheadOfItsOwnSuccessors(t *testing.T) {
 	}
 	q.enqueueAttachData("O", []byte("OOOO")) // another pane's echo, mid-item
 
-	// serve's preempt: park the unwritten remainder, take the echo.
-	q.requeueBulkHead(it.sid, it.data)
-	if got := q.interactiveHeadSid(); got != "O" {
-		t.Fatalf("interactive head must be the echo pane, got %q", got)
+	// serve's preempt — ONE atomic decision+park: another pane's echo waits,
+	// and P has nothing queued interactive, so the remainder parks at the
+	// head of bulk in the same lock hold that decided it.
+	if !q.preemptBulkForEcho(it.sid, it.data) {
+		t.Fatal("another pane's echo is waiting with nothing of P's queued interactive: the remainder must preempt")
 	}
 	if it2 := q.take(); string(it2.data) != "OOOO" {
 		t.Fatalf("the echo must be served before the parked remainder, got %q", it2.data)
@@ -349,6 +350,95 @@ func TestBulkRemainderParksAheadOfItsOwnSuccessors(t *testing.T) {
 	}
 	if q.bulkBytes != 0 || q.interNat != 0 {
 		t.Fatalf("byte accounting must return to zero after a full drain: bulk=%d inter=%d", q.bulkBytes, q.interNat)
+	}
+}
+
+// TestPreemptRefusesWhileAnySameSidEchoIsQueued — the pane-wide half of the
+// preempt rule, and the case a head-only check corrupts: another pane's echo
+// sits at the interactive head and THIS pane's echo sits BEHIND it (the pane
+// has no queued bulk for migration to hoist — its output is all in flight).
+// The remainder must NOT park: take() serves the interactive queue first, so
+// a parked remainder would come out after the pane's own echo — the pane's
+// echo before its own predecessor bytes. Refusing is byte-neutral: the
+// writer keeps the remainder and finishes it ahead of everything queued.
+func TestPreemptRefusesWhileAnySameSidEchoIsQueued(t *testing.T) {
+	// The classifier emulates the 1s echo window: pane P types, so its next
+	// chunk classifies interactive; everything earlier classified bulk.
+	recent := map[string]bool{"O": true, "P": false}
+	q := newOutboundQueue(func(sid string) bool { return recent[sid] })
+	q.enqueueAttachData("O", []byte("OOOO")) // another pane's echo, first
+	recent["P"] = true                       // the user types into P
+	q.enqueueAttachData("P", []byte("ECHO")) // P's own echo lands BEHIND it
+
+	if q.preemptBulkForEcho("P", []byte("REST")) {
+		t.Fatal("a same-sid echo queued behind another pane's echo must refuse the preempt — parking the remainder below its own echo corrupts the pane's stream")
+	}
+	if it1 := q.take(); string(it1.data) != "OOOO" {
+		t.Fatalf("the cross-pane echo must still be served first, got %q", it1.data)
+	}
+	if it2 := q.take(); string(it2.data) != "ECHO" {
+		t.Fatalf("P's own echo must follow, got %q", it2.data)
+	}
+	if inter, bulk, bytes := queueCounts(q); inter+bulk > 0 || bytes > 0 {
+		t.Fatalf("a refused preempt must leave the queue byte-identical: inter=%d bulk=%d bytes=%d", inter, bulk, bytes)
+	}
+}
+
+// TestServePreemptSeesAnEchoEnqueuedBeforeItsCheck — the TOCTOU the atomic
+// preempt closes, at its DETERMINISTIC extreme (no nanosecond window needed).
+// pane-p floods; while the writer sits INSIDE a unit write — its preempt
+// check for that unit already passed — pane-o's echo enqueues, then pane-p's
+// OWN echo enqueues behind it (pane-p has no queued bulk for migration to
+// hoist: its stream is all in flight). The writer's NEXT unit check now sees
+// the fully-assembled losing state, and every broken shape loses here: the
+// old split check/park pair, and an atomic HEAD-ONLY check alike, read
+// pane-o at the head, preempt, and park the remainder BELOW pane-p's echo —
+// take() then writes the pane's echo before its own predecessor bytes. The
+// pane-wide atomic check sees the same-sid echo and refuses; the writer
+// finishes the remainder; the echo follows its own stream, order-exact.
+func TestServePreemptSeesAnEchoEnqueuedBeforeItsCheck(t *testing.T) {
+	// The classifier emulates the 1s echo window: o-echo's pane has typed;
+	// pane-p's window opens only when its user types mid-item (inside step),
+	// so the setup chunks stay bulk and BOTH echoes classify interactive.
+	recent := map[string]bool{"o-echo": true, "pane-p": false}
+	q := newOutboundQueue(func(sid string) bool { return recent[sid] })
+	w := newRecordedWriter()
+
+	chunk := bytes.Repeat([]byte("A"), 30<<10)
+	bulkRaw := append(append([]byte(nil), chunk...), chunk...)
+	q.enqueueAttachData("pane-p", chunk)
+	q.enqueueAttachData("pane-p", chunk) // merges with the first: one 60KB bulk item
+
+	runGatedServe(t, q, w, 2, func() {
+		// Both echoes land while the writer is blocked INSIDE unit 3's
+		// write — before its next unit's preempt check runs.
+		q.enqueueAttachData("o-echo", []byte("O-ECHO"))
+		recent["pane-p"] = true // the user types into pane-p
+		q.enqueueAttachData("pane-p", []byte("P-ECHO"))
+	})
+
+	events := paneEvents(t, w.stream())
+	var paneP []byte
+	oIdx, pEchoIdx := -1, -1
+	for i, ev := range events {
+		switch ev.sid {
+		case "pane-p":
+			paneP = append(paneP, ev.data...)
+			if pEchoIdx == -1 && string(ev.data) == "P-ECHO" {
+				pEchoIdx = i
+			}
+		case "o-echo":
+			if oIdx == -1 {
+				oIdx = i
+			}
+		}
+	}
+	want := append(append([]byte(nil), bulkRaw...), []byte("P-ECHO")...)
+	if !bytes.Equal(paneP, want) {
+		t.Fatalf("pane-p's stream was reordered around its own echo (%d bytes, want %d) — the preempt decision did not see the echo enqueued before its check", len(paneP), len(want))
+	}
+	if oIdx == -1 || pEchoIdx == -1 || oIdx > pEchoIdx {
+		t.Fatalf("the cross-pane echo must precede pane-p's echo (events: o=%d p-echo=%d)", oIdx, pEchoIdx)
 	}
 }
 
