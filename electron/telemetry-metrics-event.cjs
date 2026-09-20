@@ -14,8 +14,10 @@
 //      category is off;
 //   2. main.cjs re-checks the category on IPC receipt before building this
 //      event (a window can land mid-flip).
-// The pipeline downstream gates on "anything collecting" (its documented
-// contract), which is the same granularity every other event type flows under.
+// The pipeline downstream re-gates PER EVENT TYPE (an event is sendable iff an
+// ENABLED category declares its type — WARDEN-1416), on top of its coarse
+// "anything collecting" guard, so this event reaches the wire only under the
+// `operational-metrics` category's own consent, end to end.
 //
 // The builder is defensive but NOT the wire's last line of defense: the
 // pipeline's redact → validate stages remain authoritative. A snapshot that is

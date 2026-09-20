@@ -127,9 +127,11 @@ export type TelemetrySendingStatus =
  * has not been set); the persisted value itself is left untouched.
  *
  * WARDEN-1116 — `collecting` is "a COLLECTING consent category is enabled"
- * (`collectsEvents`), not "the base tier is on". A decorating-only consent (e.g.
- * names with nothing collecting) is `off` here, which is the truth: no event is
- * produced, so nothing is sent.
+ * (`collectsEvents`), not "the base tier is on". A decorating-only consent is
+ * `off` here, which is the truth: no event is produced, so nothing is sent.
+ * (WARDEN-1416: `names` is no longer such a category — it produces its own
+ * `workspace-names` event, so names-only consent reads as COLLECTING here. No
+ * category is `decorating` today; the branch stays for a future one.)
  */
 export function deriveTelemetrySendingStatus({
   collecting,
