@@ -43,11 +43,23 @@ const TELEMETRY_CATEGORIES = Object.freeze([
     id: 'names',
     configKey: 'telemetryNamesEnabled',
     legacy: Object.freeze({ key: 'telemetryExtendedEnabled', requires: 'telemetryBaseEnabled' }),
-    role: 'decorating',
+    // WARDEN-1416 — COLLECTING: the category now PRODUCES its own event (the
+    // bounded `workspace-names` window aggregate) instead of only decorating
+    // events other categories build. That flip is what closes the dead switch —
+    // a names-only consent used to send nothing, which WARDEN-443 names
+    // explicitly: "A category that sends nothing is not consent, it is a dead
+    // switch." The category still gates the decoration fields below, so a
+    // names-enabled user who ALSO enables incidents still gets names on
+    // incidents events; but names alone now sends its own bounded event.
+    role: 'collecting',
     label: 'Chat & session names',
     summary:
-      'Adds the chat name and Claude session name to whatever else you have turned on. Chat content is never sent — names only. On its own this sends nothing: there is no event for a name to ride on.',
-    eventTypes: Object.freeze([]),
+      'Periodically sends a bounded list of your chat names (the ones shown in the sidebar — for a resumed Claude session, its session name), plus a count. Capped and de-duplicated; chat content is never sent — names only.',
+    // WARDEN-1416 — the names category's OWN event type. Disclosed here because
+    // the transparency panel's contract is to list every event type a category
+    // produces; a silently-added type would be exactly the lie of omission that
+    // surface exists to prevent.
+    eventTypes: Object.freeze(['workspace-names']),
     gatedFields: Object.freeze(['chatname', 'sessionname', 'chattitle', 'sessiontitle']),
   }),
   // WARDEN-1258 — first usage category with a live producer; aggregates only.

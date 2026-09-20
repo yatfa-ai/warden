@@ -79,13 +79,13 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 6 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 7 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 6);
+  assert.equal(SCHEMA_VERSION, 7);
 });
 
-test('BASE_EVENT_TYPES is exactly the five anonymous base-tier kinds', () => {
-  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall']);
+test('BASE_EVENT_TYPES is exactly the six anonymous-or-consented base-tier kinds', () => {
+  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
 });
 
 test('RUNTIME is exactly { main, renderer, server }', () => {
@@ -448,6 +448,110 @@ test('server-stall carries NO free-text field — the whole shape is numbers + c
       `every string in a server-stall event is a literal or a kebab key: ${JSON.stringify(s)}`,
     );
   }
+});
+
+// ==========================================================================
+// (f) workspace-names (WARDEN-1416) — the `names` category's carrying event
+// ==========================================================================
+
+const workspaceNamesFixture = {
+  schemaVersion: SCHEMA_VERSION,
+  type: 'workspace-names',
+  runtime: 'server',
+  timestamp: 1735689600000,
+  appVersion: '0.1.75',
+  platform: 'linux',
+  windowStartedAt: 1735689300000,
+  windowEndedAt: 1735689600000,
+  chats: ['demo', 'Refactor auth', 'chat-4nh15o'],
+  chatCount: 3,
+  truncated: false,
+};
+
+test('validateBaseEvent accepts the workspace-names fixture', () => {
+  assert.equal(validateBaseEvent(workspaceNamesFixture), true, 'workspace-names fixture validates');
+  assert.equal(validateEvent(workspaceNamesFixture), true, 'validateEvent accepts it too');
+});
+
+test('workspace-names is PINNED to the server runtime — main/renderer are rejected', () => {
+  // The chat catalog lives in the forked backend child; stamping any other
+  // runtime would misattribute where the workspace is observed.
+  for (const runtime of ['main', 'renderer', 'worker', undefined]) {
+    assert.equal(
+      validateBaseEvent({ ...workspaceNamesFixture, runtime }),
+      false,
+      `workspace-names with runtime ${JSON.stringify(runtime)} must be rejected`,
+    );
+  }
+});
+
+test('workspace-names ACCEPTS arbitrary name text — names are the permitted payload', () => {
+  // The inverse of the operation/culprit key rule. THIS type's strings are the
+  // user's own chat names, behind the names category's own opt-in: a name with
+  // spaces, punctuation, unicode or mixed case MUST validate, or the category
+  // could not carry the data it exists for. (Hard exclusions in a name — a path,
+  // a host — are the REDACTOR's job, not the schema's: it scrubs every retained
+  // string before the wire.)
+  for (const name of [
+    'Refactor auth', 'chat-4nh15o', 'AAA BBB', 'ünïcode ✨', 'x'.repeat(300),
+    'a.b.c', '', 'GET /api/chats',
+  ]) {
+    assert.equal(
+      validateBaseEvent({ ...workspaceNamesFixture, chats: [name], chatCount: 1 }),
+      true,
+      `name ${JSON.stringify(name.slice(0, 20))} must validate`,
+    );
+  }
+});
+
+test('workspace-names enforces the HONEST-CAP invariant (count ≥ list length)', () => {
+  // The cap is loud or it is a lie: a chatCount SMALLER than the list it bounds
+  // would claim a catalog smaller than what was sent.
+  assert.equal(
+    validateBaseEvent({ ...workspaceNamesFixture, chatCount: 2 }),
+    false,
+    'a count below the list length is rejected',
+  );
+  assert.equal(
+    validateBaseEvent({ ...workspaceNamesFixture, chatCount: 500, truncated: true }),
+    true,
+    'a count ABOVE the list length is the truncated case and is accepted',
+  );
+});
+
+test('workspace-names rejects malformed windows / lists / counts / flags', () => {
+  for (const mutate of [
+    (e) => { delete e.windowStartedAt; },
+    (e) => { e.windowEndedAt = 'soon'; },
+    (e) => { e.chats = 'nope'; },
+    (e) => { e.chats = ['ok', 42]; },
+    (e) => { e.chats = ['ok', null]; },
+    (e) => { delete e.chatCount; },
+    (e) => { e.chatCount = 1.5; },
+    (e) => { e.chatCount = -1; },
+    (e) => { e.truncated = 'yes'; },
+    (e) => { delete e.truncated; },
+  ]) {
+    const clone = JSON.parse(JSON.stringify(workspaceNamesFixture));
+    mutate(clone);
+    assert.equal(validateBaseEvent(clone), false, `mutation must invalidate: ${mutate.toString().slice(0, 60)}`);
+  }
+});
+
+test('workspace-names rejects more names than the schema footprint bound', () => {
+  const clone = JSON.parse(JSON.stringify(workspaceNamesFixture));
+  clone.chats = Array.from({ length: 401 }, (_, i) => `chat-${i}`);
+  clone.chatCount = 401;
+  assert.equal(validateBaseEvent(clone), false, '401 names exceed the 400 cap');
+});
+
+test('workspace-names carries NO field beyond the disclosed shape', () => {
+  // The forcing function for "this type collects exactly what the consent
+  // summary says": the fixture's own key set IS the disclosed field list.
+  assert.deepEqual(
+    Object.keys(workspaceNamesFixture).sort(),
+    ['appVersion', 'chatCount', 'chats', 'platform', 'runtime', 'schemaVersion', 'timestamp', 'truncated', 'type', 'windowEndedAt', 'windowStartedAt'],
+  );
 });
 
 console.log(`\n✓ TELEMETRY-SCHEMA TESTS PASS (${passed})`);

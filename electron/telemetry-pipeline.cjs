@@ -12,6 +12,8 @@
 //     → nothing being COLLECTED (all off / unknown / corrupt / decorating-only)?
 //       HARD NO-OP  (send nothing; also CLEAR the replay buffer so a buffered
 //       event never survives an opt-out — WARDEN-671)
+//     → is THIS event's TYPE produced by an ENABLED category (WARDEN-1416)?
+//       if not, HARD NO-OP — one category never carries another's event type
 //     → flush the in-memory replay buffer first if non-empty (re-dispatch prior
 //       transient-exhausted drops through dispatch(), in arrival order — WARDEN-671)
 //     → redact(payload, { consent })              [slice 2, SHIPPED — injected]
@@ -86,14 +88,36 @@ const {
 } = require('./telemetry-transmission-log.cjs');
 // WARDEN-1116 — THE consent authority. The pipeline makes no consent decision of
 // its own: it normalizes whatever the injected resolver returns through
-// normalizeConsent and asks collectsEvents whether anything is being collected.
+// normalizeConsent and asks the registry-derived queries what is collected.
 // A missing / corrupt / unrecognized value normalizes to nothing enabled, so a
 // bad consent value can never accidentally send.
 const {
   NO_CONSENT,
   collectsEvents,
+  collectedEventTypes,
   normalizeConsent,
 } = require('../src/telemetry-consent.cjs');
+
+// WARDEN-1416 — is THIS event's type collected under THIS consent state?
+//
+// The gate used to be category-COARSE ("is anything collecting?"), which was
+// adequate only while every collecting category produced anonymous events. The
+// `names` category now produces one (`workspace-names`), so the coarse gate
+// would let a names-only consent carry an INCIDENT event to transport if one
+// were ever built — a cross-category fold WARDEN-443 Principle 2 forbids. The
+// per-type check closes that by construction, from the SAME registry the
+// transparency panel discloses: an event type is sendable iff some ENABLED
+// category declares it in `eventTypes`. That makes the panel's promise ("this
+// category produces these types") a structural property of the wire rather
+// than a convention the producers are trusted to honor.
+//
+// An event with no recognizable `type` fails the check — it belongs to no
+// category, so no consent covers it.
+function isTypeCollected(consentState, event) {
+  const type = event && typeof event === 'object' ? event.type : undefined;
+  if (typeof type !== 'string' || type === '') return false;
+  return collectedEventTypes(consentState).includes(type);
+}
 
 // Safe default consent resolver: everything OFF. The live per-category prefs are
 // injected by main.cjs.
@@ -356,10 +380,16 @@ function createTelemetryPipeline(opts) {
   function dispatch(payload) {
     const consentState = effectiveConsent();
     // Layer 2 consent guard (defense in depth). Nothing COLLECTING on → nothing
-    // is dispatched. A decorating-only consent (e.g. names with no collecting
-    // category) is naturally inert here: there is no event to decorate, so the
-    // gate closes without needing a clamp between categories.
+    // is dispatched. A decorating-only consent is naturally inert here: there is
+    // no event to decorate, so the gate closes without needing a clamp between
+    // categories.
     if (!collectsEvents(consentState)) return;
+    // WARDEN-1416 — and the event's OWN type must be one an ENABLED category
+    // produces. Without this, a consent that enables category A would carry
+    // category B's event type to the wire (the cross-category fold Principle 2
+    // forbids). Registry-derived, so a new category's types are covered with no
+    // change here.
+    if (!isTypeCollected(consentState, payload)) return;
 
     // WARDEN-631 — circuit-breaker. If the current endpoint already rejected the
     // current schema (415), do NOT redact/validate/POST: the receiver cannot
@@ -446,7 +476,14 @@ function createTelemetryPipeline(opts) {
         // traffic immediately" holds end-to-end (toggle → dispatch → WIRE), not just
         // up to this boundary. The snapshot above stays as the transport's entry
         // gate; this callback is the mid-loop re-check between attempts.
-        isConsentActive: () => collectsEvents(effectiveConsent()),
+        //
+        // WARDEN-1416 — it re-checks THIS batch's OWN type, not merely "anything
+        // collecting": revoking the category that produced the in-flight event
+        // must halt it even when a DIFFERENT category is still on.
+        isConsentActive: () => {
+          const live = effectiveConsent();
+          return collectsEvents(live) && isTypeCollected(live, redacted);
+        },
       });
       // Route the transport outcome into the transmission log instead of
       // swallowing it (WARDEN-583 — verifiability's third leg), arm/clear the
