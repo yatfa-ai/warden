@@ -877,6 +877,255 @@ describe('WARDEN-1412 companion-totality sweep', () => {
         `total gate sites changed (${total} ≠ 36) — update CENSUS and re-verify the sweep covers the new/removed family`);
     });
 
+    // -----------------------------------------------------------------------
+    // THE RAW-TRANSPORT CALL-SITE CENSUS (WARDEN-1421) — the companion of the
+    // gate census above, and the closure of the blind spot that census's own
+    // comment concedes four lines up: "A new UNGATED remote op has no census
+    // row to grow". The gate census counts GATES, so a WARDEN-1348-shaped
+    // regression — a NEW file created on the raw-ssh pattern, with no gate at
+    // all — adds ZERO gate sites, drives no sweep leg (the driven-leg list is
+    // hand-maintained), and ships GREEN. Nothing drives a file nobody noticed.
+    //
+    // THE INSTRUMENT. Every raw remote op in this tree begins at one of ssh.js's
+    // six remote-spawn exports — run, runWithPool, validateHost, attach,
+    // attachPty, buildSshArgv (ssh.js's own `spawn(SSH_BIN, …)` sites are :115
+    // inside run/validateHost's argv path, :603 in attach, :624 in attachPty).
+    // So the census counts CALL-SITE REFERENCES TO THOSE IMPORTED BINDINGS,
+    // per non-test src file, and pins every file that carries one.
+    //
+    // COUNTING RULE (stated because a naive rule is worse than none):
+    //   • Only files whose `import { … } from './ssh.js'` names at least one of
+    //     the six participate. shellQuote/isTransportFailure-only importers —
+    //     git.js, gitRoutes.js, observer.js, claudeSessions.js,
+    //     sessionRecovery.js, tmux.js — are invisible BY CONSTRUCTION, and
+    //     childCapture.js deliberately imports no ssh transport at all
+    //     (in-file comment, childCapture.js:18).
+    //   • Counted on the source with COMMENTS AND STRING/TEMPLATE LITERALS
+    //     STRIPPED, and with the ssh.js import statement itself blanked. That
+    //     is not fussiness: a raw `\brun\b` token census over this tree is pure
+    //     noise (`--dry-run`, `re-run`, `tmux attach -t …` inside shell script
+    //     literals, and `run:`/`attach:` object keys all match), which is why
+    //     the proposal's naive measurement found 40+ false hits in files that
+    //     never import these bindings at all.
+    //   • References, not literal `binding(` calls. This codebase's dominant
+    //     seam is injection — `(deps.X ?? X)(args)` and
+    //     `const runFn = deps.run ?? X; … runFn(…)` — so a call-site regex
+    //     misses the REAL sites in cli.js, companion.js and chats.js. The
+    //     binding REFERENCE is the tripwire: a new raw op cannot reach ssh
+    //     without naming one.
+    //   • Property accesses (`deps.run`) and object keys (`{ run: … }`) are NOT
+    //     counted — those are the injection seam's plumbing, not a transport
+    //     reach. Hence chats.js:374's `{ run: runWithPoolFn }` option value and
+    //     every `deps.run` is excluded, while the `?? run` fallback it guards is
+    //     counted.
+    //
+    // ZERO TOLERANCE, mirroring the gate census's maintenance model: any count
+    // change in a mapped file, and ANY unlisted file carrying one of the six,
+    // is RED with re-triage instructions. Never trust a stored count — the gate
+    // census grew 30 → 36 while its own ticket sat in review, and between this
+    // slice's proposal (720bc00) and its implementation (d2d72cc) the server.js
+    // validateHost anchors moved by +1/+25 lines inside a single day.
+    //
+    // MUTATION CONTROL (run at implementation time, the same discipline as the
+    // toggle-OFF control legs above — a guard that has never been seen to fail
+    // is not a guard). BOTH arms were driven and reverted:
+    //   1. UNLISTED FILE. A temp consumer src/warden-1421-mutant.js importing
+    //      buildSshArgv from ./ssh.js and spawning it was added to the tree.
+    //      This census turned RED with "unlisted file(s) reach the raw ssh
+    //      transport: warden-1421-mutant.js", naming the file and the two
+    //      remedies — while the GATE census above stayed GREEN, which IS the
+    //      blind spot this census closes. Reverted → GREEN.
+    //   2. COUNT DRIFT. A second buildSshArgv call was added to pasteImage.js
+    //      (the WARDEN-1348 file). RED with "raw-transport census moved in
+    //      src/pasteImage.js: expected {"buildSshArgv":1}, found
+    //      {"buildSshArgv":2}". Reverted → GREEN.
+    // The detector sees exactly the WARDEN-1348 shape it exists for.
+    // -----------------------------------------------------------------------
+    const RAW_BINDINGS = ['run', 'runWithPool', 'validateHost', 'attach', 'attachPty', 'buildSshArgv'];
+
+    // Per-file expected call-site counts of the six bindings, re-derived LIVE
+    // against origin/main @ d2d72cc. Every row is a CITED deliberate raw path:
+    // class (a) the transport core, (b) a gated toggle-off branch, (c) a named
+    // allow-list exception. Rows are the routing decision's audit trail — the
+    // census PINS them, so growth or shrink is visible on the next push.
+    const RAW_TRANSPORT_CENSUS = {
+      // ---- class (a): the deliberate raw core ----------------------------
+      // ssh.js IS the transport (buildSshArgv :73, validateHost :384, run :435,
+      // runWithPool :560, attach :600, attachPty :621) — it defines the six
+      // rather than importing them, so it carries no ssh.js import and is
+      // invisible to this instrument by construction, asserted separately below.
+      'companion.js': {
+        // The bootstrap legs: a channel cannot install itself over the channel.
+        // `run as defaultRun` (:33) reaches the tree through the injection
+        // rebind `deps.run ?? defaultRun`.
+        run: 3,          // :969 bootstrapChannel, :1219 uninstallCompanion, :1805 deliverRemoteScript's raw path
+        buildSshArgv: 2, // :564 spawnPersistentChannel, :638 streamFileToHost — the upload/channel legs
+      },
+      // ---- class (b): gated toggle-off branches --------------------------
+      'chats.js': {
+        run: 1,          // :366 discoverManual's `deps.run ?? run` — activity read, behind viaCompanion()
+        runWithPool: 3,  // :265 discover + :367 discoverManual injection rebinds, :715 capturePanes' raw else-branch
+      },
+      'paneContainer.js': {
+        // :292, the else-branch of the gated ternary at :289–291
+        // (`companionOn && !isCompanionExcludedHost(host) ? deliverRemoteScript : runWithPool`).
+        runWithPool: 1,
+      },
+      'cli.js': {
+        run: 1,          // :232 cmdDash's dash preflight (dry-run-guarded)
+        attach: 1,       // :253 the toggle-off attach fallback; the companion-bridged path is the default
+      },
+      'pasteImage.js': {
+        buildSshArgv: 1, // :221 buildPasteSshArgv — the gated WARDEN-1348 site
+      },
+      // ---- class (b) + (c): server.js carries one of each -----------------
+      'server.js': {
+        // :1217 probeHostReachability's raw fallback — companion-routing the
+        //   probe would bootstrap the binary being probed (comments :1200–1213).
+        // :2424 POST /api/companion/uninstall's precheck — a named allow-list
+        //   exception: a host whose flag was on and is now off must still be
+        //   cleanable, so the endpoint works regardless of toggle state
+        //   (comments :2420–2422; re-asserted as a sweep leg above).
+        validateHost: 2,
+      },
+    };
+
+    it('every raw ssh-transport call site sits in a cited census row, and no unlisted file reaches the transport', () => {
+      const srcDir = path.dirname(fileURLToPath(import.meta.url));
+
+      // Blank comments and string/template literals so the census counts CODE,
+      // not prose and shell scripts. Template-literal `${…}` holes are recursed
+      // into (they are code), newlines are preserved so line numbers survive.
+      const stripNonCode = (src) => {
+        let out = '';
+        let i = 0;
+        const n = src.length;
+        while (i < n) {
+          const c = src[i];
+          const d = src[i + 1];
+          if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
+          if (c === '/' && d === '*') {
+            i += 2;
+            while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
+            i += 2; continue;
+          }
+          if (c === "'" || c === '"') {
+            const q = c; i++;
+            while (i < n && src[i] !== q) { if (src[i] === '\\') i++; if (src[i] === '\n') out += '\n'; i++; }
+            i++; continue;
+          }
+          if (c === '`') {
+            i++;
+            while (i < n && src[i] !== '`') {
+              if (src[i] === '\\') { i += 2; continue; }
+              if (src[i] === '$' && src[i + 1] === '{') {
+                i += 2;
+                let depth = 1; let inner = '';
+                while (i < n) {
+                  if (src[i] === '{') depth++;
+                  else if (src[i] === '}') { depth--; if (!depth) break; }
+                  inner += src[i]; i++;
+                }
+                out += ` ${stripNonCode(inner)} `;
+                i++; continue;
+              }
+              if (src[i] === '\n') out += '\n';
+              i++;
+            }
+            i++; continue;
+          }
+          out += c; i++;
+        }
+        return out;
+      };
+
+      const files = fs.readdirSync(srcDir)
+        .filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'))
+        .sort();
+
+      const found = {};
+      for (const f of files) {
+        const text = fs.readFileSync(path.join(srcDir, f), 'utf8');
+        // The import must be detected on the RAW text: stripNonCode blanks the
+        // module specifier's string literal, so `from './ssh.js'` is gone from
+        // the stripped source. Detect there, count on the stripped source —
+        // stripNonCode preserves newlines, so the two agree line for line.
+        const im = text.match(/import\s*\{([^}]*)\}\s*from\s*['"]\.\/ssh\.js['"]\s*;?/s);
+        if (!im) continue;
+        // Map imported name → local binding, keeping only the six (`run as
+        // defaultRun` in companion.js is why the alias half matters).
+        const bindings = im[1].split(',')
+          .map((s) => s.trim()).filter(Boolean)
+          .map((s) => { const p = s.split(/\s+as\s+/); return { imported: p[0].trim(), local: (p[1] || p[0]).trim() }; })
+          .filter((b) => RAW_BINDINGS.includes(b.imported));
+        if (!bindings.length) continue;
+        const lines = stripNonCode(text).split('\n');
+        assert.strictEqual(lines.length, text.split('\n').length,
+          `the census's comment/literal stripper changed src/${f}'s line count — its counts and citations would no longer line up`);
+        // Blank the import statement's own lines — naming a binding to import
+        // it is not reaching the transport.
+        const firstLine = text.slice(0, im.index).split('\n').length; // 1-based
+        const lastLine = firstLine + im[0].split('\n').length - 1;
+        for (let i = firstLine - 1; i < lastLine; i++) lines[i] = '';
+        const body = lines.join('\n');
+        const counts = {};
+        for (const b of bindings) {
+          // Not preceded by `.` or an identifier char (excludes `deps.run`),
+          // not followed by `:` (excludes the `{ run: … }` option key).
+          const re = new RegExp(`(?:^|[^.\\w$])${b.local}(?![\\w$])(?!\\s*:)`, 'gm');
+          const n = (body.match(re) || []).length;
+          if (n > 0) counts[b.imported] = n;
+        }
+        if (Object.keys(counts).length) found[f] = counts;
+      }
+
+      // (1) No UNLISTED file may reach the transport — the WARDEN-1348 shape.
+      const unlisted = Object.keys(found).filter((f) => !(f in RAW_TRANSPORT_CENSUS)).sort();
+      assert.deepStrictEqual(unlisted, [],
+        `unlisted file(s) reach the raw ssh transport: ${unlisted.join(', ')} — a new remote op was built on raw ssh. ` +
+        'Either ROUTE it onto the companion channel (gate it with isCompanionExcludedHost + deliverRemoteScript, and add its ON leg + OFF control to this sweep), ' +
+        'or, if the raw path is genuinely deliberate, add a CITED row to RAW_TRANSPORT_CENSUS saying which class it is (core / gated toggle-off branch / named allow-list exception) and why.');
+
+      // (2) Every mapped file matches its pinned per-binding counts exactly.
+      for (const [f, expected] of Object.entries(RAW_TRANSPORT_CENSUS)) {
+        assert.deepStrictEqual(found[f], expected,
+          `raw-transport census moved in src/${f}: expected ${JSON.stringify(expected)}, found ${JSON.stringify(found[f] ?? {})}. ` +
+          'A raw ssh call site was added or removed — re-derive the counts live (never trust the stored map), then re-triage: ' +
+          'a GROWN count needs its new site cited in the comment above the row (and, if it is a new op family, an ON leg + OFF control in this sweep); ' +
+          'a SHRUNK count means a raw path was routed or deleted — update the row and drop its stale citation.');
+      }
+
+      // (3) paneContainer.js specifically — its raw else-branch was present in
+      // this slice's evidence but missing from the filed map, so it is pinned
+      // by name: a census that silently loses a row is a census that lies.
+      assert.deepStrictEqual(found['paneContainer.js'], { runWithPool: 1 },
+        'paneContainer.js runWalk must keep exactly one raw runWithPool site (the else-branch of its gated ternary)');
+
+      // (4) The transport core defines the six rather than importing them, so
+      // it must never appear in this census at all. If ssh.js ever imports one
+      // of its own exports from itself, the instrument's premise is broken.
+      assert.ok(!('ssh.js' in found),
+        'src/ssh.js appeared in the raw-transport census — it DEFINES the six remote-spawn exports (buildSshArgv/validateHost/run/runWithPool/attach/attachPty) and must not import them');
+      const sshText = fs.readFileSync(path.join(srcDir, 'ssh.js'), 'utf8');
+      for (const b of RAW_BINDINGS) {
+        assert.ok(new RegExp(`^export\\s+(?:async\\s+)?function\\s+${b}\\b`, 'm').test(sshText),
+          `src/ssh.js no longer exports ${b}() — the raw-transport census counts the wrong bindings; re-derive RAW_BINDINGS from ssh.js's remote-spawn exports`);
+      }
+
+      // (5) The instrument only sees files that IMPORT the six by name. Pin
+      // that premise: a namespace import, a re-export or a dynamic import of
+      // ssh.js would route around the census entirely.
+      for (const f of files) {
+        const text = fs.readFileSync(path.join(srcDir, f), 'utf8');
+        assert.ok(!/import\s+\*\s+as\s+[\w$]+\s+from\s*['"]\.\/ssh\.js['"]/.test(text),
+          `src/${f} takes a NAMESPACE import of ./ssh.js — the raw-transport census counts named bindings and cannot see ns.run(); import the bindings by name or teach the census`);
+        assert.ok(!/export\s*(?:\*|\{[^}]*\})\s*from\s*['"]\.\/ssh\.js['"]/.test(text),
+          `src/${f} RE-EXPORTS ./ssh.js — a consumer could reach the transport through it without importing ssh.js, which is invisible to this census`);
+        assert.ok(!/import\s*\(\s*['"]\.\/ssh\.js['"]/.test(text),
+          `src/${f} takes a DYNAMIC import of ./ssh.js — the raw-transport census reads static imports only`);
+      }
+    });
+
     it('the sweep was taught every method of the closed channel vocabulary (companion/main.go dispatch)', () => {
       // Live re-enumeration of the Go RPC vocabulary, so a new case in
       // companion/main.go forces this file (and CHANNEL_METHODS) to catch up
