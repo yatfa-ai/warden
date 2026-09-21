@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import { useHostLabels } from '@/lib/uiStore';
 import type { Directive } from '@/lib/types';
-import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -12,24 +11,26 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { copyText } from '@/lib/clipboard';
 import { toast } from 'sonner';
 import { EmptyState } from './EmptyState';
+import { LiveFeedChrome } from './LiveFeedChrome';
 import { MarkdownBody } from './MarkdownBody';
-import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
+import { dayBucket, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
+import { useNowTicker } from '@/lib/useNowTicker';
 
 // Read-only history of every directive that reached an agent (full text + target
 // + time), sourced from the append-only directives.md via GET /api/directives.
-// Mirrors ActivityTimeline's filter row (agent + host + limit) and shares its
-// whole live-feed wiring through the same useLiveTimeline hook (path/select
-// options, WARDEN-1353), so the two views read as one system and the wiring
-// exists exactly once. The directive text is the FULL body (not a 60-char
-// snippet) in a scrollable MarkdownBody block — the whole point of this tab
-// (see WARDEN-359).
+// Shares ActivityTimeline's whole live-feed wiring through the same
+// useLiveTimeline hook (path/select options, WARDEN-1353) and its whole chrome
+// — Live/Pause, Refresh, the agent/host/limit filter row, the stats line and
+// the fetch-failure strip — through the same LiveFeedChrome component
+// (WARDEN-1419), so the two views read as one system and both exist exactly
+// once. The directive text is the FULL body (not a 60-char snippet) in a
+// scrollable MarkdownBody block — the whole point of this tab (see WARDEN-359).
 
 // Pull the row array out of GET /api/directives' JSON. `Array.isArray` is
 // deliberately STRICTER than the hook's default `json.events || []`: a
@@ -68,16 +69,20 @@ export function DirectiveHistory({
   issueEntries?: IssueLinkEntry[];
 }) {
   const [limit, setLimit] = useState(100);
-  // Re-render once per second so the "Updated Ns ago" label stays fresh.
-  const [now, setNow] = useState(() => Date.now());
+  // Re-render once per second so the "Updated Ns ago" label stays fresh. ONE
+  // ticker per feed (WARDEN-1419): this same `now` is passed to LiveFeedChrome,
+  // so the header label and the row grouping below read the same instant.
+  const now = useNowTicker();
 
   // The whole live-feed wiring — state cluster, bounded fetch, initial/limit
   // effect, visibility refresh, poll cadence, Refresh — lives in the shared
-  // useLiveTimeline hook (WARDEN-1353); this component keeps only the
-  // per-second re-render tick above and the directive-specific filter/grouping
-  // below. Destructure rename: the hook's result key is `events` (shared with
-  // ActivityTimeline, whose call site must not change); locally the rows stay
-  // `directives`.
+  // useLiveTimeline hook (WARDEN-1353), and the chrome around it — Live/Pause,
+  // Refresh, the host/agent/limit filter row, the stats line and the
+  // fetch-failure strip — lives in the shared LiveFeedChrome component
+  // (WARDEN-1419); this component keeps only the clock tick above and the
+  // directive-specific filter/grouping/rows below. Destructure rename: the
+  // hook's result key is `events` (shared with ActivityTimeline, whose call
+  // site must not change); locally the rows stay `directives`.
   const {
     events: directives,
     loading,
@@ -88,12 +93,6 @@ export function DirectiveHistory({
     error,
     refresh,
   } = useLiveTimeline<Directive>(limit, DIRECTIVES_FEED);
-
-  // Re-render tick for the relative "Updated Ns ago" label.
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   // Unique filter options derived from loaded directives. Sorted (not feed
   // order) so the menus don't reshuffle under the cursor on every poll —
@@ -122,109 +121,32 @@ export function DirectiveHistory({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Header with filters */}
-      <div className="flex-shrink-0 p-3 border-b space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Directives</h2>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setIsLive((v) => !v)}
-              title={isLive ? 'Pause live updates' : 'Resume live updates'}
-            >
-              <span
-                className={`inline-block size-2 rounded-full mr-1.5 ${
-                  isLive ? 'bg-green-500 animate-pulse' : 'bg-muted-foreground'
-                }`}
-              />
-              {isLive ? 'Live' : 'Paused'}
-            </Button>
-            <Button size="sm" variant="outline" onClick={refresh} disabled={loading || refreshing}>
-              {refreshing ? 'Refreshing...' : 'Refresh'}
-            </Button>
-          </div>
-        </div>
-
-        {/* Filters */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <Select value={hostFilter} onValueChange={setHostFilter}>
-            <SelectTrigger className="h-7 w-auto text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Hosts</SelectItem>
-              {allHosts.map((h) => (
-                <SelectItem key={h} value={h}>
-                  {h}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={agentFilter} onValueChange={setAgentFilter}>
-            <SelectTrigger className="h-7 w-auto text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Agents</SelectItem>
-              {allAgents.map((a) => (
-                <SelectItem key={a} value={a}>
-                  {a}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={String(limit)} onValueChange={(v) => setLimit(parseInt(v, 10))}>
-            <SelectTrigger className="h-7 w-auto text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="50">Last 50</SelectItem>
-              <SelectItem value="100">Last 100</SelectItem>
-              <SelectItem value="500">Last 500</SelectItem>
-              <SelectItem value="1000">Last 1000</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Stats */}
-        <div className="text-xs text-muted-foreground">
-          Showing {filtered.length} of {directives.length} directives
-          {!isLive
-            ? ' · Paused'
-            : lastUpdated
-              ? ` · Updated ${formatUpdatedAgo(now, lastUpdated)}`
-              : ''}
-        </div>
-      </div>
-
-      {/* Fetch-failure strip. This feed RETAINS stale directives on a failed
-          fetch (the hook's catch clause keeps the previous rows in place —
-          useLiveTimeline.ts:124-128) — without this, a feed that already had
-          rows and then started failing would keep presenting stale state as
-          live with no indicator at all, since the error arm below is
-          unreachable while the list is non-empty. Non-blocking by design: the
-          rows stay on screen. Gate on the RAW `directives`, never `filtered` —
-          an active filter matching nothing during a healthy fetch must not be
-          dressed up as a failure. Both feeds share the hook since WARDEN-1353,
-          so `error` is an `Error` instance here too: render `error.message` —
-          an Error object as a React child throws. */}
-      {!loading && error && directives.length > 0 && (
-        <div
-          role="status"
-          title={`Live updates failed: ${error.message}`}
-          className="flex-shrink-0 flex items-start gap-2 px-3 py-1.5 border-b border-destructive/30 bg-destructive/10 text-destructive text-sm leading-snug"
-        >
-          <span aria-hidden="true">⚠</span>
-          {/* No `truncate`: the panel is narrow, and clipping the message would
-              hide the one diagnostic part of the strip (e.g. "HTTP 503"). */}
-          <span className="min-w-0">
-            Live updates failed ({error.message}) — showing last known directives.
-          </span>
-        </div>
-      )}
+      <LiveFeedChrome
+        title="Directives"
+        noun="directives"
+        staleNoun="directives"
+        isLive={isLive}
+        setIsLive={setIsLive}
+        refresh={refresh}
+        loading={loading}
+        refreshing={refreshing}
+        lastUpdated={lastUpdated}
+        now={now}
+        error={error}
+        hostFilter={hostFilter}
+        setHostFilter={setHostFilter}
+        agentFilter={agentFilter}
+        setAgentFilter={setAgentFilter}
+        allHosts={allHosts}
+        allAgents={allAgents}
+        limit={limit}
+        setLimit={setLimit}
+        filteredCount={filtered.length}
+        // The RAW directive count, never `filtered.length` — it gates the
+        // shared fetch-failure strip, and an active filter matching nothing
+        // during a healthy fetch must not be dressed up as a failure.
+        totalCount={directives.length}
+      />
 
       {/* Directive list */}
       <div className="flex-1 overflow-y-auto min-h-0">
