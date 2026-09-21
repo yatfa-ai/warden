@@ -7,17 +7,19 @@
 //                       atomically via PUT /api/config by the useBackendConfig
 //                       seam. Owned INSIDE SettingsPage (never threaded from App).
 //
-//   - CLIENT prefs    → the `*Prefs` groups (AppearancePrefs).
-//                       Pure localStorage prefs owned by App
-//                       and persisted by App's saveUi effect. Threaded into
-//                       SettingsPage as grouped props.
+//   - CLIENT prefs    → the shared client-state store (lib/uiStore.ts). Pure
+//                       localStorage prefs, persisted by the ONE compile-locked
+//                       saveUi effect. Each surface SUBSCRIBES to the fact it
+//                       reads rather than receiving it threaded down from App.
 //
-//                       A client pref shared with surfaces OUTSIDE Settings is
-//                       increasingly not threaded at all: it lives in the shared
-//                       client-state store (lib/uiStore.ts) and each surface
-//                       subscribes (WARDEN-1271 — see the note where
-//                       SnippetsPrefs used to be). Its persistence sink is
-//                       unchanged; only the SHARING channel differs.
+//                       WARDEN-1420 (roadmap WARDEN-1204 slice 12) finished
+//                       that migration: every remaining UiState appearance pref
+//                       moved, so NO UiState pref is threaded through this
+//                       module any more. `AppearancePrefs` — the one surviving
+//                       `*Prefs` group — now carries only the three main-owned
+//                       ELECTRON pairs, which are not localStorage prefs at all.
+//                       A pref's persistence sink was unchanged throughout;
+//                       only the SHARING channel differs.
 //
 // A client pref must NEVER appear in `ConfigData` — that is the 10×-commented
 // "wrong persistence sink" footgun (mixing the two inside one component made it
@@ -177,40 +179,37 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
 
 // ─── Client pref groups (the App → SettingsPage contract) ───────────────────
 //
-// Each group is a slice of App's UiState prefs, partitioned by the Settings
-// section that owns them. App constructs a group from its useState hooks;
-// SettingsPage spreads it straight through to the matching section component.
-// A section's prop type is its group intersected with whatever extra (backend
-// state, the `hidden` toggle) it needs — see each section file.
+// Each group is a slice of App-owned prefs, partitioned by the Settings section
+// that owns them. App constructs a group from its useState hooks; SettingsPage
+// spreads it straight through to the matching section component. A section's
+// prop type is its group intersected with whatever extra (backend state, the
+// `hidden` toggle) it needs — see each section file.
+//
+// WARDEN-1420 (roadmap WARDEN-1204 slice 12): exactly ONE group survives here,
+// and it holds no UiState pref at all — every shared/persisted client pref now
+// lives in the shared store (lib/uiStore.ts) and its section subscribes. What
+// remains in AppearancePrefs is the three main-owned ELECTRON pairs.
 
-import type { Theme, TerminalColorScheme } from '@/lib/theme';
-import type { Density } from '@/lib/density';
-import type {
-  RestoreOnStartup,
-  PaneLayout,
-} from '@/lib/storage';
 import type { HostLabels } from '@/lib/chatDisplay';
 
 /**
- * Appearance + terminal + window/launch prefs — all pure client localStorage,
- * persisted by App's saveUi effect. (These were the most-footgun-heavy props:
+ * Window/launch prefs — the three ELECTRON pairs, all main-owned via IPC and
+ * mirrored here for the switches. (These were the most-footgun-heavy props:
  * each carried a "must never be added to the config state / PUT /api/config
  * body" comment. Grouping them here makes that comment structural — none of
  * these types are even expressible in `ConfigData`.)
+ *
+ * WARDEN-1420 (roadmap WARDEN-1204 slice 12) shrank this bag from nine pairs to
+ * three: theme, density, paneLayout, autoFocusNewPane, restoreOnStartup and
+ * terminalColorScheme joined the six terminal prefs slice 3 already moved, so
+ * every remaining UiState appearance pref now lives in the shared client-state
+ * store (lib/uiStore.ts) and AppearanceSection subscribes. The three below
+ * deliberately STAY App-local: each has one reader and one writer, and each is
+ * an electron integration (window bounds / login item / tray) rather than a
+ * UiState pref — there is no second sharing channel to end, and global storage
+ * without global meaning is a cost.
  */
 export interface AppearancePrefs {
-  theme: Theme;
-  setTheme: (theme: Theme) => void;
-  density: Density;
-  setDensity: (density: Density) => void;
-  paneLayout: PaneLayout;
-  setPaneLayout: (layout: PaneLayout) => void;
-  autoFocusNewPane: boolean;
-  setAutoFocusNewPane: (v: boolean) => void;
-  restoreOnStartup: RestoreOnStartup;
-  setRestoreOnStartup: (v: RestoreOnStartup) => void;
-  terminalColorScheme: TerminalColorScheme;
-  setTerminalColorScheme: (v: TerminalColorScheme) => void;
   rememberWindowBounds: boolean;
   setRememberWindowBounds: (v: boolean) => void;
   launchAtLogin: boolean;
@@ -258,10 +257,18 @@ export interface AppearancePrefs {
 // proven-zero-use carrier (PaneGrid forwarded all six to PaneTile without
 // reading them). PaneTile and AppearanceSection both subscribe (PaneTile is
 // also a WRITER: its A−/A+ toolbar + context-menu entries call the same store
-// action this section does). `terminalColorScheme` STAYS in the bag: it is read
-// only by App and Settings and is never prop-drilled to PaneTile — its derived
-// product terminalThemeId remains an App-computed prop so an OS theme flip can
-// re-theme open panes live.
+// action this section does).
+//
+// NOTE (WARDEN-1420, roadmap WARDEN-1204 slice 12): the SIX remaining UiState
+// pairs followed — theme, density, paneLayout, autoFocusNewPane,
+// restoreOnStartup and terminalColorScheme — so AppearancePrefs now carries
+// nothing but the three electron pairs. Slice 3 kept `terminalColorScheme`
+// here because App, not a component, was its only runtime reader; that is
+// SUPERSEDED rather than contradicted — once the family moves, a UiState pref
+// still riding a props bag IS the second sharing channel this direction exists
+// to end. Its derived product terminalThemeId remains an App-computed prop so
+// an OS theme flip can re-theme open panes live; App reads the scheme itself
+// through the store hook.
 
 /** Re-exported so sections that take a hostLabels pref share one type. */
 export type { HostLabels };

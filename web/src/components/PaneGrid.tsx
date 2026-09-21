@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
-import type { PaneLayout } from '@/lib/storage';
+import { usePaneLayout } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -100,7 +100,6 @@ interface Props {
   externalSearchQuery?: { paneId: string; query: string } | null;
   onToggleSidebar?: () => void;
   onToggleObserver?: () => void;
-  paneLayout: PaneLayout;
   // WARDEN-660: draggable resize-gutter ratios. Per-axis track weights for the
   // grid's columns / rows ([] or all-equal = today's uniform grid). App owns the
   // persisted pref; PaneGrid holds a LOCAL working copy (see colRatios/rowRatios
@@ -118,6 +117,10 @@ interface Props {
   // pass-through to the single PaneTile below. PaneTile now SUBSCRIBES to those
   // six in the shared client-state store (lib/uiStore.ts), so none of them ride
   // through here any more. `terminalThemeId` STAYS a prop (see below).
+  //
+  // WARDEN-1420 (slice 12): `paneLayout` left this Props interface too — unlike
+  // the seven above, this grid genuinely READS it (gridShape below), so it now
+  // SUBSCRIBES to the same store rather than receiving App's pass-through.
   //
   // Resolved terminal theme id (App resolves terminalColorScheme + the active
   // theme down to a concrete named-theme id here). Pure pass-through to PaneTile
@@ -147,7 +150,12 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes }: Props) {
+  // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
+  // from the shared client-state store, keeping the exact name the Props
+  // destructure used — so gridShape below (and the comment that cites it) is
+  // textually unchanged.
+  const paneLayout = usePaneLayout();
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
