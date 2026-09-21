@@ -2,10 +2,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
 import type { ActivityEvent } from '@/lib/types';
-import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { LiveFeedChrome } from './LiveFeedChrome';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
-import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
+import { useNowTicker } from '@/lib/useNowTicker';
+import { dayBucket, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import { copyText } from '@/lib/clipboard';
@@ -59,8 +60,10 @@ export function ActivityTimeline({
   // as a prop from ObserverTabs (a proven-zero-use carrier).
   const timestampFormat = useTimestampFormat();
   const [limit, setLimit] = useState(100);
-  // Re-render once per second so the "Updated Ns ago" label stays fresh.
-  const [now, setNow] = useState(() => Date.now());
+  // Re-render once per second so the "Updated Ns ago" label stays fresh. ONE
+  // ticker per feed (WARDEN-1419): this same `now` is passed to LiveFeedChrome,
+  // so the header label and the row grouping below read the same instant.
+  const now = useNowTicker();
 
   const {
     events,
@@ -72,11 +75,6 @@ export function ActivityTimeline({
     lastUpdated,
     refresh,
   } = useLiveTimeline(limit);
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   // Extract unique values for filters. `sortedFilterOptions` dedupes, drops
   // falsy values (Radix SelectItem requires a non-empty `string`, so this also
@@ -113,10 +111,10 @@ export function ActivityTimeline({
   // (matching what each row's own formatTimestamp renders) rather than by
   // elapsed milliseconds.
   //
-  // `now` is the component's 1s-ticking state clock rather than a fresh
-  // `Date.now()` read inside the callback — the header and the "Updated Ns ago"
-  // label then share one clock — so it MUST stay in the dep array or the
-  // callback would capture a stale `now` forever.
+  // `now` is the feed's single 1s-ticking clock (`useNowTicker`) rather than a
+  // fresh `Date.now()` read inside the callback — this grouping and the header's
+  // "Updated Ns ago" label then share one clock — so it MUST stay in the dep
+  // array or the callback would capture a stale `now` forever.
   const groupedEvents = useCallback(
     (events: ActivityEvent[]) => {
       const groups: { [key: string]: ActivityEvent[] } = {};
@@ -331,32 +329,34 @@ export function ActivityTimeline({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Header with filters */}
-      <div className="flex-shrink-0 p-3 border-b space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Activity Timeline</h2>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setIsLive((v) => !v)}
-              title={isLive ? 'Pause live updates' : 'Resume live updates'}
-            >
-              <span
-                className={`inline-block size-2 rounded-full mr-1.5 ${
-                  isLive ? 'bg-green-500 animate-pulse' : 'bg-muted-foreground'
-                }`}
-              />
-              {isLive ? 'Live' : 'Paused'}
-            </Button>
-            <Button size="sm" variant="outline" onClick={refresh} disabled={loading || refreshing}>
-              {refreshing ? 'Refreshing...' : 'Refresh'}
-            </Button>
-          </div>
-        </div>
-
-        {/* Filters */}
-        <div className="flex items-center gap-2 flex-wrap">
+      <LiveFeedChrome
+        title="Activity Timeline"
+        noun="events"
+        staleNoun="activity"
+        isLive={isLive}
+        setIsLive={setIsLive}
+        refresh={refresh}
+        loading={loading}
+        refreshing={refreshing}
+        lastUpdated={lastUpdated}
+        now={now}
+        error={error}
+        hostFilter={hostFilter}
+        setHostFilter={setHostFilter}
+        agentFilter={agentFilter}
+        setAgentFilter={setAgentFilter}
+        allHosts={allHosts}
+        allAgents={allAgents}
+        limit={limit}
+        setLimit={setLimit}
+        filteredCount={filtered.length}
+        // The RAW event count, never `filtered.length` — it gates the shared
+        // fetch-failure strip, and an active filter matching nothing during a
+        // healthy fetch must not be dressed up as a failure.
+        totalCount={events.length}
+        // Activity-only: the directives feed has no event types, so this filter
+        // stays here rather than moving into the shared chrome.
+        extraFilters={
           <Select value={typeFilter} onValueChange={setTypeFilter}>
             <SelectTrigger className="h-7 w-auto text-xs">
               <SelectValue />
@@ -370,83 +370,8 @@ export function ActivityTimeline({
               ))}
             </SelectContent>
           </Select>
-
-          <Select value={hostFilter} onValueChange={setHostFilter}>
-            <SelectTrigger className="h-7 w-auto text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Hosts</SelectItem>
-              {allHosts.map((h) => (
-                <SelectItem key={h} value={h}>
-                  {h}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={agentFilter} onValueChange={setAgentFilter}>
-            <SelectTrigger className="h-7 w-auto text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Agents</SelectItem>
-              {allAgents.map((a) => (
-                <SelectItem key={a} value={a}>
-                  {a}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={String(limit)} onValueChange={(v) => setLimit(parseInt(v, 10))}>
-            <SelectTrigger className="h-7 w-auto text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="50">Last 50</SelectItem>
-              <SelectItem value="100">Last 100</SelectItem>
-              <SelectItem value="500">Last 500</SelectItem>
-              <SelectItem value="1000">Last 1000</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Stats */}
-        <div className="text-xs text-muted-foreground">
-          Showing {filtered.length} of {events.length} events
-          {!isLive
-            ? ' · Paused'
-            : lastUpdated
-              ? ` · Updated ${formatUpdatedAgo(now, lastUpdated)}`
-              : ''}
-        </div>
-      </div>
-
-      {/* Fetch-failure strip. The hook RETAINS stale events on a failed poll
-          (useLiveTimeline.ts:124-128) — without this, a feed that already had rows
-          and then started failing would keep presenting stale state as live with
-          no indicator at all, since the error arm below is unreachable while the
-          list is non-empty. Non-blocking by design: the rows stay on screen.
-          Gate on the RAW `events`, never `filtered` — an active filter matching
-          nothing during a healthy fetch must not be dressed up as a failure.
-          Render `error.message`: the hook stores an `Error` instance, and an
-          Error object as a React child throws (DirectiveHistory now shares this
-          hook and shape too — WARDEN-1353). */}
-      {!loading && error && events.length > 0 && (
-        <div
-          role="status"
-          title={`Live updates failed: ${error.message}`}
-          className="flex-shrink-0 flex items-start gap-2 px-3 py-1.5 border-b border-destructive/30 bg-destructive/10 text-destructive text-sm leading-snug"
-        >
-          <span aria-hidden="true">⚠</span>
-          {/* No `truncate`: the panel is narrow, and clipping the message would
-              hide the one diagnostic part of the strip (e.g. "HTTP 503"). */}
-          <span className="min-w-0">
-            Live updates failed ({error.message}) — showing last known activity.
-          </span>
-        </div>
-      )}
+        }
+      />
 
       {/* Event list */}
       <div className="flex-1 overflow-y-auto min-h-0">
@@ -455,11 +380,15 @@ export function ActivityTimeline({
             Loading activity...
           </div>
         ) : error && events.length === 0 ? (
-          // Mirrors DirectiveHistory.tsx:222 — gate on the RAW list, not `filtered`,
-          // so an active filter matching nothing during a healthy fetch still shows
-          // the normal empty state. Render `error.message`: the hook stores an
-          // `Error` instance, and an Error object as a React child throws (both
-          // feeds share the hook and shape since WARDEN-1353).
+          // Mirrors DirectiveHistory's full-screen error arm — gate on the RAW
+          // list, not `filtered`, so an active filter matching nothing during a
+          // healthy fetch still shows the normal empty state. Render
+          // `error.message`: the hook stores an `Error` instance, and an Error
+          // object as a React child throws (both feeds share the hook and shape
+          // since WARDEN-1353). This arm stays per-feed — the copy and the
+          // surrounding list layout differ — while the header controls, filter
+          // row, stats line and non-blocking failure strip are shared through
+          // LiveFeedChrome (WARDEN-1419).
           <div className="flex items-center justify-center h-full text-destructive text-sm">
             ⚠ {error.message}
           </div>
