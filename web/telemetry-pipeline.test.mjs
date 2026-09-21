@@ -116,6 +116,22 @@ function validEventWithNames() {
   };
 }
 
+// WARDEN-1416 — the `names` category's own carrying event: the bounded chat-name
+// window. Schema-valid under v7 and gated by the names category alone.
+function namesEvent() {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'workspace-names',
+    runtime: 'server',
+    timestamp: 1719500000123,
+    windowStartedAt: 1719499700123,
+    windowEndedAt: 1719500000123,
+    chats: ['demo', 'Refactor auth'],
+    chatCount: 2,
+    truncated: false,
+  };
+}
+
 // A structurally-valid base-tier error event whose free-text MESSAGE carries a
 // filesystem PATH. With the REAL redactor wired, the path is scrubbed and the
 // event validates + sends. With an IDENTITY redactor (p => p — standing in for
@@ -148,8 +164,8 @@ test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 6);
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall']);
+  assert.equal(SCHEMA_VERSION, 7);
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
 });
 
 test('effectiveConsent normalizes through the ONE authority — garbage resolves to nothing', () => {
@@ -205,23 +221,62 @@ test('unknown / undefined / corrupt consent ⇒ hard no-op (resolves to nothing 
   }
 });
 
-test('a DECORATING-only consent ⇒ hard no-op (names alone sends nothing — inert, not clamped)', () => {
-  // The combination the linear tier could not express. `names` really is enabled
-  // (the resolver reports it), but no COLLECTING category is on, so the pipeline
-  // sends nothing. This is why the categories need no clamp between them.
+test('NAMES-ONLY now COLLECTS — the dead switch is closed (WARDEN-1416)', () => {
+  // This test used to assert the opposite, and the inversion IS the slice: a
+  // names-only consent used to be a decorating-only state that sent nothing (a
+  // checkbox promising a flow that never happened — WARDEN-443's named dead
+  // switch). The `names` category now PRODUCES the bounded `workspace-names`
+  // event, so it is a COLLECTING category and the pipeline's gate opens for it.
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({
     consent: consentReturning(CONSENT.NAMES_ONLY),
     redact,
     send,
   });
-  assert.equal(pipeline.effectiveConsent().names, true, 'names IS on — it was not clamped away');
-  pipeline.record(validEventWithNames());
-  pipeline.record(validEventWithCredential());
-  assert.equal(send.calls.length, 0, 'but nothing is collected, so nothing reaches transport');
-  // Even a DIRECT dispatch (the layer-2 guard) sends nothing.
-  pipeline.dispatch(validEventWithNames());
-  assert.equal(send.calls.length, 0, 'the layer-2 guard closes for a decorating-only consent too');
+  assert.equal(pipeline.effectiveConsent().names, true, 'names IS on');
+  pipeline.record(namesEvent());
+  assert.equal(send.calls.length, 1, 'the names category carries its own event to transport');
+  assert.equal(send.calls[0].events[0].type, 'workspace-names');
+  assert.deepEqual(send.calls[0].events[0].chats, ['demo', 'Refactor auth']);
+});
+
+test('the pipeline gate is PER-TYPE — one category never carries another\'s event (WARDEN-1416)', () => {
+  // The structural half of Principle 2 at the wire. `names` is a COLLECTING
+  // category now, so the old coarse "is anything collecting?" gate alone would
+  // have let a names-only consent carry an INCIDENTS event to transport. The
+  // gate is registry-derived per type: an event is sendable iff some ENABLED
+  // category declares its type — so the transparency panel's per-category
+  // disclosure is a property of the wire, not a producer convention.
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.NAMES_ONLY),
+    redact,
+    send,
+  });
+  pipeline.record(validEventWithCredential()); // an `incidents` type
+  assert.equal(send.calls.length, 0, 'names-only must NOT carry an incidents event');
+  pipeline.dispatch(validEventWithCredential());
+  assert.equal(send.calls.length, 0, 'the layer-2 guard refuses it too');
+  // And the mirror direction: incidents-only must not carry the names event.
+  const send2 = fakeSend();
+  const pipeline2 = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    send: send2,
+  });
+  pipeline2.record(namesEvent());
+  assert.equal(send2.calls.length, 0, 'incidents-only must NOT carry the names event');
+
+  const send3 = fakeSend();
+  const pipeline3 = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.OFF),
+    redact,
+    send: send3,
+  });
+  pipeline3.record(namesEvent());
+  assert.equal(send3.calls.length, 0, 'with nothing on, even the names event is a hard no-op');
+  pipeline3.dispatch(namesEvent());
+  assert.equal(send3.calls.length, 0, 'the layer-2 guard closes too');
 });
 
 test('a throwing consent resolver degrades to nothing enabled (telemetry must not crash the host)', () => {
@@ -679,7 +734,10 @@ test('the transport receives a LIVE isConsentActive callback alongside the snaps
   live = CONSENT.OFF;
   assert.equal(call.isConsentActive(), false, 'flips to inactive once consent re-resolves to nothing');
   live = CONSENT.NAMES_ONLY;
-  assert.equal(call.isConsentActive(), false, 'a decorating-only consent is also inactive');
+  // WARDEN-1416 — names-only is now a COLLECTING state, but this in-flight batch
+  // is an INCIDENTS event: the live re-check is per-TYPE, so revoking the
+  // category that produced it halts it even though another category is on.
+  assert.equal(call.isConsentActive(), false, 'a consent that no longer covers THIS event type is inactive');
 });
 
 test('isConsentActive re-resolves LIVE: a revoke AFTER dispatch halts the in-flight batch', () => {

@@ -52,6 +52,23 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v7 (WARDEN-1416): added the `workspace-names` event type — the FIRST event the
+// `names` consent category PRODUCES. Until now that category could only DECORATE
+// events other categories produced (chat/session names on incidents events), so
+// a user who enabled names ALONE consented to something that never happened — a
+// dead switch (WARDEN-443: "A category that sends nothing is not consent"). This
+// type gives names its own carrying event: ONE bounded aggregate per 5-minute
+// window carrying the chat catalog's names (the sidebar-rendered `.name`, which
+// for a resumed Claude session IS that session's name — the fold the product
+// already performs), de-duplicated and capped at the producer's NAMES_MAX, with
+// `chatCount` (the TRUE catalog size) + `truncated` making the cap loud. It
+// rides ONLY the names category — identifying data stays behind its own
+// conscious opt-in and is never folded into a metrics category. The names
+// category's role therefore flips `decorating → collecting` in consent.ts: it
+// now produces this type AND still gates the decoration fields. There is no
+// free-text field beyond the names themselves; every string in `chats` is a
+// name the user sees in their own sidebar. Client + receiver bump together so
+// the x-telemetry-schema handshake (the receiver's ingest.mjs) does not 415.
 // v6 (WARDEN-1278): added the `server-stall` event type and the `server`
 // RUNTIME. The backend runs as a FORKED CHILD of the Electron main process, and
 // until now the wire had no runtime for it — so the heaviest worker in the app
@@ -86,10 +103,10 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
-export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall'] as const);
+export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names'] as const);
 export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
@@ -291,8 +308,56 @@ export interface ServerStallEvent {
   culprits: ServerStallCulprit[];
 }
 
+// ---------------------------------------------------------------------------
+// Workspace names (WARDEN-1416) — the FIRST event the `names` category produces.
+//
+// The `names` category previously only DECORATED events other categories built
+// (chat/session names on incidents events), so enabling it alone sent nothing —
+// the dead switch WARDEN-443 names explicitly. This type is its carrying event:
+// ONE bounded aggregate per 5-minute window of the chat catalog's names. The
+// identity surface is exactly what the design article permits — chat names and
+// (via the product's own fold of a resumed session's summary into `.name`)
+// Claude session names — the strings the user sees in their own sidebar. CONTENT
+// IS NEVER SENT: no raw session summary is enumerated; a session that was never
+// resumed has no catalog name beyond its id, and that id-shaped string is what
+// arrives (the same string the sidebar shows).
+//
+// BOUNDED BY CONSTRUCTION: `chats` is capped by the producer (NAMES_MAX =
+// 200), de-duplicated; `chatCount` is the TRUE catalog size and `truncated`
+// says whether the cap bit, so a capped list is loud, never silent. An empty
+// catalog (chatCount 0) sends nothing at all — the producer's hasAnything.
+//
+// It rides ONLY the `names` category (its producer gates there, and main's
+// receipt re-checks there): identifying data stays behind its own opt-in. The
+// validator carries NO name-pattern constraint — unlike an operation or culprit
+// KEY, a name is arbitrary user-chosen text BY DESIGN; the hard exclusions
+// (content/paths/hosts) are enforced by the redactor, which scrubs every
+// retained string, exactly as it does a decorated `chatName`.
+// ---------------------------------------------------------------------------
+
+/** A window of the chat catalog's names, bounded + honest about the cap. */
+export interface WorkspaceNamesEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: 'workspace-names';
+  /** Always `server` — the chat catalog lives in the forked backend child. */
+  runtime: Runtime;
+  timestamp: number;
+  appVersion?: string; // non-identifying release label; optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
+  /** When the window opened (epoch-ms, from the producer). */
+  windowStartedAt: number;
+  /** When the window closed (epoch-ms, from the producer). */
+  windowEndedAt: number;
+  /** The catalog's names (de-duplicated, ≤ the producer's NAMES_MAX cap). */
+  chats: string[];
+  /** The TRUE number of named chats in the catalog — before any cap. */
+  chatCount: number;
+  /** True iff `chats.length < chatCount` (the cap bit; the list is partial). */
+  truncated: boolean;
+}
+
 /** Any base-tier event, discriminated by `type`. */
-export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent;
+export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent;
 
 // ---------------------------------------------------------------------------
 // Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
@@ -428,6 +493,28 @@ function isServerStallShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// The names event's own footprint bound. Held generously ABOVE the producer's
+// NAMES_MAX (200) so a future cap raise does not need a schema bump — the same
+// posture MAX_CULPRITS_PER_EVENT takes toward the stall aggregator's key cap.
+// Names themselves carry NO pattern constraint (see the interface note above).
+const MAX_CHATS_PER_EVENT = 400;
+
+/** True iff `e` is a structurally valid WorkspaceNamesEvent. */
+function isWorkspaceNamesShape(e: Record<string, unknown>): boolean {
+  if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
+  if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.chats) || e.chats.length > MAX_CHATS_PER_EVENT) return false;
+  for (const c of e.chats) {
+    if (typeof c !== 'string') return false;
+  }
+  // chatCount is the TRUE catalog size — a non-negative integer, never smaller
+  // than the list it bounds (the honest-cap invariant: truncated ⟺ count > len).
+  if (typeof e.chatCount !== 'number' || !Number.isInteger(e.chatCount) || e.chatCount < 0) return false;
+  if (e.chatCount < e.chats.length) return false;
+  if (typeof e.truncated !== 'boolean') return false;
+  return true;
+}
+
 /** True iff `event` has a valid base-tier SHAPE (correct version, a known type,
  *  a valid runtime, a finite timestamp, and the type-specific fields). Does not
  *  inspect field VALUES for identifier leaks (that is redaction's concern). */
@@ -460,6 +547,11 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
       // emitted for the `server` runtime, and saying so structurally is what
       // makes "the backend is the source" a wire fact rather than a convention.
       return e.runtime === RUNTIME.SERVER && isServerStallShape(e);
+    case 'workspace-names':
+      // WARDEN-1416 — the names category's own carrying event. Same runtime pin
+      // as server-stall: the chat catalog lives in the forked backend child, so
+      // only a `server`-runtime event is a truthful workspace-names event.
+      return e.runtime === RUNTIME.SERVER && isWorkspaceNamesShape(e);
     default:
       return false;
   }

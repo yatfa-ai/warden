@@ -26,6 +26,7 @@ import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
 import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
 import { createPaneInputTelemetry } from './paneInputTelemetry.js';
 import { createRequestTelemetry } from './requestTelemetry.js';
+import { createWorkspaceNamesTelemetry } from './workspaceNamesTelemetry.js';
 import { applyCompanionToggle, applyCompanionExclusions } from './companion.js';
 import * as collections from './collections.js';
 // NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
@@ -1511,6 +1512,30 @@ const requestTelemetry = createRequestTelemetry({
   },
 });
 requestTelemetry.start();
+
+// WARDEN-1416 — the workspace-names producer: the `names` consent category's
+// OWN carrying event, and the slice that closes that category's dead switch.
+// Until now the category could only decorate events other producers built, so
+// a names-alone consent sent nothing — a checkbox promising a flow that never
+// happened. This producer reads the in-memory chat catalog's sidebar names
+// (chatCatalog.snapshot() — zero new SSH, zero new polls) once per window,
+// keeps ONLY the `.name` strings (every other catalog field is dropped at this
+// collection boundary), de-duplicates, caps at NAMES_MAX, and forwards ONE
+// bounded snapshot over the fork's IPC channel. Consent is resolved LIVE
+// through the one authority and gates ONLY on the names category — identifying
+// data stays behind its own conscious opt-in, never folded into a metrics
+// category. Same three properties as the producers above: live consent (cfg is
+// mutated in place by applyConfigPut), the same process.send guard for
+// standalone `node src/server` runs, and an unref'd interval.
+const workspaceNamesTelemetry = createWorkspaceNamesTelemetry({
+  consent: () => resolveConsent(cfg).names === true,
+  catalog: () => chatCatalog.snapshot(),
+  send: (snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-names', snapshot });
+  },
+});
+workspaceNamesTelemetry.start();
 
 // Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
@@ -3509,6 +3534,12 @@ export { paneInputTelemetry };
 // the window with flushNow(), rather than reaching into the producer's
 // internals or waiting 5 minutes for a timer.
 export { requestTelemetry };
+
+// WARDEN-1416 — exported on the same reasoning: a test seeds the REAL chat
+// catalog and closes the window with flushNow(), proving the catalog read and
+// the names-only consent gate through the real wiring rather than a parallel
+// copy.
+export { workspaceNamesTelemetry };
 
 // WARDEN-1278 — test seams for src/server-stall-telemetry.test.js, which drives
 // the REAL setOnStall callback to prove the owner's local channels (stalls.jsonl,

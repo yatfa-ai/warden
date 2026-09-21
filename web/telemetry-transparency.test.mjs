@@ -233,20 +233,31 @@ test('incidents + names ADDITIONALLY retains the chat/session-name fields', () =
   assert.equal(c.collectsAnything, true);
   assert.ok(c.retainedFields.includes('chatname'), 'chat name advertised');
   assert.ok(c.retainedFields.includes('sessionname'), 'session name advertised');
-  assert.equal(c.eventTypes.length, 4, 'the same four anonymous types');
-  assert.equal(catOf(BOTH, 'names').inert, false, 'names is live when something collects');
+  // WARDEN-1416 — five types now: the four incidents types PLUS the names
+  // category's own `workspace-names`, which it produces in its own right.
+  assert.equal(c.eventTypes.length, 5, 'the four incidents types + workspace-names');
+  assert.ok(c.eventTypes.some((e) => e.type === 'workspace-names'), 'the names event is disclosed');
+  assert.equal(catOf(BOTH, 'names').inert, false, 'names is live — it collects its own event');
 });
 
-test('names-ONLY is reported as enabled but INERT — nothing is collected or retained', () => {
-  // The combination the old three-value tier could not express. The catalog must
-  // tell the truth: the switch is on, and it still sends nothing.
+test('names-ONLY COLLECTS its own bounded event — the dead switch is closed (WARDEN-1416)', () => {
+  // This assertion is the INVERSE of what it was, and the inversion IS the
+  // slice. A names-only consent used to be reported (truthfully, then) as
+  // enabled-but-inert: the switch was on and it sent nothing. The category now
+  // produces `workspace-names`, so the honest catalog says so.
   const c = cat(NAMES_ONLY);
   assert.equal(catOf(NAMES_ONLY, 'names').enabled, true, 'the user DID turn names on');
-  assert.equal(catOf(NAMES_ONLY, 'names').inert, true, 'and it is flagged inert');
-  assert.equal(c.collectsAnything, false, 'nothing is collected');
-  assert.deepEqual(c.eventTypes, [], 'no event types');
-  assert.deepEqual(c.retainedFields, [],
-    'and NO fields are advertised as retained — there is no event for a name to ride on');
+  assert.equal(catOf(NAMES_ONLY, 'names').inert, false, 'and it is NOT inert — it carries its own event');
+  assert.equal(c.collectsAnything, true, 'something IS collected');
+  assert.deepEqual(c.eventTypes.map((e) => e.type), ['workspace-names'], 'exactly its own type');
+  // The decoration fields are still advertised as retained: with a collecting
+  // category on (this one), a name CAN ride an event — its own.
+  assert.ok(c.retainedFields.includes('chatname'), 'the gated name fields are retained');
+  // And the disclosed field list for the new type names exactly what leaves.
+  const fields = c.eventTypes[0].fields;
+  assert.ok(fields.includes('chats'), 'the name list is disclosed');
+  assert.ok(fields.includes('chatCount'), 'the true count is disclosed');
+  assert.ok(fields.includes('truncated'), 'the cap flag is disclosed');
 });
 
 test('a missing / malformed / unrecognized / stale-tier consent collects NOTHING (most-redacted)', () => {
@@ -280,7 +291,9 @@ test('describeCollection DISCLOSES the optional appVersion? field on every event
   for (const c of [INCIDENTS_ONLY, BOTH]) {
     const label = JSON.stringify(c);
     const out = cat(c);
-    assert.equal(out.eventTypes.length, 4, `four event types for ${label}`);
+    // WARDEN-1416 — incidents contributes four types; BOTH adds the names
+    // category's own `workspace-names` for five.
+    assert.equal(out.eventTypes.length, c === BOTH ? 5 : 4, `event types for ${label}`);
     for (const et of out.eventTypes) {
       assert.ok(et.fields.includes('appVersion?'), `${et.type} discloses optional appVersion? for ${label}`);
     }
@@ -297,7 +310,8 @@ test('describeCollection DISCLOSES the optional platform? field on every event t
   for (const c of [INCIDENTS_ONLY, BOTH]) {
     const label = JSON.stringify(c);
     const out = cat(c);
-    assert.equal(out.eventTypes.length, 4, `four event types for ${label}`);
+    // WARDEN-1416 — BOTH now also carries the names category's own type.
+    assert.equal(out.eventTypes.length, c === BOTH ? 5 : 4, `event types for ${label}`);
     for (const et of out.eventTypes) {
       assert.ok(et.fields.includes('platform?'), `${et.type} discloses optional platform? for ${label}`);
     }
@@ -442,17 +456,63 @@ test('chatName / sessionName PRESENT (scrubbed) when the `names` category is on'
   assert.equal(containsIdentifier(payload.chatName), false, 'retained chatName is scrubbed of identifiers');
 });
 
-test('a names-ONLY preview is schema-valid but reports transmitted:false (the honest answer)', () => {
-  // The combination the old tier could not express. Redaction retains the name
-  // (the user consented to it) and the schema is satisfied — but nothing is being
-  // COLLECTED, so nothing would actually be sent. The preview must say so rather
-  // than implying a name is on the wire.
+test('an INCIDENTS event under names-ONLY previews valid but transmitted:false (per-TYPE truth)', () => {
+  // The reason this still reads false after WARDEN-1416 made names a COLLECTING
+  // category: the gate is per-TYPE. Redaction retains the name (the user
+  // consented to names) and the schema is satisfied — but the enabled category
+  // does not produce an `error` event, so the pipeline refuses it and the
+  // preview must say so rather than implying a name is on the wire.
   const res = previewPayload(CANDIDATE, NAMES_ONLY);
   assert.equal(res.valid, true, 'the payload itself is schema-valid');
-  assert.equal(res.transmitted, false, 'but it would NOT be sent — nothing is collected');
+  assert.equal(res.transmitted, false, 'but it would NOT be sent — names does not produce this type');
   const collecting = previewPayload(CANDIDATE, BOTH);
-  assert.equal(collecting.transmitted, true, 'with a collecting category on, it would be sent');
+  assert.equal(collecting.transmitted, true, 'with incidents on, this type would be sent');
   assert.equal(previewPayload(CANDIDATE, NOTHING).transmitted, false, 'nothing on → not sent');
+});
+
+test('the NAMES event itself previews transmitted under names-only (WARDEN-1416)', () => {
+  // The other side of the same per-type gate — and the proof the dead switch is
+  // really closed: under names-ONLY, the category's OWN event reaches the wire.
+  const namesEvent = {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'workspace-names',
+    runtime: 'server',
+    timestamp: 1719500000123,
+    windowStartedAt: 1719499700123,
+    windowEndedAt: 1719500000123,
+    chats: ['demo', 'Refactor auth'],
+    chatCount: 2,
+    truncated: false,
+  };
+  const res = previewPayload(namesEvent, NAMES_ONLY);
+  assert.equal(res.valid, true, 'the names event is schema-valid');
+  assert.equal(res.transmitted, true, 'and names-only DOES send it — the switch is live');
+  assert.deepEqual(res.payload.chats, ['demo', 'Refactor auth'], 'the names survive redaction');
+  assert.equal(previewPayload(namesEvent, INCIDENTS_ONLY).transmitted, false,
+    'incidents-only does NOT carry the names event');
+  assert.equal(previewPayload(namesEvent, NOTHING).transmitted, false, 'nothing on → not sent');
+});
+
+test('a name that is PATH- or HOST-shaped is SCRUBBED inside the names event', () => {
+  // The schema permits arbitrary name text (a name is the permitted payload),
+  // so the hard exclusions are the REDACTOR's job on this type exactly as they
+  // are on a decorated chatName. A user who names a chat after a path must not
+  // put that path on the wire.
+  const res = previewPayload({
+    schemaVersion: SCHEMA_VERSION,
+    type: 'workspace-names',
+    runtime: 'server',
+    timestamp: 1719500000123,
+    windowStartedAt: 1719499700123,
+    windowEndedAt: 1719500000123,
+    chats: ['/home/alice/secret/project', 'deploy@prod.internal', 'ordinary name'],
+    chatCount: 3,
+    truncated: false,
+  }, NAMES_ONLY);
+  for (const name of res.payload.chats) {
+    assert.equal(containsIdentifier(name), false, `no identifier survives in ${JSON.stringify(name)}`);
+  }
+  assert.ok(res.payload.chats.includes('ordinary name'), 'an ordinary name is untouched');
 });
 
 test('each dropped/retained change names the CATEGORY that gates it', () => {

@@ -31,7 +31,6 @@
 // WARDEN-1116 — THE consent authority (per-category, independent, off by
 // default). This module makes no consent decision of its own; it asks.
 const {
-  collectsEvents,
   isCategoryEnabled,
   normalizeConsent,
 } = require('../src/telemetry-consent.cjs');
@@ -42,6 +41,12 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
+// v7 (WARDEN-1416): + 'workspace-names' — the FIRST event the `names` consent
+// category PRODUCES. Until now that category could only decorate events other
+// categories built, so names-alone consent sent nothing (the dead switch).
+// This inline copy stays byte-aligned with the canonical module; the drift
+// tests pin the pair. See the canonical web/src/lib/telemetry/schema.ts for
+// the full bump note.
 // v6 (WARDEN-1278): + 'server-stall' and the `server` RUNTIME — the forked
 // backend child's folded stall window (see the canonical
 // web/src/lib/telemetry/schema.ts for the full bump note).
@@ -49,9 +54,9 @@ const {
 // event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
 // note). This inline copy stays byte-aligned with the canonical module; the
 // drift tests pin the pair.
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
-const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall']);
+const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
 
 const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer', SERVER: 'server' });
 
@@ -378,6 +383,18 @@ function validateBaseEvent(event) {
     // child, and saying so structurally keeps "which process froze" honest.
     if (event.runtime !== RUNTIME.SERVER) return false;
     if (!isValidServerStall(event)) return false;
+  } else if (event.type === 'workspace-names') {
+    // WARDEN-1416 — the `names` category's carrying event. Mirrors the
+    // canonical schema's shape checks, with the same server-runtime pin (the
+    // chat catalog lives in the backend child). NOTE the deliberate ABSENCE of
+    // a name-pattern check, unlike the two types above: a chat name is
+    // arbitrary user-chosen text BY DESIGN — this is the one type whose payload
+    // the data boundary PERMITS to be identifying, behind the names category's
+    // own consent. A name that is path- or host-shaped is SCRUBBED by the
+    // redactor before the wire, exactly as a decorated chatName is; rejecting
+    // it here would refuse the data the category exists to carry.
+    if (event.runtime !== RUNTIME.SERVER) return false;
+    if (!isValidWorkspaceNames(event)) return false;
   }
   // Hard-exclusion proof: the built event must not leak an identifier.
   //   - The free-text MESSAGE is fully redacted at the collection boundary, so
@@ -475,6 +492,28 @@ function isValidServerStall(e) {
   for (const c of e.culprits) {
     if (!isValidStallCulprit(c)) return false;
   }
+  return true;
+}
+
+// WARDEN-1416 — the names event's own footprint bound, mirroring the canonical
+// schema's MAX_CHATS_PER_EVENT (held above the producer's NAMES_MAX of 200).
+const MAX_NAMES_CHATS = 400;
+
+// WARDEN-1416 — the `workspace-names` shape check, mirroring the canonical
+// schema's isWorkspaceNamesShape. Shape ONLY: the names themselves are the
+// permitted payload (see the validateBaseEvent branch for why no pattern
+// applies), so the hard exclusions are enforced by the redactor, not here.
+function isValidWorkspaceNames(e) {
+  if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.chats) || e.chats.length > MAX_NAMES_CHATS) return false;
+  for (const c of e.chats) {
+    if (typeof c !== 'string') return false;
+  }
+  // The honest-cap invariant: the count is the TRUE catalog size, so it can
+  // never be smaller than the list it bounds.
+  if (!Number.isInteger(e.chatCount) || e.chatCount < 0) return false;
+  if (e.chatCount < e.chats.length) return false;
+  if (typeof e.truncated !== 'boolean') return false;
   return true;
 }
 
@@ -752,8 +791,9 @@ function createTelemetrySource(opts) {
     // WARDEN-1116 — apply the whole per-category consent state in ONE call. The
     // categories are applied INDEPENDENTLY: `names` is set from its own switch
     // and is NEVER clamped to whether anything is collecting. Safety with names
-    // on and nothing collecting comes from inertness — no event is built, so no
-    // name is attached to anything — not from a clamp.
+    // on and `incidents` off comes from this source arming on its OWN category
+    // (WARDEN-1416, below) — no incident event is built, so no name is attached
+    // to anything — not from a clamp.
     //
     // Whatever is passed goes through the single consent authority
     // (normalizeConsent), so a missing / partial / malformed / unrecognized value
@@ -761,7 +801,20 @@ function createTelemetrySource(opts) {
     setConsent(consent) {
       const resolved = normalizeConsent(consent);
       namesConsent = isCategoryEnabled(resolved, 'names');
-      const next = collectsEvents(resolved);
+      // WARDEN-1416 — arm on THIS source's OWN category, not on
+      // `collectsEvents`. Everything this source builds (error / crash /
+      // performance-stall) rides the `incidents` category, so `incidents` off
+      // means this source has nothing to do — arming on "any collecting
+      // category" would let a names-only (or metrics-only) consent subscribe
+      // these taps and send INCIDENT events the user never opted into,
+      // exactly the cross-category fold WARDEN-443 Principle 2 forbids. (That
+      // leak pre-dated this change — the metrics category tripped it too —
+      // and the names category's flip to `collecting` made it reachable from
+      // a single checkbox a user could plausibly pick alone, so it is fixed
+      // HERE, at the only source that still keyed its taps on the coarse
+      // gate. The per-category server producers (file-exists, stalls,
+      // request, names) always self-gated.)
+      const next = isCategoryEnabled(resolved, 'incidents');
       if (next === collecting) return;
       collecting = next;
       if (next) {

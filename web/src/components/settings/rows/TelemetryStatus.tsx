@@ -16,8 +16,10 @@ import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
  *
  * Four states (see deriveTelemetrySendingStatus):
  *  - nothing collecting → renders nothing (off is off). WARDEN-1116: a
- *    decorating-only consent (names on, nothing collecting) lands here, because
- *    no event is produced for a name to ride on.
+ *    decorating-only consent lands here, because no event is produced for its
+ *    fields to ride on. (WARDEN-1416: `names` is no longer such a category —
+ *    it produces its own `workspace-names` event, so names-only consent now
+ *    lands in the COLLECTING branches below, which is the point of that slice.)
  *  - collecting + blank endpoint → amber notice: enabled but no receiver is
  *    configured, so nothing is being sent (the silently-inert opt-in).
  *  - collecting + endpoint set but no usable web scheme (WARDEN-1238) → amber

@@ -4,14 +4,17 @@
 //
 // TWO INVARIANTS this client enforces by construction:
 //   1. NOTHING COLLECTED = NOTHING RECORDED. `record()` is a guarded no-op unless
-//      at least one COLLECTING category is enabled. Everything is off by default,
-//      so out of the box this records, buffers, and sends nothing.
+//      at least one COLLECTING category is enabled AND that consent state covers
+//      the event's own TYPE (WARDEN-1416 — the same per-type gate the main
+//      pipeline applies, so one category can never carry another's event type).
+//      Everything is off by default, so out of the box this records, buffers,
+//      and sends nothing.
 //   2. CATEGORIES ARE INDEPENDENT. Enabling one NEVER enables another, and none
 //      is subordinate to another. The old "extended requires base" clamp is gone:
-//      `names` is a DECORATING category that adds fields to events other
-//      categories produce, so on its own it is naturally inert — with nothing
-//      collecting, `record()` still enqueues nothing. Safety comes from that
-//      inertness, not from a clamp.
+//      `names` used to be a DECORATING category (inert on its own), and since
+//      WARDEN-1416 it PRODUCES its own bounded `workspace-names` event — so
+//      safety no longer rests on inertness but on the per-type gate above: a
+//      names-only consent records the names event and nothing else.
 //
 // The consent decision itself is NOT made here — it is delegated to `./consent`,
 // the single authority. This client only asks it questions.
@@ -26,6 +29,7 @@ import {
 } from './schema';
 import {
   NO_CONSENT,
+  collectedEventTypes,
   collectsEvents,
   isCategoryEnabled,
   normalizeConsent,
@@ -54,11 +58,13 @@ export interface TelemetryClient {
   getConsent(): TelemetryConsent;
   /** Is this one category enabled? */
   isCategoryOn(category: TelemetryCategory): boolean;
-  /** True iff a COLLECTING category is on (i.e. `record()` will enqueue). A
+  /** True iff a COLLECTING category is on (i.e. `record()` MAY enqueue — the
+   *  event's own type must also be one an enabled category produces). A
    *  decorating-only consent is false: nothing is collected, so nothing is sent. */
   isCollecting(): boolean;
   /** Record a telemetry event. A guarded NO-OP (records nothing) while nothing is
-   *  being collected. Otherwise validates the event against the schema and
+   *  being collected, or while no enabled category produces this event's TYPE
+   *  (WARDEN-1416). Otherwise validates the event against the schema and
    *  enqueues it to the in-memory buffer. Returns true iff an event was enqueued
    *  (collecting AND schema-valid). */
   record(event: unknown): boolean;
@@ -115,6 +121,11 @@ export function createTelemetryClient(options: TelemetryClientOptions = {}): Tel
       // Schema conformance: only well-formed events are retained. An invalid
       // event is dropped (returns false), never buffered.
       if (!validateEvent(event)) return false;
+      // WARDEN-1416 — and the event's own TYPE must be one an ENABLED category
+      // produces (the same registry-derived per-type gate the main pipeline
+      // applies). Without it, a consent enabling category A would buffer
+      // category B's event type, the cross-category fold Principle 2 forbids.
+      if (!collectedEventTypes(consent).includes((event as TelemetryEvent).type)) return false;
 
       const safe = event as TelemetryEvent;
 

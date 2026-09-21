@@ -12,9 +12,12 @@
 // WARDEN-1116 — this surface is now CATEGORY-KEYED, not tier-keyed. It describes
 // collection PER CATEGORY and tells the truth for ANY combination the user picks,
 // including combinations the old three-value tier could not express (e.g. names
-// on with nothing collecting: honestly reported as "nothing is sent" because a
-// decorating category has no event to ride on). A new category appears in the
-// catalog automatically — it is read from the registry, not enumerated here.
+// on with incidents off: reported as collecting ONLY the names category's own
+// `workspace-names` event, never as though an incidents event were on the wire).
+// A new category appears in the catalog automatically — it is read from the
+// registry, not enumerated here. WARDEN-1416 made `transmitted` per-TYPE for
+// exactly that reason: the pipeline gates on the event's own type, so a preview
+// that ignored it would tell a comforting lie.
 //
 // PURE. Its runtime imports are `./redact` (the shipped redactor + its field-name
 // sets), `./consent` (the single consent authority) and `./schema` (the CANONICAL
@@ -30,6 +33,7 @@ import type { TelemetryCategory, TelemetryConsent } from './consent';
 import {
   GATED_FIELD_CATEGORY,
   TELEMETRY_CATEGORIES,
+  collectedEventTypes,
   collectsEvents,
   enabledCategories,
   normalizeConsent,
@@ -81,6 +85,11 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   // number or a closed-set kebab-case culprit key; there is no free text and no
   // identifier anywhere in the shape (the validator enforces the key pattern).
   'server-stall': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'count', 'totalMs', 'maxMs', 'boundaries', 'buckets', 'culprits'],
+  // WARDEN-1416 — the `names` category's own carrying event. THE one base-event
+  // type whose payload IS identifiers: the bounded sidebar-name list plus the
+  // true count and the loud truncated flag. Disclosed field-by-field like every
+  // other type — the panel's contract is to name exactly what leaves.
+  'workspace-names': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'chats', 'chatCount', 'truncated'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the
@@ -185,6 +194,33 @@ function isValidServerStallShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// WARDEN-1416 — the workspace-names shape check (a local mirror of the
+// canonical schema's isWorkspaceNamesShape, kept local for the same reason
+// isValidBaseEvent itself is). NOTE what is deliberately ABSENT here, unlike
+// the operation/culprit checks above: NO containsIdentifier pass over the
+// names. A name is arbitrary user-chosen text BY DESIGN — this type is the
+// one place the data boundary PERMITS identifiers (behind the names
+// category's own consent), and a name that happens to be path- or
+// host-shaped is scrubbed by the redactor before the wire, not rejected
+// here. Running the identifier proof on this type would reject the exact
+// strings the category exists to carry.
+const MAX_NAMES_CHATS = 400; // schema bound, held above the producer's NAMES_MAX (200)
+
+function isValidWorkspaceNamesShape(e: Record<string, unknown>): boolean {
+  if (e.runtime !== 'server') return false;
+  const finiteNonNegative = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.chats) || e.chats.length > MAX_NAMES_CHATS) return false;
+  for (const c of e.chats) {
+    if (typeof c !== 'string') return false;
+  }
+  if (!Number.isInteger(e.chatCount) || (e.chatCount as number) < 0) return false;
+  if ((e.chatCount as number) < (e.chats as string[]).length) return false;
+  if (typeof e.truncated !== 'boolean') return false;
+  return true;
+}
+
 /**
  * Base-event schema conformance — a LOCAL copy mirroring the
  * `validateBaseEvent` proof shape from telemetry-source.cjs:212-244. Returns
@@ -235,6 +271,11 @@ export function isValidBaseEvent(event: unknown): boolean {
     for (const c of e.culprits as unknown[]) {
       if (containsIdentifier(String((c as Record<string, unknown>).culprit))) return false;
     }
+  } else if (e.type === 'workspace-names') {
+    // WARDEN-1416 — the `names` category's carrying event: shape-check only.
+    // The names themselves are the PERMITTED payload (see the shape-check note
+    // above) — no identifier proof runs over them.
+    if (!isValidWorkspaceNamesShape(e)) return false;
   }
   // Hard-exclusion proof: the redacted message must be free of any identifier;
   // structured frame fields must be free of paths (a bare filename basename is
@@ -281,8 +322,11 @@ export interface CategoryCollection {
   readonly fields: readonly string[];
   /**
    * True when this category is ENABLED but contributes nothing, because it only
-   * decorates events and no collecting category is on. The honest reading of
-   * "names on, incidents off": the switch is on and it still sends nothing.
+   * decorates events and no collecting category is on — the honest reading of a
+   * switch that is on and still sends nothing. WARDEN-1416: every registry
+   * category is `collecting` today (`names` was the last decorating one and now
+   * produces `workspace-names`), so this is `false` for every current category;
+   * the flag stays for a future decorate-only one.
    */
   readonly inert: boolean;
 }
@@ -313,11 +357,13 @@ export interface ConsentCollection {
  *
  * Truthful for EVERY combination, including ones the old tier could not express:
  *  - nothing on            → collectsAnything false, no event types, no fields.
- *  - incidents on          → the three anonymous event types, no identifiers.
- *  - names on, nothing else→ collectsAnything false and the `names` category is
- *                            flagged `inert` — enabled, but there is no event for
- *                            a name to ride on, so nothing is sent.
- *  - incidents + names     → the three event types, plus the name fields.
+ *  - incidents on          → the anonymous incident event types, no identifiers.
+ *  - names on, nothing else→ the `workspace-names` type IS collected (WARDEN-1416
+ *                            closed the dead switch — the category produces its
+ *                            own bounded event), so collectsAnything is true and
+ *                            the category is not flagged `inert`.
+ *  - incidents + names     → the incident types PLUS workspace-names, plus the
+ *                            name fields the decoration retains.
  *
  * A missing / malformed / unrecognized consent value normalizes to nothing
  * enabled, so the catalog is the most-redacted one. Pure: the same consent state
@@ -400,8 +446,9 @@ export interface PreviewResult {
   readonly valid: boolean;
   /**
    * Whether this payload would actually be SENT. A schema-valid payload is still
-   * transmitted only when a COLLECTING category is on — so a names-only consent
-   * previews as "valid, but nothing is sent", which is the truth.
+   * transmitted only when a COLLECTING category is on AND some enabled category
+   * declares THIS event's type (WARDEN-1416) — so an incidents event previews as
+   * "valid, but nothing is sent" under a names-only consent, which is the truth.
    */
   readonly transmitted: boolean;
   /** Enumerated diff of what redaction did (dropped fields + [REDACTED:…] substitutions). */
@@ -500,7 +547,8 @@ function collectChanges(
  *  - `valid`       = whether `payload` conforms to the base-event schema (the
  *    local isValidBaseEvent proof, mirroring telemetry-source.cjs).
  *  - `transmitted` = whether the pipeline would actually send it (a COLLECTING
- *    category must be on). A decorating-only consent previews as valid but not
+ *    category must be on AND it must declare this event's TYPE — WARDEN-1416).
+ *    An incidents event under a names-only consent previews as valid but not
  *    transmitted — the honest answer, not a comforting one.
  *  - `changes`     = an enumerated diff of what redaction did: dropped
  *    content/prompt fields, dropped/retained category-gated fields (each tagged
@@ -514,11 +562,21 @@ export function previewPayload(rawEvent: unknown, consent: unknown): PreviewResu
   const changes: PreviewChange[] = [];
   collectChanges(rawEvent, payload, resolved, '', changes);
   const valid = isValidBaseEvent(payload);
+  // WARDEN-1416 — `transmitted` mirrors the pipeline's gate EXACTLY, which is
+  // now per-TYPE as well as per-category: an event is sent iff a collecting
+  // category is on AND some ENABLED category declares THIS event's type. A
+  // preview that ignored the type would tell a names-only user their INCIDENT
+  // event is on the wire when the pipeline refuses it — the precise class of
+  // comforting lie this surface exists to prevent.
+  const type = payload && typeof payload === 'object'
+    ? (payload as Record<string, unknown>).type
+    : undefined;
+  const typeCollected = typeof type === 'string' && collectedEventTypes(resolved).includes(type);
   return {
     consent: resolved,
     payload,
     valid,
-    transmitted: valid && collectsEvents(resolved),
+    transmitted: valid && collectsEvents(resolved) && typeCollected,
     changes,
   };
 }

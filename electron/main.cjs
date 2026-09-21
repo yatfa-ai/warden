@@ -59,6 +59,9 @@ const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
 // WARDEN-1258 — the server-child metrics-window → schema-event builder.
 const { buildOperationalMetricsEvent } = require('./telemetry-metrics-event.cjs');
 const { buildServerStallEvent } = require('./telemetry-stall-event.cjs');
+// WARDEN-1416 — the server-child workspace-names window → schema-event builder
+// (the `names` category's own carrying event).
+const { buildWorkspaceNamesEvent } = require('./telemetry-names-event.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
@@ -465,6 +468,29 @@ function readLastPaneLatency() {
 function recordServerStallWindow(snapshot) {
   if (resolveTelemetryConsent(telemetryPrefs).incidents !== true) return;
   const event = buildServerStallEvent({
+    snapshot,
+    schemaVersion: SCHEMA_VERSION,
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    now: Date.now,
+  });
+  if (event) telemetryPipeline.record(event);
+}
+
+// WARDEN-1416 — turn a server-child workspace-NAMES window (the
+// 'telemetry-names' IPC message) into a `workspace-names` schema event and
+// record it through the standard pipeline. Same double gate as the metrics and
+// stall receipts above: the server child already refuses to flush while the
+// `names` category is off and drops the window at flush time, and this
+// receipt-side re-check closes the mid-flip gap for a window that was in
+// flight when the user revoked.
+//
+// It rides ONLY the `names` category — this is the identifying-data category,
+// and its event goes nowhere without its own conscious opt-in. It is never
+// gated by (or folded into) a metrics category.
+function recordWorkspaceNamesWindow(snapshot) {
+  if (resolveTelemetryConsent(telemetryPrefs).names !== true) return;
+  const event = buildWorkspaceNamesEvent({
     snapshot,
     schemaVersion: SCHEMA_VERSION,
     appVersion: app.getVersion(),
@@ -1500,6 +1526,17 @@ app.whenReady().then(async () => {
     // the stderr line, /api/diagnostics/stalls) are untouched by this path.
     if (msg && msg.type === 'telemetry-stalls') {
       recordServerStallWindow(msg.snapshot);
+    }
+    // WARDEN-1416 — the server child's workspace-NAMES window, the `names`
+    // category's own carrying event (that category's dead switch, closed).
+    // Same channel shape as the two windows above and the same gates: the
+    // producer gates on `names` alone and drops out-of-consent windows at
+    // flush; this receipt re-checks `names` before building. The event carries
+    // the bounded sidebar-name list + the true count — never content, never a
+    // path or hostname (the redactor scrubs the names like any retained
+    // string).
+    if (msg && msg.type === 'telemetry-names') {
+      recordWorkspaceNamesWindow(msg.snapshot);
     }
     if (msg && msg.type === 'telemetry-config') {
       // The server forwards the already-sanitized per-category consent under

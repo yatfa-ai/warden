@@ -4,8 +4,11 @@
 //      a COLLECTING category is on.
 //   2. CATEGORIES ARE INDEPENDENT — setting one never changes another, and none
 //      is subordinate to another. The old extended-requires-base clamp is gone;
-//      a decorating category is safe on its own because it is INERT, which these
-//      tests demonstrate rather than assume.
+//      a category is safe on its own because record() is gated PER EVENT TYPE
+//      (WARDEN-1416) — enabling one category never carries another's event type
+//      — which these tests demonstrate rather than assume. (Before WARDEN-1416
+//      that safety came from a decorating category's INERTNESS; `names` was the
+//      only such category, and it now produces its own event.)
 //
 // No front-end test runner in this repo, so (like web/storage.test.mjs) this
 // loads the REAL web/src/lib/telemetry/client.ts (transpiled TS -> ESM via Vite's
@@ -59,6 +62,19 @@ const errorEvent = {
   name: 'Error',
   message: 'boom',
   frames: [],
+};
+
+// WARDEN-1416 — the `names` category's OWN carrying event.
+const namesEvent = {
+  schemaVersion: SCHEMA_VERSION,
+  type: 'workspace-names',
+  runtime: 'server',
+  timestamp: 1,
+  windowStartedAt: 0,
+  windowEndedAt: 1,
+  chats: ['demo'],
+  chatCount: 1,
+  truncated: false,
 };
 
 // ==========================================================================
@@ -134,17 +150,21 @@ test('the buffer is bounded — oldest events are dropped past maxBuffer', () =>
 // (3) INDEPENDENCE — no category implies, clamps, or revokes another
 // ==========================================================================
 
-test('enabling `names` alone does NOT enable collection — the decorating category is INERT', () => {
-  // The property that makes the old "extended requires base" clamp unnecessary:
-  // with nothing collecting there is no event for a name to ride on, so the
-  // client records nothing. Demonstrated, not assumed.
+test('enabling `names` alone COLLECTS its own event but NOT another category\'s (WARDEN-1416)', () => {
+  // This assertion inverted with WARDEN-1416, and the inversion IS the slice:
+  // `names` used to be a decorating category that collected nothing on its own
+  // (the dead switch). It now produces `workspace-names`. What still holds — and
+  // is now enforced per TYPE rather than by inertness — is that names-only
+  // never carries an INCIDENTS event.
   const c = createTelemetryClient();
   const applied = c.setCategory('names', true);
   assert.deepEqual({ ...applied }, { incidents: false, names: true, 'operational-metrics': false },
     'the user\'s choice is stored VERBATIM — not silently clamped back off');
-  assert.equal(c.isCollecting(), false, 'names alone collects nothing');
-  assert.equal(c.record(errorEvent), false, 'and therefore records nothing');
+  assert.equal(c.isCollecting(), true, 'names now collects its own event');
+  assert.equal(c.record(errorEvent), false, 'but an INCIDENTS event is still refused');
   assert.equal(c.size(), 0);
+  assert.equal(c.record(namesEvent), true, 'its OWN event is recorded');
+  assert.equal(c.size(), 1);
 });
 
 test('setConsent({ names:true }) leaves every other category exactly as it was', () => {
@@ -167,7 +187,10 @@ test('revoking `incidents` does NOT revoke `names` (no subordination)', () => {
   const applied = c.setCategory('incidents', false);
   assert.deepEqual({ ...applied }, { incidents: false, names: true, 'operational-metrics': false },
     'names survives — it was never subordinate to incidents');
-  assert.equal(c.isCollecting(), false, 'but nothing is collected any more');
+  // WARDEN-1416 — names still collects its OWN event, but the revoked
+  // category's event type is refused immediately (no restart, no clamp).
+  assert.equal(c.isCollecting(), true, 'names keeps collecting its own event');
+  assert.equal(c.record(errorEvent), false, 'but the revoked category\'s type is refused at once');
 });
 
 test('revoking `names` does NOT revoke `incidents`', () => {

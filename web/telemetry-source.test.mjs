@@ -104,7 +104,7 @@ function makeSource(overrides = {}) {
 
 test('base-tier contract: shared SCHEMA_VERSION + the event types', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall']);
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
   assert.equal(RUNTIME.MAIN, 'main');
   assert.equal(RUNTIME.RENDERER, 'renderer');
   // WARDEN-1278 — the forked BACKEND child, the third real process warden runs.
@@ -1028,12 +1028,14 @@ test('(c) `names` ON but NO context held → anonymous event (graceful)', () => 
   assert.equal(record.calls[1].chatName, 'now-focused');
 });
 
-test('INERTNESS: `names` ON with NOTHING COLLECTING builds no event at all — so no name rides out', () => {
-  // This is the property that replaces the old "extended requires base" clamp.
-  // The category is NOT clamped off (the user really did enable it, and the
-  // resolver stores that verbatim) — it is simply inert: with no collecting
-  // category on, no tap is subscribed, no heartbeat runs, and nothing is built,
-  // so there is no event for a name to ride on. Demonstrated, not assumed.
+test('INERTNESS: `names` ON with INCIDENTS OFF builds no INCIDENT event — no name rides out', () => {
+  // WARDEN-1416 renamed the property but not its teeth. `names` is now a
+  // COLLECTING category (it produces `workspace-names`, from the SERVER child,
+  // not from this source), so "nothing is collecting" no longer describes this
+  // state — what still holds, and is what actually protects the user, is that
+  // THIS source arms on its OWN category: with `incidents` off, no tap is
+  // subscribed, no heartbeat runs, and nothing is built here, so there is no
+  // incident event for a name to ride on. Demonstrated, not assumed.
   const clock = fakeClock();
   const record = recorder();
   const src = createTelemetrySource({
@@ -1047,14 +1049,14 @@ test('INERTNESS: `names` ON with NOTHING COLLECTING builds no event at all — s
 
   src.setConsent({ incidents: false, names: true });
   assert.equal(src.isNamesConsentOn(), true, 'the names category IS on — it was not clamped away');
-  assert.equal(src.isCollecting(), false, 'but nothing is being collected');
+  assert.equal(src.isCollecting(), false, 'but THIS source is not collecting (incidents is off)');
 
   // No tap is subscribed and no heartbeat runs.
   assert.equal(proc.listenerCount(UNCAUGHT_EVENT), 0);
   assert.equal(proc.listenerCount(REJECTION_EVENT), 0);
   assert.equal(wc.listenerCount('render-process-gone'), 0);
   assert.equal(wc.listenerCount('unresponsive'), 0);
-  assert.equal(clock.state.tickFn, null, 'no heartbeat with nothing collecting');
+  assert.equal(clock.state.tickFn, null, 'no heartbeat with incidents off');
 
   // Every signal family, plus both direct entry points, records NOTHING.
   proc.emit(UNCAUGHT_EVENT, new Error('boom'));
@@ -1064,7 +1066,49 @@ test('INERTNESS: `names` ON with NOTHING COLLECTING builds no event at all — s
   src.recordRendererError({ name: 'Error', message: 'renderer boom', stack: '' });
   src.recordMainCrash();
   assert.equal(record.calls.length, 0,
-    'names alone produces NO event — the decorating category is inert by construction');
+    'names alone produces NO incident event — this source arms on its OWN category');
+});
+
+test('PER-CATEGORY ARMING: a NON-incidents collecting category does NOT arm the incident taps', () => {
+  // WARDEN-1416. This source builds error / crash / performance-stall, and
+  // every one of them rides `incidents`. It used to arm on `collectsEvents`
+  // ("is ANY collecting category on"), which meant enabling a DIFFERENT
+  // collecting category — operational-metrics then, names now — subscribed
+  // these taps and sent INCIDENT events the user never opted into: exactly the
+  // cross-category fold WARDEN-443 Principle 2 forbids. It now arms on
+  // `incidents` alone. This test fails on the old gate.
+  for (const other of ['names', 'operational-metrics']) {
+    const clock = fakeClock();
+    const record = recorder();
+    const src = createTelemetrySource({
+      record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    });
+    const proc = fakeEmitter();
+    const wc = fakeEmitter();
+    src.attachMain(proc);
+    src.attachRenderer(wc);
+    src.setContext({ chatName: 'leak-probe', sessionName: 'leak-session' });
+
+    src.setConsent({ incidents: false, [other]: true });
+    assert.equal(src.isCollecting(), false, `${other} alone must not arm the incident source`);
+    assert.equal(proc.listenerCount(UNCAUGHT_EVENT), 0, `no uncaught tap for ${other}`);
+    assert.equal(proc.listenerCount(REJECTION_EVENT), 0, `no rejection tap for ${other}`);
+    assert.equal(wc.listenerCount('render-process-gone'), 0, `no crash tap for ${other}`);
+    assert.equal(wc.listenerCount('unresponsive'), 0, `no unresponsive tap for ${other}`);
+    assert.equal(clock.state.tickFn, null, `no heartbeat for ${other}`);
+
+    proc.emit(UNCAUGHT_EVENT, new Error('boom'));
+    wc.emit('render-process-gone', {}, { reason: 'oom' });
+    src.recordRendererError({ name: 'Error', message: 'renderer boom', stack: '' });
+    src.recordMainCrash();
+    assert.equal(record.calls.length, 0, `${other} alone produces NO incident event`);
+
+    // Positive control: turning INCIDENTS on arms it immediately, same source.
+    src.setConsent({ incidents: true, [other]: true });
+    assert.equal(src.isCollecting(), true);
+    proc.emit(UNCAUGHT_EVENT, new Error('now armed'));
+    assert.equal(record.calls.length, 1, 'the gate really is the incidents category');
+  }
 });
 
 test('INDEPENDENCE: enabling `names` first, then `incidents`, still attaches names (no ordering rule)', () => {

@@ -1134,11 +1134,11 @@ function crossField(cfg) {
   // corrupt, or unrecognized value lands as false.
   //
   // There is NO cross-CATEGORY clamp. The old "extended requires base" coupling is
-  // gone: categories are independent, and the `names` category is safe on its own
-  // because it only decorates events other categories produce — with nothing
-  // collecting there is no event for a name to ride on. Re-introducing a clamp
-  // here would re-couple the categories WARDEN-443 Principle 2 requires to be
-  // independent.
+  // gone: categories are independent, and — since WARDEN-1416 gave the `names`
+  // category its own bounded `workspace-names` producer — safe on its own in the
+  // plain sense: it collects exactly the one bounded event its summary
+  // discloses, and nothing more. Re-introducing a clamp here would re-couple the
+  // categories WARDEN-443 Principle 2 requires to be independent.
   const consent = resolveConsent(cfg);
   for (const cat of TELEMETRY_CATEGORIES) cfg[cat.configKey] = consent[cat.id] === true;
 }
