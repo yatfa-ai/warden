@@ -54,9 +54,12 @@ import {
   type OnExitBehavior,
   type CustomPreset,
 } from '@/lib/storage';
+import type { PaneLayout, RestoreOnStartup } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
 import type { AgentFilter, AgentSort } from '@/lib/agentFilter';
+import type { Theme, TerminalColorScheme } from '@/lib/theme';
+import type { Density } from '@/lib/density';
 
 /**
  * The shared client-state slice. One field + its setter per migrated pref.
@@ -275,6 +278,79 @@ export interface UiStoreState {
   attentionStates: { stuck?: boolean; done?: boolean };
   /** Replace the per-state filter bag. The persisted write follows via App's snapshot. */
   setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
+  /**
+   * The six remaining AppearancePrefs pairs (roadmap WARDEN-1204 slice 12,
+   * WARDEN-1420) — theme, density, paneLayout, autoFocusNewPane,
+   * restoreOnStartup and terminalColorScheme. Slice 3 (WARDEN-1322) took the
+   * six terminal prefs out of the same bag; this takes the rest, so
+   * `AppearancePrefs` shrinks to the three ELECTRON pairs (rememberWindowBounds
+   * / launchAtLogin / closeToTray) that deliberately stay App-local: one
+   * reader, one writer, an IPC integration with no second sharing channel.
+   *
+   * The slice-3 note kept terminalColorScheme in the bag because App — not a
+   * component — was its only runtime reader. That is SUPERSEDED, not
+   * contradicted: once the family moves, a UiState pref still riding a props
+   * bag IS the second sharing channel this direction exists to end, and App
+   * keeps reading it here (via the hook) to derive `terminalThemeId`.
+   *
+   * Every one of the six is pure client localStorage — shared + persisted
+   * client state, WARDEN-832 row 2 — and persistence is unchanged: App keeps
+   * its snapshot fields + resetSetters entries, so the ONE compile-locked
+   * saveUi effect remains the single writer.
+   */
+  /**
+   * The app-wide theme pref — 'system' (follow the OS) or a concrete named
+   * theme id. Read by App (the [theme] effect that paints the chrome and keeps
+   * `resolvedThemeId` in sync) and AppearanceSection (its only writer).
+   */
+  theme: Theme;
+  /** Set the app theme. The persisted write follows via App's snapshot. */
+  setTheme: (v: Theme) => void;
+  /**
+   * Row/header spacing — 'comfortable' | 'compact' (WARDEN-133). Read by App's
+   * applyDensity effect; AppearanceSection is its only writer.
+   */
+  density: Density;
+  /** Set the density. The persisted write follows via App's snapshot. */
+  setDensity: (v: Density) => void;
+  /**
+   * How open panes are arranged — 'auto' | 'stacked' | 'side-by-side'. Read by
+   * PaneGrid (`gridShape(paneLayout, tiles.length)`), which SUBSCRIBES here
+   * since this slice instead of taking it as a prop from App; AppearanceSection
+   * is its only writer.
+   */
+  paneLayout: PaneLayout;
+  /** Set the pane layout. The persisted write follows via App's snapshot. */
+  setPaneLayout: (v: PaneLayout) => void;
+  /**
+   * Whether opening/resuming/splitting a chat moves keyboard focus to the new
+   * pane (WARDEN-274; default true = today's behavior). Read by App's openChat
+   * (it gates the setFocused calls) and AppearanceSection (its only writer).
+   */
+  autoFocusNewPane: boolean;
+  /** Set auto-focus-on-open. The persisted write follows via App's snapshot. */
+  setAutoFocusNewPane: (v: boolean) => void;
+  /**
+   * "Restore workspace on startup" — 'previous' | 'empty'. The ONE UiState
+   * field persistUiState takes as a separate argument rather than through the
+   * `live` spread, so App passes the LIVE value to useConfigPersistence.
+   * BOOT restoration does not read this store: App resolves the initial
+   * workspace from the DISK payload before React renders, so where the live
+   * pref lives is independent of it. AppearanceSection is its only writer.
+   */
+  restoreOnStartup: RestoreOnStartup;
+  /** Set the startup-restore pref. The persisted write follows via App's snapshot. */
+  setRestoreOnStartup: (v: RestoreOnStartup) => void;
+  /**
+   * Terminal color scheme — 'auto' (follow the effective app theme) |
+   * 'dark' | 'light'. Read by App, which resolves it together with
+   * `resolvedThemeId` into the concrete `terminalThemeId` PaneTile repaints
+   * from (that derivation stays an App-computed prop so an OS theme flip
+   * re-themes open panes live); AppearanceSection is its only writer.
+   */
+  terminalColorScheme: TerminalColorScheme;
+  /** Set the terminal color scheme. The persisted write follows via App's snapshot. */
+  setTerminalColorScheme: (v: TerminalColorScheme) => void;
 }
 
 /**
@@ -311,6 +387,12 @@ export type UiStoreSeed = Partial<
     | 'defaultShellByHost'
     | 'attentionDesktopAlerts'
     | 'attentionStates'
+    | 'theme'
+    | 'density'
+    | 'paneLayout'
+    | 'autoFocusNewPane'
+    | 'restoreOnStartup'
+    | 'terminalColorScheme'
   >
 >;
 
@@ -407,6 +489,25 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setAttentionDesktopAlerts: (attentionDesktopAlerts) => set({ attentionDesktopAlerts }),
     attentionStates: seed.attentionStates ?? persisted.attentionStates ?? { stuck: true, done: true },
     setAttentionStates: (attentionStates) => set({ attentionStates }),
+    // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the six remaining appearance
+    // prefs, ??-only — every literal below mirrors DEFAULT_UI (pinned against
+    // it by uiStore.test.mjs), exactly as the App useStates they replaced
+    // seeded (`uiState.theme ?? 'system'`, `?? 'comfortable'`, `?? 'auto'`,
+    // `?? true`, `?? 'previous'`, `?? 'auto'`). loadUi's own sanitizers already
+    // normalize a persisted payload, so there is no terminalFontFamily-style
+    // truthiness exception here either.
+    theme: seed.theme ?? persisted.theme ?? 'system',
+    setTheme: (theme) => set({ theme }),
+    density: seed.density ?? persisted.density ?? 'comfortable',
+    setDensity: (density) => set({ density }),
+    paneLayout: seed.paneLayout ?? persisted.paneLayout ?? 'auto',
+    setPaneLayout: (paneLayout) => set({ paneLayout }),
+    autoFocusNewPane: seed.autoFocusNewPane ?? persisted.autoFocusNewPane ?? true,
+    setAutoFocusNewPane: (autoFocusNewPane) => set({ autoFocusNewPane }),
+    restoreOnStartup: seed.restoreOnStartup ?? persisted.restoreOnStartup ?? 'previous',
+    setRestoreOnStartup: (restoreOnStartup) => set({ restoreOnStartup }),
+    terminalColorScheme: seed.terminalColorScheme ?? persisted.terminalColorScheme ?? 'auto',
+    setTerminalColorScheme: (terminalColorScheme) => set({ terminalColorScheme }),
   }));
 }
 
@@ -742,4 +843,92 @@ export function useAttentionStates(): { stuck?: boolean; done?: boolean } {
 /** The per-state-filter setter (NotificationsSection; also App's resetSetters). Stable across renders. */
 export function useSetAttentionStates(): (v: { stuck?: boolean; done?: boolean }) => void {
   return useUiStore((s) => s.setAttentionStates);
+}
+
+// ─── the six remaining appearance prefs (WARDEN-1420, roadmap WARDEN-1204 slice 12) ───
+//
+// AppearanceSection (the writer of all six) subscribes here instead of
+// destructuring them from the AppearancePrefs bag, and PaneGrid subscribes to
+// `paneLayout` instead of taking it as a prop from App — so the bag shrinks to
+// the three electron pairs and the App→PaneGrid pass site is gone. App
+// subscribes too (keep-local-names) for its [theme]/[density] effects, the
+// openChat focus gate, the terminalThemeId derivation, the persisted snapshot
+// and resetSetters, as with every migrated fact. All six setters are stable
+// across renders (zustand actions are created once with the store), so they are
+// safe in React dependency arrays.
+
+/**
+ * The app-wide theme pref (WARDEN-1420). App's [theme] effect keys on THIS
+ * VALUE (not on the setter's identity), so the OS-flip repaint chain —
+ * listenSystemThemeChange → setResolvedThemeId → terminalThemeId → PaneTile —
+ * is untouched by the migration.
+ */
+export function useTheme(): Theme {
+  return useUiStore((s) => s.theme);
+}
+
+/** The theme setter (AppearanceSection; also App's resetSetters). Stable across renders. */
+export function useSetTheme(): (v: Theme) => void {
+  return useUiStore((s) => s.setTheme);
+}
+
+/** Row/header spacing — 'comfortable' | 'compact' (WARDEN-133, WARDEN-1420). */
+export function useDensity(): Density {
+  return useUiStore((s) => s.density);
+}
+
+/** The density setter (AppearanceSection; also App's resetSetters). Stable across renders. */
+export function useSetDensity(): (v: Density) => void {
+  return useUiStore((s) => s.setDensity);
+}
+
+/**
+ * The pane-arrangement pref (WARDEN-1420). PaneGrid — the fact's only runtime
+ * reader — subscribes here directly; App no longer passes it down.
+ */
+export function usePaneLayout(): PaneLayout {
+  return useUiStore((s) => s.paneLayout);
+}
+
+/** The pane-layout setter (AppearanceSection; also App's resetSetters). Stable across renders. */
+export function useSetPaneLayout(): (v: PaneLayout) => void {
+  return useUiStore((s) => s.setPaneLayout);
+}
+
+/** "Auto-focus pane on open" (WARDEN-274, WARDEN-1420). Read by App's openChat. */
+export function useAutoFocusNewPane(): boolean {
+  return useUiStore((s) => s.autoFocusNewPane);
+}
+
+/** The auto-focus setter (AppearanceSection; also App's resetSetters). Stable across renders. */
+export function useSetAutoFocusNewPane(): (v: boolean) => void {
+  return useUiStore((s) => s.setAutoFocusNewPane);
+}
+
+/**
+ * "Restore workspace on startup" (WARDEN-1420). The LIVE pref App hands to
+ * useConfigPersistence as persistUiState's separate argument. BOOT restoration
+ * reads the DISK payload before React renders, so it never consults this.
+ */
+export function useRestoreOnStartup(): RestoreOnStartup {
+  return useUiStore((s) => s.restoreOnStartup);
+}
+
+/** The startup-restore setter (AppearanceSection; also App's resetSetters). Stable across renders. */
+export function useSetRestoreOnStartup(): (v: RestoreOnStartup) => void {
+  return useUiStore((s) => s.setRestoreOnStartup);
+}
+
+/**
+ * The terminal color scheme (WARDEN-1420). App reads it to derive
+ * `terminalThemeId` (still a computed prop to PaneGrid → PaneTile, so an OS
+ * theme flip re-themes open panes live).
+ */
+export function useTerminalColorScheme(): TerminalColorScheme {
+  return useUiStore((s) => s.terminalColorScheme);
+}
+
+/** The terminal-color-scheme setter (AppearanceSection; also App's resetSetters). Stable across renders. */
+export function useSetTerminalColorScheme(): (v: TerminalColorScheme) => void {
+  return useUiStore((s) => s.setTerminalColorScheme);
 }

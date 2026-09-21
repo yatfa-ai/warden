@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
-import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
-import { applyDensity, type Density } from '@/lib/density';
+import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/theme';
+import { applyDensity } from '@/lib/density';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useWatchState } from '@/lib/useWatchState';
@@ -21,7 +21,7 @@ import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWind
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -107,7 +107,19 @@ function App() {
   // persist — so for the whole session persistUiState carries the on-disk workspace
   // forward (even after flipping back to "Reopen previous"), never the live arrays.
   const startedEmpty = uiState.restoreOnStartup === 'empty';
-  const [restoreOnStartup, setRestoreOnStartup] = useState<RestoreOnStartup>(() => uiState.restoreOnStartup ?? 'previous');
+  // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the LIVE "restore on startup"
+  // pref migrated onto the shared store (see the appearance family below) —
+  // AppearanceSection subscribes; App subscribes to keep the persistence
+  // argument + reset partition whole. The two `uiState.restoreOnStartup` reads
+  // that BRACKET this pair are deliberately NOT migrated with it, and reading
+  // them as leftovers is the trap: both are BOOT facts about what this launch
+  // started as, which the live pref stops being the moment the user flips it.
+  // `startedEmpty` must stay pinned to the at-launch value for the whole
+  // session (that is the comment above), and `initialWorkspace` resolves the
+  // opening workspace from the DISK payload before React renders anything.
+  // Where the LIVE pref lives is independent of both.
+  const restoreOnStartup = useRestoreOnStartup();
+  const setRestoreOnStartup = useSetRestoreOnStartup();
   const initWs = initialWorkspace(uiState, uiState.restoreOnStartup ?? 'previous');
   // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed now live INSIDE
   // per-workspace pane-sets. The active workspace's panes are what render in the
@@ -252,7 +264,15 @@ function App() {
   // by the saveUi effect below like the panel collapses above. Pure client-side
   // pref; never sent to the backend.
   const [sourceControlCollapsed, setSourceControlCollapsed] = useState(uiState.sourceControlCollapsed ?? false);
-  const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
+  // WARDEN-1420 (roadmap WARDEN-1204 slice 12): theme/density/paneLayout/
+  // autoFocusNewPane/restoreOnStartup/terminalColorScheme migrated onto the
+  // shared store (lib/uiStore.ts) — AppearanceSection subscribes (it is the
+  // only writer of all six) and PaneGrid subscribes to paneLayout; App
+  // subscribes for its own runtime reads (the [theme]/[density] effects, the
+  // openChat focus gate, the terminalThemeId derivation) plus the persisted
+  // snapshot + reset partition.
+  const theme = useTheme();
+  const setTheme = useSetTheme();
   // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula'). The
   // `theme` state variable stays 'system' on an OS flip, so chrome re-paints via
   // a direct DOM attribute mutation in the [theme] effect — no React re-render.
@@ -262,9 +282,16 @@ function App() {
   // theme" live-update on an OS flip (nuance #1): listenSystemThemeChange calls
   // setResolvedThemeId, the prop propagates to PaneTile, and its effect
   // re-paints open panes with the new theme's xterm palette.
-  const [resolvedThemeId, setResolvedThemeId] = useState<ThemeId>(() => resolveThemeId(uiState.theme ?? 'system'));
-  const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
-  const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => uiState.paneLayout ?? 'auto');
+  //
+  // WARDEN-1420 (slice 12): seeded from the STORE's live `theme` above rather
+  // than from a second read of the persisted payload — the store seeded itself
+  // from the same loadUi() document at module load, so the value is identical
+  // and the pref keeps exactly ONE read channel.
+  const [resolvedThemeId, setResolvedThemeId] = useState<ThemeId>(() => resolveThemeId(theme));
+  const density = useDensity();
+  const setDensity = useSetDensity();
+  const paneLayout = usePaneLayout();
+  const setPaneLayout = useSetPaneLayout();
   // Draggable resize-gutter ratios (WARDEN-660): per-axis PaneGrid track
   // weights ([] = equal split, the default). Pure client-side pref (like
   // paneLayout/terminalFontSize): persisted by the saveUi effect below, never
@@ -305,7 +332,11 @@ function App() {
   // the user focus a pane on demand. Pure client-side pref (like
   // onExitBehavior/paneLayout): persisted by the saveUi effect below, never sent
   // to the backend. Gates the setFocused call in openChat below. See WARDEN-274.
-  const [autoFocusNewPane, setAutoFocusNewPane] = useState<boolean>(() => uiState.autoFocusNewPane ?? true);
+  //
+  // WARDEN-1420 (slice 12): migrated onto the shared store with the rest of the
+  // appearance family (see theme above).
+  const autoFocusNewPane = useAutoFocusNewPane();
+  const setAutoFocusNewPane = useSetAutoFocusNewPane();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above) — PaneTile and AppearanceSection subscribe; App subscribes only to
   // keep the persisted snapshot + reset partition whole.
@@ -351,7 +382,13 @@ function App() {
   // 'dark'/'light' force the terminal surface. Pure client-side pref (like
   // terminalFontSize/scrollback): persisted by the saveUi effect below, never
   // sent to the backend.
-  const [terminalColorScheme, setTerminalColorScheme] = useState<TerminalColorScheme>(() => uiState.terminalColorScheme ?? 'auto');
+  //
+  // WARDEN-1420 (slice 12): migrated onto the shared store with the rest of the
+  // appearance family (see theme above). App is still its only RUNTIME reader —
+  // it derives terminalThemeId below — but it reads it through the hook now, so
+  // no UiState pref rides a Settings props bag any more.
+  const terminalColorScheme = useTerminalColorScheme();
+  const setTerminalColorScheme = useSetTerminalColorScheme();
   // Terminal cursor style (shape × blink). 'blink-block' is the default (today's
   // exact cursor).
   //
@@ -916,11 +953,13 @@ function App() {
   // setFileViewerViewMode — plus the six terminal setters this reset covers
   // since WARDEN-1322 (setTerminalFontSize/setTerminalScrollback/
   // setTerminalFontFamily/setTerminalCursorStyle/setCopyOnSelect/
-  // setOnExitBehavior), and the attention pair since WARDEN-1408
-  // (setAttentionDesktopAlerts/setAttentionStates) — are zustand actions
-  // created once with the store (lib/uiStore.ts) — so listing them in the dep
-  // array below costs nothing and keeps the lint rule satisfied honestly
-  // rather than by suppression.
+  // setOnExitBehavior), the attention pair since WARDEN-1408
+  // (setAttentionDesktopAlerts/setAttentionStates), and the six appearance
+  // prefs since WARDEN-1420 (setTheme/setDensity/setPaneLayout/
+  // setAutoFocusNewPane/setRestoreOnStartup/setTerminalColorScheme) — are
+  // zustand actions created once with the store (lib/uiStore.ts) — so listing
+  // them in the dep array below costs nothing and keeps the lint rule satisfied
+  // honestly rather than by suppression.
   const resetUiPrefsToDefaults = useCallback(() => {
     const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
       // Appearance
@@ -992,7 +1031,7 @@ function App() {
     // contract), so it joins clearWatchedChats outside the dep array.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
     setObserverResetToken((t) => t + 1);
-  }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates]);
+  }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates, setTheme, setDensity, setPaneLayout, setAutoFocusNewPane, setRestoreOnStartup, setTerminalColorScheme]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1955,17 +1994,14 @@ function App() {
           onClose={() => setSettingsOpen(false)}
           onConfigChange={handleConfigChange}
           appearance={{
-            theme, setTheme,
-            density, setDensity,
-            paneLayout, setPaneLayout,
-            autoFocusNewPane, setAutoFocusNewPane,
-            restoreOnStartup, setRestoreOnStartup,
-            // WARDEN-1322 (slice 3): terminalFontSize/terminalScrollback/
-            // terminalFontFamily/terminalCursorStyle/copyOnSelect/onExitBehavior
-            // left this bag — AppearanceSection subscribes to them in the shared
-            // store instead (lib/uiStore.ts). terminalColorScheme STAYS: App is
-            // its only runtime reader (it derives terminalThemeId below).
-            terminalColorScheme, setTerminalColorScheme,
+            // WARDEN-1420 (roadmap WARDEN-1204 slice 12): this bag is now the
+            // three ELECTRON pairs and nothing else. theme/density/paneLayout/
+            // autoFocusNewPane/restoreOnStartup/terminalColorScheme joined the
+            // six terminal prefs slice 3 moved — AppearanceSection subscribes to
+            // every one of them in the shared store (lib/uiStore.ts). The three
+            // below stay App-local by design: one reader, one writer, an IPC
+            // integration (window bounds / login item / tray) with no second
+            // sharing channel.
             rememberWindowBounds, setRememberWindowBounds,
             launchAtLogin, setLaunchAtLogin,
             closeToTray, setCloseToTray,
@@ -2094,10 +2130,11 @@ function App() {
             // Change, scrollback, fontFamily, terminalCursorStyle, copyOnSelect,
             // onExitBehavior) no longer ride through PaneGrid — PaneTile
             // subscribes to them in the shared store (lib/uiStore.ts) and
-            // PaneGrid never read them. terminalThemeId STAYS a prop: it is
-            // derived per render below so an OS theme flip re-themes open panes
-            // live.
-            paneLayout={paneLayout}
+            // PaneGrid never read them. WARDEN-1420 (slice 12): `paneLayout`
+            // stopped riding through too — PaneGrid DOES read that one, so it
+            // subscribes to the same store directly. terminalThemeId STAYS a
+            // prop: it is derived per render below so an OS theme flip re-themes
+            // open panes live.
             paneColRatios={paneColRatios}
             paneRowRatios={paneRowRatios}
             onPaneColRatiosChange={setPaneColRatios}

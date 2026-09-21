@@ -1,8 +1,9 @@
 // Appearance section — pure client localStorage prefs (terminal look, theme,
-// window/launch behavior). Receives the remaining pref group from App via
-// SettingsPage and spreads it straight through. Owns the one piece of local
-// state the appearance controls need (the custom-font Select/free-text toggle).
-// Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged.
+// window/launch behavior). Subscribes to every UiState pref it renders in the
+// shared client-state store (lib/uiStore.ts) and receives only the three
+// main-owned electron pairs from App via SettingsPage. Owns the one piece of
+// local state the appearance controls need (the custom-font Select/free-text
+// toggle). Extracted verbatim from SettingsPage (WARDEN-664).
 //
 // WARDEN-1322 (roadmap WARDEN-1204 slice 3): the six terminal prefs this
 // section reads AND writes — terminalFontSize, terminalFontFamily,
@@ -11,11 +12,21 @@
 // in the shared client-state store (lib/uiStore.ts) instead, exactly as
 // SnippetsSection does for `snippets` (WARDEN-1271). They are the same facts
 // PaneTile reads/writes, so a store subscription is what keeps ONE read
-// channel per pref. `terminalColorScheme` stays in the bag: it is read only by
-// App and Settings and never reaches PaneTile at all.
+// channel per pref.
 //
 // WARDEN-1342 (slice 4): `timestampFormat` followed them out of the bag for the
 // same reason — it is the same fact a dozen timestamp-display surfaces read.
+//
+// WARDEN-1420 (slice 12): the SIX REMAINING pairs followed — theme, density,
+// paneLayout, autoFocusNewPane, restoreOnStartup and terminalColorScheme — so
+// the bag this section still receives is exactly the three ELECTRON pairs
+// (rememberWindowBounds / launchAtLogin / closeToTray), which stay App-local by
+// design: one reader, one writer, an IPC integration with no second sharing
+// channel. Slice 3's note kept `terminalColorScheme` here because App (not a
+// component) was its only runtime reader; that is superseded rather than
+// contradicted — once the family moves, a UiState pref still riding a props bag
+// IS the second sharing channel this direction exists to end, and App still
+// reads the fact (via the store hook) to derive terminalThemeId.
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -51,6 +62,18 @@ import {
   useSetOnExitBehavior,
   useTimestampFormat,
   useSetTimestampFormat,
+  useTheme,
+  useSetTheme,
+  useDensity,
+  useSetDensity,
+  usePaneLayout,
+  useSetPaneLayout,
+  useAutoFocusNewPane,
+  useSetAutoFocusNewPane,
+  useRestoreOnStartup,
+  useSetRestoreOnStartup,
+  useTerminalColorScheme,
+  useSetTerminalColorScheme,
 } from '@/lib/uiStore';
 import { type AppearancePrefs } from '../types';
 
@@ -58,12 +81,6 @@ export type AppearanceSectionProps = AppearancePrefs & { hidden: boolean };
 
 export function AppearanceSection(props: AppearanceSectionProps) {
   const {
-    theme, setTheme,
-    terminalColorScheme, setTerminalColorScheme,
-    density, setDensity,
-    paneLayout, setPaneLayout,
-    autoFocusNewPane, setAutoFocusNewPane,
-    restoreOnStartup, setRestoreOnStartup,
     rememberWindowBounds, setRememberWindowBounds,
     launchAtLogin, setLaunchAtLogin,
     closeToTray, setCloseToTray,
@@ -89,6 +106,21 @@ export function AppearanceSection(props: AppearanceSectionProps) {
   // reset button below are textually unchanged.
   const timestampFormat = useTimestampFormat();
   const setTimestampFormat = useSetTimestampFormat();
+  // WARDEN-1420 (slice 12): the six remaining appearance prefs, same
+  // keep-the-names pattern — every Select/Switch/reset-button row body below is
+  // textually unchanged; only where the values come from differs.
+  const theme = useTheme();
+  const setTheme = useSetTheme();
+  const density = useDensity();
+  const setDensity = useSetDensity();
+  const paneLayout = usePaneLayout();
+  const setPaneLayout = useSetPaneLayout();
+  const autoFocusNewPane = useAutoFocusNewPane();
+  const setAutoFocusNewPane = useSetAutoFocusNewPane();
+  const restoreOnStartup = useRestoreOnStartup();
+  const setRestoreOnStartup = useSetRestoreOnStartup();
+  const terminalColorScheme = useTerminalColorScheme();
+  const setTerminalColorScheme = useSetTerminalColorScheme();
 
   // Terminal font family Select: a curated font, or "Custom…" which reveals a
   // free-text input for any installed CSS font (e.g. a Nerd Font for glyphs).

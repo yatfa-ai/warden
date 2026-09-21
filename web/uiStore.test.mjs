@@ -82,8 +82,12 @@ const test = (name, fn) => {
 // The persistence hop App + useConfigPersistence perform, called exactly as
 // useConfigPersistence.ts calls it. `store` stands in for App's subscription:
 // reading `store.getState().snippets` here IS what App's `useSnippets()` gives
-// its PersistedPrefSnapshot.
-const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpty = false } = {}) => {
+// its PersistedPrefSnapshot. `restoreOnStartup` defaults to the STORE's own
+// value since WARDEN-1420 (slice 12) migrated that pref — App reads it through
+// `useRestoreOnStartup()` and passes it to useConfigPersistence as
+// persistUiState's separate argument — and an explicit override stays available
+// for the empty-mode launch test below.
+const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
   const snapshot = {
     ...loadUi(),
@@ -91,7 +95,11 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     fileViewerViewMode: s.fileViewerViewMode,
     // WARDEN-1322: the six terminal prefs ride the same snapshot — App's
     // PersistedPrefSnapshot carries every one of them (compile-locked), so the
-    // honest stand-in for "App re-rendered" includes all eight facts.
+    // honest stand-in for "App re-rendered" mirrors every MIGRATED fact, not
+    // just the slice under test. (Slice 3's note said "all eight facts" — true
+    // when the store held snippets + fileViewerViewMode + these six; the list
+    // has grown with every slice since, so the claim is stated by shape now
+    // rather than by a count that silently goes stale.)
     terminalFontSize: s.terminalFontSize,
     terminalScrollback: s.terminalScrollback,
     terminalFontFamily: s.terminalFontFamily,
@@ -118,8 +126,18 @@ const flushSnapshotToDisk = (store, { restoreOnStartup = 'previous', startedEmpt
     // compile-locked snapshot fields.
     attentionDesktopAlerts: s.attentionDesktopAlerts,
     attentionStates: s.attentionStates,
+    // WARDEN-1420 (slice 12): the six remaining appearance prefs. FIVE are
+    // compile-locked snapshot fields; `restoreOnStartup` is the ONE UiState
+    // field persistUiState takes as a SEPARATE argument (it is excluded from
+    // PERSISTED_PREF_KEYS), so it rides the call below rather than the bag —
+    // exactly as App passes it to useConfigPersistence.
+    theme: s.theme,
+    density: s.density,
+    paneLayout: s.paneLayout,
+    autoFocusNewPane: s.autoFocusNewPane,
+    terminalColorScheme: s.terminalColorScheme,
   };
-  saveUi(persistUiState(snapshot, restoreOnStartup, loadUi(), startedEmpty));
+  saveUi(persistUiState(snapshot, restoreOnStartup ?? store.getState().restoreOnStartup, loadUi(), startedEmpty));
 };
 
 console.log('\ncreateUiStore — the seed (storage.ts owns the shape and the defaults)');
@@ -1390,6 +1408,251 @@ test('the pair is independent of the other migrated facts', () => {
   assert.equal(store.getState().defaultNewChatHost, '(local)');
   store.getState().setAttentionDesktopAlerts(false);
   assert.deepEqual(store.getState().attentionStates, { stuck: false });
+});
+
+// ─── the six remaining appearance prefs (WARDEN-1420, roadmap WARDEN-1204 slice 12) ───
+//
+// theme, density, paneLayout, autoFocusNewPane, restoreOnStartup and
+// terminalColorScheme — the last UiState pairs riding the AppearancePrefs
+// Settings props bag. AppearanceSection (the only writer of all six) and
+// PaneGrid (the only runtime reader of paneLayout) subscribe here now; the bag
+// shrinks to the three ELECTRON pairs, which are not UiState prefs at all.
+// `restoreOnStartup` is the one of the six that is NOT in PERSISTED_PREF_KEYS —
+// persistUiState takes it as a separate argument — so its round trip below
+// rides that argument rather than the snapshot bag.
+console.log('\ncreateUiStore — the six appearance prefs seed from storage.ts, never from re-declared defaults');
+test('a fresh store seeds all six from DEFAULT_UI on a clean install (not local literals)', () => {
+  reset();
+  const s = createUiStore().getState();
+  assert.equal(s.theme, 'system');
+  assert.equal(s.theme, DEFAULT_UI.theme);
+  assert.equal(s.density, 'comfortable');
+  assert.equal(s.density, DEFAULT_UI.density);
+  assert.equal(s.paneLayout, 'auto');
+  assert.equal(s.paneLayout, DEFAULT_UI.paneLayout);
+  assert.equal(s.autoFocusNewPane, true);
+  assert.equal(s.autoFocusNewPane, DEFAULT_UI.autoFocusNewPane);
+  assert.equal(s.restoreOnStartup, 'previous');
+  assert.equal(s.restoreOnStartup, DEFAULT_UI.restoreOnStartup);
+  assert.equal(s.terminalColorScheme, 'auto');
+  assert.equal(s.terminalColorScheme, DEFAULT_UI.terminalColorScheme);
+});
+test('a fresh store seeds all six from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({
+    ...loadUi(),
+    theme: 'dracula',
+    density: 'compact',
+    paneLayout: 'stacked',
+    autoFocusNewPane: false,
+    restoreOnStartup: 'empty',
+    terminalColorScheme: 'light',
+  });
+  const s = createUiStore().getState();
+  assert.equal(s.theme, 'dracula');
+  assert.equal(s.density, 'compact');
+  assert.equal(s.paneLayout, 'stacked');
+  assert.equal(s.autoFocusNewPane, false);
+  assert.equal(s.restoreOnStartup, 'empty');
+  assert.equal(s.terminalColorScheme, 'light');
+});
+test("the seed runs through loadUi's sanitizers (bogus persisted values fall back to the defaults)", () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    theme: 'not-a-theme',
+    density: 'roomy',
+    paneLayout: 'diagonal',
+    autoFocusNewPane: 'yes',
+    restoreOnStartup: 'sometimes',
+    terminalColorScheme: 'neon',
+  }));
+  const s = createUiStore().getState();
+  assert.equal(s.theme, DEFAULT_UI.theme);
+  assert.equal(s.density, DEFAULT_UI.density);
+  assert.equal(s.paneLayout, DEFAULT_UI.paneLayout);
+  assert.equal(s.autoFocusNewPane, DEFAULT_UI.autoFocusNewPane);
+  assert.equal(s.restoreOnStartup, DEFAULT_UI.restoreOnStartup);
+  assert.equal(s.terminalColorScheme, DEFAULT_UI.terminalColorScheme);
+});
+test('an explicit seed overrides the persisted read for all six (so a test needs no localStorage)', () => {
+  reset();
+  saveUi({ ...loadUi(), theme: 'dracula', density: 'compact', paneLayout: 'stacked', autoFocusNewPane: false, restoreOnStartup: 'empty', terminalColorScheme: 'light' });
+  const s = createUiStore({
+    theme: 'system',
+    density: 'comfortable',
+    paneLayout: 'side-by-side',
+    autoFocusNewPane: true,
+    restoreOnStartup: 'previous',
+    terminalColorScheme: 'dark',
+  }).getState();
+  assert.equal(s.theme, 'system');
+  assert.equal(s.density, 'comfortable');
+  assert.equal(s.paneLayout, 'side-by-side');
+  assert.equal(s.autoFocusNewPane, true);
+  assert.equal(s.restoreOnStartup, 'previous');
+  assert.equal(s.terminalColorScheme, 'dark');
+});
+test("a persisted autoFocusNewPane of FALSE survives the seed (the ??-not-|| trap the boolean default invites)", () => {
+  // DEFAULT_UI.autoFocusNewPane is `true`, so a `||` seed would silently
+  // resurrect the default for a user who deliberately turned it OFF — the
+  // mirror of terminalFontFamily's truthiness case, and the reason this fact
+  // is ??-seeded. Mutation-check: swapping ?? for || here turns this leg red.
+  reset();
+  saveUi({ ...loadUi(), autoFocusNewPane: false });
+  assert.equal(createUiStore().getState().autoFocusNewPane, false);
+  assert.equal(createUiStore({ autoFocusNewPane: false }).getState().autoFocusNewPane, false);
+});
+
+console.log("\nthe six setters — AppearanceSection's writes, and they do NOT touch localStorage");
+test('each of the six setters replaces its value and notifies subscribers', () => {
+  reset();
+  const store = createUiStore();
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push([s.theme, s.density, s.paneLayout, s.autoFocusNewPane, s.restoreOnStartup, s.terminalColorScheme]));
+  store.getState().setTheme('dracula');
+  store.getState().setDensity('compact');
+  store.getState().setPaneLayout('stacked');
+  store.getState().setAutoFocusNewPane(false);
+  store.getState().setRestoreOnStartup('empty');
+  store.getState().setTerminalColorScheme('light');
+  unsubscribe();
+  assert.equal(seen.length, 6);
+  assert.deepEqual(seen[5], ['dracula', 'compact', 'stacked', false, 'empty', 'light']);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setTheme('system');
+  assert.equal(seen.length, 6);
+});
+test('the six setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setTheme('dracula');
+  store.getState().setDensity('compact');
+  store.getState().setPaneLayout('stacked');
+  store.getState().setAutoFocusNewPane(false);
+  store.getState().setRestoreOnStartup('empty');
+  store.getState().setTerminalColorScheme('light');
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the six action identities are stable across writes (safe in resetSetters and dep arrays)', () => {
+  reset();
+  const store = createUiStore();
+  const before = {
+    theme: store.getState().setTheme,
+    density: store.getState().setDensity,
+    paneLayout: store.getState().setPaneLayout,
+    autoFocusNewPane: store.getState().setAutoFocusNewPane,
+    restoreOnStartup: store.getState().setRestoreOnStartup,
+    terminalColorScheme: store.getState().setTerminalColorScheme,
+  };
+  before.theme('dracula');
+  before.density('compact');
+  before.paneLayout('stacked');
+  before.autoFocusNewPane(false);
+  before.restoreOnStartup('empty');
+  before.terminalColorScheme('light');
+  assert.equal(store.getState().setTheme, before.theme);
+  assert.equal(store.getState().setDensity, before.density);
+  assert.equal(store.getState().setPaneLayout, before.paneLayout);
+  assert.equal(store.getState().setAutoFocusNewPane, before.autoFocusNewPane);
+  assert.equal(store.getState().setRestoreOnStartup, before.restoreOnStartup);
+  assert.equal(store.getState().setTerminalColorScheme, before.terminalColorScheme);
+});
+
+console.log('\nround trip: Settings → Appearance → store → App snapshot → the saveUi effect → loadUi');
+test('all six survive a restart through the real chain', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setTheme('dracula');
+  store.getState().setDensity('compact');
+  store.getState().setPaneLayout('side-by-side');
+  store.getState().setAutoFocusNewPane(false);
+  store.getState().setTerminalColorScheme('light');
+  flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
+  const persisted = loadUi();                  // next launch
+  assert.equal(persisted.theme, 'dracula');
+  assert.equal(persisted.density, 'compact');
+  assert.equal(persisted.paneLayout, 'side-by-side');
+  assert.equal(persisted.autoFocusNewPane, false);
+  assert.equal(persisted.terminalColorScheme, 'light');
+  // And the next launch's store seeds from exactly that.
+  const next = createUiStore().getState();
+  assert.equal(next.theme, 'dracula');
+  assert.equal(next.paneLayout, 'side-by-side');
+  assert.equal(next.autoFocusNewPane, false);
+});
+test("restoreOnStartup round-trips through persistUiState's SEPARATE argument, not the snapshot bag", () => {
+  // The one of the six excluded from PERSISTED_PREF_KEYS. App reads the LIVE
+  // value here (useRestoreOnStartup) and hands it to useConfigPersistence,
+  // which passes it to persistUiState as its own argument — so a flip written
+  // through the store still reaches disk.
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().restoreOnStartup, 'previous');
+  store.getState().setRestoreOnStartup('empty');       // the Settings Select's write
+  flushSnapshotToDisk(store);                          // reads the store's live value
+  assert.equal(loadUi().restoreOnStartup, 'empty');
+  assert.equal(createUiStore().getState().restoreOnStartup, 'empty');
+});
+test('the reset path restores all six defaults through the store-backed setters', () => {
+  reset();
+  const store = createUiStore({
+    theme: 'dracula',
+    density: 'compact',
+    paneLayout: 'stacked',
+    autoFocusNewPane: false,
+    restoreOnStartup: 'empty',
+    terminalColorScheme: 'light',
+  });
+  // App's resetSetters entries are `theme: setTheme` (…and siblings) — the SAME
+  // setters, now backed by the store, called with resetUiPrefDefaults()' values.
+  const defaults = resetUiPrefDefaults();
+  store.getState().setTheme(defaults.theme);
+  store.getState().setDensity(defaults.density);
+  store.getState().setPaneLayout(defaults.paneLayout);
+  store.getState().setAutoFocusNewPane(defaults.autoFocusNewPane);
+  store.getState().setRestoreOnStartup(defaults.restoreOnStartup);
+  store.getState().setTerminalColorScheme(defaults.terminalColorScheme);
+  flushSnapshotToDisk(store);
+  const s = store.getState();
+  assert.equal(s.theme, DEFAULT_UI.theme);
+  assert.equal(s.density, DEFAULT_UI.density);
+  assert.equal(s.paneLayout, DEFAULT_UI.paneLayout);
+  assert.equal(s.autoFocusNewPane, DEFAULT_UI.autoFocusNewPane);
+  assert.equal(s.restoreOnStartup, DEFAULT_UI.restoreOnStartup);
+  assert.equal(s.terminalColorScheme, DEFAULT_UI.terminalColorScheme);
+  assert.equal(loadUi().theme, DEFAULT_UI.theme);
+  assert.equal(loadUi().paneLayout, DEFAULT_UI.paneLayout);
+  assert.equal(loadUi().restoreOnStartup, DEFAULT_UI.restoreOnStartup);
+});
+test('the family is independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setTheme('dracula');
+  store.getState().setPaneLayout('stacked');
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().timestampFormat, 'relative');
+  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().attentionDesktopAlerts, false);
+  // …and writing one of the six does not disturb the other five.
+  assert.equal(store.getState().density, 'comfortable');
+  assert.equal(store.getState().autoFocusNewPane, true);
+  assert.equal(store.getState().restoreOnStartup, 'previous');
+  assert.equal(store.getState().terminalColorScheme, 'auto');
+});
+test('two stores do not share the appearance family; the APP-LEVEL singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setTheme('dracula');
+  a.getState().setPaneLayout('stacked');
+  assert.equal(b.getState().theme, 'system');
+  assert.equal(b.getState().paneLayout, 'auto');
+  assert.equal(uiStore.getState().theme, 'system');
+  assert.equal(uiStore.getState().paneLayout, 'auto');
 });
 
 console.log('\nstructural guard: components never read persisted state directly — they subscribe');
