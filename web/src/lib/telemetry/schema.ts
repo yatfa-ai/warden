@@ -52,6 +52,24 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v8 (WARDEN-1424): added the `workspace-shape` event type — the COUNT snapshot
+// that closes the last uncovered fact in the telemetry channel's founding
+// sentence (WARDEN-1265: the channel cannot answer "how many panes are open").
+// ONE bounded aggregate per 5-minute window, built from the RENDERER's own
+// workspace state: how many workspaces exist, how many panes are open across
+// them, how many panes the ACTIVE workspace holds, how many chats the sidebar
+// lists, plus the per-window peaks of the two volatile counts (peakPanesOpen /
+// peakChats) so a burst of open-then-close activity is still visible in a
+// window that closed on a quiet state. COUNTS ONLY, by construction: there is
+// no array, no name, no title, no path and no hostname anywhere in the shape —
+// every payload field is a non-negative integer, and the validator REJECTS any
+// key outside the shape's own allowlist so no injected identifier can ride it
+// (names ride `workspace-names` behind their own category, never here). It
+// rides the EXISTING `operational-metrics` category (counts are not identifying
+// data; WARDEN-443 Principle 2 untouched). Pinned to the `renderer` runtime —
+// the workspace state lives in the renderer's own refs, so any other runtime
+// would be a lie about where it was observed. Client + receiver bump together
+// so the x-telemetry-schema handshake (the receiver's ingest.mjs) does not 415.
 // v7 (WARDEN-1416): added the `workspace-names` event type — the FIRST event the
 // `names` consent category PRODUCES. Until now that category could only DECORATE
 // events other categories produced (chat/session names on incidents events), so
@@ -103,10 +121,10 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
-export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names'] as const);
+export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape'] as const);
 export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
@@ -356,8 +374,64 @@ export interface WorkspaceNamesEvent {
   truncated: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Workspace shape (WARDEN-1424) — the COUNT snapshot that closes the last
+// uncovered fact in the telemetry channel's founding sentence (WARDEN-1265:
+// "not how many panes are open").
+//
+// ONE bounded aggregate per 5-minute window, read from the RENDERER's own
+// workspace state (its refs — nothing new is fetched, polled or retained): how
+// many workspaces exist, how many panes are open across them, how many panes
+// the ACTIVE workspace holds, how many chats the sidebar lists, plus the
+// per-window peaks of the two volatile counts so an open-then-close burst
+// inside a window that ended on a quiet state is still visible.
+//
+// COUNTS ONLY, BY CONSTRUCTION — the design's hard boundary for this type:
+//   • no array, no name, no title, no path, no hostname anywhere in the shape;
+//   • every payload field is a non-negative integer;
+//   • the validator enforces a CLOSED KEY SET — any key outside the shape's own
+//     fields rejects the event, so an injected `name` / `path` / `host` string
+//     can never ride it even from a hostile caller.
+// Chat NAMES ride `workspace-names` behind their own category — this type never
+// carries them, and `chats` here is the COUNT of sidebar rows, never a list.
+//
+// It rides the EXISTING `operational-metrics` category: counts are not
+// identifying data, so no new category and no new checkbox exists for it. It is
+// PINNED to the `renderer` runtime — the workspace state lives in the
+// renderer's own refs, so a `main`/`server`-runtime shape event would be a lie
+// about where it was observed (the validator enforces the pin, exactly like the
+// `server` pins on workspace-names/server-stall).
+// ---------------------------------------------------------------------------
+
+/** A window of the renderer's workspace-shape counts. */
+export interface WorkspaceShapeEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: 'workspace-shape';
+  /** Always `renderer` — the type exists precisely to report that runtime. */
+  runtime: Runtime;
+  timestamp: number;
+  appVersion?: string; // non-identifying release label; optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
+  /** When the window opened (epoch-ms, from the producer). */
+  windowStartedAt: number;
+  /** When the window closed (epoch-ms, from the producer). */
+  windowEndedAt: number;
+  /** How many workspaces existed at window close. */
+  workspaces: number;
+  /** Panes open across ALL workspaces at window close. */
+  panesOpen: number;
+  /** Panes open in the ACTIVE workspace at window close. */
+  panesActive: number;
+  /** Chats listed in the sidebar at window close — the COUNT, never names. */
+  chats: number;
+  /** The window's largest observed panesOpen (open-then-close bursts stay visible). */
+  peakPanesOpen: number;
+  /** The window's largest observed chats count. */
+  peakChats: number;
+}
+
 /** Any base-tier event, discriminated by `type`. */
-export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent;
+export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent | WorkspaceShapeEvent;
 
 // ---------------------------------------------------------------------------
 // Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
@@ -515,6 +589,41 @@ function isWorkspaceNamesShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// The shape event's closed key set — the type's own fields plus the base-tier
+// envelope. A `workspace-shape` event is COUNTS ONLY by construction, so the
+// schema itself refuses any other key: an injected `name`, `path`, `host` (or
+// even an identifier field from another category, `chatName`/`sessionName` —
+// this type never carries them) rejects the event at the validator, which makes
+// "no identifier can ride the shape channel" a STRUCTURAL guarantee rather than
+// a producer promise.
+const WORKSPACE_SHAPE_KEYS = Object.freeze([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt',
+  'workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats',
+] as const);
+const WORKSPACE_SHAPE_KEY_SET = new Set<string>(WORKSPACE_SHAPE_KEYS);
+
+/** True iff `e` is a structurally valid WorkspaceShapeEvent. */
+function isWorkspaceShapeShape(e: Record<string, unknown>): boolean {
+  for (const k of Object.keys(e)) {
+    if (!WORKSPACE_SHAPE_KEY_SET.has(k)) return false;
+  }
+  if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
+  if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
+  // Every count is a non-negative integer — a negative, a NaN, a float or a
+  // string where a count belongs is not a shape snapshot.
+  for (const k of ['workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats'] as const) {
+    const v = e[k];
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) return false;
+  }
+  // The peaks are maxima WITHIN the window, so they cannot be smaller than the
+  // counts the window closed on (the honest-peak invariant: a peak below its
+  // own closing count is a lie about the window).
+  if ((e.peakPanesOpen as number) < (e.panesOpen as number)) return false;
+  if ((e.peakChats as number) < (e.chats as number)) return false;
+  return true;
+}
+
 /** True iff `event` has a valid base-tier SHAPE (correct version, a known type,
  *  a valid runtime, a finite timestamp, and the type-specific fields). Does not
  *  inspect field VALUES for identifier leaks (that is redaction's concern). */
@@ -552,6 +661,13 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
       // as server-stall: the chat catalog lives in the forked backend child, so
       // only a `server`-runtime event is a truthful workspace-names event.
       return e.runtime === RUNTIME.SERVER && isWorkspaceNamesShape(e);
+    case 'workspace-shape':
+      // WARDEN-1424 — the renderer's workspace-shape count snapshot. Runtime
+      // pin MIRRORED from the two types above: the workspace state lives in the
+      // renderer's own refs, so only a `renderer`-runtime event is a truthful
+      // workspace-shape event. The shape itself is counts-only over a closed
+      // key set (see isWorkspaceShapeShape).
+      return e.runtime === RUNTIME.RENDERER && isWorkspaceShapeShape(e);
     default:
       return false;
   }

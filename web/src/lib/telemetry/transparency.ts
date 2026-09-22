@@ -90,6 +90,12 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   // true count and the loud truncated flag. Disclosed field-by-field like every
   // other type — the panel's contract is to name exactly what leaves.
   'workspace-names': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'chats', 'chatCount', 'truncated'],
+  // WARDEN-1424 — the renderer's workspace-shape COUNT snapshot. COUNTS ONLY:
+  // every payload field is a number (six counts + two window stamps) — there
+  // is no name, no title, no path, no hostname and no free text anywhere in
+  // the shape, and the validator rejects any key outside this list (the
+  // structural hard-exclusion proof for the type).
+  'workspace-shape': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the
@@ -221,6 +227,35 @@ function isValidWorkspaceNamesShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// WARDEN-1424 — the `workspace-shape` shape check, mirroring the canonical
+// schema's isWorkspaceShapeShape: a closed key set (no key beyond the type's
+// own fields may exist) over counts-only values. The counts themselves are
+// numbers, so there is no string to run the identifier proof over — the
+// closed-key check IS this type's hard-exclusion proof.
+const WORKSPACE_SHAPE_KEYS = new Set([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt',
+  'workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats',
+]);
+
+function isValidWorkspaceShapeShape(e: Record<string, unknown>): boolean {
+  if (e.runtime !== 'renderer') return false;
+  for (const k of Object.keys(e)) {
+    if (!WORKSPACE_SHAPE_KEYS.has(k)) return false;
+  }
+  const finiteNonNegative = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
+  for (const k of ['workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats'] as const) {
+    if (!Number.isInteger(e[k]) || (e[k] as number) < 0) return false;
+  }
+  // The honest-peak invariant: a peak is the window's MAXIMUM, so it cannot be
+  // smaller than the count the window closed on.
+  if ((e.peakPanesOpen as number) < (e.panesOpen as number)) return false;
+  if ((e.peakChats as number) < (e.chats as number)) return false;
+  return true;
+}
+
 /**
  * Base-event schema conformance — a LOCAL copy mirroring the
  * `validateBaseEvent` proof shape from telemetry-source.cjs:212-244. Returns
@@ -276,6 +311,12 @@ export function isValidBaseEvent(event: unknown): boolean {
     // The names themselves are the PERMITTED payload (see the shape-check note
     // above) — no identifier proof runs over them.
     if (!isValidWorkspaceNamesShape(e)) return false;
+  } else if (e.type === 'workspace-shape') {
+    // WARDEN-1424 — the renderer's workspace-shape COUNT snapshot: shape-check
+    // only (closed key set over non-negative integers). There is no string
+    // field in the type to run the identifier proof over — the shape check IS
+    // the hard-exclusion proof for this type.
+    if (!isValidWorkspaceShapeShape(e)) return false;
   }
   // Hard-exclusion proof: the redacted message must be free of any identifier;
   // structured frame fields must be free of paths (a bare filename basename is

@@ -171,6 +171,12 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategoryDescriptor[] = Obje
   // producer is the terminal linkifier's file-existence probe
   // (src/fileExistsTelemetry.js); more operations can ride the same category
   // later without a consent change.
+  // WARDEN-1424 — the category now ALSO carries the renderer's periodic
+  // workspace-shape COUNT snapshot (one per 5-min window; counts only — never
+  // names). Disclosed in eventTypes + the summary for the same reason the
+  // names slice disclosed its own type: a category that starts sending a new
+  // event type without saying so is the exact lie of omission the transparency
+  // surface exists to prevent.
   Object.freeze({
     id: 'operational-metrics' as const,
     configKey: 'telemetryOperationalMetricsEnabled' as const,
@@ -180,8 +186,8 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategoryDescriptor[] = Obje
     role: 'collecting' as const,
     label: 'Operational metrics',
     summary:
-      'Aggregate counts, success rates, and latency histograms of app operations (currently: the terminal file-link existence probes) — no file paths, no hostnames, no chat content, no credentials, just numbers.',
-    eventTypes: Object.freeze(['operational-metrics']),
+      'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
+    eventTypes: Object.freeze(['operational-metrics', 'workspace-shape']),
     gatedFields: Object.freeze([]),
   }),
 ]);

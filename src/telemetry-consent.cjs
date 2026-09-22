@@ -64,6 +64,12 @@ const TELEMETRY_CATEGORIES = Object.freeze([
   }),
   // WARDEN-1258 — first usage category with a live producer; aggregates only.
   // Mirrors the canonical entry in web/src/lib/telemetry/consent.ts verbatim.
+  // WARDEN-1424 — the category now ALSO carries the renderer's periodic
+  // workspace-shape COUNT snapshot (one per 5-min window; counts only — never
+  // names). Disclosed in eventTypes + the summary for the same reason the
+  // names slice disclosed its own type: a category that starts sending a new
+  // event type without saying so is the exact lie of omission the transparency
+  // surface exists to prevent.
   Object.freeze({
     id: 'operational-metrics',
     configKey: 'telemetryOperationalMetricsEnabled',
@@ -71,8 +77,8 @@ const TELEMETRY_CATEGORIES = Object.freeze([
     role: 'collecting',
     label: 'Operational metrics',
     summary:
-      'Aggregate counts, success rates, and latency histograms of app operations (currently: the terminal file-link existence probes) — no file paths, no hostnames, no chat content, no credentials, just numbers.',
-    eventTypes: Object.freeze(['operational-metrics']),
+      'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
+    eventTypes: Object.freeze(['operational-metrics', 'workspace-shape']),
     gatedFields: Object.freeze([]),
   }),
 ]);

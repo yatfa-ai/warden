@@ -62,6 +62,7 @@ const { buildServerStallEvent } = require('./telemetry-stall-event.cjs');
 // WARDEN-1416 — the server-child workspace-names window → schema-event builder
 // (the `names` category's own carrying event).
 const { buildWorkspaceNamesEvent } = require('./telemetry-names-event.cjs');
+const { buildWorkspaceShapeEvent } = require('./telemetry-shape-event.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
@@ -430,6 +431,29 @@ function recordRendererPaneMetrics(snapshot) {
   if (!event) return;
   telemetryPipeline.record(event);
   persistLastPaneLatency(snapshot);
+}
+
+// WARDEN-1424 — the RENDERER's workspace-shape COUNT window
+// (web/src/lib/workspaceShapeTelemetry.ts, forwarded over the
+// telemetry:renderer-shape bridge). Same double gate as the pane windows: the
+// sampler retains only the six counts + two stamps it reports, and THIS
+// receipt refuses the operational-metrics category before anything is built
+// or recorded (the mid-flip re-check — a window can be in flight when the
+// user revokes). Recorded with `runtime: 'renderer'` so the shape snapshot is
+// attributable to the surface the user actually shaped. Unlike the names
+// producer, an idle app still reports (the event doubles as the consented
+// liveness signal); unlike the pane windows, nothing here persists to disk —
+// counts of the CURRENT workspace are not culprit data.
+function recordWorkspaceShapeWindow(snapshot) {
+  if (resolveTelemetryConsent(telemetryPrefs)['operational-metrics'] !== true) return;
+  const event = buildWorkspaceShapeEvent({
+    snapshot,
+    schemaVersion: SCHEMA_VERSION,
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    now: Date.now,
+  });
+  if (event) telemetryPipeline.record(event);
 }
 
 // WARDEN-1385 — crash-sentinel culprit data (userData/pane-latency-last.json).
@@ -1392,6 +1416,22 @@ ipcMain.on('telemetry:renderer-error', (_event, serialized) => {
 ipcMain.on('telemetry:renderer-metrics', (_event, snapshot) => {
   try {
     recordRendererPaneMetrics(snapshot);
+  } catch {
+    /* a telemetry forward must never crash the host */
+  }
+});
+
+// WARDEN-1424 — the renderer's workspace-shape COUNT window (six integers +
+// two stamps, counts only — never a name, a title, a path or a hostname; the
+// schema's closed-key check drops any injected extra). Fire-and-forget `send`,
+// same discipline as the pane-metrics forward above: main is the consent gate
+// (recordWorkspaceShapeWindow refuses the operational-metrics category), so
+// the renderer forwarding unconditionally captures nothing until the user
+// opts in. A malformed snapshot yields null from the builder and is dropped
+// here — never trusted because it came from our own window.
+ipcMain.on('telemetry:renderer-shape', (_event, snapshot) => {
+  try {
+    recordWorkspaceShapeWindow(snapshot);
   } catch {
     /* a telemetry forward must never crash the host */
   }

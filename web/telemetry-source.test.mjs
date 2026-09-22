@@ -104,7 +104,8 @@ function makeSource(overrides = {}) {
 
 test('base-tier contract: shared SCHEMA_VERSION + the event types', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
+  // WARDEN-1424 — v8 adds `workspace-shape`.
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
   assert.equal(RUNTIME.MAIN, 'main');
   assert.equal(RUNTIME.RENDERER, 'renderer');
   // WARDEN-1278 — the forked BACKEND child, the third real process warden runs.

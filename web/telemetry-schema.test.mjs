@@ -79,13 +79,15 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 7 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 8 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 7);
+  assert.equal(SCHEMA_VERSION, 8);
 });
 
-test('BASE_EVENT_TYPES is exactly the six anonymous-or-consented base-tier kinds', () => {
-  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
+test('BASE_EVENT_TYPES is exactly the seven anonymous-or-consented base-tier kinds', () => {
+  // WARDEN-1424 — v8 adds `workspace-shape`, the renderer's counts-only shape
+  // snapshot riding the operational-metrics category.
+  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
 });
 
 test('RUNTIME is exactly { main, renderer, server }', () => {
