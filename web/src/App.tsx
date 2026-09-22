@@ -3,14 +3,12 @@ import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
-import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/theme';
 import { applyDensity } from '@/lib/density';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useWatchState } from '@/lib/useWatchState';
-import { indexByWatchKey } from '@/lib/chatWatch';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import { useHostStatuses } from '@/lib/useHostStatuses';
@@ -39,7 +37,6 @@ import { PaneGrid } from '@/components/PaneGrid';
 import { WorkspaceTabs } from '@/components/WorkspaceTabs';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
-import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { SessionTranscriptViewer } from '@/components/SessionTranscriptViewer';
 import { HealthDashboard } from '@/components/HealthDashboard';
@@ -98,7 +95,7 @@ function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
+  const [, setLastRefreshAt] = useState<number | null>(null);
   // Read persisted UI state ONCE on mount (lazy initializer runs only the first
   // render) and reuse it for every useState seed below — consolidates the prior
   // per-state loadUi() calls into a single read.
@@ -131,6 +128,27 @@ function App() {
   const [workspaces, setWorkspaces] = useState<WorkspacePaneSet[]>(() => initWs.workspaces);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => initWs.activeWorkspaceId);
   const [paneHost, setPaneHost] = useState<Record<string, string>>(() => initWs.paneHost);
+  // WARDEN-1422: running UNSAVED shells per discovered host — served by
+  // /api/discover's `temporaryChats` and used ONLY for counts (the host view's
+  // footer line + empty state). Never listed as rows; merged into PaneGrid's
+  // chats so an open temp pane still resolves its label + host.
+  const [tempChats, setTempChats] = useState<Chat[]>([]);
+  // Ref twin for read-inside-callback sites (the close-time snapshot lookup),
+  // mirroring chatsRef.
+  const tempChatsRef = useRef<Chat[]>(tempChats);
+  tempChatsRef.current = tempChats;
+  // Per-host discovery failure reasons — the host view's "unknown, not absent"
+  // unreachable state quotes these.
+  const [discoverErrors, setDiscoverErrors] = useState<Record<string, string>>({});
+  // Sessions just saved from the recently-closed flyout — the one-shot "saved"
+  // pill on their row. Entries expire (one-shot marker, not a state).
+  const [recentlySavedIds, setRecentlySavedIds] = useState<Set<string>>(new Set());
+  const markRecentlySaved = useCallback((id: string) => {
+    setRecentlySavedIds((prev) => new Set(prev).add(id));
+    setTimeout(() => {
+      setRecentlySavedIds((prev) => { if (!prev.has(id)) return prev; const next = new Set(prev); next.delete(id); return next; });
+    }, 30_000);
+  }, []);
   const chatsRef = useRef(chats);
   useEffect(() => { chatsRef.current = chats; }, [chats]);
   // The active workspace's pane-set, derived every render. Falls back to the
@@ -263,8 +281,10 @@ function App() {
   // WARDEN-431: Source Control section collapse (the single place a focused
   // pane's repo changes now show). A sidebar-internal section collapse, persisted
   // by the saveUi effect below like the panel collapses above. Pure client-side
-  // pref; never sent to the backend.
-  const [sourceControlCollapsed, setSourceControlCollapsed] = useState(uiState.sourceControlCollapsed ?? false);
+  // pref; never sent to the backend. WARDEN-1422 moves the panel to the bottom of
+  // root as an add-on and flips the DEFAULT to collapsed — git status is job D,
+  // behind hosts and sessions in the sidebar's priority order.
+  const [sourceControlCollapsed, setSourceControlCollapsed] = useState(uiState.sourceControlCollapsed ?? true);
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): theme/density/paneLayout/
   // autoFocusNewPane/restoreOnStartup/terminalColorScheme migrated onto the
   // shared store (lib/uiStore.ts) — AppearanceSection subscribes (it is the
@@ -376,7 +396,7 @@ function App() {
   // Per-chat watch state + single/bulk toggles + the derived O(1) lookup Set live
   // in useWatchState (WARDEN-696 slice 2). watchedChats is still persisted by the
   // saveUi effect below and wired into the attention rollup (composition root).
-  const { watchedChats, watchedChatSet, toggleWatch, toggleWatchMany, clearWatchedChats } = useWatchState({
+  const { watchedChats, clearWatchedChats } = useWatchState({
     initialWatched: uiState.watchedChats ?? [],
   });
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
@@ -1072,15 +1092,27 @@ function App() {
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
+  // WARDEN-1422: the response also carries `temporaryChats` — the host's running
+  // UNSAVED shells. They are never listed; the sidebar reads only their COUNT
+  // (the host view's footer line + empty state). A failed discover records the
+  // reason in `discoverErrors` so the host view can say "unknown, not absent".
   const discoverHost = useCallback(async (host: string) => {
     discoveredHostsRef.current.add(host);
     try {
       const r = await fetchBounded(`/api/discover?host=${encodeURIComponent(host)}`, CATALOG_FETCH_OPTS);
       const j = await r.json();
+      if (j.error) throw new Error(j.error);
       if (Array.isArray(j.chats)) {
         setChats((prev) => applyOptimisticGuard([...prev.filter((c) => c.host !== host), ...j.chats] as Chat[], killedChatIdsRef.current, pendingRenamesRef.current));
       }
-    } catch (e) { console.error('discoverHost failed:', e); }
+      setTempChats((prev) => [...prev.filter((c) => c.host !== host), ...(Array.isArray(j.temporaryChats) ? (j.temporaryChats as Chat[]) : [])]);
+      setDiscoverErrors((prev) => (prev[host] ? { ...prev, [host]: undefined } as Record<string, string> : prev));
+    } catch (e) {
+      console.error('discoverHost failed:', e);
+      const message = e instanceof Error ? e.message : 'discovery failed';
+      setDiscoverErrors((prev) => ({ ...prev, [host]: message }));
+      throw e;
+    }
   }, []);
 
   // Re-discover every host the user has engaged with, concurrently. This is what keeps
@@ -1091,7 +1123,7 @@ function App() {
   const refreshDiscoveredHosts = useCallback(async () => {
     const hosts = [...discoveredHostsRef.current];
     if (!hosts.length) return;
-    await Promise.all(hosts.map((h) => discoverHost(h)));
+    await Promise.all(hosts.map((h) => discoverHost(h).catch(() => {})));
   }, [discoverHost]);
 
   // Auto-refresh the agent list so active/idle dots + last-activity stay live in the sidebar
@@ -1117,7 +1149,7 @@ function App() {
   // the common case, so local agents show live immediately and the auto-refresh above keeps
   // them live — no host-click required. Remote hosts remain on-demand per lazy mode.
   useEffect(() => {
-    void discoverHost(THIS_MACHINE);
+    void discoverHost(THIS_MACHINE).catch(() => {});
   }, [discoverHost]);
 
   // open chat: open pane + focus. The dedup point for the multi-workspace model
@@ -1318,7 +1350,7 @@ function App() {
   const handleReconnectChat = useCallback((chatKey: string, host?: string | null) => {
     if (host && host !== '(local)') {
       setPaneHost((p) => (p[chatKey] === host ? p : { ...p, [chatKey]: host }));
-      void discoverHost(host);
+      void discoverHost(host).catch(() => {});
     }
     openChat(chatKey);
   }, [openChat, discoverHost]);
@@ -1337,29 +1369,98 @@ function App() {
   // every poll. A yatfa pane has no cwd → empty → the host's default login dir,
   // and its host is the SSH host, so the shell lands OUTSIDE the container
   // (host-side tmux).
+  // Start a shell from the sidebar's spawn control (WARDEN-1422 job A): a PLAIN
+  // SHELL on a host in a directory. A name makes it saved/persistent; no name
+  // (undefined) makes it temporary — it runs as a pane and is never listed.
+  // The user's per-host default-shell preference still decides WHICH shell when
+  // set; blank = the host's own login shell (the WARDEN-223 semantics).
+  const spawnShell = useCallback(async (host: string, cwd: string, name?: string) => {
+    const cmd = (defaultShellByHost[host] ?? defaultShell ?? '').trim();
+    // The name rides as `name` ONLY: the server derives the tmux session id
+    // from it (the raw text may carry spaces — "release train 0.1.75") and
+    // treats a body with neither session nor name as a temporary shell.
+    const result = await postJson<{ chat: Chat }>('/api/spawn', name
+      ? { host, cwd, cmd, name }
+      : { host, cwd, cmd });
+    if (!result.ok || !result.data) {
+      if (prefs.notifyErrors) toast.error(result.error || 'Failed to start shell');
+      return false;
+    }
+    const chat = result.data.chat;
+    if (chat.temporary) {
+      // Temporaries never ride the catalog list — track it locally so the new
+      // pane resolves its label + host, and remember the pane's host (openChat's
+      // chatsRef lookup cannot see a temp).
+      setTempChats((prev) => [...prev.filter((c) => c.id !== chat.id), chat]);
+    } else {
+      void refresh();
+    }
+    const hostOf = chat.host || THIS_MACHINE;
+    setPaneHost((p) => (p[chat.id] === hostOf ? p : { ...p, [chat.id]: hostOf }));
+    openChat(chat.key || chat.id);
+    return true;
+  }, [defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors, setPaneHost]);
+
+  // A split shell is an UNNAMED shell: temporary, never listed (WARDEN-1422).
   const handleSplitShell = useCallback(async (id?: string) => {
     const target = id ?? focused;
     if (!target) return;
     const fc = chatsRef.current.find((c) => (c.key || c.id) === target);
     if (!fc) return;
-    const host = fc.host || THIS_MACHINE;
-    const cwd = fc.cwd || '';
-    const cmd = (defaultShellByHost[host] ?? defaultShell ?? '').trim();
-    const session = `split-${Math.random().toString(36).slice(2, 10)}`;
-    const result = await postJson<{ chat: Chat }>('/api/spawn', { host, session, cwd, cmd });
-    if (!result.ok || !result.data) {
-      if (prefs.notifyErrors) toast.error(result.error || 'Failed to spawn split shell');
-      return;
-    }
-    await refresh();
-    openChat(result.data.chat.key || result.data.chat.id);
-  }, [focused, defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors]);
+    const ok = await spawnShell(fc.host || THIS_MACHINE, fc.cwd || '');
+    if (ok) void refresh();
+  }, [focused, spawnShell, refresh]);
   // A chat was spawned from a pane's recovery panel (open-shell / re-spawn,
   // WARDEN-231): refresh the list so the new chat appears, then open + focus it.
   const handlePaneSpawned = useCallback((chat: Chat) => {
-    void refresh();
+    // WARDEN-1422: an UNNAMED open-shell spawn is temporary — it never rides the
+    // catalog list, so track it locally (pane label) and remember its pane host.
+    if (chat.temporary) {
+      setTempChats((prev) => [...prev.filter((c) => c.id !== chat.id), chat]);
+      const hostOf = chat.host || THIS_MACHINE;
+      setPaneHost((p) => (p[chat.id] === hostOf ? p : { ...p, [chat.id]: hostOf }));
+    } else {
+      void refresh();
+    }
     openChat(chat.key || chat.id);
   }, [refresh, openChat]);
+
+  // Respawn a STOPPED saved session (WARDEN-1422): one action recreating the
+  // tmux session with the same name in the same directory — a fresh process
+  // under the same identity (tmux cannot resurrect the dead one). Only warden-
+  // owned chats (kind:'tmux' with a stored cmd) are respawnable; the server
+  // rejects the rest with a readable error.
+  const respawnChat = useCallback(async (id: string) => {
+    const result = await postJson('/api/respawn', { id });
+    if (!result.ok) {
+      if (prefs.notifyErrors) toast.error(result.error || 'Failed to respawn');
+      return;
+    }
+    const host = chatsRef.current.find((c) => (c.key || c.id) === id)?.host;
+    if (host) void discoverHost(host).catch(() => {});
+    if (prefs.notifyChatOps) toast.success('Session respawned — a fresh process under the same name');
+  }, [discoverHost, prefs.notifyErrors, prefs.notifyChatOps]);
+
+  // Save a closed TEMPORARY session from the recently-closed flyout (WARDEN-1422):
+  // promote it to persistent — it moves into its host's saved list, and its
+  // accident-insurance entry leaves the list (it is no longer a closed temp).
+  const saveClosedSession = useCallback(async (id: string) => {
+    const result = await postJson<{ chat: Chat }>('/api/save-session', { id });
+    if (!result.ok || !result.data) {
+      if (prefs.notifyErrors) toast.error(result.error || 'Failed to save session');
+      return;
+    }
+    const chat = result.data.chat;
+    const host = chat.host;
+    // It is saved now — drop it from the temp tracking and from every workspace's
+    // recently-closed list, then refresh so the host view shows it.
+    setTempChats((prev) => prev.filter((c) => c.id !== id));
+    setWorkspaces((prev) => prev.map((w) => ({ ...w, recentlyClosed: (w.recentlyClosed ?? []).filter((e) => e.id !== id) })));
+    markRecentlySaved(chat.key || chat.id);
+    void refresh();
+    if (host) void discoverHost(host).catch(() => {});
+    if (prefs.notifyChatOps) toast.success(`Saved — it is listed under ${host || 'its host'}`);
+  }, [discoverHost, markRecentlySaved, refresh, prefs.notifyErrors, prefs.notifyChatOps]);
 
   // WARDEN-372: record a closing pane in the active workspace's recently-closed
   // recovery list. Snapshots the chat's display name/host/cwd at close time so the
@@ -1368,11 +1469,17 @@ function App() {
   // chat can't be found (e.g. a pane already gone from the catalog) — there is
   // nothing to snapshot or reopen. Reads chatsRef so this callback stays stable.
   const pushRecentlyClosed = useCallback((id: string) => {
-    const c = chatsRef.current.find((x) => (x.key || x.id) === id);
+    // WARDEN-1422: a closed TEMPORARY shell is not in `chats` — the snapshot
+    // comes from tempChatsRef instead, so the flyout's accident insurance
+    // covers exactly the sessions that need it.
+    const c = chatsRef.current.find((x) => (x.key || x.id) === id) || tempChatsRef.current.find((x) => (x.key || x.id) === id);
     if (!c) return;
     const entry: RecentlyClosedEntry = {
       id,
-      name: displayName(c),
+      // A temporary shell's name EQUALS its generated key, so displayName(c)
+      // would collapse it to the "shell" cwd-label — the flyout must show the
+      // actual generated name the human would be re-opening.
+      name: c.name && c.name !== c.key ? c.name : (c.key || c.id),
       host: c.host || '',
       cwd: c.cwd || '',
       closedAt: Date.now(),
@@ -1427,12 +1534,18 @@ function App() {
   // closed), then open it. openChat re-primes paneHost from the live catalog entry,
   // so a remote pane re-discovers its host on reopen.
   const reopenClosed = useCallback((id: string) => {
+    // WARDEN-1422: a closed TEMPORARY shell is not in the chats catalog list, so
+    // openChat's chatsRef lookup cannot learn its host — restore it from the
+    // close-time snapshot instead (a remote temp must reattach to ITS host).
+    // Read from the ref (not the updater — updaters must stay pure).
+    const entry = workspacesRef.current.find((w) => w.id === activeWorkspaceIdRef.current)?.recentlyClosed?.find((e) => e.id === id);
+    if (entry?.host) setPaneHost((p) => (p[id] === entry.host ? p : { ...p, [id]: entry.host! }));
     updateActiveWorkspace((w) => ({
       ...w,
       recentlyClosed: (w.recentlyClosed ?? []).filter((e) => e.id !== id),
     }));
     openChat(id);
-  }, [updateActiveWorkspace, openChat]);
+  }, [updateActiveWorkspace, openChat, setPaneHost]);
   const toggleMax = useCallback((id: string) => setMaximized((m) => (m === id ? null : id)), []);
   // Stable toggles for keyboard shortcuts: useCallback with functional updates gives
   // them empty deps and a stable identity, so PaneGrid's keydown effect doesn't
@@ -1527,7 +1640,7 @@ function App() {
       refresh();
       // discoverHost re-pulls that host's live list, confirming the kill and
       // refreshing the rest of the host's agents.
-      if (host) void discoverHost(host);
+      if (host) void discoverHost(host).catch(() => {});
       if (prefs.notifyChatOps) toast.success('Chat killed');
     } catch (error) {
       // ROLLBACK on a thrown error too (e.g. an unexpected exception).
@@ -1543,32 +1656,9 @@ function App() {
     cancel: cancelKill,
   } = useConfirmTarget(performKill, shouldConfirmDestructive);
 
-  const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
-    try {
-      const result = await postJson<{ chat: { key: string; id: string } }>('/api/resume', { id, cwd, host, name: description || undefined });
-      if (!result.ok) {
-        if (prefs.notifyChatOps) toast.error(result.error || 'resume failed');
-        return;
-      }
-      const chat = result.data!.chat;
-      // Drop any stale entry for this resumed chat before refresh() so the catalog
-      // merge can't carry forward its pre-resume status. Re-resuming the same Claude
-      // session reuses the `resume-<sid>` tmux session, so the existing live entry
-      // would otherwise briefly flash its old (e.g. idle) status until discoverHost
-      // re-marks it active. (chat's key/id — not the bare Claude session id passed
-      // in — is what matches a chat already in the list.)
-      const resumedId = chat.key || chat.id;
-      setChats((prev) => prev.filter((c) => (c.key || c.id) !== resumedId));
-      await refresh();
-      // Resuming activates the chat; re-discover the host so it shows green immediately
-      // instead of waiting for the next auto-refresh tick.
-      if (host) void discoverHost(host);
-      openChat(chat.key);
-      if (prefs.notifyChatOps) toast.success('Session resumed');
-    } catch (e) {
-      if (prefs.notifyChatOps) toast.error(e instanceof Error ? e.message : String(e));
-    }
-  }, [refresh, discoverHost, openChat, prefs.notifyChatOps]);
+  // WARDEN-1422: `resumeSession` (claude JSONL --resume from the history list and
+  // the deleted Open-chat browser) is retired with those surfaces. The backend
+  // /api/resume endpoint is untouched — the CLI and companion may still call it.
 
   const renameChat = useCallback(async (session: string, kind: string, name: string, host?: string) => {
     const prevName = chatsRef.current.find((c) => (c.key || c.id) === session)?.name;
@@ -1726,7 +1816,7 @@ function App() {
     cancel: cancelCloseWorkspace,
   } = useConfirmTarget(closeWorkspace);
 
-  const openPaneSet = new Set(openPanes);
+
   // WARDEN-514: per-key CURRENT-state lookup for the watched rows — so a watched chat
   // that needs the human right now (waiting/erroring/stuck/blocked) shows a persistent,
   // state-aware indicator on its own row even when its pane is closed (the header
@@ -1735,7 +1825,10 @@ function App() {
   // closed panes, pre-open-filter — useAttentionRollup), so this adds ZERO SSH cost: it
   // rides the same open ∪ watched ~30s poll. keyed by row.key ?? row.id — the same key
   // space watchedChats/openPanes use. Recomputed each render (mirrors watchedChatSet).
-  const watchedStateByKey = indexByWatchKey(watchedAgentStates);
+  // WARDEN-1422: the per-key watched-state map the sidebar rows used to render
+  // (indexByWatchKey(watchedAgentStates)) is gone with the row indicators; the
+  // rollup itself still feeds the header badge, and useWatchCatchup still reads
+  // watchedAgentStates directly.
   const tiles = openPanes.map((id) => ({ id }));
   // Resolved terminal theme id (which named theme's xterm palette to use).
   // 'auto' defers to the active (OS-resolved) app theme; 'dark'/'light' force it
@@ -1786,36 +1879,16 @@ function App() {
       document.execCommand('selectAll');
     }
   }), []);
-  // Full-page "Open chat" browser view (WARDEN-216). Mirrors settingsOpen: an
-  // App-level boolean toggled by the sidebar's "Open chat…" button; when true the
-  // view-switch ternary below swaps the workspace for the browser page. Formerly a
-  // blocking Dialog modal — now a full-page view per WARDEN-68 Rule 7 (the browser
-  // is an unbounded list + search, not a ≤200-symbol confirmation).
-  const [chatBrowserOpen, setChatBrowserOpen] = useState(false);
-  // Whether the browser should open with sort-by-usage ON. Seeded true when the
-  // browser is opened as a token-budget deep-link (WARDEN-415) so the heaviest
-  // (offending) session floats to the top; the sidebar "Open chat…" button opens
-  // it false (recency first). The page mounts fresh each open, so this is read
-  // once as the local sortUsage initial. Reset on close.
-  const [chatBrowserSortUsage, setChatBrowserSortUsage] = useState(false);
-  // Stable close handler for the browser page. useState's setter is stable, so
-  // wrapping it here keeps `onClose` identity stable across chat-poll ticks —
-  // otherwise the page's Escape keydown effect would re-subscribe on every poll.
-  const closeChatBrowser = useCallback(() => { setChatBrowserOpen(false); setChatBrowserSortUsage(false); }, []);
-  // Token-spend budget alarm (WARDEN-415). The always-on hook polls /api/budget
-  // on a slow cadence and fires a debounced one-shot (toast + desktop) on a
-  // threshold crossing. onOpenSessions deep-links to the All Sessions usage view
-  // (heaviest first) so a click lands on the offending session. The desktop
-  // channel is gated on the same attentionDesktopAlerts opt-in the attention
-  // alerts respect — subscribed INSIDE the hook from the shared store since
-  // WARDEN-1408 (slice 11), so it is no longer an arg here.
-  const openSessionsView = useCallback(() => { setChatBrowserSortUsage(true); setChatBrowserOpen(true); }, []);
-  const { budget: tokenBudget } = useTokenBudget({ onOpenSessions: openSessionsView, hostLabels });
+  // WARDEN-1422: the full-page "Open chat" browser view (WARDEN-216) is DELETED —
+  // the sidebar is the only session surface, and unsaved sessions are never
+  // listed. The token-budget alarm's old deep-link into that page's heaviest-
+  // first view goes with it; the alarm itself (toast + desktop) still fires.
+  useTokenBudget({ hostLabels });
   // Host connectivity statuses, sourced from the shared /api/hosts/status
   // singleton (useHostStatuses, WARDEN-237). One ref-counted, visibility-gated
-  // poll backs every consumer — this App-level feed (host dots in the sidebar
-  // and the full-page Open Chat browser, which replaces ChatSidebar) plus the
-  // Fleet Health dashboard — so there is no second SSH-probing poll. The poll
+  // poll backs every consumer — this App-level feed (host rows + the host view's
+  // unreachable state in the sidebar) plus the Fleet Health dashboard — so there
+  // is no second SSH-probing poll. The poll
   // runs at a fixed 30s and is gated on Page Visibility (WARDEN-609); it does
   // not track the "Poll Interval" pref (the catalog poll above still does).
   const hostStatuses = useHostStatuses();
@@ -2078,21 +2151,6 @@ function App() {
           // the store the same way, and the DesktopAlertPrefs bag is retired.
           resetUiPrefsToDefaults={resetUiPrefsToDefaults}
         />
-      ) : chatBrowserOpen ? (
-        <OpenChatBrowserPage
-          onClose={closeChatBrowser}
-          hosts={hosts}
-          chats={chats}
-          onOpenChat={openChat}
-          onResume={resumeSession}
-          onDiscoverHost={discoverHost}
-          hostStatuses={hostStatuses}
-          hideOfflineHosts={displaySettings.hideOfflineHosts}
-          showHostTags={displaySettings.showHostTags}
-          budget={tokenBudget}
-          initialSortUsage={chatBrowserSortUsage}
-          issueEntries={markdownIssueEntries}
-        />
       ) : (
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
@@ -2141,34 +2199,26 @@ function App() {
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
             <ChatSidebar
               chats={chats}
-              sshHosts={sshHosts}
-              openPanes={openPaneSet}
+              tempChats={tempChats}
+              hosts={hosts}
               recentlyClosed={activeWorkspace?.recentlyClosed ?? []}
               focused={focused}
               onOpenChat={openChat}
-              onClosePane={closePane}
+              onSpawnShell={spawnShell}
+              onSaveSession={saveClosedSession}
               onReopenClosed={reopenClosed}
+              onRespawn={respawnChat}
               onKill={requestKill}
               onRename={renameChat}
-              onResume={resumeSession}
               onRefresh={refresh}
               onDiscoverHost={discoverHost}
               loading={loading}
-              lastRefreshAt={lastRefreshAt}
-              showHostTags={displaySettings.showHostTags}
-              showTypeBadges={displaySettings.showTypeBadges}
-              showStatusIndicators={displaySettings.showStatusIndicators}
-              showProjectBadges={displaySettings.showProjectBadges}
-              hideOfflineHosts={displaySettings.hideOfflineHosts}
-              onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
-              pollIntervalMs={pollIntervalMs}
-              watchedChats={watchedChatSet}
-              watchedStates={watchedStateByKey}
-              onToggleWatch={toggleWatch}
-              onToggleWatchMany={toggleWatchMany}
+              discoverErrors={discoverErrors}
+              recentlySavedIds={recentlySavedIds}
               sourceControlCollapsed={sourceControlCollapsed}
               onSourceControlCollapsedChange={setSourceControlCollapsed}
+              pollIntervalMs={pollIntervalMs}
             />
           </ErrorBoundary>
         </section>
@@ -2178,7 +2228,7 @@ function App() {
             focused={focused}
             maximized={maximized}
             newActivity={newActivity}
-            chats={chats}
+            chats={[...chats, ...tempChats]}
             paneHost={paneHost}
             onFocus={setFocused}
             onClose={closePane}

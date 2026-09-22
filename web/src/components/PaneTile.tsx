@@ -1257,25 +1257,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const retryAttach = () => setRetryNonce((n) => n + 1);
 
   // [Open shell here]: spawn a host shell at the chat's cwd, OUTSIDE any docker
-  // container, via the same /api/spawn path NewChatForm uses. Pass an explicit
-  // `bash` cmd — an empty cmd would default to `claude` (server.js), not a shell.
+  // container, via the same /api/spawn path the sidebar uses. An UNNAMED spawn is
+  // TEMPORARY (WARDEN-1422): it runs as a pane and is never listed in the
+  // sidebar — the right shape for a recovery shell. The explicit `bash` cmd is
+  // still honored (an omitted cmd on the named path defaults to claude).
   // On success the new shell chat is opened (replacing this dead pane) and this
   // pane closes.
   const openShell = async () => {
     if (!chat || busy) return;
     setBusy(true);
-    const shellSession = `shell-${Math.random().toString(36).slice(2, 8)}`;
     const res = await postJson<{ chat: Chat }>('/api/spawn', {
       host: chat.host,
       cwd: chat.cwd || '',
       cmd: 'bash',
-      session: shellSession,
-      // WARDEN-490: routed through hostTagOf to dedup the inline (local) → 'local'
-      // logic, but deliberately WITHOUT a label — this `name` is sent to the
-      // backend (/api/spawn body), and a display label must never leave the
-      // machine. The friendly label still shows in this shell's PANE HEADER
-      // (hostTag above), which is pure display.
-      name: `shell @ ${hostTagOf(chat.host)}`,
     });
     setBusy(false);
     if (!res.ok || !res.data) { if (prefs.notifyErrors) toast.error(res.error || 'Failed to open shell'); return; }
@@ -1635,7 +1629,9 @@ function RecoveryPanel({
 }) {
   // Re-spawn is offered only for chats warden owns (manual/spawned kind:'tmux'
   // with a stored cmd); yatfa chats are externally managed and carry no cmd.
-  const respawnable = chat?.kind === 'tmux' && Boolean(chat?.cmd);
+  // WARDEN-1422: an EMPTY cmd is a real command (the host login shell, the
+  // plain-shell spawn) — only a missing cmd is unrespawnable.
+  const respawnable = chat?.kind === 'tmux' && chat?.cmd != null;
   return (
     <div
       className="absolute inset-0 z-10 flex items-center justify-center bg-background/80 p-4 text-center backdrop-blur-sm"

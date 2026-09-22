@@ -4,7 +4,7 @@
 // Both share one shape; tmux.js switches between docker-exec and bare tmux by
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
-import { loadCatalog, stampCatalogActivity } from './config.js';
+import { loadCatalog, stampCatalogActivity, mutateCatalog } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats, windowActivityToMs, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
@@ -490,6 +490,7 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
         cwd: e.cwd, cmd: e.cmd,
         active, status: active ? 'running' : 'idle',
         lastActivity: e.lastActivity ?? null,
+        ...(e.temporary ? { temporary: true } : {}),
       }));
 
       // Capture activity timestamps concurrently for active local sessions.
@@ -527,6 +528,11 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
     }));
   }
 
+  // WARDEN-1422: the lifecycle diff observes SAVED sessions and yatfa agents.
+  // Unnamed shells are unlisted everywhere and must not emit lifecycle noise
+  // (an agent_ended ping for a shell nobody named is exactly the false signal
+  // the event log exists to avoid).
+  all = all.filter((c) => !c.temporary);
   const pins = new Set(cfg.pins || []);
   all.sort((a, b) => compareChats(a, b, pins));
   return { chats: all, errors };
@@ -549,7 +555,31 @@ function toCatalogChat(host, entry, active, lastActivity) {
     active,
     status: active == null ? 'unknown' : (active ? 'running' : 'idle'),
     lastActivity: lastActivity ?? entry.lastActivity ?? null,
+    // WARDEN-1422: an unnamed shell's temporary flag rides the discovered chat so
+    // the listing layer (/api/chats, /api/discover, /api/health) can filter it from
+    // every surface while the in-memory cache — and therefore resolve()/pane
+    // attach/kill — still sees it.
+    ...(entry.temporary ? { temporary: true } : {}),
   };
+}
+// Remove dead temporary entries from the catalog: "temporary + stopped → gone
+// permanently, appears nowhere" (WARDEN-1422). A temporary shell's whole point
+// is that nobody named it, so once its tmux session dies there is nothing to
+// respawn and no list it could ever reappear in — keeping the entry would only
+// litter chats.json. Called from the on-demand discover paths (host click /
+// per-host poll), which already resolved aliveness; serialized through
+// mutateCatalog like every other catalog write. Best-effort: a failure must not
+// break the discover that triggered it.
+async function gcDeadTemporaryEntries(host, deadEntries) {
+  if (!deadEntries.length) return;
+  try {
+    await mutateCatalog((catalog) => {
+      const dead = new Set(deadEntries.map((d) => `${d.host || host}:${d.session}`));
+      return catalog.filter((e) => !dead.has(`${e.host || LOCAL}:${e.session}`));
+    });
+  } catch (err) {
+    console.warn(`Failed to gc dead temporary sessions on ${host}:`, err instanceof Error ? err.message : String(err));
+  }
 }
 
 // Disk-only catalog list — ZERO ssh. Used for the instant initial /api/chats in lazy mode.
@@ -573,7 +603,12 @@ export async function discoverHost(host, cfg) {
     // alive/dead state — not N blocking has-session calls (this runs on the
     // frontend's 60s /api/discover refresh for THIS_MACHINE too).
     const alive = await localAliveSessions();
-    const objs = entries.map((e) => ({
+    // WARDEN-1422: a temporary shell whose tmux session died is gone for good —
+    // drop its catalog entry so chats.json never accumulates unlisted corpses.
+    const deadTemps = entries.filter((e) => e.temporary && !alive.has(e.session));
+    await gcDeadTemporaryEntries(host, deadTemps);
+    const deadTempSessions = new Set(deadTemps.map((d) => d.session));
+    const objs = entries.filter((e) => !deadTempSessions.has(e.session)).map((e) => ({
       e, o: toCatalogChat(LOCAL, e, alive.has(e.session), null),
     })).map((x) => x.o);
     await Promise.all(objs.filter((o) => o.active).map((o) =>
@@ -606,7 +641,13 @@ export async function discoverHost(host, cfg) {
     const entries = (await loadCatalog()).filter((e) => (e.host || LOCAL) === host);
     if (entries.length) {
       const manual = await discoverManual(host, entries, cfg); // sets .active + .lastActivity
-      chats.push(...manual.map((m) => toCatalogChat(host, m, m.active, m.lastActivity)));
+      // WARDEN-1422: a dead temporary shell is gone for good — drop the entry
+      // AND the just-discovered object for it (a shell that died between the
+      // spawn and this poll must not ride temporaryChats).
+      const deadTemps = manual.filter((m) => m.temporary && m.active === false);
+      await gcDeadTemporaryEntries(host, deadTemps);
+      const deadTempSessions = new Set(deadTemps.map((d) => d.session));
+      chats.push(...manual.filter((m) => !deadTempSessions.has(m.session)).map((m) => toCatalogChat(host, m, m.active, m.lastActivity)));
     }
   }
 

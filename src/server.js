@@ -294,7 +294,10 @@ app.get('/api/chats', async (_req, res) => {
   // yatfa chats, so already-open remote panes keep streaming across list refreshes.
   // That preservation is the owner's rule now, not this handler's (WARDEN-1206).
   const { chats, errors } = await chatCatalog.refreshCatalog(cfg);
-  res.json({ chats, errors });
+  // WARDEN-1422: temporary (unnamed) shells are cataloged only so panes/kill can
+  // resolve them — they are never LISTED. The in-memory cache keeps them (resolve()
+  // reads it); this wire filters them out so no sidebar/fleet surface ever lists one.
+  res.json({ chats: chats.filter((c) => !c.temporary), errors });
 });
 
 // Discover ONE host on demand (user clicked it). Returns that host's chats with live
@@ -306,7 +309,15 @@ app.get('/api/discover', async (req, res) => {
     // Concurrent clicks on the same host share ONE discover (the owner's per-host
     // in-flight dedup); each still gets that host's chats back.
     const chats = await chatCatalog.refreshHost(host, cfg);
-    res.json({ host, chats });
+    // WARDEN-1422: the saved list excludes temporary shells; the UNSAVED shells
+    // that ARE running ride beside them as `temporaryChats` so the host view can
+    // account for them in its footer line (and its empty state) without ever
+    // listing them.
+    res.json({
+      host,
+      chats: chats.filter((c) => !c.temporary),
+      temporaryChats: chats.filter((c) => c.temporary),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -329,8 +340,9 @@ app.get('/api/health', (_req, res) => {
     // Catalogue-derived (zero ssh — snapshot() never awaits the network). Under lazy
     // mode only discovered/catalog chats are present; catalog chats report UNKNOWN
     // until their host is clicked.
-    const chats = chatCatalog.snapshot();
-
+    // WARDEN-1422: temporary (unnamed) shells are unlisted everywhere — Fleet Health
+    // included. The cache keeps them (resolve() needs them); this read drops them.
+    const chats = chatCatalog.snapshot().filter((c) => !c.temporary);
     // Per-agent token spend (WARDEN-466): join each live agent to its budget
     // session's lifetime token total so the cost dimension sits beside CPU/mem
     // at the kill-decision surface. Reads ONLY the cached budgetState.sessionUsage
@@ -2229,6 +2241,29 @@ app.post('/api/rename', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Save a temporary (unnamed) shell session — the recently-closed flyout's "save"
+// action (WARDEN-1422). Clearing the entry's `temporary` flag promotes it to a
+// persistent session: it stops being filtered from every listing and appears
+// under its host in the sidebar's saved list. Identity stays untouched — the
+// tmux session name, cwd and cmd are exactly what was running, so a save of a
+// still-running shell re-homes the SAME process under the host's saved list
+// (and a stopped one is respawnable from there). Idempotent: saving an
+// already-saved entry is a no-op that still answers ok.
+app.post('/api/save-session', async (req, res) => {
+  const r = await resolve(String(req.body?.id || ''));
+  if (r.error) return res.status(404).json(r);
+  const chat = r.chat;
+  if (chat.kind !== 'tmux') return res.status(400).json({ error: 'only spawned shell sessions can be saved' });
+  const updated = await mutateCatalog((catalog) => {
+    const entry = catalog.find((c) => sameCatalogEntry(c, chat.host, chat.session));
+    if (!entry) return undefined;
+    if (!entry.temporary) return catalog; // already saved — no write needed
+    return catalog.map((c) => (sameCatalogEntry(c, chat.host, chat.session) ? { ...c, temporary: false } : c));
+  });
+  if (!updated) return res.status(404).json({ error: 'no saved session matches this id' });
+  res.json({ ok: true, chat: { ...chat, temporary: false } });
+});
+
 // Spawn a chat (always tmux). host '(local)' → this machine; remote → host tmux.
 async function buildAndSpawn({ host, session, name, cwd, cmd }) {
   const err = await preflightTmux(host);
@@ -2250,17 +2285,41 @@ async function buildAndSpawn({ host, session, name, cwd, cmd }) {
 
 app.post('/api/spawn', async (req, res) => {
   const host = String(req.body?.host || LOCAL).trim() || LOCAL;
-  const session = String(req.body?.session || '').trim();
   const cwd = String(req.body?.cwd || '').trim();
-  // An OMITTED cmd defaults to claude (the historical spawn default). An EXPLICIT
-  // empty string is honored as-is: it flows through to tmux `new-session` with no
-  // trailing command, so the host launches its own login shell — the ＋ split
-  // "no explicit shell" case (WARDEN-223). (Previously `||` collapsed both into
-  // claude, so an empty cmd could never spawn a bare shell.)
+  // WARDEN-1422 — the sidebar's spawn is a PLAIN SHELL (like opening a terminal):
+  // host ▾ + directory + optional name. An OMITTED session name means the human
+  // did not name it, so the session is TEMPORARY: a generated `shell-xxxxxx`
+  // tmux name, cataloged with `temporary: true` so panes/kill still resolve, but
+  // filtered from every LISTING (/api/chats, /api/discover, /api/health) —
+  // unsaved sessions are never listed anywhere in the UI. A NAMED spawn is
+  // persistent (listed under its host) exactly as before.
+  const requestedSession = String(req.body?.session || '').trim();
+  // A human-typed name may carry characters the tmux session id cannot (the
+  // design's saved sessions are named things like "release train 0.1.75"), so
+  // when the caller sent a NAME instead of an explicit session id, the id is
+  // DERIVED from it (invalid runs → '-') and the raw text stays the display
+  // name. An explicit `session` keeps the historical strict check.
+  const requestedName = String(req.body?.name || '').trim().slice(0, 60);
+  const temporary = !requestedSession && !requestedName;
+  // A temporary shell's name is GENERATED here (the caller deliberately sent
+  // none); `newTempName` draws fresh candidates for the collision loop below.
+  const newTempName = () => `shell-${Math.random().toString(36).slice(2, 8)}`;
+  const derivedFromName = requestedName.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  let session = requestedSession || derivedFromName || newTempName();
+  // An OMITTED cmd defaults by naming: a temporary shell is a shell (empty cmd →
+  // the host's own login shell, the WARDEN-223 semantics), a named spawn keeps
+  // the historical claude default. An EXPLICIT cmd is honored as-is in both
+  // paths (the split-shell / open-shell callers still pass theirs).
   const cmdRaw = req.body?.cmd;
-  const cmd = (cmdRaw === undefined ? 'claude --dangerously-skip-permissions' : String(cmdRaw)).trim();
-  if (!session) return res.status(400).json({ error: 'session name is required' });
-  if (!NAME_RE.test(session)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
+  const cmd = (cmdRaw === undefined ? (temporary ? '' : 'claude --dangerously-skip-permissions') : String(cmdRaw)).trim();
+  if (requestedSession && !NAME_RE.test(requestedSession)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
+  // Generate a unique name for a temporary shell, re-drawing on the (rare) same-host
+  // collision with an existing catalog entry instead of 409ing — the caller never
+  // chose the name, so a retry with a fresh draw is always the right answer.
+  for (let tries = 0; temporary && tries < 5; tries++) {
+    if (!(await loadCatalog()).some((c) => sameCatalogEntry(c, host, session))) break;
+    session = newTempName();
+  }
   // Pre-flight duplicate check: fail fast with a 409 BEFORE paying for a real
   // tmux/ssh spawn. Composite identity: the same session name may exist on a
   // DIFFERENT host (each host's tmux server is independent), so only a same-host
@@ -2268,16 +2327,19 @@ app.post('/api/spawn', async (req, res) => {
   // below — buildAndSpawn awaits a full spawn, and appending against a stale
   // snapshot across that window is exactly the lost-update bug (WARDEN-991).
   if ((await loadCatalog()).some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
-  const r = await buildAndSpawn({ host, session, name: req.body?.name || session, cwd, cmd });
+  const r = await buildAndSpawn({ host, session, name: requestedName || session, cwd, cmd });
   if (r.error) return res.status(r.status).json({ error: r.error });
   // Append under serialization with a FRESH read, and re-check the collision here:
   // a concurrent spawn of the same host+session may have landed between the
   // pre-check and now. Same 409 body/status as the pre-flight rejection.
   const appended = await mutateCatalog((catalog) => {
     if (catalog.some((c) => sameCatalogEntry(c, host, session))) return undefined;
-    return [...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }];
+    return [...catalog, temporary
+      ? { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd, temporary: true }
+      : { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }];
   });
   if (!appended) return res.status(409).json({ error: `"${session}" already exists` });
+  if (temporary) r.chat.temporary = true;
   // Record the human's own spawn action so a returning human can see the agents
   // they brought up (WARDEN-484). Mirrors the existing attached/ended row shape.
   await appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
@@ -2370,7 +2432,11 @@ app.post('/api/respawn', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));
   if (r.error) return res.status(404).json(r);
   const chat = r.chat;
-  if (chat.kind !== 'tmux' || !chat.cmd) {
+  // WARDEN-1422: an EMPTY stored cmd is a valid command — the host's own login
+  // shell (the plain-shell spawn, WARDEN-223) — and exactly what a stopped
+  // saved shell must respawn with. Only a chat with NO cmd at all (yatfa/
+  // legacy rows) is unrespawnable.
+  if (chat.kind !== 'tmux' || chat.cmd === undefined || chat.cmd === null) {
     return res.status(400).json({ error: 'this chat has no command to re-spawn (only spawned tmux chats can be re-spawned)' });
   }
   const err = await preflightTmux(chat.host);

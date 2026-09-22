@@ -436,10 +436,11 @@ describe('every search leg guards its post-await writes (WARDEN-1049)', () => {
       `expected the scanner to find the repo's search legs, found ${found.length}`,
     );
     const files = new Set(found.map((l) => l.file));
+    // WARDEN-1422: the Open chat browser page was deleted outright (the sidebar
+    // is the only session surface), so its leg left the scan with it.
     for (const expected of [
       path.join('components', 'WorkspaceSearchDialog.tsx'),
       path.join('components', 'GlobalSearchDialog.tsx'),
-      path.join('components', 'OpenChatBrowserPage.tsx'),
     ]) {
       assert.ok(files.has(expected), `expected the scan to reach ${expected}`);
     }
