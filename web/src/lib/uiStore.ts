@@ -351,6 +351,40 @@ export interface UiStoreState {
   terminalColorScheme: TerminalColorScheme;
   /** Set the terminal color scheme. The persisted write follows via App's snapshot. */
   setTerminalColorScheme: (v: TerminalColorScheme) => void;
+  /**
+   * The Fleet Health pair (roadmap WARDEN-1204 slice 13, WARDEN-1426) — the
+   * LAST persisted UiState family that crossed a props bag into another
+   * component. App owned both as useStates and threaded four JSX pass sites +
+   * four Props entries into HealthDashboard, which is mounted in exactly ONE
+   * place and is the pair's only reader AND only writer. It subscribes here
+   * now, so the props channel is gone.
+   *
+   * Both are pure client localStorage — shared + persisted client state,
+   * WARDEN-832 row 2 — and persistence is unchanged: App keeps its snapshot
+   * fields + resetSetters entries, so the ONE compile-locked saveUi effect
+   * remains the single writer.
+   */
+  /**
+   * "Group agents by: Health | Host | Project" (WARDEN-237; Project added in
+   * WARDEN-741, persisted in WARDEN-468). Read by HealthDashboard's mode
+   * buttons, its visible-ids derivation and its render fork; written by those
+   * same mode buttons. The type is the inline literal union rather than an
+   * import of HealthDashboard's exported `GroupMode` — the fileViewerViewMode
+   * precedent above — so lib/ never imports from components/.
+   */
+  healthGroupBy: 'health' | 'host' | 'project';
+  /** Set the health grouping mode. The persisted write follows via App's snapshot. */
+  setHealthGroupBy: (v: 'health' | 'host' | 'project') => void;
+  /**
+   * The per-host expand/collapse state INSIDE Host grouping (WARDEN-237,
+   * persisted in WARDEN-500) — the companion that made WARDEN-468's durable
+   * grouping choice useful, since the collapsed hosts beneath it used to reset
+   * on every restart. Read by HealthDashboard's host-group render branch;
+   * written by its per-host collapse toggle. Default {} = every host expanded.
+   */
+  healthCollapsedHosts: Record<string, boolean>;
+  /** Set the collapsed-hosts map. The persisted write follows via App's snapshot. */
+  setHealthCollapsedHosts: (v: Record<string, boolean>) => void;
 }
 
 /**
@@ -393,6 +427,8 @@ export type UiStoreSeed = Partial<
     | 'autoFocusNewPane'
     | 'restoreOnStartup'
     | 'terminalColorScheme'
+    | 'healthGroupBy'
+    | 'healthCollapsedHosts'
   >
 >;
 
@@ -439,11 +475,12 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     timestampFormat: seed.timestampFormat ?? persisted.timestampFormat ?? 'relative',
     setTimestampFormat: (timestampFormat) => set({ timestampFormat }),
     // WARDEN-1204 slice 6: ??-only shape — DEFAULT_UI.hostLabels is {} and an
-    // empty map is the "no labels" identity, the same Record-shape class App's
-    // `useState(() => uiState.hostLabels ?? {})` initializer established for
-    // healthCollapsedHosts. The store's {} replaces the context's `undefined`
-    // default with an equivalent: hostLabelFor/hostTagOf treat both as "no
-    // labels", so nothing renders differently.
+    // empty map is the "no labels" identity, the same Record-shape class the
+    // `?? {}` seed of healthCollapsedHosts below carries (it was App's
+    // `useState(() => uiState.healthCollapsedHosts ?? {})` initializer until
+    // slice 13 moved that fact here too). The store's {} replaces the context's
+    // `undefined` default with an equivalent: hostLabelFor/hostTagOf treat both
+    // as "no labels", so nothing renders differently.
     hostLabels: seed.hostLabels ?? persisted.hostLabels ?? {},
     setHostLabels: (hostLabels) => set({ hostLabels }),
     // WARDEN-1204 slice 7: ??-only shape, mirroring App's retired
@@ -508,6 +545,19 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setRestoreOnStartup: (restoreOnStartup) => set({ restoreOnStartup }),
     terminalColorScheme: seed.terminalColorScheme ?? persisted.terminalColorScheme ?? 'auto',
     setTerminalColorScheme: (terminalColorScheme) => set({ terminalColorScheme }),
+    // WARDEN-1426 (roadmap WARDEN-1204 slice 13): the Fleet Health pair,
+    // ??-only — both literals mirror DEFAULT_UI (pinned against it by
+    // uiStore.test.mjs), exactly as the App useStates they replaced seeded
+    // (`uiState.healthGroupBy ?? 'health'` / `uiState.healthCollapsedHosts ??
+    // {}`). loadUi's own sanitizers already normalize a persisted payload (a
+    // 3-way enum allow-list for the mode; parseCollapsedHosts drops non-boolean
+    // entries from the map), so there is no terminalFontFamily-style truthiness
+    // exception here either — and {} is the already-shaped "every host
+    // expanded" identity, the same Record-shape class as hostLabels above.
+    healthGroupBy: seed.healthGroupBy ?? persisted.healthGroupBy ?? 'health',
+    setHealthGroupBy: (healthGroupBy) => set({ healthGroupBy }),
+    healthCollapsedHosts: seed.healthCollapsedHosts ?? persisted.healthCollapsedHosts ?? {},
+    setHealthCollapsedHosts: (healthCollapsedHosts) => set({ healthCollapsedHosts }),
   }));
 }
 
@@ -931,4 +981,43 @@ export function useTerminalColorScheme(): TerminalColorScheme {
 /** The terminal-color-scheme setter (AppearanceSection; also App's resetSetters). Stable across renders. */
 export function useSetTerminalColorScheme(): (v: TerminalColorScheme) => void {
   return useUiStore((s) => s.setTerminalColorScheme);
+}
+
+// ─── the Fleet Health pair (WARDEN-1426, roadmap WARDEN-1204 slice 13) ───
+//
+// HealthDashboard — the pair's ONLY reader and ONLY writer, mounted in exactly
+// one place — subscribes here instead of receiving four props from App, so the
+// last persisted UiState family riding a props bag into another component is
+// off that channel. App subscribes too (keep-local-names) for the persisted
+// snapshot and resetSetters, as with every migrated fact. Both setters are
+// stable across renders (zustand actions are created once with the store), so
+// they are safe in React dependency arrays.
+
+/**
+ * The Fleet Health grouping mode — Health | Host | Project (WARDEN-237,
+ * WARDEN-741, WARDEN-468, WARDEN-1426). HealthDashboard's mode buttons read it
+ * for their pressed state and its visible-ids derivation keys on the VALUE, so
+ * flipping the mode still recomputes the grouping live.
+ */
+export function useHealthGroupBy(): 'health' | 'host' | 'project' {
+  return useUiStore((s) => s.healthGroupBy);
+}
+
+/** The grouping-mode setter (HealthDashboard's mode buttons; also App's resetSetters). Stable across renders. */
+export function useSetHealthGroupBy(): (v: 'health' | 'host' | 'project') => void {
+  return useUiStore((s) => s.setHealthGroupBy);
+}
+
+/**
+ * The per-host collapse map inside Host grouping (WARDEN-500, WARDEN-1426).
+ * `{}` = every host expanded, the same identity App's retired `?? {}`
+ * initializer guaranteed.
+ */
+export function useHealthCollapsedHosts(): Record<string, boolean> {
+  return useUiStore((s) => s.healthCollapsedHosts);
+}
+
+/** The collapsed-hosts setter (HealthDashboard's per-host toggle; also App's resetSetters). Stable across renders. */
+export function useSetHealthCollapsedHosts(): (v: Record<string, boolean>) => void {
+  return useUiStore((s) => s.setHealthCollapsedHosts);
 }

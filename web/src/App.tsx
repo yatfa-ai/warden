@@ -22,7 +22,7 @@ import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -42,7 +42,7 @@ import { SettingsPage } from '@/components/SettingsPage';
 import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { SessionTranscriptViewer } from '@/components/SessionTranscriptViewer';
-import { HealthDashboard, type GroupMode } from '@/components/HealthDashboard';
+import { HealthDashboard } from '@/components/HealthDashboard';
 import { AttentionBadge, dotForState } from '@/components/AttentionBadge';
 import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
@@ -431,14 +431,23 @@ function App() {
   const setAgentFilter = useSetAgentFilter();
   const agentSort = useAgentSort();
   const setAgentSort = useSetAgentSort();
-  // WARDEN-468: HealthDashboard "Group agents by: Health | Host" toggle
-  // (WARDEN-237). Was a HealthDashboard-local useState that silently reset to
-  // 'health' on every Warden restart. Now App-owned + persisted by the saveUi
-  // effect (the single writer), like agentFilter/agentSort above (which
-  // WARDEN-1204 slice 7 moved one step further onto the shared uiStore) — so a
-  // cross-host human's Host grouping survives reload. Forwarded read-only to
-  // HealthDashboard except for the change handler. Pure client-side pref.
-  const [healthGroupBy, setHealthGroupBy] = useState<GroupMode>(() => uiState.healthGroupBy ?? 'health');
+  // WARDEN-468: HealthDashboard "Group agents by: Health | Host | Project" toggle
+  // (WARDEN-237; Project added in WARDEN-741). Was a HealthDashboard-local
+  // useState that silently reset to 'health' on every Warden restart. Lifted to
+  // App + persisted by the saveUi effect (the single writer), like
+  // agentFilter/agentSort above — so a cross-host human's Host grouping
+  // survives reload. Pure client-side pref.
+  //
+  // WARDEN-1426 (roadmap WARDEN-1204 slice 13) — migrated onto the shared
+  // uiStore together with healthCollapsedHosts below. HealthDashboard is the
+  // pair's ONLY reader and ONLY writer and is mounted in exactly one place, so
+  // it SUBSCRIBES directly and the four JSX pass sites into it are gone. App
+  // still subscribes for the same two single-writer reasons as `snippets`: the
+  // PersistedPrefSnapshot field below and the reset partition's setter. The
+  // store seeds itself from loadUi() with the same 'health' default DEFAULT_UI
+  // has, through loadUi's own 3-way enum allow-list.
+  const healthGroupBy = useHealthGroupBy();
+  const setHealthGroupBy = useSetHealthGroupBy();
   // File Viewer markdown view mode (WARDEN-480): 'rendered' (default = docs/
   // README reading) or 'source' (raw markdown). One global remembered choice,
   // surfaced only through the existing in-dialog toggle. Pure client-side pref;
@@ -474,11 +483,17 @@ function App() {
   // WARDEN-500: the per-host expand/collapse state INSIDE Health's Host grouping.
   // Was a HealthDashboard-local useState that reset to {} on every restart — so
   // the durable grouping choice (WARDEN-468) survived reload but the collapsed
-  // hosts beneath it did not. Now App-owned + persisted by the saveUi effect (the
+  // hosts beneath it did not. Lifted to App + persisted by the saveUi effect (the
   // single writer), exactly like healthGroupBy above — so a cross-host human's
-  // collapsed hosts survive reload. Forwarded read-only to HealthDashboard except
-  // for the change handler. Pure client-side pref; default {} = every host expanded.
-  const [healthCollapsedHosts, setHealthCollapsedHosts] = useState<Record<string, boolean>>(() => uiState.healthCollapsedHosts ?? {});
+  // collapsed hosts survive reload. Pure client-side pref; default {} = every
+  // host expanded.
+  //
+  // WARDEN-1426 (roadmap WARDEN-1204 slice 13) — migrated onto the shared
+  // uiStore with healthGroupBy above, on the same terms: HealthDashboard
+  // subscribes directly, App keeps the snapshot field + the resetSetters entry,
+  // and the store's `?? {}` seed reproduces the retired initializer's fallback.
+  const healthCollapsedHosts = useHealthCollapsedHosts();
+  const setHealthCollapsedHosts = useSetHealthCollapsedHosts();
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -961,6 +976,14 @@ function App() {
   // zustand actions created once with the store (lib/uiStore.ts) — so listing
   // them in the dep array below costs nothing and keeps the lint rule satisfied
   // honestly rather than by suppression.
+  //
+  // The health pair's setters (setHealthGroupBy/setHealthCollapsedHosts, since
+  // WARDEN-1426) are zustand actions on exactly the same terms, so the dep
+  // array is left UNCHANGED for them: a store action's identity never varies,
+  // so an unlisted one cannot go stale. They join the several store-backed
+  // setters the array already omits for that reason (the standing
+  // exhaustive-deps warning here is about those, and this slice neither adds to
+  // it nor resolves it).
   const resetUiPrefsToDefaults = useCallback(() => {
     const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
       // Appearance
@@ -2194,10 +2217,6 @@ function App() {
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}
             pollIntervalMs={pollIntervalMs}
-            groupBy={healthGroupBy}
-            onGroupByChange={setHealthGroupBy}
-            collapsedHosts={healthCollapsedHosts}
-            onCollapsedHostsChange={setHealthCollapsedHosts}
             companionTransportEnabled={companionTransportEnabled}
           />
         </section>

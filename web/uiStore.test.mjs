@@ -136,6 +136,11 @@ const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } =
     paneLayout: s.paneLayout,
     autoFocusNewPane: s.autoFocusNewPane,
     terminalColorScheme: s.terminalColorScheme,
+    // WARDEN-1426 (slice 13): the Fleet Health pair — same compile-locked
+    // snapshot fields. App keeps them (it subscribes keep-local-names) even
+    // though HealthDashboard is now the only surface that reads or writes them.
+    healthGroupBy: s.healthGroupBy,
+    healthCollapsedHosts: s.healthCollapsedHosts,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup ?? store.getState().restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -1653,6 +1658,151 @@ test('two stores do not share the appearance family; the APP-LEVEL singleton is 
   assert.equal(b.getState().paneLayout, 'auto');
   assert.equal(uiStore.getState().theme, 'system');
   assert.equal(uiStore.getState().paneLayout, 'auto');
+});
+
+// ─── the Fleet Health pair (WARDEN-1426, roadmap WARDEN-1204 slice 13) ───
+//
+// healthGroupBy (the Health | Host | Project toggle, WARDEN-237/741, persisted
+// WARDEN-468) and healthCollapsedHosts (the per-host collapse map inside Host
+// grouping, WARDEN-500) — the LAST persisted UiState family that crossed a
+// props bag into another component. HealthDashboard is the pair's only reader
+// AND only writer and is mounted in exactly one place, so it subscribes here
+// now and App's four JSX pass sites + four Props entries are gone. Both facts
+// ARE in PERSISTED_PREF_KEYS, so both round-trip through the snapshot bag (no
+// restoreOnStartup-style separate argument here).
+console.log('\ncreateUiStore — the health pair seeds from storage.ts, never from re-declared defaults');
+test('a fresh store seeds the pair from DEFAULT_UI on a clean install (not local literals)', () => {
+  reset();
+  const s = createUiStore().getState();
+  assert.equal(s.healthGroupBy, 'health');
+  assert.equal(s.healthGroupBy, DEFAULT_UI.healthGroupBy);
+  assert.deepEqual(s.healthCollapsedHosts, {});
+  assert.deepEqual(s.healthCollapsedHosts, DEFAULT_UI.healthCollapsedHosts);
+});
+test('a fresh store seeds the pair from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({ ...loadUi(), healthGroupBy: 'host', healthCollapsedHosts: { 'build-01': true, '(local)': false } });
+  const s = createUiStore().getState();
+  assert.equal(s.healthGroupBy, 'host');
+  assert.deepEqual(s.healthCollapsedHosts, { 'build-01': true, '(local)': false });
+});
+test("the seed runs through loadUi's sanitizers (a bogus mode falls back; non-boolean map entries are dropped)", () => {
+  reset();
+  // A corrupt/legacy payload: the mode is outside the 3-way allow-list, and the
+  // map mixes a real boolean with a truthy string and a numeric 1 — exactly the
+  // values parseCollapsedHosts documents as dropped.
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    healthGroupBy: 'by-vibes',
+    healthCollapsedHosts: { 'build-01': true, 'web-02': 'yes', 'db-03': 1, '(local)': false },
+  }));
+  const s = createUiStore().getState();
+  assert.equal(s.healthGroupBy, DEFAULT_UI.healthGroupBy);
+  // `false` is a real KEPT value — an explicitly-expanded host is not an absent one.
+  assert.deepEqual(s.healthCollapsedHosts, { 'build-01': true, '(local)': false });
+});
+test('a non-object collapsed-hosts payload degrades to {} (every host expanded — today\'s default)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthCollapsedHosts: 'all-of-them' }));
+  assert.deepEqual(createUiStore().getState().healthCollapsedHosts, {});
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage) — the UiStoreSeed addition', () => {
+  reset();
+  saveUi({ ...loadUi(), healthGroupBy: 'host', healthCollapsedHosts: { 'build-01': true } });
+  const s = createUiStore({ healthGroupBy: 'project', healthCollapsedHosts: {} }).getState();
+  assert.equal(s.healthGroupBy, 'project');
+  assert.deepEqual(s.healthCollapsedHosts, {});
+});
+
+console.log("\nsetHealthGroupBy/setHealthCollapsedHosts — the dashboard's own writes, and they do NOT touch localStorage");
+test('the setters replace the pair, and a subscriber is notified (the SHARING channel the dashboard reads)', () => {
+  reset();
+  const store = createUiStore({ healthGroupBy: 'health', healthCollapsedHosts: {} });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push([s.healthGroupBy, { ...s.healthCollapsedHosts }]));
+  store.getState().setHealthGroupBy('host');                       // the mode buttons
+  store.getState().setHealthCollapsedHosts({ 'build-01': true });  // the per-host collapse toggle
+  unsubscribe();
+  assert.deepEqual(seen, [['host', {}], ['host', { 'build-01': true }]]);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setHealthGroupBy('project');
+  assert.equal(seen.length, 2);
+});
+test('the setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ healthGroupBy: 'health', healthCollapsedHosts: {} });
+  store.getState().setHealthGroupBy('host');
+  store.getState().setHealthCollapsedHosts({ 'build-01': true });
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the two action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
+  reset();
+  const store = createUiStore();
+  const beforeMode = store.getState().setHealthGroupBy;
+  const beforeHosts = store.getState().setHealthCollapsedHosts;
+  beforeMode('project');
+  beforeHosts({ 'build-01': true });
+  assert.equal(store.getState().setHealthGroupBy, beforeMode);
+  assert.equal(store.getState().setHealthCollapsedHosts, beforeHosts);
+});
+
+console.log('\nround trip: Fleet Health → store → App snapshot → the saveUi effect → loadUi');
+test('the pair survives a restart through the real chain', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().healthGroupBy, 'health');
+  assert.deepEqual(store.getState().healthCollapsedHosts, {});
+  store.getState().setHealthGroupBy('host');                                        // pick Host grouping
+  store.getState().setHealthCollapsedHosts({ 'build-01': true, '(local)': false }); // collapse a host
+  flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
+  const persisted = loadUi();                  // next launch
+  assert.equal(persisted.healthGroupBy, 'host');
+  assert.deepEqual(persisted.healthCollapsedHosts, { 'build-01': true, '(local)': false });
+  // And the next launch's store seeds from exactly that.
+  const next = createUiStore().getState();
+  assert.equal(next.healthGroupBy, 'host');
+  assert.deepEqual(next.healthCollapsedHosts, { 'build-01': true, '(local)': false });
+});
+test('the reset path restores both defaults through the store-backed setters', () => {
+  reset();
+  const store = createUiStore({ healthGroupBy: 'project', healthCollapsedHosts: { 'build-01': true } });
+  // App's resetSetters entries are `healthGroupBy: setHealthGroupBy` /
+  // `healthCollapsedHosts: setHealthCollapsedHosts` — the SAME setters, now
+  // backed by the store, called with resetUiPrefDefaults()' values.
+  const defaults = resetUiPrefDefaults();
+  store.getState().setHealthGroupBy(defaults.healthGroupBy);
+  store.getState().setHealthCollapsedHosts(defaults.healthCollapsedHosts);
+  flushSnapshotToDisk(store);
+  assert.equal(store.getState().healthGroupBy, DEFAULT_UI.healthGroupBy);
+  assert.deepEqual(store.getState().healthCollapsedHosts, DEFAULT_UI.healthCollapsedHosts);
+  assert.equal(loadUi().healthGroupBy, DEFAULT_UI.healthGroupBy);
+  assert.deepEqual(loadUi().healthCollapsedHosts, DEFAULT_UI.healthCollapsedHosts);
+});
+test('the pair is independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore({ healthGroupBy: 'host' });
+  store.getState().setHealthCollapsedHosts({ 'build-01': true });
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().theme, 'system');
+  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  // …and writing one of the pair does not disturb the other.
+  assert.equal(store.getState().healthGroupBy, 'host');
+  store.getState().setHealthGroupBy('project');
+  assert.deepEqual(store.getState().healthCollapsedHosts, { 'build-01': true });
+});
+test('two stores do not share the health pair; the APP-LEVEL singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setHealthGroupBy('host');
+  a.getState().setHealthCollapsedHosts({ 'build-01': true });
+  assert.equal(b.getState().healthGroupBy, 'health');
+  assert.deepEqual(b.getState().healthCollapsedHosts, {});
+  assert.equal(uiStore.getState().healthGroupBy, 'health');
+  assert.deepEqual(uiStore.getState().healthCollapsedHosts, {});
 });
 
 console.log('\nstructural guard: components never read persisted state directly — they subscribe');

@@ -51,7 +51,7 @@ import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
 import { cn } from '@/lib/utils';
 import { Trash2 } from 'lucide-react';
 
@@ -74,21 +74,6 @@ interface Props {
   // tsc error when this branch rebased past WARDEN-749/757; threaded here to keep
   // the build green and complete the mirror the WARDEN-757 commit intended.
   pollIntervalMs: number;
-  // "Group agents by: Health | Host | Project" mode (WARDEN-237; Project added in
-  // WARDEN-741). Lifted to App + persisted (WARDEN-468) so the toggle survives a
-  // Warden restart — App owns the single source of truth and this is read-only
-  // here except for the change handler. Health stays the default
-  // (DEFAULT_UI.healthGroupBy) so the dashboard is unchanged unless a human opts
-  // into the per-host or per-project view.
-  groupBy: GroupMode;
-  onGroupByChange: (mode: GroupMode) => void;
-  // Per-host expand/collapse state inside Host grouping (WARDEN-237). Lifted to
-  // App + persisted (WARDEN-500) so which hosts a human collapses survives a
-  // Warden restart — App owns the single source of truth and this is read-only
-  // here except for the change handler. Completes the persistence WARDEN-468
-  // started for the grouping toggle itself. Default {} = every host expanded.
-  collapsedHosts: Record<string, boolean>;
-  onCollapsedHostsChange: (next: Record<string, boolean>) => void;
   // WARDEN-882 — whether the companion transport is enabled. Gates the per-host
   // "Remove companion" affordance's visibility (Host mode, remote hosts only).
   // The same gate every companion surface uses; the action is hidden unless the
@@ -650,11 +635,29 @@ const FLEET_GIT_AXES: FleetGitAxis[] = [
   },
 ];
 
-export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companionTransportEnabled }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hostLabels = useHostLabels();
+  // WARDEN-1426 (slice 13): the health pair — "Group agents by: Health | Host |
+  // Project" (WARDEN-237/741, persisted WARDEN-468) and the per-host collapse
+  // map inside Host grouping (WARDEN-500) — read from the shared store instead
+  // of four props from App. This component is the pair's only reader AND only
+  // writer, so the four JSX pass sites and the four Props entries are gone; the
+  // setters below are the same writes the mode buttons and the per-host toggle
+  // always made. Persistence is unchanged: App keeps the compile-locked
+  // snapshot fields, so the ONE saveUi effect still writes both. Health stays
+  // the default (DEFAULT_UI.healthGroupBy) and {} = every host expanded.
+  //
+  // The two `GroupMode` annotations are deliberate, not decoration: the store
+  // declares its own INLINE literal union (lib/ must not import from
+  // components/), so annotating here pins the two unions together — widening
+  // one without the other is a compile error rather than a silent drift.
+  const groupBy: GroupMode = useHealthGroupBy();
+  const setGroupBy: (mode: GroupMode) => void = useSetHealthGroupBy();
+  const collapsedHosts = useHealthCollapsedHosts();
+  const setCollapsedHosts = useSetHealthCollapsedHosts();
   // WARDEN-1342 (slice 4): the dashboard's own timestamps (last-activity, "Last
   // updated") read the shared pref; the fleet panels + FileViewer below
   // subscribe for themselves, so the pass-through prop is gone.
