@@ -78,6 +78,9 @@ const CONSENT = Object.freeze({
   INCIDENTS: Object.freeze({ incidents: true, names: false }),
   BOTH: Object.freeze({ incidents: true, names: true }),
   NAMES_ONLY: Object.freeze({ incidents: false, names: true }),
+  // WARDEN-1424 — the metrics category ALONE: the state that carries the
+  // renderer's workspace-shape snapshot.
+  METRICS_ONLY: Object.freeze({ incidents: false, names: false, 'operational-metrics': true }),
 });
 
 // A consent resolver that returns a fixed per-category state.
@@ -132,6 +135,26 @@ function namesEvent() {
   };
 }
 
+// WARDEN-1424 — the renderer's workspace-shape COUNT snapshot: counts only
+// (six integers + two stamps), schema-valid under v8, gated by the
+// operational-metrics category alone.
+function shapeEvent() {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'workspace-shape',
+    runtime: 'renderer',
+    timestamp: 1719500000123,
+    windowStartedAt: 1719499700123,
+    windowEndedAt: 1719500000123,
+    workspaces: 2,
+    panesOpen: 5,
+    panesActive: 3,
+    chats: 7,
+    peakPanesOpen: 6,
+    peakChats: 9,
+  };
+}
+
 // A structurally-valid base-tier error event whose free-text MESSAGE carries a
 // filesystem PATH. With the REAL redactor wired, the path is scrubbed and the
 // event validates + sends. With an IDENTITY redactor (p => p — standing in for
@@ -164,8 +187,9 @@ test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 7);
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
+  assert.equal(SCHEMA_VERSION, 8);
+  // WARDEN-1424 — v8 adds `workspace-shape`.
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
 });
 
 test('effectiveConsent normalizes through the ONE authority — garbage resolves to nothing', () => {
@@ -277,6 +301,53 @@ test('the pipeline gate is PER-TYPE — one category never carries another\'s ev
   assert.equal(send3.calls.length, 0, 'with nothing on, even the names event is a hard no-op');
   pipeline3.dispatch(namesEvent());
   assert.equal(send3.calls.length, 0, 'the layer-2 guard closes too');
+});
+
+test('METRICS-ONLY carries the workspace-shape snapshot — and nothing else does (WARDEN-1424)', () => {
+  // The shape event rides the EXISTING operational-metrics category (counts
+  // are not identifying data), so a metrics-only consent IS the consent state
+  // that sends it — no new category, no new checkbox. The per-type gate is
+  // proven in BOTH directions: metrics-only carries the shape event, and the
+  // other single-category states (plus nothing-on) must NOT.
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.METRICS_ONLY),
+    redact,
+    send,
+  });
+  pipeline.record(shapeEvent());
+  assert.equal(send.calls.length, 1, 'metrics-only carries the shape snapshot to transport');
+  assert.equal(send.calls[0].events[0].type, 'workspace-shape');
+  assert.equal(send.calls[0].events[0].chats, 7, 'chats is the COUNT, never a list');
+
+  const send2 = fakeSend();
+  const pipeline2 = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.NAMES_ONLY),
+    redact,
+    send: send2,
+  });
+  pipeline2.record(shapeEvent());
+  assert.equal(send2.calls.length, 0, 'names-only must NOT carry the shape event (metrics data stays behind the metrics switch)');
+
+  const send3 = fakeSend();
+  const pipeline3 = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.OFF),
+    redact,
+    send: send3,
+  });
+  pipeline3.record(shapeEvent());
+  assert.equal(send3.calls.length, 0, 'with nothing on, the shape event is a hard no-op');
+
+  // The mirror direction of the registry honesty: a metrics-only consent must
+  // not START carrying an INCIDENTS event it never declared either.
+  const send4 = fakeSend();
+  const pipeline4 = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.METRICS_ONLY),
+    redact,
+    send: send4,
+  });
+  pipeline4.record(validEventWithCredential()); // an `incidents` type
+  assert.equal(send4.calls.length, 0, 'metrics-only must NOT carry an incidents event');
 });
 
 test('a throwing consent resolver degrades to nothing enabled (telemetry must not crash the host)', () => {

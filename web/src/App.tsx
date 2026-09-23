@@ -17,7 +17,8 @@ import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, forwardWorkspaceShape, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
+import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
@@ -1179,6 +1180,33 @@ function App() {
   useEffect(() => {
     setTelemetryContext({ chatName: focusedChat?.name });
   }, [focusedChat?.name]);
+  // WARDEN-1424 — the workspace-shape COUNT snapshot: ONE bounded
+  // `workspace-shape` event per 5-minute window, read from THIS component's own
+  // refs (nothing new fetched, polled, or retained — the sampler holds six
+  // integers + two stamps per window). COUNTS ONLY by construction: workspaces
+  // / panes / chats as numbers, never a name or a title — chat names ride
+  // `workspace-names` behind their own consent category. In Electron the closed
+  // window ships over the telemetry:renderer-shape bridge and MAIN is the
+  // consent gate (the receipt refuses the operational-metrics category); in a
+  // plain browser the sampler is a bounded no-op. Build-once via the module
+  // singleton; the read closure reads refs, so it never goes stale and the
+  // effect runs once.
+  useEffect(() => {
+    getWorkspaceShapeSampler({
+      read: () => {
+        const ws = workspacesRef.current;
+        const activeId = activeWorkspaceIdRef.current;
+        const active = ws.find((w) => w.id === activeId) ?? ws[0] ?? null;
+        return {
+          workspaces: ws.length,
+          panesOpen: ws.reduce((n, w) => n + (Array.isArray(w.openPanes) ? w.openPanes.length : 0), 0),
+          panesActive: Array.isArray(active?.openPanes) ? active.openPanes.length : 0,
+          chats: chatsRef.current.length,
+        };
+      },
+      sendWindow: (snap) => forwardWorkspaceShape(snap),
+    });
+  }, []);
   // WARDEN-1408 (slice 11): the persisted prefs the rollup gates on (the
   // desktop-alerts opt-in + per-state filters) are subscribed INSIDE the hook
   // from the shared store now — the runtime inputs (openPanes, watchedChats,

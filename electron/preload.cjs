@@ -135,4 +135,14 @@ contextBridge.exposeInMainWorld('wardenTelemetry', {
   // the wire's last line of defense. The snapshot can never carry a pane key:
   // the sampler folds into fixed-size accumulators keyed by constant literals.
   reportPaneMetrics: (snapshot) => ipcRenderer.send('telemetry:renderer-metrics', snapshot),
+
+  // WARDEN-1424 — forward the renderer's closed workspace-shape window (COUNTS
+  // only: workspaces / panes / chats + the window's peaks — six integers and
+  // two stamps; no name, no title, no path, no hostname anywhere in the shape,
+  // and the schema validator rejects any key outside the shape's own set).
+  // Fire-and-forget via `send`, mirroring reportPaneMetrics: main is the
+  // consent gate (the receipt handler refuses the operational-metrics category,
+  // the mid-flip re-check), and the pipeline's redact → validate remain the
+  // wire's last line of defense.
+  reportWorkspaceShape: (snapshot) => ipcRenderer.send('telemetry:renderer-shape', snapshot),
 });

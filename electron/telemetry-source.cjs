@@ -41,6 +41,9 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
+// v8 (WARDEN-1424): + 'workspace-shape' — the renderer's COUNT snapshot of its
+// own workspace state (workspaces / panes / chats + window peaks; see the
+// canonical web/src/lib/telemetry/schema.ts for the full bump note).
 // v7 (WARDEN-1416): + 'workspace-names' — the FIRST event the `names` consent
 // category PRODUCES. Until now that category could only decorate events other
 // categories built, so names-alone consent sent nothing (the dead switch).
@@ -54,9 +57,9 @@ const {
 // event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
 // note). This inline copy stays byte-aligned with the canonical module; the
 // drift tests pin the pair.
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
-const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names']);
+const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
 
 const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer', SERVER: 'server' });
 
@@ -395,6 +398,14 @@ function validateBaseEvent(event) {
     // it here would refuse the data the category exists to carry.
     if (event.runtime !== RUNTIME.SERVER) return false;
     if (!isValidWorkspaceNames(event)) return false;
+  } else if (event.type === 'workspace-shape') {
+    // WARDEN-1424 — the renderer's workspace-shape COUNT snapshot. Runtime pin
+    // mirrored from the two types above: the workspace state lives in the
+    // renderer's own refs, so only a `renderer`-runtime event is a truthful
+    // workspace-shape event. The shape is counts-only over a CLOSED KEY SET —
+    // no string field exists in the type, so no identifier can ride it.
+    if (event.runtime !== RUNTIME.RENDERER) return false;
+    if (!isValidWorkspaceShape(event)) return false;
   }
   // Hard-exclusion proof: the built event must not leak an identifier.
   //   - The free-text MESSAGE is fully redacted at the collection boundary, so
@@ -514,6 +525,32 @@ function isValidWorkspaceNames(e) {
   if (!Number.isInteger(e.chatCount) || e.chatCount < 0) return false;
   if (e.chatCount < e.chats.length) return false;
   if (typeof e.truncated !== 'boolean') return false;
+  return true;
+}
+
+// WARDEN-1424 — the `workspace-shape` closed key set + shape check, mirroring
+// the canonical schema's isWorkspaceShapeShape. COUNTS ONLY: every payload
+// field is a non-negative integer, and any key outside the allowlist rejects
+// the event (the structural hard-exclusion proof — no string can ride it).
+const WORKSPACE_SHAPE_KEYS = Object.freeze([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt',
+  'workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats',
+]);
+const WORKSPACE_SHAPE_KEY_SET = new Set(WORKSPACE_SHAPE_KEYS);
+
+function isValidWorkspaceShape(e) {
+  for (const k of Object.keys(e)) {
+    if (!WORKSPACE_SHAPE_KEY_SET.has(k)) return false;
+  }
+  if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
+  for (const k of ['workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats']) {
+    if (!Number.isInteger(e[k]) || e[k] < 0) return false;
+  }
+  // The honest-peak invariant: a peak is the window's MAXIMUM, so it cannot be
+  // smaller than the count the window closed on.
+  if (e.peakPanesOpen < e.panesOpen) return false;
+  if (e.peakChats < e.chats) return false;
   return true;
 }
 
