@@ -22,7 +22,7 @@ import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts, usePaneColRatios, usePaneRowRatios } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -298,9 +298,22 @@ function App() {
   // paneLayout/terminalFontSize): persisted by the saveUi effect below, never
   // sent to the backend. PaneGrid holds a LOCAL working copy so a drag re-
   // templates the grid at 60fps without a localStorage write per pointermove;
-  // it commits the final ratios up through these setters on pointerUp only.
-  const [paneColRatios, setPaneColRatios] = useState<number[]>(() => uiState.paneColRatios ?? []);
-  const [paneRowRatios, setPaneRowRatios] = useState<number[]>(() => uiState.paneRowRatios ?? []);
+  // it commits the final ratios up through the store actions on pointerUp only.
+  //
+  // WARDEN-1433 (roadmap WARDEN-1204 slice 14) — migrated onto the shared
+  // uiStore with the other panel prefs: PaneGrid is the pair's only reader AND
+  // only writer, so it subscribes to the store directly and the four JSX pass
+  // sites + four Props entries are gone. App keeps ONLY the value
+  // subscriptions, for the same two reasons every migrated fact keeps its
+  // App-side read: the values feed PersistedPrefSnapshot (the compile-locked
+  // single writer) and the subscription is what re-renders App when a pane
+  // resize commits, so the saveUi effect fires. The setters are NOT kept:
+  // unlike the health pair (slice 13) the ratios are NOT resettable — both
+  // keys sit in RESET_PRESERVED_KEYS (WARDEN-934: "they are panel layout,
+  // which the shipped button promises to keep") — so no resetSetters entry
+  // ever needed them, and an unused local would only fail noUnusedLocals.
+  const paneColRatios = usePaneColRatios();
+  const paneRowRatios = usePaneRowRatios();
   // "Pane on agent exit" behavior: what an already-open pane does when its agent
   // process exits (chat.active goes true→false). 'keep' (default) is today's exact
   // behavior (dead terminal left for manual close); 'dim' marks it exited while
@@ -2186,10 +2199,11 @@ function App() {
             // subscribes to the same store directly. terminalThemeId STAYS a
             // prop: it is derived per render below so an OS theme flip re-themes
             // open panes live.
-            paneColRatios={paneColRatios}
-            paneRowRatios={paneRowRatios}
-            onPaneColRatiosChange={setPaneColRatios}
-            onPaneRowRatiosChange={setPaneRowRatios}
+            // WARDEN-1433 (slice 14): the pane-ratio pair stopped riding through
+            // the same way — PaneGrid DOES read AND write it (persisted values
+            // in, committed arrays out), and it now subscribes to the store for
+            // both under the exact local names the props used, so every drag /
+            // template / equalize / reset-reorder call site below is unchanged.
             terminalThemeId={terminalThemeId}
             showHostTags={displaySettings.showHostTags}
             // WARDEN-1388: the issue-key link integration — server config
