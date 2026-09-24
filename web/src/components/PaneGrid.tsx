@@ -256,17 +256,19 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
 
   // WARDEN-660: working ratio arrays for the grid's column / row tracks. LOCAL
   // state so a drag re-templates the grid at 60fps without a localStorage write
-  // per pointermove (the App-owned persisted pref is committed on pointerUp
-  // only). Seeded from the persisted prop when its length matches the current
-  // shape, else equal split. Always length === cols / rows while the shape is
-  // stable (the reset effect restores that invariant on any shape change).
+  // per pointermove (the persisted pref on the shared uiStore is committed on
+  // pointerUp only). Seeded from the persisted store value when its length
+  // matches the current shape, else equal split. Always length === cols / rows
+  // while the shape is stable (the reset effect restores that invariant on any
+  // shape change).
   const [colRatios, setColRatios] = useState<number[]>(() => effectiveRatios(paneColRatios, cols));
   const [rowRatios, setRowRatios] = useState<number[]>(() => effectiveRatios(paneRowRatios, rows));
 
-  // The last ratios PaneGrid pushed up to App. Lets the sync effect tell a
-  // SELF-commit (the prop echoes what we just sent → local already matches, so
-  // skip — avoids a redundant render on every drag commit) from an EXTERNAL
-  // change (a global pref reset wipes the prop to [] → re-seed local).
+  // The last ratios PaneGrid committed to the store. Lets the sync effect tell
+  // a SELF-commit (the store value echoes what we just sent → local already
+  // matches, so skip — avoids a redundant render on every drag commit) from an
+  // EXTERNAL change (a global pref reset wipes the store value to [] → re-seed
+  // local).
   const pushedRef = useRef<{ col: number[]; row: number[] }>({
     col: paneColRatios.slice(),
     row: paneRowRatios.slice(),
@@ -457,11 +459,12 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   // (WARDEN-660: "ratios intact after restore"). The n===0 case renders the
   // empty-state message instead of the grid, so the shape is moot then.
 
-  // WARDEN-660 sync: when the persisted ratio prop changes OUT from under us
-  // (an external reset — e.g. resetUiPrefsPreservingWorkspace wipes it to []),
-  // re-seed local. A prop value equal to what we last pushed is our own commit
-  // echoing back — local already matches, so skip (avoids a redundant render on
-  // every drag commit). Skips mount (pushedRef seeded to the prop).
+  // WARDEN-660 sync: when the persisted store value changes OUT from under us
+  // (an external push by ANY other store writer — in practice a global reset —
+  // e.g. resetUiPrefsPreservingWorkspace wipes it to []), re-seed local. A
+  // store value equal to what we last committed is our own write echoing back —
+  // local already matches, so skip (avoids a redundant render on every drag
+  // commit). Skips mount (pushedRef seeded to the store value).
   useEffect(() => {
     const same = (a: number[], b: number[]) =>
       a.length === b.length && a.every((v, i) => v === b[i]);
@@ -675,8 +678,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     document.body.style.userSelect = '';
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* best-effort */ }
     if (wasPending || !d) return;
-    // Commit the final ratios to App for persistence — ONE write per drag, not
-    // one per pointermove (the per-move updates were local-only).
+    // Commit the final ratios to the store (App's snapshot carries them into
+    // the one saveUi effect) — ONE write per drag, not one per pointermove (the
+    // per-move updates were local-only).
     if (d.axis === 'col') {
       pushedRef.current.col = d.last.slice();
       onPaneColRatiosChange(d.last);
