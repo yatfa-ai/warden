@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
-import { usePaneLayout } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -100,17 +100,6 @@ interface Props {
   externalSearchQuery?: { paneId: string; query: string } | null;
   onToggleSidebar?: () => void;
   onToggleObserver?: () => void;
-  // WARDEN-660: draggable resize-gutter ratios. Per-axis track weights for the
-  // grid's columns / rows ([] or all-equal = today's uniform grid). App owns the
-  // persisted pref; PaneGrid holds a LOCAL working copy (see colRatios/rowRatios
-  // below) so a drag re-templates the grid at 60fps without a localStorage write
-  // per pointermove, then commits the final array up through the setters on
-  // pointerUp. The setters are stable React setters passed straight through from
-  // App (no inline arrow) per the App→PaneGrid handler convention (WARDEN-16).
-  paneColRatios: number[];
-  paneRowRatios: number[];
-  onPaneColRatiosChange: (ratios: number[]) => void;
-  onPaneRowRatiosChange: (ratios: number[]) => void;
   // WARDEN-1322 (roadmap WARDEN-1204 slice 3): this grid used to carry SEVEN
   // terminal-config props it never read — fontSize/onFontSizeChange, scrollback,
   // fontFamily, terminalCursorStyle, copyOnSelect, onExitBehavior — as a pure
@@ -121,6 +110,13 @@ interface Props {
   // WARDEN-1420 (slice 12): `paneLayout` left this Props interface too — unlike
   // the seven above, this grid genuinely READS it (gridShape below), so it now
   // SUBSCRIBES to the same store rather than receiving App's pass-through.
+  //
+  // WARDEN-1433 (slice 14): the pane-ratio pair (paneColRatios/paneRowRatios
+  // and their two on*Change setters) left this Props interface the same way —
+  // unlike the seven above, this grid genuinely READS and WRITES the pair, so
+  // it subscribes to the store for both under the exact local names the Props
+  // destructure used (see below the signature) and every drag / template /
+  // equalize / reset-reorder call site is textually unchanged.
   //
   // Resolved terminal theme id (App resolves terminalColorScheme + the active
   // theme down to a concrete named-theme id here). Pure pass-through to PaneTile
@@ -150,12 +146,26 @@ interface Props {
   onReorderPanes: (dragId: string, targetId: string) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
   // textually unchanged.
   const paneLayout = usePaneLayout();
+  // WARDEN-1433 (roadmap WARDEN-1204 slice 14): the draggable resize-gutter
+  // ratios (WARDEN-660) come from the same store on the same terms — the pair
+  // of persisted values AND the pair of commit callbacks, each keeping the
+  // exact local name the Props destructure used, so the ephemeral drag working
+  // copies (colRatios/rowRatios below), the pointerUp commit sites, the
+  // template/equalize/reset-reorder paths, and the external-push effect all
+  // read the same identifiers with the same change-identity semantics. The
+  // setters are zustand actions (stable identities — the same property the
+  // WARDEN-16 handler convention asked of the React setters they replace), and
+  // the persisted write follows via App's snapshot into the ONE saveUi effect.
+  const paneColRatios = usePaneColRatios();
+  const paneRowRatios = usePaneRowRatios();
+  const onPaneColRatiosChange = useSetPaneColRatios();
+  const onPaneRowRatiosChange = useSetPaneRowRatios();
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's

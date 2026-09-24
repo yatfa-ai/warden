@@ -141,6 +141,12 @@ const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } =
     // though HealthDashboard is now the only surface that reads or writes them.
     healthGroupBy: s.healthGroupBy,
     healthCollapsedHosts: s.healthCollapsedHosts,
+    // WARDEN-1433 (slice 14): the pane-ratio pair — same compile-locked
+    // snapshot fields. App keeps only the value subscriptions (PaneGrid is the
+    // pair's only reader AND writer; the ratios are NOT resettable, so there
+    // is no resetSetters entry to keep a setter for).
+    paneColRatios: s.paneColRatios,
+    paneRowRatios: s.paneRowRatios,
   };
   saveUi(persistUiState(snapshot, restoreOnStartup ?? store.getState().restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -1803,6 +1809,156 @@ test('two stores do not share the health pair; the APP-LEVEL singleton is untouc
   assert.deepEqual(b.getState().healthCollapsedHosts, {});
   assert.equal(uiStore.getState().healthGroupBy, 'health');
   assert.deepEqual(uiStore.getState().healthCollapsedHosts, {});
+});
+
+// ─── the pane-ratio pair (WARDEN-1433, roadmap WARDEN-1204 slice 14) ───
+//
+// paneColRatios/paneRowRatios (the draggable resize-gutter track weights,
+// WARDEN-660) — the LAST App→PaneGrid props-bag family. PaneGrid is the pair's
+// only reader AND only writer (App never read the values beyond the persistence
+// snapshot), so it subscribes here now and App's four JSX pass sites + four
+// Props entries are gone. Both facts ARE in PERSISTED_PREF_KEYS, so both
+// round-trip through the snapshot bag — and both are PRESERVED by the UI-prefs
+// reset (RESET_PRESERVED_KEYS, WARDEN-934: "they are panel layout, which the
+// shipped button promises to keep"), pinned below.
+console.log('\ncreateUiStore — the pane-ratio pair seeds from storage.ts, never from re-declared defaults');
+test('a fresh store seeds the pair from DEFAULT_UI on a clean install (not local literals)', () => {
+  reset();
+  const s = createUiStore().getState();
+  assert.deepEqual(s.paneColRatios, []);
+  assert.deepEqual(s.paneColRatios, DEFAULT_UI.paneColRatios);
+  assert.deepEqual(s.paneRowRatios, []);
+  assert.deepEqual(s.paneRowRatios, DEFAULT_UI.paneRowRatios);
+});
+test('a fresh store seeds the pair from the PERSISTED payload when one exists', () => {
+  reset();
+  saveUi({ ...loadUi(), paneColRatios: [0.6, 0.4], paneRowRatios: [0.3, 0.7] });
+  const s = createUiStore().getState();
+  assert.deepEqual(s.paneColRatios, [0.6, 0.4]);
+  assert.deepEqual(s.paneRowRatios, [0.3, 0.7]);
+});
+test("the seed runs through loadUi's sanitizers (a non-array payload degrades; a non-positive entry drops the WHOLE array)", () => {
+  reset();
+  // Exactly what parseRatioArray documents: a present-but-wrong-type value is
+  // genuine corruption → [], and one non-positive/non-finite entry poisons the
+  // whole array (a partial ratio list would distort the grid template) → [].
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    paneColRatios: 'all-of-them',
+    paneRowRatios: [0.3, -1],
+  }));
+  const s = createUiStore().getState();
+  assert.deepEqual(s.paneColRatios, DEFAULT_UI.paneColRatios);
+  assert.deepEqual(s.paneRowRatios, DEFAULT_UI.paneRowRatios);
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage) — the UiStoreSeed addition', () => {
+  reset();
+  saveUi({ ...loadUi(), paneColRatios: [0.6, 0.4], paneRowRatios: [0.3, 0.7] });
+  const s = createUiStore({ paneColRatios: [0.8, 0.2], paneRowRatios: [] }).getState();
+  assert.deepEqual(s.paneColRatios, [0.8, 0.2]);
+  assert.deepEqual(s.paneRowRatios, []);
+});
+
+console.log("\nsetPaneColRatios/setPaneRowRatios — PaneGrid's pointerUp commits, and they do NOT touch localStorage");
+test('the setters replace the pair, and a subscriber is notified (the SHARING channel PaneGrid reads)', () => {
+  reset();
+  const store = createUiStore({ paneColRatios: [], paneRowRatios: [] });
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push([[...s.paneColRatios], [...s.paneRowRatios]]));
+  store.getState().setPaneColRatios([0.6, 0.4]);  // a column-gutter pointerUp commit
+  store.getState().setPaneRowRatios([0.3, 0.7]);  // a row-gutter pointerUp commit
+  unsubscribe();
+  assert.deepEqual(seen, [[[0.6, 0.4], []], [[0.6, 0.4], [0.3, 0.7]]]);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setPaneColRatios([0.5, 0.5]);
+  assert.equal(seen.length, 2);
+});
+test('the setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore({ paneColRatios: [], paneRowRatios: [] });
+  store.getState().setPaneColRatios([0.6, 0.4]);
+  store.getState().setPaneRowRatios([0.3, 0.7]);
+  // The store deliberately has no write-through persistence: a second writer
+  // here would silently race the ONE compile-locked saveUi effect.
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+test('the two action identities are stable across writes (safe in a React dep array — the property the WARDEN-16 handler convention asked of the props setters)', () => {
+  reset();
+  const store = createUiStore();
+  const beforeCol = store.getState().setPaneColRatios;
+  const beforeRow = store.getState().setPaneRowRatios;
+  beforeCol([0.6, 0.4]);
+  beforeRow([0.3, 0.7]);
+  assert.equal(store.getState().setPaneColRatios, beforeCol);
+  assert.equal(store.getState().setPaneRowRatios, beforeRow);
+});
+
+console.log('\nround trip: PaneGrid pointerUp → store → App snapshot → the saveUi effect → loadUi');
+test('the pair survives a restart through the real chain (shipped WARDEN-660 behavior, unchanged)', () => {
+  reset();
+  const store = createUiStore();
+  assert.deepEqual(store.getState().paneColRatios, []);
+  assert.deepEqual(store.getState().paneRowRatios, []);
+  store.getState().setPaneColRatios([0.6, 0.4]); // resize columns, release the gutter
+  store.getState().setPaneRowRatios([0.3, 0.7]); // resize rows, release the gutter
+  flushSnapshotToDisk(store);                    // App snapshot → saveUi effect
+  const persisted = loadUi();                    // next launch
+  assert.deepEqual(persisted.paneColRatios, [0.6, 0.4]);
+  assert.deepEqual(persisted.paneRowRatios, [0.3, 0.7]);
+  // And the next launch's store seeds from exactly that.
+  const next = createUiStore().getState();
+  assert.deepEqual(next.paneColRatios, [0.6, 0.4]);
+  assert.deepEqual(next.paneRowRatios, [0.3, 0.7]);
+});
+test('the UI-prefs reset PRESERVES the pair (WARDEN-934: ratios are panel layout, PRESERVED)', () => {
+  reset();
+  saveUi({ ...loadUi(), paneColRatios: [0.6, 0.4], paneRowRatios: [0.3, 0.7] });
+  const store = createUiStore();
+  // The shipped reset is keyed by ResettableKey = (PERSISTED_PREF_KEYS ∪
+  // restoreOnStartup) − RESET_PRESERVED_KEYS. The pair sits in
+  // RESET_PRESERVED_KEYS, so it has NO entry in resetUiPrefDefaults() and NO
+  // entry in App's resetSetters — nothing in the reset can move it. Pin the
+  // exclusion itself (the compile lock's runtime shadow: pulling a key out of
+  // RESET_PRESERVED_KEYS forces a defaults entry, and this leg goes red), then
+  // drive a representative slice of the defaults sweep through the
+  // store-backed setters and show the saveUi effect re-persists the pair
+  // UNCHANGED.
+  const defaults = resetUiPrefDefaults();
+  assert.ok(!('paneColRatios' in defaults), 'paneColRatios must stay in RESET_PRESERVED_KEYS (WARDEN-934: ratios are panel layout) — a defaults entry means it left the preserved set');
+  assert.ok(!('paneRowRatios' in defaults), 'paneRowRatios must stay in RESET_PRESERVED_KEYS (WARDEN-934: ratios are panel layout) — a defaults entry means it left the preserved set');
+  const s = store.getState();
+  s.setTheme(defaults.theme);
+  s.setPaneLayout(defaults.paneLayout);
+  s.setHealthGroupBy(defaults.healthGroupBy);
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().paneColRatios, [0.6, 0.4]);
+  assert.deepEqual(loadUi().paneRowRatios, [0.3, 0.7]);
+  assert.deepEqual(store.getState().paneColRatios, [0.6, 0.4]);
+  assert.deepEqual(store.getState().paneRowRatios, [0.3, 0.7]);
+});
+test('the pair is independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore({ paneColRatios: [0.6, 0.4] });
+  store.getState().setPaneRowRatios([0.3, 0.7]);
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().theme, 'system');
+  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  // …and writing one axis does not disturb the other.
+  assert.deepEqual(store.getState().paneColRatios, [0.6, 0.4]);
+  store.getState().setPaneColRatios([0.7, 0.3]);
+  assert.deepEqual(store.getState().paneRowRatios, [0.3, 0.7]);
+});
+test('two stores do not share the pane-ratio pair; the APP-LEVEL singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setPaneColRatios([0.6, 0.4]);
+  a.getState().setPaneRowRatios([0.3, 0.7]);
+  assert.deepEqual(b.getState().paneColRatios, []);
+  assert.deepEqual(b.getState().paneRowRatios, []);
+  assert.deepEqual(uiStore.getState().paneColRatios, []);
+  assert.deepEqual(uiStore.getState().paneRowRatios, []);
 });
 
 console.log('\nstructural guard: components never read persisted state directly — they subscribe');

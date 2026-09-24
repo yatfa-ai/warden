@@ -385,6 +385,30 @@ export interface UiStoreState {
   healthCollapsedHosts: Record<string, boolean>;
   /** Set the collapsed-hosts map. The persisted write follows via App's snapshot. */
   setHealthCollapsedHosts: (v: Record<string, boolean>) => void;
+  /**
+   * The draggable resize-gutter ratios (WARDEN-660; roadmap WARDEN-1204 slice
+   * 14, WARDEN-1433) — per-axis PaneGrid track weights ([] = equal split, the
+   * default). The pair's ONLY reader AND only writer is PaneGrid: App owned
+   * both as useStates and threaded four JSX pass sites + four Props entries
+   * into it, and PaneGrid now subscribes here instead, so the props channel
+   * is gone.
+   *
+   * Pure client localStorage — shared + persisted client state, WARDEN-832
+   * row 2 — persisted by the saveUi effect (App keeps its snapshot
+   * subscription; the store has NO write-through). PaneGrid keeps a LOCAL
+   * working copy so a drag re-templates the grid at 60fps without a
+   * localStorage write per pointermove; it commits the final arrays through
+   * these actions on pointerUp only. NOT resettable: both keys sit in
+   * RESET_PRESERVED_KEYS (WARDEN-934 — "they are panel layout, which the
+   * shipped button promises to keep"), so there is deliberately NO entry for
+   * them in resetUiPrefDefaults() or App's resetSetters.
+   */
+  paneColRatios: number[];
+  paneRowRatios: number[];
+  /** Commit the column ratios (PaneGrid pointerUp). The persisted write follows via App's snapshot. */
+  setPaneColRatios: (v: number[]) => void;
+  /** Commit the row ratios (PaneGrid pointerUp). The persisted write follows via App's snapshot. */
+  setPaneRowRatios: (v: number[]) => void;
 }
 
 /**
@@ -429,6 +453,8 @@ export type UiStoreSeed = Partial<
     | 'terminalColorScheme'
     | 'healthGroupBy'
     | 'healthCollapsedHosts'
+    | 'paneColRatios'
+    | 'paneRowRatios'
   >
 >;
 
@@ -558,6 +584,19 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setHealthGroupBy: (healthGroupBy) => set({ healthGroupBy }),
     healthCollapsedHosts: seed.healthCollapsedHosts ?? persisted.healthCollapsedHosts ?? {},
     setHealthCollapsedHosts: (healthCollapsedHosts) => set({ healthCollapsedHosts }),
+    // WARDEN-1433 (roadmap WARDEN-1204 slice 14): the pane-ratio pair, ??-only
+    // — both literals mirror DEFAULT_UI (pinned against it by
+    // uiStore.test.mjs), exactly as the App useStates they replaced seeded
+    // (`uiState.paneColRatios ?? []` / `uiState.paneRowRatios ?? []`).
+    // loadUi's own sanitizer (parseRatioArray: a non-array payload → [], and
+    // any array holding a non-positive/non-finite entry → the whole []) already
+    // normalizes a persisted payload, so there is no terminalFontFamily-style
+    // truthiness exception here — and [] is the already-shaped "equal split"
+    // identity, the same array-shape class as watchedChats/customPresets above.
+    paneColRatios: seed.paneColRatios ?? persisted.paneColRatios ?? [],
+    setPaneColRatios: (paneColRatios) => set({ paneColRatios }),
+    paneRowRatios: seed.paneRowRatios ?? persisted.paneRowRatios ?? [],
+    setPaneRowRatios: (paneRowRatios) => set({ paneRowRatios }),
   }));
 }
 
@@ -1020,4 +1059,30 @@ export function useHealthCollapsedHosts(): Record<string, boolean> {
 /** The collapsed-hosts setter (HealthDashboard's per-host toggle; also App's resetSetters). Stable across renders. */
 export function useSetHealthCollapsedHosts(): (v: Record<string, boolean>) => void {
   return useUiStore((s) => s.setHealthCollapsedHosts);
+}
+
+/**
+ * The draggable resize-gutter ratios, per axis (WARDEN-660, WARDEN-1433).
+ * `[]` = equal split, the same identity App's retired `?? []` initializers
+ * guaranteed. PaneGrid is the pair's only reader AND only writer: it holds a
+ * LOCAL working copy for the 60fps drag and commits the final arrays through
+ * the set actions on pointerUp only.
+ */
+export function usePaneColRatios(): number[] {
+  return useUiStore((s) => s.paneColRatios);
+}
+
+/** The column-ratios commit action (PaneGrid pointerUp). Stable across renders. */
+export function useSetPaneColRatios(): (v: number[]) => void {
+  return useUiStore((s) => s.setPaneColRatios);
+}
+
+/** The row-axis twin of usePaneColRatios. */
+export function usePaneRowRatios(): number[] {
+  return useUiStore((s) => s.paneRowRatios);
+}
+
+/** The row-ratios commit action (PaneGrid pointerUp). Stable across renders. */
+export function useSetPaneRowRatios(): (v: number[]) => void {
+  return useUiStore((s) => s.setPaneRowRatios);
 }
