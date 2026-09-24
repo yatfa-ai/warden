@@ -120,7 +120,14 @@ describe('live: the sync-I/O probe attributes a stall to the real blocking call'
     const monitor = createLoopMonitor({
       heartbeatMs: 100,
       thresholdMs: 200,
-      syncFloorMs: 1, // a big readFileSync is only a few ms; production uses 100ms
+      // Floor 0, deliberately: the ring assertion below is proof the PATCH fired,
+      // and that proof must not depend on read SPEED. An 8MB readFileSync served
+      // from a warm page cache can finish in under 1ms on a fast runner (CI,
+      // 2026-09-23: the sub-floor read took no ring slot and the ring held only
+      // the outer span — a false "patch did not fire"). Production keeps its
+      // 100ms floor for noise control; this suite wants every wrapped call seen.
+      // The sibling fd-level test below uses 0 for the same reason.
+      syncFloorMs: 0,
       onStall: (r) => stalls.push(r),
     });
     // Patch the REAL fs module object — the same object every src/ module reaches
