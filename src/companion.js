@@ -788,12 +788,14 @@ const bootstrapFailures = new Map(); // host -> { at, err }
 //        | 'inactive'      — toggle off, LOCAL, or no op has engaged the host yet
 const companionStatus = new Map(); // host -> { state, version?, lastError?, lastErrorAt? }
 
-// Module-private writer; the only writers that SET a status are the getChannel
-// bootstrap transitions (bootstrapping/active/error) below. Kept narrow so all
-// status mutation funnels through one place the reachability trace can reason
-// about. Two places INVALIDATE instead of setting, by deleting the entry so
-// getCompanionStatus falls back to {state:'inactive'}: uninstallCompanion (the
-// host's companion was just removed — WARDEN-882) and
+// Module-private writer; the writers that SET a status are the getChannel
+// bootstrap transitions (bootstrapping/active/error) below plus the WARDEN-1430
+// death reconciliation (the onDead listener registered on the success path —
+// same {state:'error', lastError, lastErrorAt} shape, death-flavored message).
+// Kept narrow so all status mutation funnels through one place the reachability
+// trace can reason about. Two places INVALIDATE instead of setting, by deleting
+// the entry so getCompanionStatus falls back to {state:'inactive'}:
+// uninstallCompanion (the host's companion was just removed — WARDEN-882) and
 // _resetChannelCacheForTests (whole-map clear).
 function setCompanionStatus(host, status) {
   companionStatus.set(host, status);
@@ -1128,6 +1130,39 @@ export async function getChannel(host, cfg = {}, deps = {}) {
       // successful bootstrap just loaded and cached it).
       const version = deps.manifest?.version ?? loadManifest().version;
       setCompanionStatus(host, { state: 'active', version });
+      // WARDEN-1430: a channel death must RECONCILE this map — until now
+      // `active` was a high-water mark and an idle host whose ssh channel
+      // exited kept rendering the working green dot indefinitely (the defect
+      // WARDEN-1324's pingProbe routed around instead of fixing). The listener
+      // rides the WARDEN-1295 onDead seam (same one CompanionAttachSession
+      // uses), writing the SAME shape the bootstrap-failure transition below
+      // writes — a death-flavored lastError is what distinguishes "died after
+      // working" from "bootstrap failed", since they share the state.
+      //
+      // Registration ORDER is load-bearing, twice over:
+      //   (a) AFTER the superseded-bootstrap identity check above — a bootstrap
+      //       whose cache entry was replaced mid-flight (the WARDEN-1390
+      //       exclusion release race) is killed WITHOUT ever registering, so
+      //       its death cannot stamp a host it no longer owns.
+      //   (b) AFTER the active write — a channel that dies in the gap between
+      //       its bootstrap ping and this registration fires onDead
+      //       immediately (already-dead contract), and the error write must
+      //       land AFTER the active write, never be buried by it.
+      // The identity guard makes the WRITE safe too: a channel released by
+      // uninstallCompanion (kill-then-delete) or releaseExcludedHostState
+      // (delete-then-kill) re-checks that it still owns the cache slot before
+      // writing, so a deliberately torn-down host is never resurrected by its
+      // own death. Kept trivially non-throwing — _die already isolates a
+      // throwing dead-handler, but the handler should not need the grace.
+      channel.onDead((deathErr) => {
+        if (channelCache.get(host) === channel) {
+          setCompanionStatus(host, {
+            state: 'error',
+            lastError: `companion channel to ${host} died: ${deathErr?.message || 'channel exited'}`,
+            lastErrorAt: Date.now(),
+          });
+        }
+      });
       return channel;
     })
     .catch((err) => {
@@ -1672,17 +1707,21 @@ export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}
 //      here would pay the binary-upload cost on a 30s clock, for a host the
 //      operator never gestured at.
 //
-//   2. companionStatus IS NOT A LIVE-CHANNEL READ. `state === 'active'` is a
-//      HIGH-WATER MARK: it is written by the getChannel bootstrap transitions and
-//      never reconciled when the channel dies (CompanionChannel._die() writes
-//      nothing), so an active-marked host can be holding a dead channel. Gating
-//      on the status map alone and then calling getChannel would bootstrap —
-//      trap 1 through the back door. THE EXPLICIT CHOICE (ticket-required to be
-//      stated, not left implicit): read the channel cache DIRECTLY via
-//      liveChannelFor() below — a module-private non-bootstrapping reader — and
-//      DECLINE whenever there is no live channel (absent, still bootstrapping, or
-//      dead). A decline is not a failure: the caller (probeHostReachability in
-//      server.js) takes today's raw-SSH validateHost path byte-for-byte.
+//   2. companionStatus IS NOT A LIVE-CHANNEL READ. WARDEN-1430 closed the worst
+//      gap — a channel death now RECONCILES the map (the onDead listener
+//      registered in getChannel's success path writes a death-flavored error),
+//      so a dead channel no longer reads 'active' indefinitely — but the map
+//      remains a transition LOG (bootstrapping / active / error), not a channel
+//      read: there is a TOCTOU gap between any map read and the channel use,
+//      and a 'bootstrapping' entry means the cache holds a PROMISE, not a
+//      channel. Gating on the status map alone and then calling getChannel
+//      would still bootstrap — trap 1 through the back door. THE EXPLICIT
+//      CHOICE (ticket-required to be stated, not left implicit, WARDEN-1324):
+//      read the channel cache DIRECTLY via liveChannelFor() below — a
+//      module-private non-bootstrapping reader — and DECLINE whenever there is
+//      no live channel (absent, still bootstrapping, or dead). A decline is not
+//      a failure: the caller (probeHostReachability in server.js) takes today's
+//      raw-SSH validateHost path byte-for-byte.
 //
 // Return contract: the validateHost shape `{ ok, host, error? }` when the probe
 // RODE a live channel, or `null` when it DECLINED — null is the caller's signal
@@ -1698,11 +1737,12 @@ export async function execInContext(host, script, opts = {}, cfg = {}, deps = {}
 // (run/upload/spawnChannel) and this op runs none of them — that is the point.
 // `opts.timeout` bounds the ping (the seam the timeout test drives).
 export async function pingProbe(host, cfg = {}, opts = {}) {
-  // Gate, cheapest first: a host the transport never engaged, an errored or
-  // still-bootstrapping host, LOCAL, or a disabled toggle all read != 'active'
-  // and decline. The toggle-off short-circuit inside getCompanionStatus is what
-  // makes the whole op inert when the transport is off (byte-for-byte parity) —
-  // asserted, not assumed, in the tests.
+  // Gate, cheapest first: a host the transport never engaged, an errored (a
+  // failed bootstrap OR — since WARDEN-1430 — a channel whose death reconciled
+  // the map) or still-bootstrapping host, LOCAL, or a disabled toggle all read
+  // != 'active' and decline. The toggle-off short-circuit inside
+  // getCompanionStatus is what makes the whole op inert when the transport is
+  // off (byte-for-byte parity) — asserted, not assumed, in the tests.
   if (getCompanionStatus(host).state !== 'active') return null;
   const channel = liveChannelFor(host);
   if (!channel) return null; // dead-channel window / bootstrap in flight: decline

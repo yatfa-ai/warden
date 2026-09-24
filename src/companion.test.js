@@ -2283,8 +2283,9 @@ describe('companion transport status (WARDEN-878)', () => {
 
   it('a re-bootstrap after a dead channel flips the stale active back through bootstrapping', async () => {
     // A channel that dies (ssh process exits) is re-bootstrapped on the next
-    // getChannel call. The status must follow: active → bootstrapping → active,
-    // never stuck on a stale "active" once a fresh bootstrap is underway.
+    // getChannel call. The status must follow: active → (error on the death
+    // itself, WARDEN-1430's reconciliation) → bootstrapping → active, never
+    // stuck on a stale "active" once a fresh bootstrap is underway.
     const { deps } = fakeDeps();
     const first = await getChannel('prod-redead', {}, deps);
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
@@ -2302,6 +2303,165 @@ describe('companion transport status (WARDEN-878)', () => {
     resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
+  });
+});
+
+// WARDEN-1430 — a channel DEATH reconciles the per-host status. Until now
+// `active` was a high-water mark: written by the bootstrap transitions, never
+// cleared when the ssh channel exited, so an idle host rendered the working
+// green dot indefinitely (the defect WARDEN-1324's pingProbe routed around).
+// The fix rides the WARDEN-1295 onDead seam, registered in getChannel's
+// success path. This suite pins the reconciliation AND the three hazards the
+// ticket names: torn-down hosts must not be resurrected (uninstall +
+// exclusion release), superseded bootstraps must not register, and the
+// death write must keep the exact-shape status contract.
+describe('companion status reconciles on channel death (WARDEN-1430)', () => {
+  let savedEnv;
+  let savedExclusionEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+    applyCompanionExclusions([]);
+    _resetChannelCacheForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+    else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
+    applyCompanionExclusions([]);
+    _resetChannelCacheForTests();
+  });
+
+  const deathTransportDeps = () => {
+    let t;
+    const { deps } = fakeDeps({
+      spawnChannel: () => { t = healthyTransport(); return t; },
+    });
+    return { deps, transport: () => t };
+  };
+
+  it('a channel dying via transport exit reconciles the stale active to error', async () => {
+    const { deps, transport } = deathTransportDeps();
+    await getChannel('prod-death', {}, deps);
+    assert.deepStrictEqual(getCompanionStatus('prod-death'), { state: 'active', version: TEST_VER },
+      'precondition: the bootstrap stamped active');
+    transport()._die(new Error('ssh exited')); // the ssh process exits on its own
+    const status = getCompanionStatus('prod-death');
+    assert.strictEqual(status.state, 'error',
+      'the surface stops asserting a transport that is gone — no stale-active window');
+    assert.ok(status.lastError.includes('prod-death'), 'names the host');
+    assert.ok(/died/.test(status.lastError), `says the channel DIED: ${status.lastError}`);
+    assert.ok(status.lastError.includes('ssh exited'), 'carries the death cause');
+    assert.ok(typeof status.lastErrorAt === 'number' && status.lastErrorAt > 0, 'lastErrorAt is an epoch-ms stamp');
+    assert.ok(Date.now() - status.lastErrorAt < 5000, 'lastErrorAt is recent');
+    assert.ok(!('version' in status), 'a dead channel carries no version');
+  });
+
+  it('a channel dying via kill() reconciles too (both death paths funnel through _die)', async () => {
+    const { deps } = deathTransportDeps();
+    const ch = await getChannel('prod-kill', {}, deps);
+    assert.strictEqual(getCompanionStatus('prod-kill').state, 'active', 'precondition: active');
+    ch.kill();
+    const status = getCompanionStatus('prod-kill');
+    assert.strictEqual(status.state, 'error', 'kill() is a death the status map learns about');
+    assert.ok(/died/.test(status.lastError), status.lastError);
+  });
+
+  it('onDead fires immediately for an ALREADY-dead channel (the late-registration seam property)', async () => {
+    // Load-bearing for the status listener: if a channel dies in the gap
+    // between its bootstrap ping and getChannel's registration, the seam must
+    // still deliver the death. (WARDEN-1295 contract, pinned here because the
+    // reconciliation depends on it.)
+    const t = fakeTransport(() => null);
+    const ch = new CompanionChannel('h', t);
+    t._die(new Error('early exit'));
+    const seen = [];
+    ch.onDead((err) => seen.push(err.message));
+    assert.deepStrictEqual(seen, ['early exit'], 'fires immediately, with the death cause');
+    ch.onDead((err) => seen.push(`again:${err.message}`));
+    assert.deepStrictEqual(seen, ['early exit', 'again:early exit'],
+      'a late registration on a dead channel is also served immediately');
+  });
+
+  it('a death landing right after the bootstrap ping is never buried by the active stamp', async () => {
+    // The worst ordering: the transport exits in the same tick the ping
+    // answers, after the response but before any observer can look. The
+    // success path must stamp active and register the listener in an order
+    // where the subsequent death still wins (registration AFTER the active
+    // write — see the ordering comment in getChannel).
+    let t;
+    const { deps } = fakeDeps({
+      spawnChannel: () => {
+        t = fakeTransport((req) => {
+          if (req.method !== 'ping') return { id: req.id, ok: false, error: 'unknown method' };
+          // answer the bootstrap ping, then die on the NEXT tick — after the
+          // response macrotask has delivered and the success path has run.
+          setImmediate(() => setImmediate(() => t._die(new Error('ssh exited'))));
+          return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping'] } };
+        });
+        return t;
+      },
+    });
+    await getChannel('prod-late', {}, deps);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(getCompanionStatus('prod-late').state, 'error',
+      'the death reconciles even when it lands immediately after the active write');
+  });
+
+  it('uninstall does not resurrect: kill-then-delete leaves the host dark (WARDEN-882 ordering vs this death write)', async () => {
+    const { deps } = deathTransportDeps();
+    const ch = await getChannel('prod-uninst', {}, deps);
+    assert.strictEqual(getCompanionStatus('prod-uninst').state, 'active', 'precondition: active');
+    const res = await uninstallCompanion('prod-uninst', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+    });
+    assert.strictEqual(res.ok, true, 'precondition: the uninstall script ran');
+    assert.strictEqual(ch.dead, true, 'the uninstall killed the channel (its death listener ran)');
+    assert.strictEqual(_channelCacheHasForTests('prod-uninst'), false, 'cache entry gone');
+    assert.deepStrictEqual(getCompanionStatus('prod-uninst'), { state: 'inactive' },
+      'the death write must not survive — let alone resurrect — a deliberately removed host');
+  });
+
+  it('exclusion release does not resurrect: delete-before-kill writes nothing the map keeps', async () => {
+    const { deps } = deathTransportDeps();
+    const ch = await getChannel('prod-excl', {}, deps);
+    assert.strictEqual(getCompanionStatus('prod-excl').state, 'active', 'precondition: active');
+
+    applyCompanionExclusions(['prod-excl']); // releaseExcludedHostState: cache delete → kill → status delete
+    assert.strictEqual(ch.dead, true, 'the released channel was killed');
+    assert.deepStrictEqual(getCompanionStatus('prod-excl'), { state: 'inactive', reason: 'excluded-by-setting' },
+      'the exclusion reads through while it holds');
+
+    applyCompanionExclusions([]); // lift the exclusion — expose the RAW map underneath
+    assert.deepStrictEqual(getCompanionStatus('prod-excl'), { state: 'inactive' },
+      'no death error was resurrected for the host the user excluded');
+  });
+
+  it('a superseded bootstrap registers no death listener: its kill writes nothing (twin of the WARDEN-1390 release race)', async () => {
+    let resolveProbe;
+    let firstRun = true;
+    const { deps } = fakeDeps({
+      run: () => firstRun
+        ? (firstRun = false, new Promise((resolve) => { resolveProbe = resolve; }))
+        : Promise.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }),
+    });
+    const pending = getChannel('prod-twin', {}, deps); // bootstrap in flight
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(getCompanionStatus('prod-twin').state, 'bootstrapping', 'precondition: in flight');
+
+    applyCompanionExclusions(['prod-twin']); // the release drops the in-flight promise
+    resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+    await pending; // the twin settles: identity check fails → killed WITHOUT registering
+    applyCompanionExclusions([]); // lift the exclusion so the raw map is readable
+    assert.strictEqual(_channelCacheHasForTests('prod-twin'), false, 'no cache entry');
+    assert.deepStrictEqual(getCompanionStatus('prod-twin'), { state: 'inactive' },
+      'the killed twin stamped NOTHING — no resurrected active (the WARDEN-1390 bug) '
+      + 'and no death error (this ticket)');
   });
 });
 describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => {
@@ -3170,7 +3330,7 @@ describe('pingProbe() — reachability over a live channel, never a bootstrap (W
     assert.strictEqual(getCompanionStatus('never-engaged-host').state, 'inactive');
   });
 
-  it('TRAP: the dead-channel window declines WITHOUT re-bootstrapping (status is a high-water mark)', async () => {
+  it('TRAP: the dead-channel window declines WITHOUT re-bootstrapping (the status reconciles; the probe still does not heal)', async () => {
     let t;
     let spawns = 0; // counted here: the override replaces fakeDeps' counting spawnChannel
     const { deps } = fakeDeps({
@@ -3180,9 +3340,12 @@ describe('pingProbe() — reachability over a live channel, never a bootstrap (W
           : { id: req.id, ok: false, error: 'unknown method' })); return t; },
     });
     await getChannel('prod', {}, deps); // bootstrap: live channel + status 'active'
-    t._die(new Error('ssh exited'));    // the channel dies — companionStatus is NOT reconciled
-    assert.strictEqual(getCompanionStatus('prod').state, 'active',
-      'the stale-active window is real: status still says active');
+    t._die(new Error('ssh exited'));    // the channel dies — WARDEN-1430: the status map RECONCILES now
+    const status = getCompanionStatus('prod');
+    assert.strictEqual(status.state, 'error',
+      'the surface stops asserting a transport that is gone (the pre-WARDEN-1430 stale-active window is closed)');
+    assert.ok(/died/.test(status.lastError),
+      `the message says the channel DIED, not that a bootstrap failed: ${status.lastError}`);
     const res = await pingProbe('prod');
     assert.strictEqual(res, null, 'declines in the window instead of bootstrapping');
     assert.strictEqual(spawns, 1, 'NO re-bootstrap was triggered by the probe');
