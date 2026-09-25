@@ -67,7 +67,8 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, resetObsPrefDefaults } =
-  await import(join(tmpDir, 'storage.mjs'));const { createUiStore, uiStore } = await import(join(tmpDir, 'uiStore.mjs'));
+  await import(join(tmpDir, 'storage.mjs'));
+const { createUiStore, uiStore } = await import(join(tmpDir, 'uiStore.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 

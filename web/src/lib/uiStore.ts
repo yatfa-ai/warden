@@ -64,14 +64,6 @@ import type { Theme, TerminalColorScheme } from '@/lib/theme';
 import type { Density } from '@/lib/density';
 
 /**
- * The shared client-state slice. One field + its setter per migrated pref.
- *
- * SCOPE DISCIPLINE: this holds only prefs that are genuinely SHARED across
- * distant surfaces. A value read by exactly one component stays a `useState`
- * there (WARDEN-832: "ephemeral component state → useState") — moving it here
- * would buy nothing and cost a global re-render.
- */
-/**
  * A pref write that may either REPLACE the whole value or derive the next one
  * from the current (the functional form). The functional half exists for the
  * Observer filter shapes: ObserverTabs' seven spread-updater adapters each
@@ -84,6 +76,14 @@ import type { Density } from '@/lib/density';
  */
 export type ValueOrUpdater<T> = T | ((prev: T) => T);
 
+/**
+ * The shared client-state slice. One field + its setter per migrated pref.
+ *
+ * SCOPE DISCIPLINE: this holds only prefs that are genuinely SHARED across
+ * distant surfaces. A value read by exactly one component stays a `useState`
+ * there (WARDEN-832: "ephemeral component state → useState") — moving it here
+ * would buy nothing and cost a global re-render.
+ */
 export interface UiStoreState {
   /**
    * The user-authored instruction library (WARDEN-323). Read by the pane
