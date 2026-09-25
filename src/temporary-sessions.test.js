@@ -174,4 +174,64 @@ describe('temporary shell sessions — unnamed spawn, unlisted, saveable (WARDEN
     await (await fetch(`${baseUrl}/api/discover?host=${encodeURIComponent('(local)')}`)).json();
     assert.ok(readCatalog().some((e) => e.session === `${RUN}deadsaved`), 'a dead saved session is kept for respawn');
   });
+
+  it('a FAILED local aliveness probe keeps the temporary entry (unknown is not stopped)', async () => {
+    // The GC gate (WARDEN-1422 rework review finding): list-sessions failing —
+    // broken tmux, spawn error, connect blip — reports NOTHING. Its empty set
+    // is "could not ask", never "confirmed stopped"; GC-ing on it stripped
+    // RUNNING unnamed shells from chats.json, leaving live panes unresolvable
+    // and unsavable. Injected seam: the probe fails → the entry must survive.
+    const { discoverHost } = await import('./chats.js');
+    seedCatalog([
+      { kind: 'tmux', host: '(local)', session: `${RUN}probeless`, name: `${RUN}probeless`, cwd: '/tmp', cmd: '', temporary: true },
+    ]);
+    await discoverHost('(local)', {}, { localAliveSessions: async () => ({ ok: false, alive: new Set() }) });
+    assert.ok(readCatalog().some((e) => e.session === `${RUN}probeless`), 'a failed local probe must not GC the temporary entry');
+  });
+
+  it('a failed REMOTE probe keeps the temporary entry and reads unknown, not stopped', async () => {
+    // Remote seam of the same gate: discover() answers (host reachable) but the
+    // has-session probe blips — the exact split the old code flattened into
+    // "every entry dead". discoverManual must hydrate active: null (the
+    // toCatalogChat unknown model), and the GC (strict === false) must skip it.
+    const { discoverHost } = await import('./chats.js');
+    const HOST = 'w1422-remote-host';
+    seedCatalog([
+      { kind: 'tmux', host: HOST, session: `${RUN}rmt`, name: `${RUN}rmt`, cwd: '/tmp', cmd: '', temporary: true },
+    ]);
+    const deps = {
+      discover: async () => ({ host: HOST, ok: true, chats: [] }),
+      // Pin the DEFAULT transport (the boot-applied persisted toggle would
+      // otherwise route the probe over the companion channel, where it has no
+      // seam): the probe rides runWithPool, which we fail on purpose.
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: false, code: 255, stdout: '', stderr: 'ssh: transient blip' }),
+    };
+    const { chats } = await discoverHost(HOST, {}, deps);
+    assert.ok(readCatalog().some((e) => e.session === `${RUN}rmt`), 'a failed remote probe must not GC the temporary entry');
+    const chat = chats.find((c) => c.session === `${RUN}rmt`);
+    assert.ok(chat, 'the entry still resolves');
+    assert.equal(chat.active, null, 'an unanswered probe reads unknown (null), not stopped (false)');
+  });
+
+  it('an ANSWERED remote probe that reports the session dead still GCs the temporary entry', async () => {
+    // Positive control for the gate above: a SUCCESSFUL probe positively
+    // reporting the session gone is still "temporary + stopped → gone
+    // permanently". The happy-dead path keeps working.
+    const { discoverHost } = await import('./chats.js');
+    const HOST = 'w1422-remote-host';
+    seedCatalog([
+      { kind: 'tmux', host: HOST, session: `${RUN}rmtdead`, name: `${RUN}rmtdead`, cwd: '/tmp', cmd: '', temporary: true },
+    ]);
+    const deps = {
+      discover: async () => ({ host: HOST, ok: true, chats: [] }),
+      // Same transport pin as above: the probe must ride the injected
+      // runWithPool seam, not the companion channel.
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, code: 0, stdout: `0 ${RUN}rmtdead\n`, stderr: '' }),
+    };
+    const { chats } = await discoverHost(HOST, {}, deps);
+    assert.ok(!readCatalog().some((e) => e.session === `${RUN}rmtdead`), 'a positively-answered dead temporary is still gone for good');
+    assert.ok(!chats.some((c) => c.session === `${RUN}rmtdead`), 'the dead temp does not ride the response either');
+  });
 });
