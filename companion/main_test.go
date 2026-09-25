@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -805,11 +804,11 @@ func TestExecScript(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unparseable pid %q: %v", pidBytes, err)
 		}
-		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+		if processAlive(pid) {
 			// Best-effort cleanup in the failure case, so a broken kill leaves
 			// nothing behind in CI.
-			syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatalf("the timed-out probe's work process (pid %d) survived the group kill: %v — the exact orphan WARDEN-1261 forbids", pid, err)
+			killTestProcess(pid)
+			t.Fatalf("the timed-out probe's work process (pid %d) survived the group kill — the exact orphan WARDEN-1261 forbids", pid)
 		}
 	})
 

@@ -630,6 +630,9 @@ describe('stale-binary / no-PTY gate (WARDEN-1295 AC #5/#6, WARDEN-933 disciplin
     assert.ok(msg.includes('~/.warden/companion-abc123'), `names the exact path to remove: ${msg}`);
     assert.ok(msg.includes('WARDEN_COMPANION_TRANSPORT=0'), `tells the user how to reach the default SSH path: ${msg}`);
     assert.ok(/windows/i.test(msg), `explains the platform case (a windows host cannot allocate a PTY): ${msg}`);
+    // WARDEN-1437: the Windows case is now SCOPED — only pre-1809 Windows lacks
+    // ConPTY, so the message must say so instead of excluding every Windows host.
+    assert.ok(/older than 10 1809/i.test(msg), `scopes the Windows case to pre-1809 (10 1809+ hosts allocate a ConPTY and attach fine): ${msg}`);
   });
 
   it('attachSession THROWS SYNCHRONOUSLY on a live channel whose binary lacks attachStart', () => {

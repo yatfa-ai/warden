@@ -407,10 +407,11 @@ export function attachArgs(chat, cfg) {
 // `docker exec -it <container> ` prefix). One builder, both paths.
 //
 // LOCAL never routes through the companion (attachLocalTmux owns it). A stale
-// binary — or a host whose companion cannot allocate a PTY at all (windows) —
-// does NOT advertise attachStart, and the companion client THROWS the actionable
-// too-old/unsupported error rather than silently falling back to raw SSH: the
-// throw surfaces through server.js's existing attach_error path. Deliberately no
+// binary — or a host whose companion cannot allocate a PTY at all (pre-1809
+// Windows has no ConPTY) — does NOT advertise attachStart, and the companion
+// client THROWS the actionable too-old/unsupported error rather than silently
+// falling back to raw SSH: the throw surfaces through server.js's existing
+// attach_error path. Deliberately no
 // {unsupported} degradation here (same call as exec, WARDEN-1261): a silent
 // per-open fallback would re-pay the handshake this slice removes while the
 // toggle reads "on".

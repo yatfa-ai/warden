@@ -1,5 +1,5 @@
 {
-  "version": "36b7ac4f06ee",
+  "version": "01f7def4e772",
   "binaries": {
     "linux/amd64": "warden-companion-linux-amd64",
     "linux/arm64": "warden-companion-linux-arm64",

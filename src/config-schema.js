@@ -393,8 +393,9 @@ export const CONFIG_FIELDS = [
     resolve: 'arrayOrEmpty',
     order: 19,
     // Per-host companion-transport opt-out (WARDEN-1390). The toggle above is
-    // fleet-global, but the reason to opt out is per-host: a Windows companion
-    // can never carry a host-side PTY (companion/pty_windows.go), and the
+    // fleet-global, but the reason to opt out is per-host: a host whose
+    // companion reports no PTY (pre-1809 Windows has no ConPTY,
+    // companion/pty_windows.go), and the
     // user must be able to exclude exactly that host while every other host
     // keeps riding the channel. Each entry is a bare SSH host alias, matched
     // exactly against the host string the routing sites hold (the same bare

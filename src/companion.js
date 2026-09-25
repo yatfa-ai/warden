@@ -66,12 +66,12 @@ export function applyCompanionToggle(enabled, { override = false, env = process.
 
 // ------------------- per-host exclusion (WARDEN-1390) -----------------------
 // The transport toggle is FLEET-GLOBAL, but the reason to opt a host out is
-// PER-HOST: a Windows companion can never carry a host-side PTY
-// (companion/pty_windows.go hostPTYSupported=false — no pure-Go ConPTY, and CGO
-// would break the dependency-free-static-binary boundary), so the user must be
-// able to exclude exactly that host while every other host keeps riding the
-// channel. `companionExcludedHosts` (persisted config, default []) is that
-// per-host opt-out.
+// PER-HOST: a host whose companion reports no PTY — pre-1809 Windows has no
+// ConPTY (companion/pty_windows.go gates attach* on a runtime
+// CreatePseudoConsole lookup) — cannot serve an interactive attach over the
+// channel, so the user must be able to exclude exactly that host while every
+// other host keeps riding the channel. `companionExcludedHosts` (persisted
+// config, default []) is that per-host opt-out.
 //
 // The exclusion rides the SAME env-var runtime channel the toggle drives
 // (WARDEN_COMPANION_EXCLUDED_HOSTS, comma-separated), so every routing site
@@ -1995,14 +1995,15 @@ export function encodeAttachInput(s) {
 }
 
 // The actionable too-old / unsupported-platform message. ONE builder so the
-// stale-binary case and the no-host-PTY case (a windows companion omits attach*
-// from its ping methods — pty_windows.go) read identically: both are "this
-// companion does not advertise the attach RPCs", and both must tell the user how
-// to get back to the default SSH path. (WARDEN-933 discipline.)
+// stale-binary case and the no-host-PTY case (a host whose companion reports no
+// PTY — pre-1809 Windows omits attach* from its ping methods, pty_windows.go)
+// read identically: both are "this companion does not advertise the attach
+// RPCs", and both must tell the user how to get back to the default SSH path.
+// (WARDEN-933 discipline.)
 export function attachUnsupportedMessage(host, methods, version) {
   return `companion binary on ${host} is too old or cannot serve an attach: it does not advertise the 'attachStart' RPC (ping methods: ${(methods || []).join(', ') || 'none'}). ` +
     `If the binary is stale, remove ~/.warden/companion-${version} on the host and retry so the bootstrap re-uploads the current one. ` +
-    `If the host is Windows the companion cannot allocate a PTY there — exclude this host in Settings → Performance ("Companion excluded hosts") to attach over the default SSH path (the fleet-global WARDEN_COMPANION_TRANSPORT=0 toggle also works, but turns the channel off for every host).`;
+    `If the host is Windows older than 10 1809 it has no ConPTY and the companion cannot allocate a PTY there — exclude this host in Settings → Performance ("Companion excluded hosts") to attach over the default SSH path (the fleet-global WARDEN_COMPANION_TRANSPORT=0 toggle also works, but turns the channel off for every host).`;
 }
 
 // CompanionAttachSession is the IPty-compatible handle attachSession() returns.
@@ -2264,9 +2265,9 @@ export class CompanionAttachSession {
 // failure modes are therefore all decidable here:
 //   • host unreachable / bootstrap failed → the PROBE already returned
 //     host_unreachable and server.js never reached attachStream.
-//   • binary too old, or a windows host that cannot allocate a PTY (its
-//     pty_windows.go build omits attach* from the advertised methods) → caught
-//     here, synchronously, with the actionable message.
+//   • binary too old, or a host whose companion reports no PTY (pre-1809
+//     Windows has no ConPTY; such a host omits attach* from the advertised
+//     methods) → caught here, synchronously, with the actionable message.
 // Anything not decidable yet (no cached channel, methods not yet known) simply
 // passes; the async path then settles it as an exit. Never guesses.
 export function attachPreflight(host, deps = {}) {
