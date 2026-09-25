@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -65,10 +63,16 @@ import (
 // the writer end open past the child's own death, so an exit that never goes
 // through Kill would otherwise never EOF the reader), and Wait as the
 // once-guarded backstop. Wait (running on the pump goroutine, after its Read
-// has already returned) is the only site that closes the reader's own end,
-// and it closes the proc/job handles only after BOTH waits on the process
-// handle have completed, so no handle value is ever closed twice or reused
-// underneath us. ClosePseudoConsole is additionally guarded by pcMu + closed
+// has already returned) is the only site that closes the reader's own end.
+// HANDLE LIFETIMES, structural not procedural: the process-exit watcher is
+// the ONLY goroutine that ever waits on the process handle, because closing
+// a kernel handle under a pending WaitForSingleObject is undefined
+// behaviour, and a handle closed and recycled underneath a second waiter
+// that then never signals leaks that goroutine and pins its OS thread. So
+// Wait never calls WaitForSingleObject — it blocks on p.exited, the channel
+// the watcher closes the instant its wait returns — and the proc/job handles
+// are closed only after that, so no handle value is ever closed twice or
+// waited on underneath a close. ClosePseudoConsole is additionally guarded by pcMu + closed
 // so an attachResize arriving in the window between teardown and the pump's
 // attachExit refuses instead of touching a freed HPCON.
 
@@ -150,6 +154,15 @@ type conPTY struct {
 	ioOnce sync.Once   // guards shutdownIO: job terminate + console close + input-pipe close
 	pcMu   sync.Mutex  // guards pc's liveness: shutdownIO closes it exactly once, Resize refuses once closed
 	closed bool        // teardown has run (read/written only under pcMu)
+
+	// exited is the watcher→Wait handoff: the process-exit watcher closes it
+	// the instant its WaitForSingleObject returns, so Wait — the only OTHER
+	// consumer of the process handle — proceeds strictly after that wait has
+	// fully completed. The watcher is therefore the only goroutine that ever
+	// waits on the handle (see the header: close-under-pending-wait is
+	// undefined behaviour), and the handles Wait closes below are closed only
+	// once no waiter can still be inside the kernel call.
+	exited chan struct{}
 }
 
 // startHostPTY allocates a host-side ConPTY, runs `bash -c <script>` under it
@@ -248,31 +261,14 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 	}
 
 	// TERM parity with the unix twin: same env as this process plus TERM, so
-	// the child sees exactly what `ssh -tt` would have propagated. Any
-	// INHERITED TERM must go first: CreateProcess resolves duplicate keys by
-	// first match on Windows (os/exec dedups last-wins on unix), so an entry
-	// sshd/MSYS set would beat warden's forwarded value. Drop existing TERM
-	// entries case-insensitively before appending ours. The block itself is
-	// NUL-separated UTF-16 that MUST end in two NULs — the loop terminates
-	// each entry, and the final append terminates the whole block; without
-	// it, CreateProcess reads past the slice into adjacent heap memory until
-	// it happens to find a zero (Go's own syscall.createEnvBlock appends the
-	// same final 0). CREATE_UNICODE_ENVIRONMENT (below) tells CreateProcess
-	// which encoding it is reading.
-	var envv []string
-	for _, kv := range os.Environ() {
-		if name, _, _ := strings.Cut(kv, "="); strings.EqualFold(name, "TERM") {
-			continue
-		}
-		envv = append(envv, kv)
-	}
-	envv = append(envv, "TERM="+term)
-	var envBlock []uint16
-	for _, kv := range envv {
-		envBlock = append(envBlock, utf16.Encode([]rune(kv))...)
-		envBlock = append(envBlock, 0)
-	}
-	envBlock = append(envBlock, 0) // the block's own terminator — two NULs total at the end
+	// the child sees exactly what `ssh -tt` would have propagated. The
+	// inherited-TERM drop (case-insensitive — CreateProcess resolves
+	// duplicate keys by FIRST match on Windows), the UTF-16 encoding and the
+	// double-NUL block terminator all live in buildUnicodeEnvBlock
+	// (envblock.go — extracted so its encoding rules stay unit-testable off
+	// the windows build). CREATE_UNICODE_ENVIRONMENT (below) tells
+	// CreateProcess which encoding it is reading.
+	envBlock := buildUnicodeEnvBlock(term)
 	var envPtr *uint16
 	if len(envBlock) > 0 {
 		envPtr = &envBlock[0]
@@ -324,11 +320,27 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 	}
 	defer windows.CloseHandle(pi.Thread)
 	if err := windows.AssignProcessToJobObject(p.job, pi.Process); err != nil {
-		windows.TerminateJobObject(p.job, 1) // suspended child, tree of one — kill it
+		// Assignment failed, so the job cannot reach this child — and
+		// neither can the KILL_ON_JOB_CLOSE close in the unwind below —
+		// while the child is still SUSPENDED: it never ran, never connected
+		// to conhost, and ClosePseudoConsole does not reap it either.
+		// TerminateProcess is the only lever that reaches it here; anything
+		// less leaves a suspended bash holding its pseudoconsole attribute
+		// forever.
+		_ = windows.TerminateProcess(pi.Process, 1)
 		windows.CloseHandle(pi.Process)
 		return nil, fmt.Errorf("AssignProcessToJobObject: %w", err)
 	}
-	windows.ResumeThread(pi.Thread)
+	// Resume only NOW, once the child is inside the job — so a failed resume
+	// can still be reaped by TerminateJobObject (its tree is exactly this one
+	// process; it has run nothing). Ignoring the error instead would leave a
+	// suspended child that never exits: the natural-exit watcher would block
+	// on it forever and the pane would hang until a kill arrived.
+	if _, err := windows.ResumeThread(pi.Thread); err != nil {
+		_ = windows.TerminateJobObject(p.job, 1)
+		windows.CloseHandle(pi.Process)
+		return nil, fmt.Errorf("ResumeThread: %w", err)
+	}
 
 	p.proc = pi.Process
 
@@ -345,10 +357,19 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 	// This goroutine wakes at the child's exit and tears the session down
 	// OFF the reader goroutine — also safe on pre-24H2 builds where
 	// ClosePseudoConsole blocks until the buffer drains, because the pump
-	// keeps draining while it waits. Wait's own shutdownIO stays as the
-	// once-guarded backstop (and reads the exit code).
+	// keeps draining while it waits. It is also the ONLY goroutine that ever
+	// waits on the process handle: it closes p.exited the instant its wait
+	// returns, and Wait blocks on that channel instead of waiting on the
+	// handle itself, so a handle can never be closed underneath a pending
+	// WaitForSingleObject (undefined behaviour), nor recycled under a second
+	// waiter that would then never signal. The close comes BEFORE the
+	// teardown so Wait proceeds concurrently with it; the teardown itself is
+	// once-guarded, so the two sites order themselves. Wait's own shutdownIO
+	// stays as the once-guarded backstop (and reads the exit code).
+	p.exited = make(chan struct{})
 	go func() {
 		_, _ = windows.WaitForSingleObject(p.proc, windows.INFINITE)
+		close(p.exited) // Wait's handoff: the process-handle wait is DONE
 		p.shutdownIO()
 	}()
 
@@ -413,17 +434,22 @@ func (p *conPTY) shutdownIO() {
 // -1 after our own Kill (a job termination has no meaningful status — the
 // same convention runScriptCtx uses for a non-ExitError outcome). It runs on
 // the pump goroutine AFTER the read loop ended, so closing the reader's end
-// here cannot land under an in-flight Read, and it closes proc/job only after
-// both its wait and the watcher's wait on the process handle have completed.
-// Its own shutdownIO is the once-guarded backstop — a no-op when the
-// natural-exit watcher already ran, authoritative if it somehow did not.
+// here cannot land under an in-flight Read. It never waits on the process
+// handle itself: the natural-exit watcher is the ONLY goroutine that does —
+// a kernel handle closed under a pending WaitForSingleObject is undefined
+// behaviour, and a handle closed and recycled under a second waiter that
+// then never signals leaks that goroutine and pins its OS thread. Instead it
+// blocks on p.exited, the channel the watcher closes the moment its wait
+// returns, so the handles below are closed strictly AFTER that wait has
+// completed and no handle value is ever waited on underneath a close. Its
+// own shutdownIO is the once-guarded backstop — a no-op when the watcher
+// already ran, authoritative if it somehow did not.
 func (p *conPTY) Wait() int {
+	<-p.exited // the watcher's WaitForSingleObject has fully returned
 	code := -1
-	if event, err := windows.WaitForSingleObject(p.proc, windows.INFINITE); err == nil && event == windows.WAIT_OBJECT_0 {
-		var c uint32
-		if windows.GetExitCodeProcess(p.proc, &c) == nil {
-			code = int(c)
-		}
+	var c uint32
+	if windows.GetExitCodeProcess(p.proc, &c) == nil {
+		code = int(c)
 	}
 	p.shutdownIO()
 	// Our read already returned — this is the one safe moment to close it.
