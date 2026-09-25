@@ -71,6 +71,19 @@ import type { Density } from '@/lib/density';
  * there (WARDEN-832: "ephemeral component state → useState") — moving it here
  * would buy nothing and cost a global re-render.
  */
+/**
+ * A pref write that may either REPLACE the whole value or derive the next one
+ * from the current (the functional form). The functional half exists for the
+ * Observer filter shapes: ObserverTabs' seven spread-updater adapters each
+ * patch ONE key of a shape, and AttentionView's "Clear filters" fires two of
+ * them back-to-back inside one handler (`setHostFilter?.('all');
+ * setAgentFilter?.('all')`). A spread of a RENDER-captured value would let the
+ * second write silently restore the first key — the stale-closure regression
+ * this slice's first pass shipped and its audit caught — while a functional
+ * write is applied against the store's LIVE value, so the writes compose.
+ */
+export type ValueOrUpdater<T> = T | ((prev: T) => T);
+
 export interface UiStoreState {
   /**
    * The user-authored instruction library (WARDEN-323). Read by the pane
@@ -436,16 +449,16 @@ export interface UiStoreState {
   setObserverViewMode: (v: NonNullable<ObsUi['viewMode']>) => void;
   /** The Activity tab's type/agent/host filter shape (7 filter scalars live across the three shapes). */
   observerActivityFilters: NonNullable<ObsUi['activityFilters']>;
-  /** Replace the Activity filter shape (the tab's three Selects; App's reset). */
-  setObserverActivityFilters: (v: NonNullable<ObsUi['activityFilters']>) => void;
+  /** Replace the Activity filter shape (the tab's three Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
+  setObserverActivityFilters: (v: ValueOrUpdater<NonNullable<ObsUi['activityFilters']>>) => void;
   /** The Directives tab's agent/host filter shape. */
   observerDirectiveFilters: NonNullable<ObsUi['directiveFilters']>;
-  /** Replace the Directives filter shape (the tab's two Selects; App's reset). */
-  setObserverDirectiveFilters: (v: NonNullable<ObsUi['directiveFilters']>) => void;
+  /** Replace the Directives filter shape (the tab's two Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
+  setObserverDirectiveFilters: (v: ValueOrUpdater<NonNullable<ObsUi['directiveFilters']>>) => void;
   /** The Attention tab's agent/host filter shape. */
   observerAttentionFilters: NonNullable<ObsUi['attentionFilters']>;
-  /** Replace the Attention filter shape (the tab's two Selects; App's reset). */
-  setObserverAttentionFilters: (v: NonNullable<ObsUi['attentionFilters']>) => void;
+  /** Replace the Attention filter shape (the tab's two Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
+  setObserverAttentionFilters: (v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>) => void;
 }
 
 /**
@@ -665,13 +678,37 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setObserverViewMode: (observerViewMode) => set({ observerViewMode }),
     observerActivityFilters:
       seed.observerActivityFilters ?? persistedObs.activityFilters ?? obsDefaults.activityFilters,
-    setObserverActivityFilters: (observerActivityFilters) => set({ observerActivityFilters }),
+    // The three filter setters take ValueOrUpdater: the functional form is what
+    // ObserverTabs' spread-updater adapters rely on to compose back-to-back
+    // partial writes (AttentionView's "Clear filters" fires two adapters in one
+    // handler) — each functional write is applied against the store's LIVE
+    // value, never a render-captured copy. App's reset passes whole shapes, the
+    // other half of the union.
+    setObserverActivityFilters: (observerActivityFilters) =>
+      set((s) => ({
+        observerActivityFilters:
+          typeof observerActivityFilters === 'function'
+            ? observerActivityFilters(s.observerActivityFilters)
+            : observerActivityFilters,
+      })),
     observerDirectiveFilters:
       seed.observerDirectiveFilters ?? persistedObs.directiveFilters ?? obsDefaults.directiveFilters,
-    setObserverDirectiveFilters: (observerDirectiveFilters) => set({ observerDirectiveFilters }),
+    setObserverDirectiveFilters: (observerDirectiveFilters) =>
+      set((s) => ({
+        observerDirectiveFilters:
+          typeof observerDirectiveFilters === 'function'
+            ? observerDirectiveFilters(s.observerDirectiveFilters)
+            : observerDirectiveFilters,
+      })),
     observerAttentionFilters:
       seed.observerAttentionFilters ?? persistedObs.attentionFilters ?? obsDefaults.attentionFilters,
-    setObserverAttentionFilters: (observerAttentionFilters) => set({ observerAttentionFilters }),
+    setObserverAttentionFilters: (observerAttentionFilters) =>
+      set((s) => ({
+        observerAttentionFilters:
+          typeof observerAttentionFilters === 'function'
+            ? observerAttentionFilters(s.observerAttentionFilters)
+            : observerAttentionFilters,
+      })),
   }));
 }
 
@@ -1194,7 +1231,9 @@ export function useObserverActivityFilters(): NonNullable<ObsUi['activityFilters
 }
 
 /** The Activity filter-shape setter (the tab's three Selects; App's reset). Stable across renders. */
-export function useSetObserverActivityFilters(): (v: NonNullable<ObsUi['activityFilters']>) => void {
+export function useSetObserverActivityFilters(): (
+  v: ValueOrUpdater<NonNullable<ObsUi['activityFilters']>>,
+) => void {
   return useUiStore((s) => s.setObserverActivityFilters);
 }
 
@@ -1204,7 +1243,9 @@ export function useObserverDirectiveFilters(): NonNullable<ObsUi['directiveFilte
 }
 
 /** The Directives filter-shape setter (the tab's two Selects; App's reset). Stable across renders. */
-export function useSetObserverDirectiveFilters(): (v: NonNullable<ObsUi['directiveFilters']>) => void {
+export function useSetObserverDirectiveFilters(): (
+  v: ValueOrUpdater<NonNullable<ObsUi['directiveFilters']>>,
+) => void {
   return useUiStore((s) => s.setObserverDirectiveFilters);
 }
 
@@ -1214,6 +1255,8 @@ export function useObserverAttentionFilters(): NonNullable<ObsUi['attentionFilte
 }
 
 /** The Attention filter-shape setter (the tab's two Selects; App's reset). Stable across renders. */
-export function useSetObserverAttentionFilters(): (v: NonNullable<ObsUi['attentionFilters']>) => void {
+export function useSetObserverAttentionFilters(): (
+  v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>,
+) => void {
   return useUiStore((s) => s.setObserverAttentionFilters);
 }

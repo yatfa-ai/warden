@@ -102,22 +102,26 @@ export function ObserverTabs({ focusedChat, onReconnectChat, observerAutoStart, 
   const setAttentionFilters = useSetObserverAttentionFilters();
   // The children keep their exact controlled-prop contract — scalar value plus a
   // `(v: string) => void` setter — through these spread-updater adapters, so the
-  // three tab components are untouched. Each spreads the STORE's current shape —
-  // captured fresh per render, since this component re-renders whenever any of
-  // the four store values it subscribes to changes — and replaces the parent
-  // object on every scalar write, which is precisely the per-key change signal
-  // the saveObs effect's Object.values dep array reads. No useCallback: the
-  // three tab children are unmemoized function components and no effect keys on
-  // these identities, so per-render closures cost nothing (the former
+  // three tab components are untouched. Each adapter is a FUNCTIONAL write
+  // (`(p) => ({ ...p, key: v })`): the store applies it against its LIVE value,
+  // so back-to-back adapter calls in one handler COMPOSE — AttentionView's
+  // "Clear filters" (`setHostFilter?.('all'); setAgentFilter?.('all')`) must
+  // land both keys, and a spread of a render-captured shape would let the
+  // second write silently restore the first (the stale-closure regression this
+  // slice's first pass shipped; caught in the WARDEN-1441 audit). The write
+  // still replaces the parent object, which is precisely the per-key change
+  // signal the saveObs effect's Object.values dep array reads. No useCallback:
+  // the three tab children are unmemoized function components and no effect
+  // keys on these identities, so per-render closures cost nothing (the former
   // useState-setter stability guarantee became a zustand-action guarantee one
   // hop down, inside the store setters themselves).
-  const setActTypeFilter = (v: string) => setActivityFilters({ ...activityFilters, type: v });
-  const setActAgentFilter = (v: string) => setActivityFilters({ ...activityFilters, agent: v });
-  const setActHostFilter = (v: string) => setActivityFilters({ ...activityFilters, host: v });
-  const setDirAgentFilter = (v: string) => setDirectiveFilters({ ...directiveFilters, agent: v });
-  const setDirHostFilter = (v: string) => setDirectiveFilters({ ...directiveFilters, host: v });
-  const setAttnAgentFilter = (v: string) => setAttentionFilters({ ...attentionFilters, agent: v });
-  const setAttnHostFilter = (v: string) => setAttentionFilters({ ...attentionFilters, host: v });
+  const setActTypeFilter = (v: string) => setActivityFilters((p) => ({ ...p, type: v }));
+  const setActAgentFilter = (v: string) => setActivityFilters((p) => ({ ...p, agent: v }));
+  const setActHostFilter = (v: string) => setActivityFilters((p) => ({ ...p, host: v }));
+  const setDirAgentFilter = (v: string) => setDirectiveFilters((p) => ({ ...p, agent: v }));
+  const setDirHostFilter = (v: string) => setDirectiveFilters((p) => ({ ...p, host: v }));
+  const setAttnAgentFilter = (v: string) => setAttentionFilters((p) => ({ ...p, agent: v }));
+  const setAttnHostFilter = (v: string) => setAttentionFilters((p) => ({ ...p, host: v }));
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);

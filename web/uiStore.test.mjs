@@ -2108,6 +2108,24 @@ test('DEAD-LINK REGRESSION (WARDEN-880): writing the same view mode the manual s
   store.getState().setObserverViewMode('activity');  // "View Activity" deep-link #2 — must win
   assert.equal(store.getState().observerViewMode, 'activity');
 });
+test('STALE-CLOSURE REGRESSION (the Clear-filters audit): two consecutive partial writes through the adapter pattern COMPOSE', () => {
+  reset();
+  // ObserverTabs’ seven spread-updater adapters are functional writes —
+  // exactly the `(p) => ({ ...p, key: v })` shape below — because one handler
+  // can fire TWO of them back-to-back: AttentionView’s clearFilters runs
+  // `setHostFilter?.('all'); setAgentFilter?.('all')`. A spread of a
+  // RENDER-captured shape (the first pass’s bug, caught in the WARDEN-1441
+  // audit) let the second write silently restore the first key: from
+  // {agent:'a1', host:'h1'}, clearFilters landed {agent:'all', host:'h1'} —
+  // still filtered by host, still showing the empty state.
+  const store = createUiStore({ observerAttentionFilters: { agent: 'a1', host: 'h1' } });
+  // getState() re-reads before AND after: each set replaces the store’s
+  // state object, so a snapshot held across the writes is itself stale — the
+  // very failure mode this test pins, at one level up.
+  store.getState().setObserverAttentionFilters((p) => ({ ...p, host: 'all' }));   // setHostFilter?.('all')
+  store.getState().setObserverAttentionFilters((p) => ({ ...p, agent: 'all' }));  // setAgentFilter?.('all')
+  assert.deepEqual(store.getState().observerAttentionFilters, { agent: 'all', host: 'all' });
+});
 test('the Settings-reset path snaps all four through the store-backed setters (the slice-15 shape of App\u2019s obsResetSetters sweep)', () => {
   reset();
   saveObs({
