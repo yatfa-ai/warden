@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -59,11 +60,17 @@ import (
 // ever closes the reader's end underneath it — shutdownIO ends the conhost
 // session via ClosePseudoConsole, which closes the WRITER end the conhost
 // holds, and the blocked ReadFile then fails with a broken pipe on its own.
-// Wait (running on the pump goroutine, after its Read has already returned) is
-// the only site that closes the reader's own end and the kernel handles no
-// other goroutine touches, with every close either once-guarded or exclusive
-// to one goroutine, so no handle value is ever closed twice or reused
-// underneath us.
+// THREE sites reach shutdownIO, and ioOnce makes the order of arrival
+// irrelevant: Kill, the natural-exit WATCHER (see newConPTY — conhost holds
+// the writer end open past the child's own death, so an exit that never goes
+// through Kill would otherwise never EOF the reader), and Wait as the
+// once-guarded backstop. Wait (running on the pump goroutine, after its Read
+// has already returned) is the only site that closes the reader's own end,
+// and it closes the proc/job handles only after BOTH waits on the process
+// handle have completed, so no handle value is ever closed twice or reused
+// underneath us. ClosePseudoConsole is additionally guarded by pcMu + closed
+// so an attachResize arriving in the window between teardown and the pump's
+// attachExit refuses instead of touching a freed HPCON.
 
 var conptyKernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
@@ -141,6 +148,8 @@ type conPTY struct {
 
 	killed atomic.Bool // a Kill happened — Wait settles -1, never the job's exit code
 	ioOnce sync.Once   // guards shutdownIO: job terminate + console close + input-pipe close
+	pcMu   sync.Mutex  // guards pc's liveness: shutdownIO closes it exactly once, Resize refuses once closed
+	closed bool        // teardown has run (read/written only under pcMu)
 }
 
 // startHostPTY allocates a host-side ConPTY, runs `bash -c <script>` under it
@@ -203,8 +212,10 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 		windows.CloseHandle(outW)
 		return nil, fmt.Errorf("CreatePseudoConsole: %w", err)
 	}
-	// ConPTY holds its own references now; drop ours so the reader sees EOF
-	// the moment the conhost session ends (Kill need not chase these two).
+	// ConPTY holds its own references now; drop ours. Note the reader's EOF
+	// does NOT ride the child's death — conhost keeps the writer end open
+	// until ClosePseudoConsole runs (see the natural-exit watcher below for
+	// who guarantees that on a natural exit).
 	windows.CloseHandle(inR)
 	windows.CloseHandle(outW)
 
@@ -237,16 +248,31 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 	}
 
 	// TERM parity with the unix twin: same env as this process plus TERM, so
-	// the child sees exactly what `ssh -tt` would have propagated. The env
-	// block is NUL-separated UTF-16, double-NUL terminated, and
-	// CREATE_UNICODE_ENVIRONMENT (below) tells CreateProcess which encoding
-	// it is reading.
-	envv := append(os.Environ(), "TERM="+term)
+	// the child sees exactly what `ssh -tt` would have propagated. Any
+	// INHERITED TERM must go first: CreateProcess resolves duplicate keys by
+	// first match on Windows (os/exec dedups last-wins on unix), so an entry
+	// sshd/MSYS set would beat warden's forwarded value. Drop existing TERM
+	// entries case-insensitively before appending ours. The block itself is
+	// NUL-separated UTF-16 that MUST end in two NULs — the loop terminates
+	// each entry, and the final append terminates the whole block; without
+	// it, CreateProcess reads past the slice into adjacent heap memory until
+	// it happens to find a zero (Go's own syscall.createEnvBlock appends the
+	// same final 0). CREATE_UNICODE_ENVIRONMENT (below) tells CreateProcess
+	// which encoding it is reading.
+	var envv []string
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.EqualFold(name, "TERM") {
+			continue
+		}
+		envv = append(envv, kv)
+	}
+	envv = append(envv, "TERM="+term)
 	var envBlock []uint16
 	for _, kv := range envv {
 		envBlock = append(envBlock, utf16.Encode([]rune(kv))...)
 		envBlock = append(envBlock, 0)
 	}
+	envBlock = append(envBlock, 0) // the block's own terminator — two NULs total at the end
 	var envPtr *uint16
 	if len(envBlock) > 0 {
 		envPtr = &envBlock[0]
@@ -271,6 +297,19 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 	var siEx windows.StartupInfoEx
 	siEx.Cb = uint32(unsafe.Sizeof(siEx))
 	siEx.ProcThreadAttributeList = attr.List()
+	// STARTF_USESTDHANDLES with the hStd* handles left NULL: without it,
+	// Windows duplicates the COMPANION's own standard handles into a
+	// console-subsystem child even under a pseudoconsole (the pseudoconsole
+	// does not suppress that for non-console handles) — and our stdin/stdout
+	// are the sshd pipes carrying the JSON-RPC stream (main.go's scanner and
+	// writer). bash — MSYS bash especially, whose runtime prefers real pipe
+	// handles over the console — would then read RPC bytes off our stdin and
+	// write pane output straight into our JSON-lines stdout, corrupting the
+	// channel for EVERY op on this host, not only the attach. NULLed std
+	// handles make the CRT fall back to the attached ConPTY instead. The
+	// same thing node-pty does (src/win/conpty.cc) and Go's own
+	// syscall.StartProcess.
+	siEx.StartupInfo.Flags |= windows.STARTF_USESTDHANDLES
 	var pi windows.ProcessInformation
 	// CREATE_SUSPENDED + AssignProcessToJobObject BEFORE ResumeThread: the
 	// job owns the tree from the child's first instruction — there is no
@@ -292,6 +331,27 @@ func newConPTY(script, term string, cols, rows uint16) (*conPTY, error) {
 	windows.ResumeThread(pi.Thread)
 
 	p.proc = pi.Process
+
+	// Natural-exit WATCHER: EOF reaches the pump only when the conhost
+	// session is CLOSED, and conhost holds its end of the output pipe past
+	// the child's own death — ClosePseudoConsole is the only thing that ends
+	// it, and without this watcher nothing calls it on a natural exit (Wait
+	// cannot: it runs on the pump goroutine, only after Read has already
+	// returned — circular). A tmux detach or `kill-session`, an ordinary end
+	// that never goes through Kill, would then freeze the pane and leak the
+	// session until warden happened to send attachKill — breaking the
+	// "exactly one attachExit however the end arrives" contract
+	// (attach.go's exitOnce, which the unix twin meets by construction).
+	// This goroutine wakes at the child's exit and tears the session down
+	// OFF the reader goroutine — also safe on pre-24H2 builds where
+	// ClosePseudoConsole blocks until the buffer drains, because the pump
+	// keeps draining while it waits. Wait's own shutdownIO stays as the
+	// once-guarded backstop (and reads the exit code).
+	go func() {
+		_, _ = windows.WaitForSingleObject(p.proc, windows.INFINITE)
+		p.shutdownIO()
+	}()
+
 	ok = true
 	return p, nil
 }
@@ -301,8 +361,18 @@ func (p *conPTY) Write(b []byte) (int, error) { return p.inW.Write(b) }
 
 // Resize sets the terminal size (ResizePseudoConsole), which resizes the
 // conhost screen buffer — the ConPTY counterpart of the unix twin's
-// TIOCSWINSZ/SIGWINCH, and of `ssh -tt`'s window-change message.
+// TIOCSWINSZ/SIGWINCH, and of `ssh -tt`'s window-change message. Refuses
+// once teardown has run: the session stays registered until the pump reaches
+// attachExit, so an attachResize can legitimately arrive in that window (after
+// attachKill, or during Wait), and ResizePseudoConsole on a closed HPCON
+// would touch a dangling pointer into kernelbase — not an fd that fails
+// EBADF like the unix twin's.
 func (p *conPTY) Resize(cols, rows uint16) error {
+	p.pcMu.Lock()
+	defer p.pcMu.Unlock()
+	if p.closed {
+		return errors.New("conpty: resize refused — the session has been torn down")
+	}
 	return resizePseudoConsole(p.pc, coordDim(cols)|coordDim(rows)<<16)
 }
 
@@ -318,14 +388,22 @@ func (p *conPTY) Kill() {
 	p.shutdownIO()
 }
 
-// shutdownIO is the once-guarded teardown shared by Kill and Wait: terminate
-// the tree, end the conhost session (EOF for the reader), close our write end
-// (the dispatch loop serializes writes with Kill, so none is in flight here).
+// shutdownIO is the once-guarded teardown shared by Kill, the natural-exit
+// watcher and Wait: terminate the tree, end the conhost session (EOF for the
+// reader), close our write end (the dispatch loop serializes writes with
+// Kill, so none is in flight here). The console close and the closed stamp
+// sit under pcMu so Resize can never observe a half-torn-down session.
 func (p *conPTY) shutdownIO() {
 	p.ioOnce.Do(func() {
 		// No-op when the tree already exited; authoritative when it has not.
 		_ = windows.TerminateJobObject(p.job, 1)
-		windows.ClosePseudoConsole(p.pc) // void — releasing the conhost session
+		p.pcMu.Lock()
+		if p.pc != 0 {
+			windows.ClosePseudoConsole(p.pc) // void — releasing the conhost session
+			p.pc = 0
+		}
+		p.closed = true
+		p.pcMu.Unlock()
 		_ = p.inW.Close()
 	})
 }
@@ -335,7 +413,10 @@ func (p *conPTY) shutdownIO() {
 // -1 after our own Kill (a job termination has no meaningful status — the
 // same convention runScriptCtx uses for a non-ExitError outcome). It runs on
 // the pump goroutine AFTER the read loop ended, so closing the reader's end
-// here cannot land under an in-flight Read.
+// here cannot land under an in-flight Read, and it closes proc/job only after
+// both its wait and the watcher's wait on the process handle have completed.
+// Its own shutdownIO is the once-guarded backstop — a no-op when the
+// natural-exit watcher already ran, authoritative if it somehow did not.
 func (p *conPTY) Wait() int {
 	code := -1
 	if event, err := windows.WaitForSingleObject(p.proc, windows.INFINITE); err == nil && event == windows.WAIT_OBJECT_0 {
