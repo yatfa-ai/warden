@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type ResettableKey, type ResetUiDefaults, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, resetObsPrefDefaults, type ResettableKey, type ResetUiDefaults, type ObsResetKey, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName } from '@/lib/chatDisplay';
 import { mergeHostList } from '@/lib/hostList';
@@ -22,7 +22,7 @@ import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts, usePaneColRatios, usePaneRowRatios } from '@/lib/uiStore';
+import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts, usePaneColRatios, usePaneRowRatios, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -235,20 +235,22 @@ function App() {
   // pure, unit-tested predicate (hasReturnContent).
   const [returnedAfterAbsence, setReturnedAfterAbsence] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
-  const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention' | null>(null);
-  // WARDEN-981 — the Observer panel's half of "Reset appearance & UI
-  // preferences". The Observer's view prefs (viewMode + the 3 per-tab filter
-  // shapes) persist in a SECOND storage namespace (ObsUi / warden:observer:v1)
-  // that the UiState-derived ResettableKey reset below structurally cannot
-  // reach. The reset below does two things: rewrites the stored payload
-  // directly, and bumps this monotonically-increasing nonce so a STILL-MOUNTED
-  // panel snaps its live states to defaults with no remount. (The shipped
-  // reset fires from the full-page Settings view, which unmounts the dashboard
-  // — on return the panel re-seeds from the rewritten payload — but the nonce
-  // keeps the fix correct for any surface that resets while the dashboard is
-  // up, and for the same-value-bailout trap a repeated reset would otherwise
-  // hit: every bump is a distinct value.)
-  const [observerResetToken, setObserverResetToken] = useState(0);
+  // WARDEN-1441 (client-state slice 15): the Observer panel's four view prefs
+  // (viewMode + the 3 per-tab filter shapes) moved onto the shared uiStore — the
+  // observerViewMode/observerActivityFilters/observerDirectiveFilters/
+  // observerAttentionFilters facts — so App writes them DIRECTLY here. These
+  // setters replace two App→child command channels that each existed only
+  // because App cannot call a component's useState setter: the one-shot
+  // externalViewMode prop + its consume callback (WARDEN-880's
+  // yank/dead-link pair), and the observerResetToken nonce the Settings →
+  // Reset action bumped (WARDEN-981 — its full story lives in the reset
+  // callback below, which still applies the ObsUi defaults through this
+  // quartet). All four are zustand actions: stable identities, safe to list —
+  // or omit — in dependency arrays.
+  const setObserverViewMode = useSetObserverViewMode();
+  const setObserverActivityFilters = useSetObserverActivityFilters();
+  const setObserverDirectiveFilters = useSetObserverDirectiveFilters();
+  const setObserverAttentionFilters = useSetObserverAttentionFilters();
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   // The past-conversation whose read-only transcript is open from a global-search
   // result (WARDEN-719). Lifted to App level — NOT inside GlobalSearchDialog —
@@ -993,8 +995,11 @@ function App() {
   // The health pair's setters (setHealthGroupBy/setHealthCollapsedHosts, since
   // WARDEN-1426) are zustand actions on exactly the same terms, so the dep
   // array is left UNCHANGED for them: a store action's identity never varies,
-  // so an unlisted one cannot go stale. They join the several store-backed
-  // setters the array already omits for that reason (the standing
+  // so an unlisted one cannot go stale. The same now holds for the Observer
+  // quartet's setters (setObserverViewMode + the three filter-shape setters,
+  // since WARDEN-1441/slice 15) — they arm the obsResetSetters map below and
+  // stay out of the array for the same reason. They join the several
+  // store-backed setters the array already omits for that reason (the standing
   // exhaustive-deps warning here is about those, and this slice neither adds to
   // it nor resolves it).
   const resetUiPrefsToDefaults = useCallback(() => {
@@ -1056,18 +1061,29 @@ function App() {
     //      observer sessions are open is workspace state, exactly like
     //      workspaces/activeWorkspaceId above). This is the half the shipped
     //      flow rides: the full-page Settings view unmounts the dashboard, and
-    //      ObserverTabs re-seeds its viewMode/filter useState from loadObs() on
-    //      remount — so the panel returns from Settings already reset.
-    //   2. LIVE: bump the nonce ObserverTabs watches, so a panel that IS
-    //      mounted when the reset fires snaps viewMode + the 7 filter states to
-    //      defaults in place (they are component-local useState seeded once at
-    //      mount; without the signal a mounted panel would keep rendering the
-    //      old tab/filters). Monotonic counter → back-to-back resets are always
-    //      distinct values, immune to the same-value bailout.
-    // setObserverResetToken is a useState setter (stable identity by React
-    // contract), so it joins clearWatchedChats outside the dep array.
+    //      on return the panel (and the store's module-level seed) re-read the
+    //      rewritten payload — so the panel comes back already reset.
+    //   2. LIVE: snap the four store facts to resetObsPrefDefaults()' values, so
+    //      a panel that IS mounted when the reset fires re-renders to defaults
+    //      in place (slice 15 moved the prefs onto the uiStore — the four
+    //      setters below are the same actions ObserverTabs' tabs/Selects write
+    //      — so a direct store write replaces the retired resetToken nonce).
+    //      WARDEN-981's same-value-bailout worry dissolves with the nonce
+    //      retired: a repeated reset is just another store transition.
+    // The setter map keeps the ObsResetKey-keyed shape the live-panel half used
+    // to own (now HERE, where the reset lives), so a future ObsUi pref added to
+    // OBS_RESET_KEYS but not wired to this map is a missing-property compile
+    // error, not a reset that silently skips it. `d` is a fresh factory build,
+    // so handing its sub-objects to the store aliases nothing.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
-    setObserverResetToken((t) => t + 1);
+    const d = resetObsPrefDefaults();
+    const obsResetSetters: { [K in ObsResetKey]: () => void } = {
+      viewMode: () => setObserverViewMode(d.viewMode),
+      activityFilters: () => setObserverActivityFilters(d.activityFilters),
+      directiveFilters: () => setObserverDirectiveFilters(d.directiveFilters),
+      attentionFilters: () => setObserverAttentionFilters(d.attentionFilters),
+    };
+    for (const apply of Object.values(obsResetSetters)) apply();
   }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates, setTheme, setDensity, setPaneLayout, setAutoFocusNewPane, setRestoreOnStartup, setTerminalColorScheme]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
@@ -1620,19 +1636,17 @@ function App() {
     else toast.error(error || 'Reply failed');
   }, [prefs.notifyChatOps]);
 
+  // WARDEN-1441 (slice 15): deep-links into the Observer's Activity tab now write
+  // the shared uiStore directly (the retired externalViewMode one-shot prop made
+  // every click a null→'activity' transition only by round-tripping through a
+  // consume callback; a store write needs no such dance — a second write is a
+  // fresh transition the subscriber re-renders from, so repeated "View Activity"
+  // clicks work and a manual tab switch is never yanked back). The panel-collapse
+  // half stays App-local chrome: observerCollapsed is App's layout state.
   const openActivityTab = useCallback(() => {
     setObserverCollapsed(false);
-    setExternalViewMode('activity');
-  }, []);
-
-  // WARDEN-880 — externalViewMode is a ONE-SHOT command ObserverTabs consumes after
-  // applying, then calls this to reset it to null. Without the reset, a 2nd
-  // openActivityTab() finds externalViewMode already 'activity' (React same-value
-  // bailout → no re-render → ObserverTabs' on-change effect never fires → the click
-  // is a silent no-op). null between deep-links also keeps manual tab switches from
-  // being yanked back. Stable identity (useCallback, []) so ObserverTabs' effect deps
-  // are stable and it does not re-run every App render.
-  const consumeExternalViewMode = useCallback(() => setExternalViewMode(null), []);
+    setObserverViewMode('activity');
+  }, [setObserverViewMode]);
 
   // Focus a pane from global search / observer — routed through openChat so a
   // pane already open in another workspace switches there instead of duplicating.
@@ -2222,7 +2236,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} onExternalViewModeConsumed={consumeExternalViewMode} resetToken={observerResetToken} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
+            <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"

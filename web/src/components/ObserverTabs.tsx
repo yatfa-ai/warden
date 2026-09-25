@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import type { IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, useObserverViewMode, useSetObserverViewMode, useObserverActivityFilters, useSetObserverActivityFilters, useObserverDirectiveFilters, useSetObserverDirectiveFilters, useObserverAttentionFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
@@ -9,8 +9,8 @@ import { DirectiveHistory } from './DirectiveHistory';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EmptyState } from './EmptyState';
-import { loadObs, saveObs, resetObsPrefDefaults } from '@/lib/storage';
-import type { ObsResetKey, ObsUi } from '@/lib/storage';
+import { loadObs, saveObs } from '@/lib/storage';
+import type { ObsUi } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import {
   ContextMenu,
@@ -30,30 +30,6 @@ import type { AttentionListProps } from './AttentionList';
 import type { Chat, SessionMeta } from '@/lib/types';
 
 interface Props {
-  externalViewMode?: 'sessions' | 'activity' | 'directives' | 'attention' | null;
-  // WARDEN-880 — externalViewMode is a ONE-SHOT command, not a persistent override.
-  // App sets it (e.g. openActivityTab → 'activity') to deep-link into a tab; this
-  // component applies it once, then calls onExternalViewModeConsumed so App resets
-  // it to null. That reset is what keeps the deep-link firing on every click:
-  // without it, setExternalViewMode('activity') when it is ALREADY 'activity' is a
-  // React same-value bailout (no re-render, no effect run) so the 2nd+ click is a
-  // silent no-op. Reseting to null between deep-links also means a manual tab
-  // switch is never yanked back (the prop is null between deep-links, so the
-  // effect's `externalViewMode &&` guard short-circuits). Optional so the
-  // component degrades gracefully without it (no deep-link consumption).
-  onExternalViewModeConsumed?: () => void;
-  // WARDEN-981 — resetToken is the Observer panel's half of Settings → Reset →
-  // "Reset appearance & UI preferences": a ONE-SHOT, monotonically-increasing
-  // nonce App bumps once per reset. Deliberately NOT carried on
-  // externalViewMode: that prop only sets viewMode (the 7 filters need their own
-  // signal) and its ref-compare has a same-value bailout that a reset targeting
-  // an already-'sessions' tab would trip. A counter sidesteps both — every bump
-  // is a new value, so back-to-back resets always fire. Applying the defaults
-  // here re-renders the live panel with no reload, and the saveObs effect above
-  // persists the result (openIds/activeId states are untouched, so the open
-  // observer sessions ride through). Optional (undefined = never fires) so the
-  // component degrades gracefully unwired, like externalViewMode.
-  resetToken?: number;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
   focusedChat?: Chat | null;
@@ -88,7 +64,7 @@ interface Props {
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, resetToken, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention, issueEntries }: Props = {}) {
+export function ObserverTabs({ focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention, issueEntries }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   // WARDEN-1397 (client-state slice 10): ONE seed read of the ObsUi document.
@@ -96,40 +72,52 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
   // between this mount and the boot effect's re-read below nothing else writes
   // that key (this component's saveObs effect is booted-gated; App's only other
   // write is the Settings-page reset, which unmounts the full-page dashboard so
-  // the panel re-seeds on remount — see App's reset comment). So every persisted
-  // field initializes from this single `obsSeed` instead of re-parsing the same
-  // document once per field (the 10 per-field lazy useState seeds this replaces
-  // each cost their own JSON.parse). The seed rides as a BARE function reference
+  // the panel re-seeds on remount — see App's reset comment). Slice 15 moved the
+  // four view prefs' seeding into the uiStore's module-level seed, so `obsSeed`
+  // now initializes exactly the two workspace facts that stayed component-local:
+  // openIds/activeId. (The 10 per-field lazy useState seeds slice 10 replaced
+  // each cost their own JSON.parse.) The seed rides as a BARE function reference
   // — React's lazy initializer calls it exactly once, no arguments.
   const [obsSeed] = useState(loadObs);
   const [openIds, setOpenIds] = useState<string[]>(obsSeed.openIds);
   const [activeId, setActiveId] = useState<string | null>(obsSeed.activeId);
-  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention'>(obsSeed.viewMode || 'sessions');
-  // The three per-tab filter SHAPES as object-valued states — WARDEN-879: the
-  // Activity (type/agent/host) + Directives (agent/host) tab filters, WARDEN-971:
-  // the Attention pair — one state per persisted shape instead of seven per-field
-  // scalars. Collapsing them is what lets the saveObs effect below derive BOTH
-  // its payload AND its dep array from one compile-locked bag rather than an
-  // 11-entry hand-list. Each field defaults to 'all' when never saved, exactly as
-  // the per-field seeds did. Owned here (not in the children) so a warden restart
-  // reopens each tab with its view-shaping filters intact — mirroring how
-  // viewMode/openIds/activeId already ride this path.
-  const [activityFilters, setActivityFilters] = useState<NonNullable<ObsUi['activityFilters']>>(obsSeed.activityFilters ?? { type: 'all', agent: 'all', host: 'all' });
-  const [directiveFilters, setDirectiveFilters] = useState<NonNullable<ObsUi['directiveFilters']>>(obsSeed.directiveFilters ?? { agent: 'all', host: 'all' });
-  const [attentionFilters, setAttentionFilters] = useState<NonNullable<ObsUi['attentionFilters']>>(obsSeed.attentionFilters ?? { agent: 'all', host: 'all' });
+  // WARDEN-1441 (client-state slice 15): the four view prefs — viewMode + the
+  // three per-tab filter shapes — moved onto the shared uiStore (the
+  // observerViewMode / observerActivityFilters / observerDirectiveFilters /
+  // observerAttentionFilters facts). App's "View Activity" deep-links and the
+  // Settings → Reset action now write the store DIRECTLY, so the retired
+  // one-shot `externalViewMode` prop + `resetToken` nonce command channels are
+  // deleted (they existed precisely because App cannot call a child's useState
+  // setter; their comments document the WARDEN-880 yank/dead-link pair and the
+  // WARDEN-981 nonce). Same local names, so the obsBag save effect below is
+  // untouched; seeding and the ??-only defaults moved to createUiStore, which
+  // reads them from storage.ts (loadObs + resetObsPrefDefaults) at module seed.
+  const viewMode = useObserverViewMode();
+  const setViewMode = useSetObserverViewMode();
+  const activityFilters = useObserverActivityFilters();
+  const setActivityFilters = useSetObserverActivityFilters();
+  const directiveFilters = useObserverDirectiveFilters();
+  const setDirectiveFilters = useSetObserverDirectiveFilters();
+  const attentionFilters = useObserverAttentionFilters();
+  const setAttentionFilters = useSetObserverAttentionFilters();
   // The children keep their exact controlled-prop contract — scalar value plus a
   // `(v: string) => void` setter — through these spread-updater adapters, so the
-  // three tab components are untouched. useCallback keeps each identity as stable
-  // as the bare useState setters it replaces; the spread is what replaces the
-  // parent object on every scalar write, which is precisely the per-key change
-  // signal the saveObs effect's Object.values dep array reads.
-  const setActTypeFilter = useCallback((v: string) => setActivityFilters((p) => ({ ...p, type: v })), []);
-  const setActAgentFilter = useCallback((v: string) => setActivityFilters((p) => ({ ...p, agent: v })), []);
-  const setActHostFilter = useCallback((v: string) => setActivityFilters((p) => ({ ...p, host: v })), []);
-  const setDirAgentFilter = useCallback((v: string) => setDirectiveFilters((p) => ({ ...p, agent: v })), []);
-  const setDirHostFilter = useCallback((v: string) => setDirectiveFilters((p) => ({ ...p, host: v })), []);
-  const setAttnAgentFilter = useCallback((v: string) => setAttentionFilters((p) => ({ ...p, agent: v })), []);
-  const setAttnHostFilter = useCallback((v: string) => setAttentionFilters((p) => ({ ...p, host: v })), []);
+  // three tab components are untouched. Each spreads the STORE's current shape —
+  // captured fresh per render, since this component re-renders whenever any of
+  // the four store values it subscribes to changes — and replaces the parent
+  // object on every scalar write, which is precisely the per-key change signal
+  // the saveObs effect's Object.values dep array reads. No useCallback: the
+  // three tab children are unmemoized function components and no effect keys on
+  // these identities, so per-render closures cost nothing (the former
+  // useState-setter stability guarantee became a zustand-action guarantee one
+  // hop down, inside the store setters themselves).
+  const setActTypeFilter = (v: string) => setActivityFilters({ ...activityFilters, type: v });
+  const setActAgentFilter = (v: string) => setActivityFilters({ ...activityFilters, agent: v });
+  const setActHostFilter = (v: string) => setActivityFilters({ ...activityFilters, host: v });
+  const setDirAgentFilter = (v: string) => setDirectiveFilters({ ...directiveFilters, agent: v });
+  const setDirHostFilter = (v: string) => setDirectiveFilters({ ...directiveFilters, host: v });
+  const setAttnAgentFilter = (v: string) => setAttentionFilters({ ...attentionFilters, agent: v });
+  const setAttnHostFilter = (v: string) => setAttentionFilters({ ...attentionFilters, host: v });
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -337,65 +325,6 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, res
       onReconnectChat(session.chatKey, session.host);
     }
   }, [booted, activeId, sessions, onReconnectChat]);
-
-  // Respond to external view mode changes. externalViewMode is a ONE-SHOT command:
-  // App sets it to deep-link into a tab (e.g. openActivityTab → 'activity'), this
-  // effect applies it, then calls onExternalViewModeConsumed so App resets it to null.
-  //
-  // WARDEN-880: the previous ref-only form stopped the yank bug (a no-deps / viewMode-
-  // in-deps effect would re-assert externalViewMode on every render, bouncing a manual
-  // switch back to the last deep-linked tab) but traded it for a dead-link bug: because
-  // openActivityTab is the only setter and never reset to null, after the first deep-link
-  // externalViewMode is permanently 'activity', so a 2nd setExternalViewMode('activity')
-  // is a React same-value bailout — no state change, this effect never runs, the click
-  // navigates nowhere. Consuming the command (reset → null) makes every deep-link a fresh
-  // null → 'activity' transition the on-change effect reliably catches, AND keeps manual
-  // switches respected (the prop is null between deep-links, so the `externalViewMode &&`
-  // guard prevents any yank). The ref still defends against a double-apply if a stale
-  // non-null value happens to be re-rendered before the reset propagates.
-  const lastExternalViewModeRef = useRef(externalViewMode);
-  useEffect(() => {
-    if (externalViewMode && externalViewMode !== lastExternalViewModeRef.current) {
-      setViewMode(externalViewMode);
-      onExternalViewModeConsumed?.();
-    }
-    lastExternalViewModeRef.current = externalViewMode;
-  }, [externalViewMode, onExternalViewModeConsumed]);
-
-  // WARDEN-981 — apply Settings → Reset → "Reset appearance & UI preferences"
-  // to the LIVE panel. The Observer's prefs live in a second storage namespace
-  // (ObsUi / warden:observer:v1) the UiState-derived reset cannot see, so App
-  // signals this component through the resetToken nonce (see Props). The
-  // ref-compare fires only on a token CHANGE — never on mount, never on any
-  // other re-render — and a monotonic counter means two resets in a row are two
-  // distinct values, so the second always fires too. The setters snap the live
-  // states to resetObsPrefDefaults(); the saveObs effect above then persists
-  // them, with openIds/activeId riding through untouched (workspace state the
-  // reset's copy promises to keep).
-  //
-  // The setter map is keyed by ObsResetKey — the live-panel twin of App's
-  // resetSetters guard — so a future ObsUi pref added to OBS_RESET_KEYS but not
-  // wired to live state HERE is a missing-property compile error, not a panel
-  // that silently ignores the reset until reload.
-  const lastResetTokenRef = useRef(resetToken);
-  useEffect(() => {
-    if (resetToken === undefined || resetToken === lastResetTokenRef.current) return;
-    lastResetTokenRef.current = resetToken;
-    const d = resetObsPrefDefaults();
-    // The setter map keeps its ObsResetKey-keyed shape — the live-panel twin of
-    // App's resetSetters guard, so a future ObsUi pref added to OBS_RESET_KEYS
-    // but not wired to live state HERE is a missing-property compile error — but
-    // each arm is now a single whole-object snap into the matching filter state
-    // (the same objects the saveObs bag persists). `d` is a fresh factory build,
-    // so handing its sub-objects to state aliases nothing.
-    const obsResetSetters: { [K in ObsResetKey]: () => void } = {
-      viewMode: () => setViewMode(d.viewMode),
-      activityFilters: () => setActivityFilters(d.activityFilters),
-      directiveFilters: () => setDirectiveFilters(d.directiveFilters),
-      attentionFilters: () => setAttentionFilters(d.attentionFilters),
-    };
-    for (const apply of Object.values(obsResetSetters)) apply();
-  }, [resetToken]);
 
   // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
   // When observerAutoStart is on and a chat becomes focused, spawn+open a bound
