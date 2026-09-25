@@ -189,6 +189,67 @@ describe('temporary shell sessions — unnamed spawn, unlisted, saveable (WARDEN
     assert.ok(readCatalog().some((e) => e.session === `${RUN}probeless`), 'a failed local probe must not GC the temporary entry');
   });
 
+  it('an ANSWERED local probe reporting NOTHING alive still GCs (the round-2 finding: no-server is an answer)', async () => {
+    // Round-2 review: `list-sessions` exits 1 in TWO situations, and the
+    // round-2 fix classified BOTH as "the probe did not answer" — so on a
+    // machine whose tmux server has shut down (the ordinary state after the
+    // last session ends), a dead temp was never collected and kept being
+    // reported as "running here as a pane". "No server running" is a
+    // SUCCESSFUL probe of an empty world: ok: true, empty alive set, GC runs.
+    // This pins the discoverHost gate on the CLASSIFIED answer (ok: true +
+    // empty set → collect); the real classification is pinned separately
+    // below through runLocalTmux's result shape.
+    const { discoverHost } = await import('./chats.js');
+    seedCatalog([
+      { kind: 'tmux', host: '(local)', session: `${RUN}serverless`, name: `${RUN}serverless`, cwd: '/tmp', cmd: '', temporary: true },
+    ]);
+    const { chats } = await discoverHost('(local)', {}, {
+      localAliveSessions: async () => ({ ok: true, alive: new Set() }),
+    });
+    assert.ok(!readCatalog().some((e) => e.session === `${RUN}serverless`),
+      'a dead temp on a serverless machine IS collected — the no-server answer is an answer');
+    assert.ok(!chats.some((c) => c.session === `${RUN}serverless`),
+      'the collected temp does not ride the discover response either');
+    // Saved sessions on the same serverless machine are NOT collected — the
+    // stopped-saved row is the respawn row, the point of the saved list.
+    seedCatalog([
+      { kind: 'tmux', host: '(local)', session: `${RUN}savedstopped`, name: `${RUN}savedstopped`, cwd: '/tmp', cmd: '' },
+    ]);
+    await discoverHost('(local)', {}, { localAliveSessions: async () => ({ ok: true, alive: new Set() }) });
+    assert.ok(readCatalog().some((e) => e.session === `${RUN}savedstopped`),
+      'a stopped SAVED session survives (respawn target), only temps are collected');
+  });
+
+  it('localAliveSessions classifies tmux\'s no-server answers as ANSWERED-empty, never as a failed probe', async () => {
+    // The classification itself, driven through runLocalTmux's result SHAPE via
+    // the transport seam — both real tmux wordings and the native-Windows one
+    // (winsession.js emits `no server running` for the same state).
+    const { localAliveSessions } = await import('./chats.js');
+    for (const stderr of [
+      'no server running on /tmp/tmux-1000/default\n',
+      'no server running\n',
+      'error connecting to /tmp/tmux-1000/default (No such file or directory)\n',
+    ]) {
+      const r = await localAliveSessions(async () => ({ ok: false, code: 1, stdout: '', stderr }));
+      assert.equal(r.ok, true, `expected ANSWERED for stderr ${JSON.stringify(stderr)}`);
+      assert.equal(r.alive.size, 0, `expected an empty alive set for stderr ${JSON.stringify(stderr)}`);
+    }
+  });
+
+  it('localAliveSessions keeps ok:false for genuine probe failures (spawn error, timeout, other stderr)', async () => {
+    const { localAliveSessions } = await import('./chats.js');
+    for (const shape of [
+      { ok: false, code: -1, stdout: '', stderr: 'spawn tmux ENOENT' },
+      { ok: false, code: -1, stdout: '', stderr: '' },
+      { ok: false, code: 1, stdout: '', stderr: 'tmux: unknown option -- F' },
+      { ok: false, code: 255, stdout: '', stderr: 'Connection reset by peer' },
+      { ok: true, code: 0, stdout: 'one-session\n', stderr: '' },
+    ]) {
+      const r = await localAliveSessions(async () => shape);
+      assert.equal(r.ok, shape.ok, `expected ok:${shape.ok} passthrough for ${JSON.stringify(shape)}`);
+    }
+  });
+
   it('a failed REMOTE probe keeps the temporary entry and reads unknown, not stopped', async () => {
     // Remote seam of the same gate: discover() answers (host reachable) but the
     // has-session probe blips — the exact split the old code flattened into

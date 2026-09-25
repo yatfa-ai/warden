@@ -348,7 +348,12 @@ export function ChatSidebar({
     const offline = hostStatuses[H]?.status === 'offline';
     const unreachable = offline || !!discoverErrors[H];
     const discovering = enteringHost === H || (hostChats.length > 0 && hostChats.every((c) => c.active == null));
-    const tempCount = tempChats.filter((c) => c.host === H).length;
+    // WARDEN-1422 round-2 review: only a temp the probe POSITIVELY answered
+    // stopped (`active === false`) may not claim to be "running" in copy. An
+    // unknown row (`active == null`, an unanswered probe) still counts — the
+    // server GCs positively-stopped temps, this is the client-side race guard
+    // for a poll that raced a death.
+    const tempCount = tempChats.filter((c) => c.host === H && c.active !== false).length;
     const q = searchQuery.trim();
     const { working, stopped } = splitSaved(hostChats.filter((c) => matchesQuery(c, q)));
     const workingSorted = [...working].sort((a, b) => {

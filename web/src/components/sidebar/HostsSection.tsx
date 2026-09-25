@@ -33,7 +33,10 @@ export function HostsSection({ hosts, chats, tempChats, hostStatuses, onEnterHos
   const hostLabels = useHostLabels();
   const hostRows = hosts.map((h) => {
     const hostChats = chats.filter((c) => c.host === h);
-    const live = hostChats.filter((c) => c.active).length + tempChats.filter((c) => c.host === h).length;
+    // `active !== false` on temps (WARDEN-1422 round-2 review): a temp the
+    // probe positively answered stopped must not claim to be live here; an
+    // unknown one (unanswered probe, active == null) still counts.
+    const live = hostChats.filter((c) => c.active).length + tempChats.filter((c) => c.host === h && c.active !== false).length;
     const offline = hostStatuses[h]?.status === 'offline';
     return { host: h, label: hostLabelFor(h, hostLabels) || (h === THIS_MACHINE ? 'this machine' : h), live, saved: hostChats.length, offline, isLocal: h === THIS_MACHINE };
   });

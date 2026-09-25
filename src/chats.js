@@ -236,24 +236,57 @@ export function compareChats(a, b, pins) {
 // frontend's own 60s local re-discover, that froze the whole server whenever a
 // tick landed — every HTTP request (open settings, etc.) queued behind it. One
 // call regardless of N; membership tested in JS. The RESULT carries the
-// probe's own verdict: `ok` says whether list-sessions ANSWERED at all, and
-// `alive` is the session-name set (empty when the tmux server is not running —
-// list-sessions exits non-zero). Callers that only need a display verdict may
-// treat !ok as "nothing alive", but a caller that DESTROYS on absence (the
-// WARDEN-1422 temporary-entry GC) must gate on `ok`: a failed spawn, a broken
-// tmux install, or a connect blip all read exactly like an empty set, and
-// "could not ask" must never be flattened into "confirmed stopped" — GC on a
-// failed probe would strip running unnamed shells out of chats.json and leave
-// their panes unresolvable and unsavable. ASYNC since WARDEN-440: the single
+// probe's own verdict: `ok` says whether list-sessions ANSWERED, and `alive` is
+// the session-name set. ok covers THREE tmux answers, not two: a healthy server
+// listing its sessions; the server saying "no server running"; and — since the
+// WARDEN-1422 round-2 review — nothing else. `list-sessions` exits 1 in two
+// different situations and they are OPPOSITES for a caller that destroys on
+// absence: the server answered "nothing is alive" (tmux shuts its server down
+// when the last session ends, so this is the ordinary everything-is-dead
+// answer — exit 1 with stderr "no server running …" or "error connecting to …
+// (No such file or directory)"; the native Windows mirror in winsession.js
+// emits the first), versus the probe genuinely failing to ask (spawn error
+// code -1, a timeout, a broken install — any other stderr). The first is a
+// SUCCESSFUL answer of an empty world → ok: true, alive: empty Set, and the
+// temporary-entry GC runs on it (a temp whose death took the last session —
+// and therefore the whole server — down with it must still be collected). The
+// second is "could not ask" → ok: false: "could not ask" must never be
+// flattened into "confirmed stopped", and GC on it would strip running unnamed
+// shells out of chats.json and leave their panes unresolvable and unsavable
+// (WARDEN-1422 round-1 review). ASYNC since WARDEN-440: the single
 // list-sessions spawn goes through async runLocalTmux so it never blocks the
-// event loop.
-async function localAliveSessions() {
-  const res = await runLocalTmux(['list-sessions', '-F', '#{session_name}']);
-  if (!res.ok) return { ok: false, alive: new Set() };
-  return {
-    ok: true,
-    alive: new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean)),
-  };
+// event loop. `transport` is a test seam (defaults to runLocalTmux; no
+// production caller passes it) so the no-server classification is pinnable
+// through runLocalTmux's own result shape — the exact seam the round-2 slip
+// ran through.
+export async function localAliveSessions(transport = runLocalTmux) {
+  const res = await transport(['list-sessions', '-F', '#{session_name}']);
+  if (res.ok) {
+    return {
+      ok: true,
+      alive: new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean)),
+    };
+  }
+  if (isNoServerProbeAnswer(res)) return { ok: true, alive: new Set() };
+  return { ok: false, alive: new Set() };
+}
+
+// Does this runLocalTmux result SHAPE mean "tmux answered: no server running"
+// (a positive nothing-alive verdict, not a failed probe)? tmux's own two
+// wordings for that verdict, both exit code 1: `no server running on <path>`
+// (the server has shut down after its last session ended) and
+// `error connecting to <path> (No such file or directory)` (same state, the
+// socket wording). The native Windows session manager (winsession.js) emits
+// `no server running` for the same state. Exported for the temporary-sessions
+// test, which pins the classification through runLocalTmux's result shape —
+// the exact seam the round-2 slip ran through: the old code folded BOTH exit-1
+// shapes into "the probe did not answer", so a dead temp on a serverless
+// machine was never collected and kept being reported as a running pane.
+export function isNoServerProbeAnswer(res) {
+  if (!res || res.ok || res.code !== 1) return false;
+  const stderr = String(res.stderr || '');
+  return stderr.includes('no server running')
+    || /^error connecting to .+\(No such file or directory\)\s*$/m.test(stderr);
 }
 
 export async function discover(host, cfg, opts = {}, deps = {}) {

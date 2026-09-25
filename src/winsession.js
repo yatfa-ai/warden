@@ -314,10 +314,13 @@ export function createSessionManager(deps = {}) {
       }
 
       case 'list-sessions': {
-        // Mirrors tmux: no sessions → non-zero, which callers read as "nothing
-        // alive" (chats.js localAliveSessions returns an empty set on !ok; only
-        // display reads that way — the WARDEN-1422 temporary GC gates on the
-        // probe's ok and destroys on a failed probe).
+        // Mirrors tmux: no sessions → exit 1 with this stderr. chats.js
+        // classifies THIS answer (code 1 + "no server running") as a SUCCESSFUL
+        // probe of an empty world — ok: true, empty alive set — so the
+        // temporary-entry GC runs on it (the last temp dying shuts the server
+        // down, and its corpse must still be collected). A probe that genuinely
+        // could not ask keeps ok: false and is never GC'd on (WARDEN-1422
+        // round-2 review).
         if (!sessions.size) return err(1, 'no server running\n');
         return ok([...sessions.keys()].join('\n') + '\n');
       }
