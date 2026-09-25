@@ -30,6 +30,10 @@ const {
   OVERFLOW_OPERATION,
   createMetricAggregator,
 } = require('../src/telemetry-metrics.cjs');
+// The real wire, end to end (WARDEN-1439 regression): the main-side event
+// builder and the emit-side validator, the same pair the HTTP suite wires.
+const { SCHEMA_VERSION, validateBaseEvent } = require('../electron/telemetry-source.cjs');
+const { buildOperationalMetricsEvent } = require('../electron/telemetry-metrics-event.cjs');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -282,6 +286,39 @@ test('the reserved overflow name is not claimable by a caller', () => {
   assert.equal(snap.operations.length, 1);
   assert.equal(snap.operations[0].operation, OVERFLOW_OPERATION);
   assert.equal(snap.foldedOperations, 1, 'it is treated as a folded name, not a tracked key');
+});
+
+test('an overflowed window passes the wire: the fold key satisfies the validators (WARDEN-1439)', () => {
+  // The aggregator's documented safety bound folds excess names into
+  // OVERFLOW_OPERATION — so that key, unlike every producer key, is emitted
+  // by the aggregator's own worst case. It must ride the real wire:
+  // validateBaseEvent rejects the ENTIRE event when any single operation row
+  // fails the schema's operation-name pattern, so a fold key the pattern
+  // rejects voids the whole 5-minute window. End-to-end regression for
+  // WARDEN-1439: the producer's worst case must still validate.
+  const agg = createMetricAggregator({ maxOperations: 2, now: fakeClock() });
+  for (const name of ['op-a', 'op-b', 'op-c', 'op-d']) agg.record(name, 10);
+  const snap = agg.snapshot();
+  assert.equal(snap.operations.length, 3, 'maxOperations + the overflow key');
+  assert.ok(snap.operations.some((r) => r.operation === OVERFLOW_OPERATION),
+    'precondition: the window actually overflowed (the fold key is present)');
+
+  // The key itself must satisfy the wire's operation-name pattern — the same
+  // shape every producer key is held to (web/src/lib/telemetry/schema.ts
+  // OPERATION_NAME_RE, mirrored by electron/telemetry-source.cjs OP_NAME_RE).
+  assert.match(OVERFLOW_OPERATION, /^[a-z0-9][a-z0-9-]{0,63}$/,
+    'OVERFLOW_OPERATION must satisfy the schema operation-name pattern');
+
+  // The real main-side builder + the real emit-side validator.
+  const event = buildOperationalMetricsEvent({
+    snapshot: snap,
+    schemaVersion: SCHEMA_VERSION,
+    runtime: 'server',
+    now: () => 0,
+  });
+  assert.ok(event, 'the overflowed window builds into an operational-metrics event');
+  assert.equal(validateBaseEvent(event), true,
+    'an overflowed window must pass validateBaseEvent — the fold key must ride the wire');
 });
 
 // =========================================================================

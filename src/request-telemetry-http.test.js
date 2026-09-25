@@ -5,6 +5,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
 import { routeOperationKey, REQUEST_MAX_OPERATIONS } from './requestTelemetry.js';
+// The aggregator's reserved overflow key (WARDEN-1439 renamed it to 'other'
+// so it passes the validators) — imported, never hard-coded, so a future
+// rename cannot make an assertion pass vacuously.
+const { OVERFLOW_OPERATION } = createRequire(import.meta.url)('../src/telemetry-metrics.cjs');
 
 /**
  * End-to-end HTTP tests for the WARDEN-1292 request telemetry — the
@@ -30,22 +34,25 @@ import { routeOperationKey, REQUEST_MAX_OPERATIONS } from './requestTelemetry.js
  *     'HEAD' — folds under the route's `get-` key; NO `head-*` key ever
  *     appears (the audit's blocking finding: unaliased head-* twins were a
  *     route.methods-invisible growth axis that could exhaust maxOperations
- *     and reach the unsendable __other__ accumulator) — INCLUDING against a
+ *     and reach the reserved overflow accumulator — collapsing distinct
+ *     routes into one anonymous row) — INCLUDING against a
  *     POST-only route, where router v2's HEAD exemption sets req.route
  *     before the 404 (the get- twin a declared-methods-only census misses);
  *   • the derived SIZING TRIPWIRE — the live route table's distinct pattern
  *     keys (walked from the REAL router, including the nested git router)
  *     fit under the producer's maxOperations WITH room for the unmatched
  *     sink, and maxOperations + 1 stays under the wire's per-event
- *     operations cap — so the aggregator's unsendable reserved overflow key
- *     can never be reached. When a sibling PR adds routes, THIS test — not a
- *     prose number — is what fails.
+ *     operations cap — so the aggregator's reserved overflow key can never
+ *     be reached (it rides the wire since WARDEN-1439, but reaching it would
+ *     collapse distinct routes into one anonymous row). When a sibling PR
+ *     adds routes, THIS test — not a prose number — is what fails.
  */
 
 const require = createRequire(import.meta.url);
 // The emit-side validator (electron/telemetry-source.cjs) — the wire's own
 // structural check for an operational-metrics event, including the
-// per-operation name pattern that makes `__other__` unsendable.
+// per-operation name pattern the reserved overflow key must satisfy
+// (WARDEN-1439 renamed the fold key to 'other' precisely to pass it).
 const { SCHEMA_VERSION, validateBaseEvent } = require('../electron/telemetry-source.cjs');
 const { buildOperationalMetricsEvent } = require('../electron/telemetry-metrics-event.cjs');
 
@@ -125,7 +132,8 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
     // aliases 'head' onto 'get', so the observation must land in the route's
     // existing `get-` row and NO `head-*` key may exist (an unaliased head-*
     // twin per GET route is the growth axis that could exhaust
-    // REQUEST_MAX_OPERATIONS and reach the unsendable __other__ accumulator).
+    // REQUEST_MAX_OPERATIONS and reach the reserved overflow accumulator — a
+    // resolution collapse: distinct routes folded into one anonymous row).
     const res = await fetch(`${baseUrl}/api/health`, { method: 'HEAD' });
     assert.equal(res.status, 200);
 
@@ -181,8 +189,9 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
     // traffic + one garbage request must deliver BOTH — the garbage under the
     // single `unmatched` constant, the real metrics intact, the whole event
     // schema-valid. (Before the amendment this design routed the garbage into
-    // the aggregator's reserved `__other__`, which fails the validators and
-    // would have voided every legitimate key in the window.)
+    // the aggregator's reserved overflow key — which was then a name the
+    // validators rejected, voiding every legitimate key in the window; that
+    // aggregator-side defect is what WARDEN-1439 fixed at the source.)
     const ok = await fetch(`${baseUrl}/api/health`);
     assert.equal(ok.status, 200);
     const garbage = await fetch(`${baseUrl}/api/garbage-NOT-a-route`);
@@ -199,8 +208,8 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
       'the garbage path can never appear in a key');
 
     // The wire's own structural check: main builds exactly this event from
-    // exactly this snapshot shape. A `__other__` row (or any key failing the
-    // operation-name pattern) would make validateBaseEvent reject the WHOLE
+    // exactly this snapshot shape. Any operation row failing the schema's
+    // operation-name pattern would make validateBaseEvent reject the WHOLE
     // event here.
     const event = buildOperationalMetricsEvent({
       snapshot: snap,
@@ -210,8 +219,17 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
     });
     assert.ok(event, 'the snapshot builds into an operational-metrics event');
     assert.equal(validateBaseEvent(event), true, 'the MIXED window (real routes + one garbage request) passes validateBaseEvent');
-    assert.equal(JSON.stringify(event).includes('__other__'), false,
-      'the unsendable reserved overflow key never rides the event');
+    // Every emitted row must satisfy the name pattern — a check by SHAPE, not
+    // by literal, so it cannot pass vacuously through a fold-key rename (the
+    // old assertion string-matched a key the schema no longer produces), and
+    // the reserved overflow key itself must never ride a normally-routed
+    // window (un-routed traffic folds to `unmatched`, not to the fold).
+    for (const op of event.operations) {
+      assert.match(op.operation, /^[a-z0-9][a-z0-9-]{0,63}$/,
+        `every operation row must satisfy the schema name pattern: ${op.operation}`);
+      assert.notEqual(op.operation, OVERFLOW_OPERATION,
+        'the reserved overflow key must never ride a normally-routed window');
+    }
   });
 
   it('the sizing tripwire: the live route census fits maxOperations WITH the unmatched sink, and maxOperations + 1 ≤ 129', () => {
@@ -271,8 +289,9 @@ describe('/api request telemetry through the REAL wiring (WARDEN-1292)', () => {
     assert.ok(distinctKeys.size > 0, 'the walk actually derived keys');
 
     // (a) census + the unmatched sink ≤ maxOperations — the reserved
-    //     `__other__` accumulator is then structurally unreachable (it only
-    //     exists beyond maxOperations distinct keys).
+    //     overflow accumulator is then structurally unreachable (it only
+    //     exists beyond maxOperations distinct keys), so distinct routes
+    //     never lose their resolution to the fold.
     const budget = new Set([...distinctKeys, 'unmatched']).size;
     assert.ok(
       budget <= REQUEST_MAX_OPERATIONS,
