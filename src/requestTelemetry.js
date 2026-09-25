@@ -29,18 +29,22 @@
 // hostile id-bearing URL can therefore never ride a key: the URL is not an
 // input to the mapping at all, only the table's own literal is.
 //
-// ⛔ THE RESERVED OVERFLOW KEY IS UNSENDABLE — DO NOT ROUTE ANYTHING TO IT.
-// The aggregator's OVERFLOW_OPERATION ('__other__') fails BOTH the emit-side
-// OP_NAME_RE (electron/telemetry-source.cjs) and the canonical
-// OPERATION_NAME_RE (web/src/lib/telemetry/schema.ts), and
-// isValidOperationalMetrics rejects the ENTIRE event when ANY operation row
-// fails — one garbage request routed there would discard every legitimate
-// route metric in the whole 5-minute window. The exact inversion of the
-// roadmap bar. Instead:
+// ⛔ THE RESERVED OVERFLOW KEY IS STILL NOT A ROUTING TARGET — but the reason
+// changed with WARDEN-1439: it is a resolution loss, no longer a safety
+// hazard. The aggregator's OVERFLOW_OPERATION ('other') now SATISFIES both
+// the emit-side OP_NAME_RE (electron/telemetry-source.cjs) and the canonical
+// OPERATION_NAME_RE (web/src/lib/telemetry/schema.ts), so an overflowed
+// window SENDS instead of being dropped whole — the double-underscore name
+// this replaced failed both validators, and isValidOperationalMetrics
+// rejected the ENTIRE event on it. Reaching the fold would still collapse DISTINCT
+// routes into one anonymous row — every legitimate route metric in the
+// window loses its attribution. That inversion of the roadmap bar is what
+// the sizing below prevents. So:
 //   • un-routed requests (req.route undefined: bad paths, JSON-body parse
 //     errors) and any key failing the shape/length checks fold under the
-//     regex-safe constant UNMATCHED_OPERATION ('unmatched'), which matches the
-//     name shape and rides the wire normally;
+//     regex-safe constant UNMATCHED_OPERATION ('unmatched'), a distinct
+//     NAMED sink that keeps un-routed traffic attributable and rides the
+//     wire normally;
 //   • REQUEST_MAX_OPERATIONS is sized above the live route census + the
 //     unmatched sink, so the aggregator's internal overflow accumulator is
 //     never reached (src/request-telemetry-http.test.js asserts this as a
@@ -54,7 +58,8 @@
 //     routeOperationKey aliases 'head' onto `get-`. Without that alias
 //     every route would ALSO carry an uncounted `head-*` twin (a growth
 //     axis route.methods never reports), and enough distinct keys would
-//     reach the reserved accumulator and void the window.
+//     reach the reserved accumulator and fold distinct routes out of the
+//     window's resolution.
 //
 // CONSENT: recording is gated LIVE on the `operational-metrics` category (no
 // new category, no new checkbox). When the category is off (the default),
@@ -82,14 +87,19 @@ export const REQUEST_FLUSH_MS = 5 * 60_000;
 
 // The single regex-safe sink for requests that matched NO route, and for any
 // key failing the schema's operation-name shape below. Deliberately NOT the
-// aggregator's reserved '__other__' (see the ⛔ block above).
+// aggregator's reserved OVERFLOW_OPERATION ('other' since WARDEN-1439) — a
+// distinct named sink keeps un-routed traffic attributable instead of folding
+// into the anonymous overflow row (see the ⛔ block above).
 export const UNMATCHED_OPERATION = 'unmatched';
 
 // Distinct operation keys the aggregator retains. Sized ABOVE the live route
 // census (71 route patterns at the time of writing — the tripwire test
 // derives it, it is never trusted from prose) PLUS the `unmatched` sink, so
-// the aggregator's internal — and unsendable — reserved overflow key is
-// structurally unreachable. The census counts the REACHABLE set: declared-
+// the aggregator's reserved overflow key stays structurally unreachable. It
+// is SENDABLE since WARDEN-1439 renamed it to a validator-passing shape — the
+// old double-underscore name had the validators drop the whole window — but reaching it
+// would fold DISTINCT routes into one anonymous row, a resolution collapse.
+// The census counts the REACHABLE set: declared-
 // method keys PLUS the `get-` twin of every route pattern (router v2's HEAD
 // exemption sets `req.route` on ANY matching route, and routeOperationKey
 // aliases HEAD onto `get-` — on GET routes it runs the handler, on non-GET
@@ -155,8 +165,10 @@ export function routeOperationKey(method, routePath) {
   // the route's `get-` key. Without this alias HEAD would mint an unaliased
   // `head-*` key per addressable route: a growth axis the route table's own
   // `route.methods` census never sees, big enough to exhaust
-  // REQUEST_MAX_OPERATIONS and reach the aggregator's unsendable `__other__`
-  // accumulator — which voids whole windows. With it, the reachable key
+  // REQUEST_MAX_OPERATIONS and reach the aggregator's reserved overflow
+  // accumulator — which folds DISTINCT routes into one anonymous row (it
+  // rides the wire since WARDEN-1439, but its attribution is gone). With it,
+  // the reachable key
   // space is: declared-method keys ∪ the single `get-` twin of EVERY route
   // pattern — no separate head-* axis — and the HTTP suite's sizing tripwire
   // derives exactly that set through THIS mapper. (OPTIONS needs no alias:

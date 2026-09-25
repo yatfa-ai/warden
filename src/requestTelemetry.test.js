@@ -18,11 +18,12 @@ import assert from 'node:assert/strict';
 //   • the HEAD alias — Express serves HEAD through the GET handler with
 //     req.method staying 'HEAD', so it folds under the route's `get-` key;
 //     an unaliased `head-*` twin per GET route would be a census-invisible
-//     growth axis toward the unsendable `__other__` accumulator;
+//     growth axis toward the reserved overflow accumulator, collapsing
+//     distinct routes into one anonymous row;
 //   • the `unmatched` sink — un-routed requests and any key failing the
 //     schema's operation-name shape fold under ONE regex-safe constant, and
-//     ⛔ NO snapshot ever carries the aggregator's reserved `__other__` (that
-//     key is unsendable by construction and would void the whole event);
+//     ⛔ NO snapshot ever carries the aggregator's reserved overflow key (its
+//     anonymity would erase every route's attribution from the window);
 //   • N-independence — 10 vs 10,000 observations retain the IDENTICAL
 //     snapshot shape and size (the aggregator's constant-footprint contract,
 //     asserted through this producer's public surface);
@@ -201,9 +202,10 @@ describe('closed-set route-pattern key mapping', () => {
     // unaliased, every addressable route would carry an uncounted `head-*`
     // twin: a runtime growth axis the route table's own route.methods census
     // never reports — enough of them would exhaust REQUEST_MAX_OPERATIONS
-    // and reach the aggregator's unsendable `__other__` accumulator, voiding
-    // the whole window. Aliased, HEAD contributes NO keys of its own — every
-    // HEAD observation lands on the route's `get-` key — so the reachable
+    // and reach the aggregator's reserved overflow accumulator, collapsing
+    // distinct routes into one anonymous row. Aliased, HEAD contributes NO
+    // keys of its own — every HEAD observation lands on the route's `get-`
+    // key — so the reachable
     // set is declared-method keys ∪ the `get-` twin of every pattern, which
     // the HTTP suite's sizing tripwire derives through this same mapper.
     assert.equal(routeOperationKey('HEAD', '/api/health'), 'get-api-health');
@@ -233,7 +235,7 @@ describe('closed-set route-pattern key mapping', () => {
 });
 
 describe('the wire shape (aggregates only, closed set)', () => {
-  it('every emitted key satisfies OPERATION_NAME_RE, and NO snapshot ever carries __other__', () => {
+  it('every emitted key satisfies OPERATION_NAME_RE, and NO snapshot ever carries the reserved overflow key', () => {
     const { tel } = makeHarness();
     // Every leg the mapping tests above exercise, replayed through one window:
     tel.recordRequest('GET', '/api/health', 1, true);
@@ -247,8 +249,13 @@ describe('the wire shape (aggregates only, closed set)', () => {
     for (const op of snap.operations) {
       assert.match(op.operation, OP_NAME_RE, `emitted key must satisfy the schema pattern: ${op.operation}`);
     }
-    assert.equal(JSON.stringify(snap).includes(OVERFLOW_OPERATION), false,
-      'the reserved overflow key is unsendable by construction — it must never appear');
+    // Assert on the emitted KEY LIST, never on a serialized-JSON substring:
+    // a short fold-key name could legitimately appear inside another string
+    // and make a substring check lie in either direction. The intent is
+    // unchanged: the request producer never emits the overflow row under
+    // normal traffic — un-routed requests fold to the `unmatched` sink.
+    assert.equal(snap.operations.map((o) => o.operation).includes(OVERFLOW_OPERATION), false,
+      'the reserved overflow key must never appear in the snapshot under normal traffic');
   });
 
   it('every emittable key from routeOperationKey satisfies OPERATION_NAME_RE', () => {

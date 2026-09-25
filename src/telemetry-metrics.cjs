@@ -96,11 +96,18 @@ const DEFAULT_MAX_OPERATIONS = 64;
 // (rejected + counted) rather than silently ship a long string.
 const DEFAULT_MAX_NAME_LENGTH = 64;
 
-// Reserved key that excess operations fold into. Double-underscore-fenced so it
-// cannot collide with a real 'kebab-case-operation' literal. A caller that
-// passes this name explicitly is treated as a folded name (it is reserved, not
-// claimable).
-const OVERFLOW_OPERATION = '__other__';
+// Reserved key that excess operations fold into. Kebab-case ('other') so it
+// SATISFIES the wire's operation-name pattern — the schema's OPERATION_NAME_RE
+// (web/src/lib/telemetry/schema.ts), mirrored by electron/telemetry-source.cjs
+// OP_NAME_RE — whose whole-event rule makes one bad row void the entire
+// 5-minute window (WARDEN-1439: the double-underscore name this replaces was
+// rejected by both validators, so the first overflowed window was dropped
+// whole). The name must ALSO not collide with any live producer key; at the
+// time of writing none does — keys are verb-prefixed routes (get-…, post-…),
+// 'unmatched', or the file-exists-* / pane-input-* / renderer-* literals — so
+// 'other' is reserved for the fold: an explicit record of it is treated as a
+// folded name (reserved, not claimable).
+const OVERFLOW_OPERATION = 'other';
 
 // ---------------------------------------------------------------------------
 // Option validation (wire-up time — throws)
@@ -284,7 +291,7 @@ function createMetricAggregator(options) {
    *   boundaries: number[],        // buckets.length === boundaries.length + 1
    *   operations: Record[],        // sorted by name; overflow always last
    *   rejected,                    // observations refused by validation
-   *   foldedOperations,            // distinct names folded into __other__
+   *   foldedOperations,            // distinct names folded into OVERFLOW_OPERATION
    *   foldedOperationsExact,       // false => foldedOperations is a lower bound
    * }
    */
