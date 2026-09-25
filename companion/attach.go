@@ -52,7 +52,8 @@ import (
 // same split procgroup_unix.go / procgroup_windows.go established.
 
 // hostPTY is one live host-side terminal. The unix implementation wraps
-// creack/pty's master fd; the windows one does not exist (see pty_windows.go).
+// creack/pty's master fd; the windows one hosts a ConPTY session
+// (pty_windows.go), both behind the same five methods.
 type hostPTY interface {
 	Read(b []byte) (int, error)
 	Write(b []byte) (int, error)

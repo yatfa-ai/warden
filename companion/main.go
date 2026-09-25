@@ -128,8 +128,9 @@ var baseMethods = []string{
 var attachMethods = []string{"attachStart", "attachInput", "attachResize", "attachKill"}
 
 // pingMethods is what the ping RPC advertises. The attach* names are included
-// ONLY when this build can allocate a host PTY (hostPTYSupported — false on
-// windows, see pty_windows.go). That is the platform-honesty contract: warden
+// ONLY when this build/host can allocate a host PTY (hostPTYSupported — a
+// build-time const on unix, a runtime ConPTY lookup on windows, see
+// pty_windows.go). That is the platform-honesty contract: warden
 // feature-detects off this list, so a companion that physically cannot serve an
 // attach never claims it, and the JS side refuses the attach up front with an
 // actionable message instead of opening a pane that could only die. It is the

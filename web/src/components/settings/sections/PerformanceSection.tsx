@@ -52,8 +52,9 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
       )}
 
       {/* WARDEN-1390 — the PER-HOST opt-out. The toggle above is fleet-global, but
-          the reason to opt out is usually one host (a Windows companion can never
-          carry a PTY), so this list excludes exactly those hosts while every other
+          the reason to opt out is usually one host (a host whose companion reports
+          no PTY — pre-1809 Windows has no ConPTY), so this list excludes exactly
+          those hosts while every other
           host keeps riding the channel. Comma-separated aliases, parsed to the
           string[] the backend persists; the server refuses malformed entries
           (commas/newlines/control characters — a dropped exclusion would be
@@ -79,10 +80,10 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
           Hosts listed here never use the companion transport — they keep the default
           SSH path for every operation (attach, capture, exec, …), while all other
           hosts keep riding the persistent channel. Use this for hosts where the
-          companion cannot deliver (a Windows companion cannot allocate a PTY, so
-          interactive attach there requires the default path). Enter bare SSH host
-          aliases, comma-separated. Takes effect on the next operation; a newly
-          excluded host's live channel is closed immediately.
+          companion cannot deliver (a host whose companion reports no PTY — pre-1809
+          Windows has no ConPTY — needs the default path for interactive attach).
+          Enter bare SSH host aliases, comma-separated. Takes effect on the next
+          operation; a newly excluded host's live channel is closed immediately.
         </p>
       </div>
     </SettingsSection>

@@ -1,9 +1,10 @@
 // WARDEN-1390 — the PER-HOST companion-transport opt-out (companionExcludedHosts).
 //
 // The fleet-global toggle forced an all-or-nothing choice on a host with a
-// structural limitation (a Windows companion can never carry a host-side PTY —
-// companion/pty_windows.go): break attach there, or forfeit the channel on
-// EVERY host. This suite pins the per-host exclusion end to end:
+// structural limitation (a host whose companion reports no PTY — pre-1809
+// Windows has no ConPTY, companion/pty_windows.go): break attach there, or
+// forfeit the channel on EVERY host. This suite pins the per-host exclusion
+// end to end:
 //
 //   A. the gate pair: isCompanionExcludedHost (env reader) +
 //      applyCompanionExclusions (boot/afterSave writer — the runtime-state

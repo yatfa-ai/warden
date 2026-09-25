@@ -106,9 +106,9 @@ func callInput(t *testing.T, sid, data string) error {
 
 // TestPingAdvertisesAttachMethods pins the feature-detect contract: warden gates
 // the whole companion attach path on these names appearing in the ping `methods`
-// list (channelMethods → attachPreflight), and a Windows build must NOT advertise
-// them because it cannot allocate a PTY (pty_windows.go). The list is the ONE
-// mechanism serving both the stale-binary gate and platform honesty.
+// list (channelMethods → attachPreflight), and a host whose companion reports no
+// PTY (pre-1809 windows; pty_windows.go) must NOT advertise them. The list is
+// the ONE mechanism serving both the stale-binary gate and platform honesty.
 func TestPingAdvertisesAttachMethods(t *testing.T) {
 	methods := pingMethods()
 	has := func(m string) bool {
@@ -458,9 +458,17 @@ func TestClampDim(t *testing.T) {
 }
 
 // TestHostPTYSupportedMatchesPlatform documents the platform split as an
-// assertion rather than only a comment: unix builds allocate, windows does not.
+// assertion rather than only a comment: unix builds always allocate (the
+// build-time const in pty_unix.go); windows builds gate on the RUNTIME ConPTY
+// lookup, because the same windows/amd64 binary serves Windows 7 through 11
+// and only 1809+ exports CreatePseudoConsole (pty_windows.go). The windows
+// expectation is an independent evaluation of that same predicate, not a
+// restated constant — conPTYGateForTest (conpty_gate_*_test.go).
 func TestHostPTYSupportedMatchesPlatform(t *testing.T) {
 	want := runtime.GOOS != "windows"
+	if runtime.GOOS == "windows" {
+		want = conPTYGateForTest()
+	}
 	if hostPTYSupported != want {
 		t.Fatalf("hostPTYSupported=%v on %s, want %v", hostPTYSupported, runtime.GOOS, want)
 	}
