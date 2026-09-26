@@ -48,18 +48,33 @@
 import { createStore, useStore } from 'zustand';
 import {
   loadUi,
+  loadObs,
+  resetObsPrefDefaults,
   DEFAULT_TERMINAL_FONT_FAMILY,
   type Snippet,
   type TerminalCursorStyle,
   type OnExitBehavior,
   type CustomPreset,
 } from '@/lib/storage';
-import type { PaneLayout, RestoreOnStartup } from '@/lib/storage';
+import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
 import type { AgentFilter, AgentSort } from '@/lib/agentFilter';
 import type { Theme, TerminalColorScheme } from '@/lib/theme';
 import type { Density } from '@/lib/density';
+
+/**
+ * A pref write that may either REPLACE the whole value or derive the next one
+ * from the current (the functional form). The functional half exists for the
+ * Observer filter shapes: ObserverTabs' seven spread-updater adapters each
+ * patch ONE key of a shape, and AttentionView's "Clear filters" fires two of
+ * them back-to-back inside one handler (`setHostFilter?.('all');
+ * setAgentFilter?.('all')`). A spread of a RENDER-captured value would let the
+ * second write silently restore the first key — the stale-closure regression
+ * this slice's first pass shipped and its audit caught — while a functional
+ * write is applied against the store's LIVE value, so the writes compose.
+ */
+export type ValueOrUpdater<T> = T | ((prev: T) => T);
 
 /**
  * The shared client-state slice. One field + its setter per migrated pref.
@@ -409,6 +424,41 @@ export interface UiStoreState {
   setPaneColRatios: (v: number[]) => void;
   /** Commit the row ratios (PaneGrid pointerUp). The persisted write follows via App's snapshot. */
   setPaneRowRatios: (v: number[]) => void;
+  /**
+   * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
+   * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
+   * per-tab filter shapes (activity type/agent/host, directives agent/host,
+   * attention agent/host). They live in the SECOND storage namespace (ObsUi /
+   * warden:observer:v1, behind loadObs/saveObs), and used to sit in
+   * ObserverTabs' own useStates while App — the "View Activity" deep-links and
+   * the Settings → Reset action — had to command them through two channels
+   * (a one-shot `externalViewMode` prop + consume callback, and a
+   * `resetToken` nonce), each documented for the bugs it caused (WARDEN-880's
+   * yank/dead-link pair; WARDEN-981's nonce). ObserverTabs and App both
+   * SUBSCRIBE here now, so the command channels are deleted.
+   *
+   * These are the first ObsUi-namespace facts on the store, and the store is
+   * deliberately NOT their persistence writer: the single ObsUi writer stays
+   * ObserverTabs' `satisfies Required<ObsUi>` saveObs effect (the uiStore.test.mjs
+   * saveObs guard pins exactly two call sites). The setters write state only.
+   * The value shapes are imported from storage.ts (NonNullable<ObsUi[...]>) —
+   * storage stays the owner of shape and defaults; nothing is re-declared here.
+   */
+  observerViewMode: NonNullable<ObsUi['viewMode']>;
+  /** Set the Observer's visible tab (App's "View Activity" deep-links, the tab buttons). */
+  setObserverViewMode: (v: NonNullable<ObsUi['viewMode']>) => void;
+  /** The Activity tab's type/agent/host filter shape (7 filter scalars live across the three shapes). */
+  observerActivityFilters: NonNullable<ObsUi['activityFilters']>;
+  /** Replace the Activity filter shape (the tab's three Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
+  setObserverActivityFilters: (v: ValueOrUpdater<NonNullable<ObsUi['activityFilters']>>) => void;
+  /** The Directives tab's agent/host filter shape. */
+  observerDirectiveFilters: NonNullable<ObsUi['directiveFilters']>;
+  /** Replace the Directives filter shape (the tab's two Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
+  setObserverDirectiveFilters: (v: ValueOrUpdater<NonNullable<ObsUi['directiveFilters']>>) => void;
+  /** The Attention tab's agent/host filter shape. */
+  observerAttentionFilters: NonNullable<ObsUi['attentionFilters']>;
+  /** Replace the Attention filter shape (the tab's two Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
+  setObserverAttentionFilters: (v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>) => void;
 }
 
 /**
@@ -455,6 +505,10 @@ export type UiStoreSeed = Partial<
     | 'healthCollapsedHosts'
     | 'paneColRatios'
     | 'paneRowRatios'
+    | 'observerViewMode'
+    | 'observerActivityFilters'
+    | 'observerDirectiveFilters'
+    | 'observerAttentionFilters'
   >
 >;
 
@@ -469,6 +523,15 @@ export function createUiStore(seed: UiStoreSeed = {}) {
   // ONE persisted read per store instance, shared by every seeded fact — the
   // same single `loadUi()` App does for its own lazy initializers.
   const persisted = loadUi();
+  // ONE ObsUi read per store instance, for the second namespace's facts
+  // (slice 15). `resetObsPrefDefaults()` is the ??-only fallback for both the
+  // view mode and the three filter shapes — storage.ts stays the owner of
+  // shape and defaults; nothing below re-declares a `{ type: 'all', … }`
+  // literal. It is a FACTORY, so every store instance (and the singleton)
+  // gets its own fresh default objects — handing them to state aliases
+  // nothing, and a store-level `set` replaces objects whole anyway.
+  const persistedObs = loadObs();
+  const obsDefaults = resetObsPrefDefaults();
   return createStore<UiStoreState>()((set) => ({
     snippets: seed.snippets ?? persisted.snippets ?? [],
     setSnippets: (snippets) => set({ snippets }),
@@ -597,6 +660,55 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setPaneColRatios: (paneColRatios) => set({ paneColRatios }),
     paneRowRatios: seed.paneRowRatios ?? persisted.paneRowRatios ?? [],
     setPaneRowRatios: (paneRowRatios) => set({ paneRowRatios }),
+    // WARDEN-1441 (roadmap WARDEN-1204 slice 15): the Observer panel's four
+    // view prefs — the first facts seeded from the SECOND storage namespace
+    // (ObsUi / warden:observer:v1, `persistedObs` above), ??-only like every
+    // slice before. The fallbacks are `obsDefaults` (resetObsPrefDefaults())
+    // rather than re-declared literals: loadObs itself defaults viewMode to
+    // 'sessions' but leaves the three filter shapes undefined when a payload
+    // predates them, so the fallback pair mirrors exactly what ObserverTabs'
+    // retired per-field useStates did (`obsSeed.viewMode || 'sessions'`,
+    // `obsSeed.activityFilters ?? { type: 'all', … }`) with the literals now
+    // owned by storage.ts. There is deliberately NO write-through: these four
+    // setters write state only, and the ONE ObsUi writer stays ObserverTabs'
+    // `satisfies Required<ObsUi>` saveObs effect (App's Settings-reset disk
+    // write is the second sanctioned call site) — pinned by uiStore.test.mjs's
+    // saveObs guard.
+    observerViewMode: seed.observerViewMode ?? persistedObs.viewMode ?? obsDefaults.viewMode,
+    setObserverViewMode: (observerViewMode) => set({ observerViewMode }),
+    observerActivityFilters:
+      seed.observerActivityFilters ?? persistedObs.activityFilters ?? obsDefaults.activityFilters,
+    // The three filter setters take ValueOrUpdater: the functional form is what
+    // ObserverTabs' spread-updater adapters rely on to compose back-to-back
+    // partial writes (AttentionView's "Clear filters" fires two adapters in one
+    // handler) — each functional write is applied against the store's LIVE
+    // value, never a render-captured copy. App's reset passes whole shapes, the
+    // other half of the union.
+    setObserverActivityFilters: (observerActivityFilters) =>
+      set((s) => ({
+        observerActivityFilters:
+          typeof observerActivityFilters === 'function'
+            ? observerActivityFilters(s.observerActivityFilters)
+            : observerActivityFilters,
+      })),
+    observerDirectiveFilters:
+      seed.observerDirectiveFilters ?? persistedObs.directiveFilters ?? obsDefaults.directiveFilters,
+    setObserverDirectiveFilters: (observerDirectiveFilters) =>
+      set((s) => ({
+        observerDirectiveFilters:
+          typeof observerDirectiveFilters === 'function'
+            ? observerDirectiveFilters(s.observerDirectiveFilters)
+            : observerDirectiveFilters,
+      })),
+    observerAttentionFilters:
+      seed.observerAttentionFilters ?? persistedObs.attentionFilters ?? obsDefaults.attentionFilters,
+    setObserverAttentionFilters: (observerAttentionFilters) =>
+      set((s) => ({
+        observerAttentionFilters:
+          typeof observerAttentionFilters === 'function'
+            ? observerAttentionFilters(s.observerAttentionFilters)
+            : observerAttentionFilters,
+      })),
   }));
 }
 
@@ -1085,4 +1197,66 @@ export function usePaneRowRatios(): number[] {
 /** The row-ratios commit action (PaneGrid pointerUp). Stable across renders. */
 export function useSetPaneRowRatios(): (v: number[]) => void {
   return useUiStore((s) => s.setPaneRowRatios);
+}
+
+// ─── the Observer panel's four view prefs (WARDEN-1441, roadmap WARDEN-1204 slice 15) ───
+//
+// ObserverTabs (the tabs' own buttons and Selects) and App (the "View Activity"
+// deep-links; the Settings → Reset action) subscribe here instead of App
+// commanding a child's useState through the retired one-shot prop + nonce
+// channels. Persistence stays OUT of this store: the single ObsUi writer is
+// ObserverTabs' `satisfies Required<ObsUi>` saveObs effect. All setters are
+// stable across renders (zustand actions are created once with the store), so
+// they are safe in React dependency arrays.
+
+/** The Observer panel's visible tab ('sessions' | 'activity' | 'directives' | 'attention'). */
+export function useObserverViewMode(): NonNullable<ObsUi['viewMode']> {
+  return useUiStore((s) => s.observerViewMode);
+}
+
+/**
+ * The Observer view-mode setter. Written by ObserverTabs' own tab buttons and
+ * by App's deep-links (openActivityTab). Stable across renders — and it is the
+ * property that retires the WARDEN-880 one-shot dance: App writing 'activity'
+ * twice in a row is two store transitions the subscriber always sees, where
+ * the prop channel needed a consume callback to make the second click fresh.
+ */
+export function useSetObserverViewMode(): (v: NonNullable<ObsUi['viewMode']>) => void {
+  return useUiStore((s) => s.setObserverViewMode);
+}
+
+/** The Activity tab's type/agent/host filter shape. */
+export function useObserverActivityFilters(): NonNullable<ObsUi['activityFilters']> {
+  return useUiStore((s) => s.observerActivityFilters);
+}
+
+/** The Activity filter-shape setter (the tab's three Selects; App's reset). Stable across renders. */
+export function useSetObserverActivityFilters(): (
+  v: ValueOrUpdater<NonNullable<ObsUi['activityFilters']>>,
+) => void {
+  return useUiStore((s) => s.setObserverActivityFilters);
+}
+
+/** The Directives tab's agent/host filter shape. */
+export function useObserverDirectiveFilters(): NonNullable<ObsUi['directiveFilters']> {
+  return useUiStore((s) => s.observerDirectiveFilters);
+}
+
+/** The Directives filter-shape setter (the tab's two Selects; App's reset). Stable across renders. */
+export function useSetObserverDirectiveFilters(): (
+  v: ValueOrUpdater<NonNullable<ObsUi['directiveFilters']>>,
+) => void {
+  return useUiStore((s) => s.setObserverDirectiveFilters);
+}
+
+/** The Attention tab's agent/host filter shape. */
+export function useObserverAttentionFilters(): NonNullable<ObsUi['attentionFilters']> {
+  return useUiStore((s) => s.observerAttentionFilters);
+}
+
+/** The Attention filter-shape setter (the tab's two Selects; App's reset). Stable across renders. */
+export function useSetObserverAttentionFilters(): (
+  v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>,
+) => void {
+  return useUiStore((s) => s.setObserverAttentionFilters);
 }

@@ -66,7 +66,7 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
-const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY } =
+const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, resetObsPrefDefaults } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore } = await import(join(tmpDir, 'uiStore.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
@@ -1959,6 +1959,227 @@ test('two stores do not share the pane-ratio pair; the APP-LEVEL singleton is un
   assert.deepEqual(b.getState().paneRowRatios, []);
   assert.deepEqual(uiStore.getState().paneColRatios, []);
   assert.deepEqual(uiStore.getState().paneRowRatios, []);
+});
+
+// ─── the Observer panel's four view prefs (WARDEN-1441, roadmap WARDEN-1204 slice 15) ───
+//
+// observerViewMode + the three per-tab filter shapes (observerActivityFilters /
+// observerDirectiveFilters / observerAttentionFilters) — the FIRST facts on the
+// store from the SECOND storage namespace (ObsUi / warden:observer:v1, behind
+// loadObs/saveObs). They used to be ObserverTabs useStates that App could only
+// command through a one-shot prop + a nonce; now App writes the store directly
+// and both channels are deleted. These facts are NOT in PERSISTED_PREF_KEYS and
+// never ride the saveUi snapshot — their persistence stays with ObserverTabs'
+// `satisfies Required<ObsUi>` saveObs effect (saveObs guard below pins exactly
+// two call sites) — and the store deliberately has NO write-through for them,
+// the same single-writer rule as every slice before. Seeding reads loadObs()
+// ONCE per store instance with resetObsPrefDefaults() as the ??-only fallback:
+// storage.ts owns shape and defaults; nothing here re-declares a literal.
+console.log('\ncreateUiStore — the Observer view prefs seed from the ObsUi namespace, never from re-declared defaults');
+test('a fresh store seeds the four prefs from resetObsPrefDefaults() on a clean install (not local literals)', () => {
+  reset();
+  const s = createUiStore().getState();
+  const d = resetObsPrefDefaults();
+  assert.equal(s.observerViewMode, 'sessions');
+  assert.deepEqual(s.observerActivityFilters, { type: 'all', agent: 'all', host: 'all' });
+  assert.deepEqual(s.observerDirectiveFilters, { agent: 'all', host: 'all' });
+  assert.deepEqual(s.observerAttentionFilters, { agent: 'all', host: 'all' });
+  // The storage-owned factory is the source — every field of it, byte for byte.
+  assert.deepEqual(
+    [s.observerViewMode, s.observerActivityFilters, s.observerDirectiveFilters, s.observerAttentionFilters],
+    [d.viewMode, d.activityFilters, d.directiveFilters, d.attentionFilters],
+  );
+});
+test('a fresh store seeds the four prefs from the PERSISTED warden:observer:v1 payload when one exists', () => {
+  reset();
+  saveObs({
+    openIds: ['s1'], activeId: 's1',
+    viewMode: 'attention',
+    activityFilters: { type: 'error', agent: 'claude', host: 'build-01' },
+    directiveFilters: { agent: 'codex', host: 'web-02' },
+    attentionFilters: { agent: 'gemini', host: '(local)' },
+  });
+  const s = createUiStore().getState();
+  assert.equal(s.observerViewMode, 'attention');
+  assert.deepEqual(s.observerActivityFilters, { type: 'error', agent: 'claude', host: 'build-01' });
+  assert.deepEqual(s.observerDirectiveFilters, { agent: 'codex', host: 'web-02' });
+  assert.deepEqual(s.observerAttentionFilters, { agent: 'gemini', host: '(local)' });
+});
+test('a payload that predates the filter fields (viewMode-era only) still seeds every shape from resetObsPrefDefaults', () => {
+  reset();
+  // The no-migration upgrade path storage.ts documents: a payload written
+  // before WARDEN-879/971 loads the missing fields as undefined, and the
+  // store's ??-only fallback supplies the defaults.
+  saveObs({ openIds: ['s1'], activeId: 's1', viewMode: 'directives' });
+  const s = createUiStore().getState();
+  const d = resetObsPrefDefaults();
+  assert.equal(s.observerViewMode, 'directives');
+  assert.deepEqual(s.observerActivityFilters, d.activityFilters);
+  assert.deepEqual(s.observerDirectiveFilters, d.directiveFilters);
+  assert.deepEqual(s.observerAttentionFilters, d.attentionFilters);
+});
+test('an explicit seed overrides the persisted read (so a test needs no localStorage) — the UiStoreSeed addition', () => {
+  reset();
+  saveObs({
+    openIds: ['s1'], activeId: 's1',
+    viewMode: 'attention',
+    activityFilters: { type: 'error', agent: 'claude', host: 'build-01' },
+    directiveFilters: { agent: 'codex', host: 'web-02' },
+    attentionFilters: { agent: 'gemini', host: '(local)' },
+  });
+  const s = createUiStore({
+    observerViewMode: 'activity',
+    observerActivityFilters: { type: 'chat', agent: 'all', host: 'all' },
+    observerDirectiveFilters: { agent: 'all', host: 'db-03' },
+    observerAttentionFilters: { agent: 'all', host: '(local)' },
+  }).getState();
+  assert.equal(s.observerViewMode, 'activity');
+  assert.deepEqual(s.observerActivityFilters, { type: 'chat', agent: 'all', host: 'all' });
+  assert.deepEqual(s.observerDirectiveFilters, { agent: 'all', host: 'db-03' });
+  assert.deepEqual(s.observerAttentionFilters, { agent: 'all', host: '(local)' });
+});
+
+console.log("\nthe four Observer setters write the store, and they do NOT touch localStorage");
+test('the setters replace the values, and a subscriber is notified (the SHARING channel ObserverTabs + App both read)', () => {
+  reset();
+  const store = createUiStore();
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push([
+    s.observerViewMode,
+    { ...s.observerActivityFilters },
+    { ...s.observerDirectiveFilters },
+    { ...s.observerAttentionFilters },
+  ]));
+  store.getState().setObserverViewMode('activity');                                    // App's "View Activity"
+  store.getState().setObserverActivityFilters({ type: 'error', agent: 'all', host: 'all' }); // the tab's type Select
+  store.getState().setObserverDirectiveFilters({ agent: 'codex', host: 'all' });       // the tab's agent Select
+  store.getState().setObserverAttentionFilters({ agent: 'all', host: 'web-02' });      // the tab's host Select
+  unsubscribe();
+  assert.deepEqual(seen, [
+    ['activity', { type: 'all', agent: 'all', host: 'all' }, { agent: 'all', host: 'all' }, { agent: 'all', host: 'all' }],
+    ['activity', { type: 'error', agent: 'all', host: 'all' }, { agent: 'all', host: 'all' }, { agent: 'all', host: 'all' }],
+    ['activity', { type: 'error', agent: 'all', host: 'all' }, { agent: 'codex', host: 'all' }, { agent: 'all', host: 'all' }],
+    ['activity', { type: 'error', agent: 'all', host: 'all' }, { agent: 'codex', host: 'all' }, { agent: 'all', host: 'web-02' }],
+  ]);
+  // After unsubscribing, a further write must not reach it.
+  store.getState().setObserverViewMode('sessions');
+  assert.equal(seen.length, 4);
+});
+test('the four setters alone write NOTHING to localStorage (single-writer: ObserverTabs\u2019 saveObs effect owns the write)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setObserverViewMode('activity');
+  store.getState().setObserverActivityFilters({ type: 'error', agent: 'all', host: 'all' });
+  store.getState().setObserverDirectiveFilters({ agent: 'codex', host: 'all' });
+  store.getState().setObserverAttentionFilters({ agent: 'all', host: 'web-02' });
+  // The store deliberately has no write-through persistence for the ObsUi
+  // namespace: a second writer here would silently race the ONE compile-locked
+  // saveObs effect (App's Settings-reset disk write is the only other site).
+  assert.equal(mem.get('warden:observer:v1'), undefined);
+});
+test('the four action identities are stable across writes (safe in a React dep array, and in App\u2019s obsResetSetters map)', () => {
+  reset();
+  const store = createUiStore();
+  const before = [
+    store.getState().setObserverViewMode,
+    store.getState().setObserverActivityFilters,
+    store.getState().setObserverDirectiveFilters,
+    store.getState().setObserverAttentionFilters,
+  ];
+  before[0]('activity');
+  before[1]({ type: 'error', agent: 'all', host: 'all' });
+  before[2]({ agent: 'codex', host: 'all' });
+  before[3]({ agent: 'all', host: 'web-02' });
+  assert.equal(store.getState().setObserverViewMode, before[0]);
+  assert.equal(store.getState().setObserverActivityFilters, before[1]);
+  assert.equal(store.getState().setObserverDirectiveFilters, before[2]);
+  assert.equal(store.getState().setObserverAttentionFilters, before[3]);
+});
+test('DEAD-LINK REGRESSION (WARDEN-880): writing the same view mode the manual switch left behind STILL navigates', () => {
+  reset();
+  const store = createUiStore();
+  // The retired prop channel could not do this: after the first deep-link the
+  // prop was already 'activity', so the 2nd set was a React same-value bailout
+  // (no re-render → no effect → the click navigated nowhere) until the consume
+  // callback reset it to null. A store write is always a fresh transition the
+  // subscriber re-renders from — deep-link, manual switch, deep-link again.
+  store.getState().setObserverViewMode('activity');  // "View Activity" deep-link #1
+  store.getState().setObserverViewMode('sessions');  // the human's manual tab switch
+  assert.equal(store.getState().observerViewMode, 'sessions');
+  store.getState().setObserverViewMode('activity');  // "View Activity" deep-link #2 — must win
+  assert.equal(store.getState().observerViewMode, 'activity');
+});
+test('STALE-CLOSURE REGRESSION (the Clear-filters audit): two consecutive partial writes through the adapter pattern COMPOSE', () => {
+  reset();
+  // ObserverTabs’ seven spread-updater adapters are functional writes —
+  // exactly the `(p) => ({ ...p, key: v })` shape below — because one handler
+  // can fire TWO of them back-to-back: AttentionView’s clearFilters runs
+  // `setHostFilter?.('all'); setAgentFilter?.('all')`. A spread of a
+  // RENDER-captured shape (the first pass’s bug, caught in the WARDEN-1441
+  // audit) let the second write silently restore the first key: from
+  // {agent:'a1', host:'h1'}, clearFilters landed {agent:'all', host:'h1'} —
+  // still filtered by host, still showing the empty state.
+  const store = createUiStore({ observerAttentionFilters: { agent: 'a1', host: 'h1' } });
+  // getState() re-reads before AND after: each set replaces the store’s
+  // state object, so a snapshot held across the writes is itself stale — the
+  // very failure mode this test pins, at one level up.
+  store.getState().setObserverAttentionFilters((p) => ({ ...p, host: 'all' }));   // setHostFilter?.('all')
+  store.getState().setObserverAttentionFilters((p) => ({ ...p, agent: 'all' }));  // setAgentFilter?.('all')
+  assert.deepEqual(store.getState().observerAttentionFilters, { agent: 'all', host: 'all' });
+});
+test('the Settings-reset path snaps all four through the store-backed setters (the slice-15 shape of App\u2019s obsResetSetters sweep)', () => {
+  reset();
+  saveObs({
+    openIds: ['s1'], activeId: 's1',
+    viewMode: 'attention',
+    activityFilters: { type: 'error', agent: 'claude', host: 'build-01' },
+    directiveFilters: { agent: 'codex', host: 'web-02' },
+    attentionFilters: { agent: 'gemini', host: '(local)' },
+  });
+  const store = createUiStore();
+  // Exactly what App's reset callback does since slice 15: one
+  // resetObsPrefDefaults() build, an ObsResetKey-keyed map of the same actions
+  // the panel writes, and a sweep. (openIds/activeId stay component state and
+  // ride through untouched — the disk half, resetObsPrefsPreservingWorkspace,
+  // is storage.test.mjs's territory.)
+  const d = resetObsPrefDefaults();
+  const obsResetSetters = {
+    viewMode: () => store.getState().setObserverViewMode(d.viewMode),
+    activityFilters: () => store.getState().setObserverActivityFilters(d.activityFilters),
+    directiveFilters: () => store.getState().setObserverDirectiveFilters(d.directiveFilters),
+    attentionFilters: () => store.getState().setObserverAttentionFilters(d.attentionFilters),
+  };
+  for (const apply of Object.values(obsResetSetters)) apply();
+  const s = store.getState();
+  assert.equal(s.observerViewMode, d.viewMode);
+  assert.deepEqual(s.observerActivityFilters, d.activityFilters);
+  assert.deepEqual(s.observerDirectiveFilters, d.directiveFilters);
+  assert.deepEqual(s.observerAttentionFilters, d.attentionFilters);
+});
+test('the four prefs are independent of the other migrated facts', () => {
+  reset();
+  const store = createUiStore({ observerViewMode: 'activity' });
+  store.getState().setObserverActivityFilters({ type: 'error', agent: 'all', host: 'all' });
+  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
+  assert.equal(store.getState().agentFilter, 'all');
+  assert.equal(store.getState().theme, 'system');
+  assert.deepEqual(store.getState().paneColRatios, []);
+  // …and writing one axis does not disturb the others.
+  assert.equal(store.getState().observerViewMode, 'activity');
+  store.getState().setObserverViewMode('directives');
+  assert.deepEqual(store.getState().observerActivityFilters, { type: 'error', agent: 'all', host: 'all' });
+  assert.equal(store.getState().theme, 'system');
+});
+test('two stores do not share the Observer prefs; the APP-LEVEL singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setObserverViewMode('attention');
+  a.getState().setObserverActivityFilters({ type: 'error', agent: 'all', host: 'all' });
+  assert.equal(b.getState().observerViewMode, 'sessions');
+  assert.deepEqual(b.getState().observerActivityFilters, { type: 'all', agent: 'all', host: 'all' });
+  assert.equal(uiStore.getState().observerViewMode, 'sessions');
+  assert.deepEqual(uiStore.getState().observerActivityFilters, { type: 'all', agent: 'all', host: 'all' });
 });
 
 console.log('\nstructural guard: components never read persisted state directly — they subscribe');
