@@ -97,12 +97,26 @@ export function createServerStallTelemetry({
 }
 
 /**
+ * How deep the walk descends into MOUNTED routers. The git route table
+ * (src/gitRoutes.js) sits one level down, which is the only nesting warden
+ * has; the cap bounds the walk on pathological nesting so an unexpected
+ * router shape cannot turn route discovery into an unbounded crawl.
+ */
+const MAX_MOUNTED_ROUTER_DEPTH = 4;
+
+/**
  * Derive the set of STATIC route segments from a live express app, so the
  * culprit-key mapping's closed set can never drift from the real route table.
  *
+ * The walk descends into MOUNTED routers: `app.use(subRouter)` (see
+ * src/server.js mounting the git route table, src/gitRoutes.js) pushes a
+ * single middleware layer with no `.route`, and the sub-router's own routes
+ * live one level down in `layer.handle.stack` — a top-level-only walk
+ * silently omits every route registered there.
+ *
  * A `:param` segment is deliberately EXCLUDED — that is exactly the position a
  * session id / collection id occupies, and it must map to the `id` placeholder,
- * not to a literal.
+ * not to a literal. The exclusion holds inside mounted routers too.
  *
  * Defensive: an express version whose router is not reachable yields an empty
  * set, and the aggregator falls back to its own vendored ROUTE_SEGMENTS list.
@@ -116,13 +130,26 @@ export function routeSegmentsOf(app) {
   const out = new Set();
   const router = app && (app.router || app._router);
   const stack = router && Array.isArray(router.stack) ? router.stack : [];
+  collectSegments(stack, out, 0);
+  return out;
+}
+
+function collectSegments(stack, out, depth) {
+  if (depth > MAX_MOUNTED_ROUTER_DEPTH) return;
   for (const layer of stack) {
     const routePath = layer && layer.route && layer.route.path;
-    if (typeof routePath !== 'string') continue;
-    for (const seg of routePath.split('/')) {
-      if (!seg || seg.startsWith(':')) continue;
-      out.add(seg);
+    if (typeof routePath === 'string') {
+      for (const seg of routePath.split('/')) {
+        if (!seg || seg.startsWith(':')) continue;
+        out.add(seg);
+      }
+      continue;
+    }
+    // A mounted Router is a middleware layer with no `.route`; its routes sit
+    // one level down in `layer.handle.stack`.
+    const handle = layer && layer.handle;
+    if (handle && Array.isArray(handle.stack)) {
+      collectSegments(handle.stack, out, depth + 1);
     }
   }
-  return out;
 }

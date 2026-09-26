@@ -14,9 +14,13 @@
 // could not name what was blocking. An aggregate that reports "other" is the
 // modern version of that failure.
 //
-// So this test reads src/server.js and src/companion.js and fails the build when
-// a NEW span label appears that the mapping does not know about. It is the same
-// discipline src/loop-monitor-coverage.test.js applies to SYNC_FS_METHODS.
+// So this test reads every non-test src/*.js file — routes and traced span
+// labels alike — and fails the build when a NEW one appears that the mapping
+// does not know about. Routes are matched on both `app.*` and `router.*`
+// registrations, because a route can live on a mounted express.Router (the git
+// route table, src/gitRoutes.js) where a server.js-only scan cannot see it. It
+// is the same discipline src/loop-monitor-coverage.test.js applies to
+// SYNC_FS_METHODS.
 //
 // Run: node --test src/telemetry-stalls-coverage.test.js
 
@@ -52,23 +56,31 @@ test('every listed ROUTE_SEGMENT is actually USABLE as a key (letters + hyphens 
   );
 });
 
-test('every STATIC route segment in server.js is a known culprit-key segment', () => {
+test('every STATIC route segment in src/ is a known culprit-key segment', () => {
   // The vendored fallback list. In production server.js injects the LIVE set
   // derived from the express router, so this guard is about the standalone /
   // unit-test path AND about keeping the documented list honest.
+  //
+  // The scan covers every non-test src/*.js file and matches both `app.*` and
+  // `router.*` registrations: routes can live on a mounted express.Router (the
+  // git route table, src/gitRoutes.js), and a server.js-only scan cannot see
+  // them — they then fold to `id` in the aggregate with no guard complaining.
   const known = new Set(ROUTE_SEGMENTS);
   const missing = new Set();
-  const routeRe = /app\.(?:get|post|put|patch|delete)\(\s*'([^']+)'/g;
+  const routeRe = /\b(?:app|router)\.(?:get|post|put|patch|delete)\(\s*'([^']+)'/g;
   let m;
-  while ((m = routeRe.exec(serverSource)) !== null) {
-    for (const seg of m[1].split('/')) {
-      if (!seg || seg.startsWith(':')) continue; // a param is `id` BY DESIGN
-      // A digit-bearing segment can never be a key (see the mapper's SAFE_KEY_RE
-      // note): it folds to `id` unconditionally, so it is not "missing" from the
-      // list — it is structurally out of scope for it.
-      if (!/^[a-z][a-z-]*$/.test(seg)) continue;
-      if (!known.has(seg)) missing.add(seg);
+  for (const { name, text } of sourceFiles) {
+    while ((m = routeRe.exec(text)) !== null) {
+      for (const seg of m[1].split('/')) {
+        if (!seg || seg.startsWith(':')) continue; // a param is `id` BY DESIGN
+        // A digit-bearing segment can never be a key (see the mapper's SAFE_KEY_RE
+        // note): it folds to `id` unconditionally, so it is not "missing" from the
+        // list — it is structurally out of scope for it.
+        if (!/^[a-z][a-z-]*$/.test(seg)) continue;
+        if (!known.has(seg)) missing.add(`${seg} (${name})`);
+      }
     }
+    routeRe.lastIndex = 0;
   }
   assert.deepEqual(
     [...missing],
