@@ -1059,15 +1059,21 @@ function App() {
     //   1. DISK: rewrite the stored payload with the 4 pref fields defaulted
     //      (resetObsPrefsPreservingWorkspace keeps openIds/activeId — which
     //      observer sessions are open is workspace state, exactly like
-    //      workspaces/activeWorkspaceId above). This is the half the shipped
-    //      flow rides: the full-page Settings view unmounts the dashboard, and
-    //      on return the panel (and the store's module-level seed) re-read the
-    //      rewritten payload — so the panel comes back already reset.
-    //   2. LIVE: snap the four store facts to resetObsPrefDefaults()' values, so
-    //      a panel that IS mounted when the reset fires re-renders to defaults
-    //      in place (slice 15 moved the prefs onto the uiStore — the four
+    //      workspaces/activeWorkspaceId above). This keeps warden:observer:v1
+    //      in agreement: it is what a page reload re-reads, and it is where the
+    //      panel re-seeds openIds/activeId (via obsSeed) on remount.
+    //   2. STORE: snap the four store facts to resetObsPrefDefaults()' values.
+    //      This is the half that resets the panel — for BOTH audiences, because
+    //      slice 15 moved the prefs onto the process-lifetime uiStore, which is
+    //      seeded ONCE at import and is never re-read from disk. A panel that
+    //      IS mounted when the reset fires re-renders to defaults in place; the
+    //      shipped flow (the full-page Settings view unmounts the dashboard)
+    //      remounts the panel, whose viewMode/filters now come from the store.
+    //      Without this half the returning panel would show the old tab and
+    //      filters, and its booted-gated saveObs(obsBag) effect would write
+    //      them straight back to disk, silently undoing half 1. The four
     //      setters below are the same actions ObserverTabs' tabs/Selects write
-    //      — so a direct store write replaces the retired resetToken nonce).
+    //      — so a direct store write replaces the retired resetToken nonce.
     //      WARDEN-981's same-value-bailout worry dissolves with the nonce
     //      retired: a repeated reset is just another store transition.
     // The setter map keeps the ObsResetKey-keyed shape the live-panel half used
