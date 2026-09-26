@@ -166,7 +166,7 @@ const ROUTE_SEGMENTS = Object.freeze([
   'git-range-diff', 'git-reflog', 'git-remote', 'git-show', 'git-stash',
   'git-stash-show', 'git-status', 'health', 'hosts', 'key',
   'kill', 'pane', 'pane-export', 'pane-latency', 'pane-project', 'paste-image', 'pins', 'read-file', 'rename', 'reset',
-  'respawn', 'resume', 'search-files', 'search-pane', 'send', 'series',
+  'respawn', 'resume', 'save-session', 'search-files', 'search-pane', 'send', 'series',
   'session-kill', 'session-tags', 'sessions', 'spawn', 'ssh-hosts', 'stalls',
   'stats', 'status', 'telemetry-test', 'this-session', 'uninstall',
   'webhook-test',

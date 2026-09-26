@@ -13,6 +13,11 @@ export interface Chat {
   cwd?: string;
   cmd?: string;
   isAgent?: boolean;
+  // WARDEN-1422: an unnamed spawned shell. Cataloged only so panes/kill resolve;
+  // filtered from every LISTING (/api/chats, /api/discover's chats, /api/health)
+  // — unsaved sessions are never listed. Rides the spawn response and
+  // /api/discover's temporaryChats.
+  temporary?: boolean;
   active?: boolean | null;  // null = undiscovered (lazy mode, before host is clicked)
   status?: string;
   lastActivity?: number;  // Timestamp of last activity (ms since epoch)

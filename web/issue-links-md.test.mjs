@@ -245,8 +245,10 @@ test('App gates the markdown entries on the integration toggle (off by default)'
     'markdownIssueEntries = enabled ? unambiguousPrefixEntries(trackers) : []',
   );
 });
-test('App threads markdownIssueEntries to the three fleet-level mounts', () => {
-  for (const mount of ['<ObserverTabs', '<SessionTranscriptViewer', '<OpenChatBrowserPage']) {
+test('App threads markdownIssueEntries to the fleet-level mounts', () => {
+  // WARDEN-1422: the third mount was <OpenChatBrowserPage>, deleted with the
+  // Open chat page itself.
+  for (const mount of ['<ObserverTabs', '<SessionTranscriptViewer']) {
     const at = appSrc.indexOf(mount);
     assert.notEqual(at, -1, `${mount} mount findable`);
     assert.ok(/issueEntries=\{markdownIssueEntries\}/.test(appSrc.slice(at, at + 1600)), `${mount} passes issueEntries`);

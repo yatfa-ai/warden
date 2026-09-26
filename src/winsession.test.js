@@ -256,9 +256,16 @@ describe('session manager — the tmux argv subset, executed natively', () => {
   it('has-session / kill-session / list-sessions track the live registry', async () => {
     const { mgr, pty } = harness();
     assert.strictEqual((await mgr.run(['has-session', '-t', 'agent'])).ok, false);
-    // No sessions → list-sessions is non-zero, which chats.js reads as "nothing
-    // alive" (it returns an empty Set on !ok) — same as a tmux server that isn't running.
+    // No sessions → list-sessions exits 1 with "no server running" — a
+    // POSITIVE nothing-alive answer that chats.js classifies as ANSWERED
+    // (ok: true, empty alive set), never as a failed probe (WARDEN-1422
+    // round-2 review): the temporary GC must run on it.
     assert.strictEqual((await mgr.run(['list-sessions', '-F', '#{session_name}'])).ok, false);
+    assert.match(
+      (await mgr.run(['list-sessions', '-F', '#{session_name}'])).stderr,
+      /no server running/,
+      'the shape chats.js isNoServerProbeAnswer matches',
+    );
 
     await mgr.run(newSession('agent'));
     await mgr.run(newSession('other'));
