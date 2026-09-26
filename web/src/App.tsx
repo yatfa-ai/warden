@@ -19,7 +19,7 @@ import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWind
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
-import { paneIdOf } from '@/lib/paneAttach';
+import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts, usePaneColRatios, usePaneRowRatios } from '@/lib/uiStore';
 
@@ -275,6 +275,22 @@ function App() {
   // rendered within it. Mirrors OpenChatBrowserPage's internal `viewing` state.
   const [viewingSession, setViewingSession] = useState<{ id: string; host: string; label: string } | null>(null);
   const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
+  // WARDEN-1422 (QA round 5): per-pane reconnect tokens. A saved session whose
+  // pane is OPEN and stuck in session_dead must re-attach when (a) the sidebar
+  // respawns its chat (respawnChat below) or (b) a resume click hits the pane
+  // (openChat's already-open branch — resume means "click reconnects to the
+  // live tmux session", so a dead recovery panel on screen must re-attach, not
+  // just focus). PaneTile folds a CHANGE of its token into its retryNonce, so
+  // the external value never widens the attach effect's deps.
+  const [reconnectTokens, setReconnectTokens] = useState<ReconnectTokens>({});
+  // The attach phase each open pane last reported (PaneTile's onPhaseChange).
+  // A ref, not state: openChat must read it without depending on pane state,
+  // and a phase change never re-renders the app — it only keeps this map
+  // honest for the next resume click.
+  const panePhaseRef = useRef<Record<string, PaneAttachPhase>>({});
+  const handlePanePhaseChange = useCallback((id: string, phase: PaneAttachPhase) => {
+    panePhaseRef.current[id] = phase;
+  }, []);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
@@ -1203,6 +1219,17 @@ function App() {
     if (owner) {
       if (owner.id !== activeWorkspaceIdRef.current) setActiveWorkspaceId(owner.id);
       if (autoFocusNewPane) setWorkspaces((prev) => prev.map((w) => (w.id === owner.id && w.focused !== id ? { ...w, focused: id } : w)));
+      // WARDEN-1422 (QA round 5): resume = "click reconnects to the live tmux
+      // session". When the click hits a pane OPEN but stuck in session_dead
+      // (e.g. the session was respawned from the sidebar after the pane died,
+      // or the row still reads WORKING while the pane shows the dead panel),
+      // focus alone leaves the dead recovery panel on screen — bump the pane's
+      // reconnect token so it re-attaches now. Any other phase (connecting,
+      // connected, host_unreachable, error) is never disturbed: those have
+      // their own recovery affordances and a live pane must not flicker.
+      if (resumeShouldReattach(panePhaseRef.current[id])) {
+        setReconnectTokens((prev) => bumpReconnectToken(prev, id));
+      }
       return;
     }
     // Otherwise add to the active workspace + focus it.
@@ -1454,6 +1481,13 @@ function App() {
     }
     const host = chatsRef.current.find((c) => (c.key || c.id) === id)?.host;
     if (host) void discoverHost(host).catch(() => {});
+    // WARDEN-1422 (QA round 5): if this chat's pane is OPEN (it sat in
+    // session_dead — the ordinary permanent+stopped path), it must re-attach
+    // NOW that the session exists again. Bump its reconnect token; PaneTile
+    // folds the change into its retryNonce and re-runs the attach effect —
+    // the same sequence the in-pane Re-spawn button drives. A pane that is
+    // not open costs nothing (the token entry waits unused).
+    setReconnectTokens((prev) => bumpReconnectToken(prev, id));
     if (prefs.notifyChatOps) toast.success('Session respawned — a fresh process under the same name');
   }, [discoverHost, prefs.notifyErrors, prefs.notifyChatOps]);
 
@@ -2254,6 +2288,10 @@ function App() {
             onSplitShell={handleSplitShell}
             onSpawned={handlePaneSpawned}
             externalSearchQuery={externalSearchQuery}
+            // WARDEN-1422 (QA round 5): per-pane reconnect tokens + phase
+            // reports — the respawn/resume → open-dead-pane re-attach chain.
+            reconnectTokens={reconnectTokens}
+            onPanePhaseChange={handlePanePhaseChange}
             onToggleSidebar={toggleSidebar}
             onToggleObserver={toggleObserver}
             // WARDEN-1322 (slice 3): the six terminal prefs (fontSize/onFontSize-

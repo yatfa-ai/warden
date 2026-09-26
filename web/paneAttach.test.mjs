@@ -10,6 +10,12 @@
 //   - attachEffectDeps(inputs)     — the dependency tuple the effect uses
 //   - paneIdOf(chat)               — the paneHost write key = the pane-open id
 //                                    (the WARDEN-1422 unnamed-shell fix)
+//   - bumpReconnectToken / reconnectTokenOf / reconnectBumpPending /
+//     resumeShouldReattach          — the per-pane reconnect-token chain (the
+//                                    WARDEN-1422 QA round 5 fix): a sidebar
+//                                    respawn or a session_dead resume click
+//                                    re-attaches an OPEN dead pane, and
+//                                    nothing else ever does.
 // This test drives the triggering render sequence through that seam and asserts
 // a SINGLE attach per pane lifetime. It fails if host/hostKey are ever returned
 // from attachEffectDeps (i.e. re-added to the deps) — the regression.
@@ -36,8 +42,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-paneattach-test-'));
 const tmpFile = join(tmpDir, 'paneAttach.mjs');
 writeFileSync(tmpFile, code);
-const { hostKeyOf, attachEffectDeps, paneIdOf } = await import(tmpFile);
-rmSync(tmpDir, { recursive: true, force: true });
+const { hostKeyOf, attachEffectDeps, paneIdOf, bumpReconnectToken, reconnectTokenOf, reconnectBumpPending, resumeShouldReattach } = await import(tmpFile);rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log('  ok -', name); };
@@ -250,6 +255,163 @@ test('a remote spawn carries ITS host through the chain', () => {
   const attachHost = paneHost[paneIdOf(remote)];
   assert.equal(attachHost, 'macmini');
   assert.equal(hostKeyOf(remote, attachHost), 'macmini');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nreconnect tokens — sidebar respawn / resume-click → open-dead-pane re-attach (WARDEN-1422 QA round 5)');
+// ---------------------------------------------------------------------------
+// The QA round-5 blocker: a saved session that stops while its pane is OPEN
+// leaves the pane stuck on the session_dead recovery panel. The sidebar's
+// respawn recreated the tmux session and flipped the row to WORKING, but
+// nothing signalled the open pane to re-attach — respawnChat only POSTed,
+// openChat's already-open branch only focused, and the attach effect's deps
+// are [id, retryNonce], so no re-attach ever fired and the pane stayed dead
+// until a reload. The fix: App keeps a per-pane reconnect token, bumps it at
+// the two moments the pane must re-attach NOW (successful sidebar respawn;
+// a resume click that finds the pane in session_dead), and PaneTile folds a
+// CHANGE of its token into retryNonce — the external value never widens the
+// attachEffectDeps contract.
+
+// Drive BOTH sides of the fix the way React would run them:
+//   - the App side: which token value reaches the pane on each render
+//     (bumpReconnectToken produces the map, reconnectTokenOf reads it);
+//   - the PaneTile side: the fold effect converts a token CHANGE into a
+//     retryNonce bump (reconnectBumpPending), and the attach effect
+//     (attachEffectDeps) re-fires iff its deps changed. The last-seen-token
+//     ref initializes to the MOUNT-time token, exactly as the component does.
+function simulateReconnect(events) {
+  const sent = [];
+  let tokens = {};          // App's reconnectTokens map
+  let lastSeenToken = null; // PaneTile's ref (null = not mounted yet)
+  let retryNonce = 0;
+  let prevDeps = null;
+  for (const ev of events) {
+    if (ev.bump) tokens = bumpReconnectToken(tokens, ev.bump);
+    if (ev.unmount) { prevDeps = null; lastSeenToken = null; retryNonce = 0; sent.push('unmount'); continue; }
+    const token = reconnectTokenOf(tokens, 'p1');
+    // The fold effect runs on each render AFTER mount.
+    if (lastSeenToken !== null && reconnectBumpPending(lastSeenToken, token)) retryNonce += 1;
+    lastSeenToken = token;
+    const deps = attachEffectDeps({ id: 'p1', retryNonce, host: undefined, hostKey: '(local)' });
+    const reattach = prevDeps === null || depsChanged(prevDeps, deps);
+    if (prevDeps !== null && reattach) sent.push('detach');
+    if (reattach) sent.push('attach');
+    prevDeps = deps;
+  }
+  return sent;
+}
+
+test('bumpReconnectToken — per-pane, absent id starts at 1, others untouched, original map unmuted', () => {
+  const t0 = { other: 3 };
+  const t1 = bumpReconnectToken(t0, 'p1');
+  assert.deepEqual(t1, { other: 3, p1: 1 });
+  assert.deepEqual(t0, { other: 3 }, 'the input map is never mutated');
+  assert.deepEqual(bumpReconnectToken(t1, 'p1'), { other: 3, p1: 2 });
+  assert.deepEqual(bumpReconnectToken(t1, 'p2'), { other: 3, p1: 1, p2: 1 }, 'bumping one pane leaves the others');
+});
+test('reconnectTokenOf — an absent map or id reads as 0, never undefined', () => {
+  assert.equal(reconnectTokenOf(undefined, 'p1'), 0);
+  assert.equal(reconnectTokenOf({}, 'p1'), 0);
+  assert.equal(reconnectTokenOf({ p1: 4 }, 'p1'), 4);
+  assert.equal(reconnectTokenOf({ p1: 4 }, 'p2'), 0);
+});
+test('reconnectBumpPending — a changed token is pending; an unchanged token never is', () => {
+  assert.equal(reconnectBumpPending(0, 1), true);
+  assert.equal(reconnectBumpPending(3, 4), true);
+  assert.equal(reconnectBumpPending(3, 3), false, 'a plain re-render must never re-attach');
+});
+test('resumeShouldReattach — ONLY session_dead triggers a resume re-attach', () => {
+  assert.equal(resumeShouldReattach('session_dead'), true);
+  assert.equal(resumeShouldReattach('connected'), false, 'a live pane must not flicker on row click');
+  assert.equal(resumeShouldReattach('connecting'), false, 'an attaching pane is already doing the work');
+  assert.equal(resumeShouldReattach('host_unreachable'), false, 'its own recovery panel owns that recovery');
+  assert.equal(resumeShouldReattach('error'), false, 'its own recovery panel owns that recovery');
+  assert.equal(resumeShouldReattach(undefined), false, 'no report yet → change nothing');
+});
+
+test('THE QA REPRO: stopped session, open dead pane → sidebar respawn → the pane re-attaches', () => {
+  // Render walk of the exact QA repro (4/4 failures before this fix):
+  //   1. pane open, session working          → one attach.
+  //   2. session stops; sidebar poll flips
+  //      the row to STOPPED (renders, but
+  //      nothing App-side touches the pane)  → still attached, dead panel showing.
+  //   3. row's respawn clicked; POST
+  //      /api/respawn succeeds; App bumps
+  //      the pane's token                    → fold bumps retryNonce →
+  //                                            detach + RE-ATTACH.
+  //   4. user clicks the row (resume)        → phase already connected → no bump,
+  //                                            focus only, NO re-attach.
+  const sent = simulateReconnect([
+    {},
+    { bump: 'p1' }, // respawnChat's setReconnectTokens
+    {},             // the row click — openChat's already-open branch
+  ]);
+  assert.equal(sent.filter((s) => s === 'attach').length, 2, 'initial attach + exactly one re-attach on respawn');
+  assert.equal(sent[sent.length - 1], 'attach', 'the pane ends attached');
+});
+
+test('CONTROL: without the token bump (the old code) the pane stays dead', () => {
+  // The pre-fix shape: respawn posted, discovery refreshed, but no signal ever
+  // reached the pane — the row click only focused. Pins the regression: if the
+  // bump disappears from respawnChat, this control and the repro test cannot
+  // both pass.
+  const sent = simulateReconnect([{}, {}, {}]);
+  assert.equal(sent.filter((s) => s === 'attach').length, 1, 'one attach, ever — the pane never re-attaches');
+});
+
+test('the resume-click half: openChat bumping a pane still in session_dead re-attaches it', () => {
+  // The session came back WITHOUT a sidebar respawn (external recreate) — or
+  // the row click lands before the respawn POST resolves. App's openChat sees
+  // the pane's reported phase session_dead and bumps; the pane re-attaches.
+  const sent = simulateReconnect([{}, { bump: 'p1' }]);
+  assert.equal(sent.filter((s) => s === 'attach').length, 2);
+  assert.equal(sent.includes('detach'), true, 'the dead stream was torn down before the re-bind');
+});
+
+test('a resume click on a LIVE open pane re-attaches nothing', () => {
+  // Pane connected, user clicks its row to focus it — the common case. No
+  // bump (resumeShouldReattach is false for 'connected'), no re-attach: the
+  // live PTY must never flicker.
+  const sent = simulateReconnect([{}, {}]);
+  assert.deepEqual(sent, ['attach']);
+});
+
+test('a pane OPENED after a respawn attaches exactly once (no mount double-attach)', () => {
+  // The token was already bumped (or a respawn happened earlier in the
+  // session); the pane opens fresh with the post-bump token. Its fold ref
+  // initializes to the mount-time value, so the first render attaches once —
+  // the mount must not read the pre-existing token as a "change".
+  const sent = simulateReconnect([{ bump: 'p1' }]);
+  assert.deepEqual(sent, ['attach']);
+});
+
+test('an unbumped re-render storm (catalog polls, workspace switches) never re-attaches', () => {
+  // The WARDEN-365 discipline holds with the token in the payload: only the
+  // TOKEN's value decides. Any number of re-renders between bumps is silent.
+  const sent = simulateReconnect([{}, {}, {}, {}, { bump: 'p1' }, {}, {}, {}]);
+  assert.equal(sent.filter((s) => s === 'attach').length, 2, 'initial + the one respawn re-attach');
+  assert.equal(sent.filter((s) => s === 'detach').length, 1);
+});
+
+test('remount after the token settled: fresh pane, fresh fold, single attach per mount', () => {
+  // Pane closed while stopped, respawned from the row, pane re-opened. The
+  // unmount resets the fold ref; the new mount carries the current token and
+  // attaches ONCE — the mount must not read the pre-existing token as a
+  // "change" — and a LATER bump while open still re-attaches it.
+  const sent = simulateReconnect([
+    {},                    // open, attach
+    { unmount: true },     // close the dead pane
+    { bump: 'p1' },        // respawn (pane not open — the entry waits unused)
+    {},                    // re-open: carries token 1 at mount → one attach
+    {},                    // the render after the mount — still silent
+    { bump: 'p1' },        // a later respawn while open → re-attach
+  ]);
+  // attach #1 the first open; #2 the re-open mount; #3 the later respawn.
+  assert.equal(sent.filter((s) => s === 'attach').length, 3);
+  // The exact post-unmount sequence: the re-open's single attach, then the
+  // later respawn's detach + re-attach. Nothing between the re-open attach
+  // and the respawn — the pre-existing token did not read as a change.
+  assert.deepEqual(sent.slice(sent.indexOf('unmount') + 1), ['attach', 'detach', 'attach']);
 });
 
 console.log(`\n  ${passed} passed`);

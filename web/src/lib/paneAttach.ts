@@ -85,3 +85,74 @@ export interface AttachTriggerInputs {
 export function attachEffectDeps(inputs: AttachTriggerInputs): readonly [string, number] {
   return [inputs.id, inputs.retryNonce];
 }
+
+/**
+ * The attach lifecycle phases a pane reports (WARDEN-231). Declared here —
+ * next to the attach-trigger contract — so PaneTile, PaneGrid and App can
+ * speak about a pane's phase without the type living inside the component.
+ */
+export type PaneAttachPhase = 'connecting' | 'connected' | 'session_dead' | 'host_unreachable' | 'error';
+
+/**
+ * App's per-pane reconnect tokens (WARDEN-1422, QA round 5). The QA blocker:
+ * a saved session that stops while its pane is OPEN leaves the pane stuck on
+ * the `session_dead` recovery panel; the sidebar's respawn recreated the tmux
+ * session and flipped the row to WORKING, but nothing signalled the open pane
+ * to re-attach — `respawnChat` only POSTs /api/respawn, `openChat`'s
+ * already-open branch only focuses, and the attach effect's deps are
+ * `[id, retryNonce]`, so no re-attach ever fired.
+ *
+ * The fix is a per-pane token App bumps at exactly the two moments the pane
+ * must re-attach NOW:
+ *   1. a successful sidebar respawn of this chat (`respawnChat`), and
+ *   2. a resume click that hits an open pane still in `session_dead`
+ *      (`openChat`'s already-open branch — resume means "click reconnects to
+ *      the live tmux session", so a pane sitting on a dead recovery panel
+ *      while the session is live must re-attach, not just focus).
+ *
+ * PaneTile folds a CHANGE of its token into the internal `retryNonce` (see
+ * {@link reconnectBumpPending}), so the external value itself never widens
+ * the attach effect's deps — the `[id, retryNonce]` contract above is intact.
+ */
+export type ReconnectTokens = Record<string, number>;
+
+/** A pane's current reconnect token — an absent map/id reads as 0 (never bumped). */
+export function reconnectTokenOf(tokens: ReconnectTokens | undefined, id: string): number {
+  return tokens?.[id] ?? 0;
+}
+
+/**
+ * Bump ONE pane's token, immutably: a fresh map, other panes' entries
+ * byte-unchanged, an absent id starting at 0 → 1. Called by App on a
+ * successful sidebar respawn and on a resume click that hit a pane in
+ * `session_dead`.
+ */
+export function bumpReconnectToken(tokens: ReconnectTokens, id: string): ReconnectTokens {
+  return { ...tokens, [id]: reconnectTokenOf(tokens, id) + 1 };
+}
+
+/**
+ * The PaneTile-side fold: has this pane's external token CHANGED since the
+ * fold last ran? `true` → the pane bumps its internal `retryNonce` (detach +
+ * re-attach); `false` → a plain re-render, which must NEVER re-attach a pane
+ * (the WARDEN-365 discipline). The caller keeps the last-seen token in a ref
+ * initialized to the MOUNT-time token, so a pane OPENED after a respawn — its
+ * first render already carrying the post-bump token — attaches exactly once
+ * instead of double-attaching on mount.
+ */
+export function reconnectBumpPending(lastSeenToken: number, nextToken: number): boolean {
+  return nextToken !== lastSeenToken;
+}
+
+/**
+ * Should a resume click on an OPEN pane trigger a re-attach? Only when the
+ * pane last reported `session_dead` — the one phase that means "host is up,
+ * the pane's session is gone, and the panel on screen is stale whenever the
+ * session has come back". `connecting` is already attaching, `connected` is
+ * live, `host_unreachable`/`error` have their own recovery panels (Retry /
+ * Re-spawn) that must keep ownership of their recovery, and `undefined`
+ * (pane not yet reported) changes nothing.
+ */
+export function resumeShouldReattach(phase: PaneAttachPhase | undefined): boolean {
+  return phase === 'session_dead';
+}
