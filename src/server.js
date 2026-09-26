@@ -285,7 +285,13 @@ export async function preflightTmux(host, deps = {}) {
   return r.stdout.includes('OK') ? null : `tmux is required on ${host}. install:  ssh ${host} 'sudo apt-get install -y tmux'  (or: brew install tmux)`;
 }
 
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+// A tmux session id may be [A-Za-z0-9_-] only. `.` is deliberately ABSENT even
+// though tmux ACCEPTS it at creation: tmux silently rewrites `.` (and `:`) to
+// `_` (WARDEN-1422 QA — `new-session -d -s a.b.c` creates `a_b_c`), so a dotted
+// id would name a session warden can never find with `has-session`. Keeping the
+// class dot-free means every id we validate is byte-identical to the session
+// tmux actually creates.
+const NAME_RE = /^[A-Za-z0-9_-]+$/;
 
 // Disk-only catalog list — instant, zero ssh (lazy mode). Live active/status are
 // resolved per host on demand via /api/discover.
@@ -2298,13 +2304,22 @@ app.post('/api/spawn', async (req, res) => {
   // design's saved sessions are named things like "release train 0.1.75"), so
   // when the caller sent a NAME instead of an explicit session id, the id is
   // DERIVED from it (invalid runs → '-') and the raw text stays the display
-  // name. An explicit `session` keeps the historical strict check.
+  // name. An explicit `session` keeps the strict NAME_RE check.
+  //
+  // WARDEN-1422 QA: `.` is tmux-UNSAFE in a session name — tmux silently
+  // rewrites `.` (and `:`) to `_` at creation (`tmux new -d -s a.b.c` creates
+  // `a_b_c`), so an id that keeps `.` describes a session tmux does not have:
+  // `has-session -t <derived>` then misses, the spawn is misreported as "died
+  // immediately" while the REAL session lives on as an orphan (one per retry).
+  // The derivation therefore maps every character outside [A-Za-z0-9_-] — the
+  // dot included — to '-', so the id we check is byte-identical to the one
+  // tmux created. The display name keeps the dot; only the id is normalized.
   const requestedName = String(req.body?.name || '').trim().slice(0, 60);
   const temporary = !requestedSession && !requestedName;
   // A temporary shell's name is GENERATED here (the caller deliberately sent
   // none); `newTempName` draws fresh candidates for the collision loop below.
   const newTempName = () => `shell-${Math.random().toString(36).slice(2, 8)}`;
-  const derivedFromName = requestedName.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  const derivedFromName = requestedName.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
   let session = requestedSession || derivedFromName || newTempName();
   // An OMITTED cmd defaults by naming: a temporary shell is a shell (empty cmd →
   // the host's own login shell, the WARDEN-223 semantics), a named spawn keeps
@@ -2312,7 +2327,7 @@ app.post('/api/spawn', async (req, res) => {
   // paths (the split-shell / open-shell callers still pass theirs).
   const cmdRaw = req.body?.cmd;
   const cmd = (cmdRaw === undefined ? (temporary ? '' : 'claude --dangerously-skip-permissions') : String(cmdRaw)).trim();
-  if (requestedSession && !NAME_RE.test(requestedSession)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
+  if (requestedSession && !NAME_RE.test(requestedSession)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-)' });
   // Generate a unique name for a temporary shell, re-drawing on the (rare) same-host
   // collision with an existing catalog entry instead of 409ing — the caller never
   // chose the name, so a retry with a fresh draw is always the right answer.

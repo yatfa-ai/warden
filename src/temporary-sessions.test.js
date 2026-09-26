@@ -157,6 +157,42 @@ describe('temporary shell sessions — unnamed spawn, unlisted, saveable (WARDEN
     assert.ok(!entry.temporary, 'its catalog entry carries no temporary flag');
   });
 
+  it('a name containing "." spawns AND saves — the derived id is dot-free, so has-session finds the session tmux actually created (WARDEN-1422 QA blocking 1)', async () => {
+    // "release train 0.1.75" is the ticket's own example name. tmux rewrites
+    // `.` to `_` in session names, so a derived id that KEEPS the dot names a
+    // session tmux does not have: has-session missed, the spawn was misreported
+    // as "died immediately", and the REAL session leaked as an orphan. The id
+    // must therefore be dot-free — byte-identical to what tmux created — while
+    // the display name keeps the dot.
+    const NAME = 'release train 0.1.75';
+    const DERIVED = 'release-train-0-1-75';
+    // Exact-name pre-kill only (never a pattern — the worker sandbox rule), so a
+    // leftover from an interrupted earlier run cannot "duplicate session" 500 us.
+    spawnSync('tmux', ['kill-session', '-t', DERIVED], { stdio: 'ignore' });
+    const res = await fetch(`${baseUrl}/api/spawn`, json({ host: '(local)', cwd: '/tmp', name: NAME, cmd: 'sleep 300' }));
+    const body = await res.json();
+    assert.equal(res.status, 200, `expected 200, got ${res.status}: ${body?.error || ''}`);
+    assert.equal(body.chat.session, DERIVED, 'the id is dot-free (tmux rewrites `.` to `_` at creation)');
+    assert.equal(body.chat.name, NAME, 'the display name keeps the dot');
+    // The spawn-time has-session check passed — the chat answers active, and the
+    // session tmux actually created is reachable under the id we derived.
+    assert.equal(body.chat.active, true);
+    const listed = (await (await fetch(`${baseUrl}/api/chats`)).json()).chats;
+    assert.ok(listed.some((c) => c.session === DERIVED), 'a named spawn is persistent: listed under its host');
+    const entry = readCatalog().find((e) => e.session === DERIVED);
+    assert.ok(entry, 'the catalog entry exists under the dot-free id');
+    assert.equal(entry.name, NAME, 'the catalog keeps the human-typed display name');
+  });
+
+  it('an EXPLICIT session id containing "." is rejected 400 up front (the same tmux-rewrite hazard, WARDEN-1422 QA) — no tmux session, no catalog entry', async () => {
+    const res = await fetch(`${baseUrl}/api/spawn`, json({ host: '(local)', session: 'release-train-0.1.75', cwd: '/tmp', cmd: 'sleep 300' }));
+    const body = await res.json();
+    assert.equal(res.status, 400, `expected 400, got ${res.status}: ${body?.error || ''}`);
+    assert.match(body.error, /invalid session name/);
+    assert.ok(!readCatalog().some((e) => e.session === 'release-train-0.1.75'), 'nothing was cataloged');
+    assert.ok(!readCatalog().some((e) => e.session === 'release-train-0_1_75'), 'no tmux-rewritten ghost was cataloged either');
+  });
+
   it('a dead temporary session is gone for good: discover GCs the catalog entry (unknown-not-listed)', async () => {
     // Seed a temporary entry whose tmux session does not exist, then discover
     // the local host: the aliveness check finds it dead and the GC drops it.
