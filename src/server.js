@@ -236,13 +236,25 @@ async function resolve(id) {
       if (hostHint === LOCAL || cfg.hosts.includes(hostHint)) {
         await chatCatalog.refreshHost(hostHint, cfg);
       }
-    } else if (cfg.hosts.length) {
+    } else {
       // Bare name (e.g. a restored yatfa tab like "yatfa-worker") with no host hint.
       // Locate it across configured hosts so already-open remote panes resolve on app
       // start. Demand-driven + cached: runs at most once per unresolved bare name.
       // The owner dedups per host, so two panes resolving bare names concurrently
       // share ONE fleet sweep instead of each starting their own (WARDEN-1206).
-      await chatCatalog.refreshHosts(cfg.hosts, cfg);
+      //
+      // WARDEN-1422 QA round 4: ALSO re-read the on-disk catalog here. A
+      // just-spawned shell is appended to chats.json the instant /api/spawn
+      // returns, and a pane opened before any poll refreshed the host slot
+      // resolved a host-less bare-id attach to "no chat matches" (Couldn't
+      // attach). This re-read is the only leg that reaches it — a catalog tmux
+      // entry is invisible to refreshHost(LOCAL) (single-host discover lists
+      // yatfa containers, not catalog entries) and cfg.hosts is usually empty.
+      // Cheap local disk read, no ssh; the in-flight owner dedups concurrency.
+      await chatCatalog.refreshCatalog(cfg);
+      if (cfg.hosts.length) {
+        await chatCatalog.refreshHosts(cfg.hosts, cfg);
+      }
     }
     return { chats: chatCatalog.snapshot(), errors: [] };
   });

@@ -8,6 +8,8 @@
 // attach-TRIGGER decision into a pure, importable seam (src/lib/paneAttach.ts):
 //   - hostKeyOf(chat, host)        — the host-key derivation (send-time only)
 //   - attachEffectDeps(inputs)     — the dependency tuple the effect uses
+//   - paneIdOf(chat)               — the paneHost write key = the pane-open id
+//                                    (the WARDEN-1422 unnamed-shell fix)
 // This test drives the triggering render sequence through that seam and asserts
 // a SINGLE attach per pane lifetime. It fails if host/hostKey are ever returned
 // from attachEffectDeps (i.e. re-added to the deps) — the regression.
@@ -34,7 +36,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-paneattach-test-'));
 const tmpFile = join(tmpDir, 'paneAttach.mjs');
 writeFileSync(tmpFile, code);
-const { hostKeyOf, attachEffectDeps } = await import(tmpFile);
+const { hostKeyOf, attachEffectDeps, paneIdOf } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -187,6 +189,67 @@ test('Retry re-attaches exactly once (detach then attach), then stays attached',
   const c = counts(simulate(renders));
   assert.equal(c.attach, 2, 'initial attach + one re-attach on Retry');
   assert.equal(c.detach, 1, 'the pre-Retry stream was torn down exactly once');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\npaneIdOf — the paneHost write key = the pane-open id (WARDEN-1422 QA round 4)');
+// ---------------------------------------------------------------------------
+// The server's spawn response carries BOTH ids: `id` is the composite
+// "host:session", `key` the bare tmux session. A pane OPENS with
+// `chat.key || chat.id`; paneHost must be written under THAT id or
+// PaneGrid's `host={paneHost[t.id]}` misses and the attach goes out
+// host-less — the server skips its refreshHost seed and the just-spawned
+// shell resolves to "no chat matches" (Couldn't attach). These tests model
+// the full chain on the REAL spawn-response shape: spawnShell writes
+// paneHost[paneIdOf(chat)], openChat opens paneIdOf(chat), PaneGrid reads
+// paneHost[paneIdOf(chat)] → the attach message's host field.
+
+test('paneIdOf returns the bare key (the pane id), never the composite id', () => {
+  const spawned = { id: '(local):shell-8rhg3b', key: 'shell-8rhg3b', host: '(local)', temporary: true };
+  assert.equal(paneIdOf(spawned), 'shell-8rhg3b');
+});
+test('a key-less chat falls back to id (defensive — server always sets key)', () => {
+  assert.equal(paneIdOf({ id: 'c1' }), 'c1');
+});
+test('THE REGRESSION: the unnamed-shell attach message carries its host', () => {
+  // "+ shell" (no name) — the exact QA repro, modeled end to end with the
+  // real /api/spawn response shape.
+  const spawned = { id: '(local):shell-8rhg3b', key: 'shell-8rhg3b', host: '(local)', temporary: true };
+  const paneHost = {};
+  // spawnShell (and handlePaneSpawned) write the pane's host hint…
+  const paneId = paneIdOf(spawned);
+  paneHost[paneId] = spawned.host || '(local)';
+  // …openChat opens the pane under the SAME id (this is t.id in PaneGrid)…
+  assert.equal(paneId, paneIdOf(spawned));
+  // …so PaneGrid's `host={paneHost[t.id]}` resolves and the attach message
+  // carries it: `streamApi.send({ type:'attach', id, host: sendHost, … })`.
+  const attachHost = paneHost[paneIdOf(spawned)];
+  assert.equal(attachHost, '(local)', 'the attach message must carry the host');
+  // And the host field is honest: hostKeyOf(chat, hint) agrees with it.
+  assert.equal(hostKeyOf(spawned, attachHost), '(local)');
+});
+test('the old composite-id key is exactly the bug (control, not behavior)', () => {
+  // Documents WHY the key matters: writing under chat.id — what the
+  // first cut did — leaves the pane's own lookup empty. This is a control
+  // pinning the failure shape, so a future regression to chat.id keying
+  // makes the assertion above impossible to satisfy silently.
+  const spawned = { id: '(local):shell-8rhg3b', key: 'shell-8rhg3b', host: '(local)', temporary: true };
+  const stale = {};
+  stale[spawned.id] = spawned.host;
+  const openedPaneId = paneIdOf(spawned);
+  assert.equal(stale[openedPaneId], undefined, 'composite-id keying starves the pane lookup — the bug');
+});
+test('a named spawn (persistent chat) keys identically', () => {
+  const named = { id: '(local):release-train-0-1-75', key: 'release-train-0-1-75', host: '(local)' };
+  assert.equal(paneIdOf(named), 'release-train-0-1-75');
+});
+test('a remote spawn carries ITS host through the chain', () => {
+  const remote = { id: 'macmini:shell-9kq2xz', key: 'shell-9kq2xz', host: 'macmini', temporary: true };
+  const paneHost = {};
+  paneHost[paneIdOf(remote)] = remote.host;
+  const attachHost = paneHost[paneIdOf(remote)];
+  assert.equal(attachHost, 'macmini');
+  assert.equal(hostKeyOf(remote, attachHost), 'macmini');
 });
 
 console.log(`\n  ${passed} passed`);

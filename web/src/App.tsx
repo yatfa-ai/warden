@@ -19,6 +19,7 @@ import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWind
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
+import { paneIdOf } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts, usePaneColRatios, usePaneRowRatios } from '@/lib/uiStore';
 
@@ -1396,8 +1397,18 @@ function App() {
       void refresh();
     }
     const hostOf = chat.host || THIS_MACHINE;
-    setPaneHost((p) => (p[chat.id] === hostOf ? p : { ...p, [chat.id]: hostOf }));
-    openChat(chat.key || chat.id);
+    // paneHost is keyed by the id the pane OPENS with (paneIdOf — chat.key,
+    // the bare tmux session; chat.id is the composite "host:session"). The
+    // WARDEN-1422 QA round-4 blocker: keying by chat.id left the pane's own
+    // paneHost lookup empty, the attach went out host-less, the server
+    // skipped its refreshHost seed, and the just-spawned shell resolved to
+    // "no chat matches" — Couldn't attach. Named spawns only passed by
+    // timing luck (refresh() usually landing before the attach); the
+    // pane-id key covers both. paneIdOf is the shared seam — the write key
+    // and openChat's open id can no longer drift.
+    const paneId = paneIdOf(chat);
+    setPaneHost((p) => (p[paneId] === hostOf ? p : { ...p, [paneId]: hostOf }));
+    openChat(paneId);
     return true;
   }, [defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors, setPaneHost]);
 
@@ -1415,14 +1426,19 @@ function App() {
   const handlePaneSpawned = useCallback((chat: Chat) => {
     // WARDEN-1422: an UNNAMED open-shell spawn is temporary — it never rides the
     // catalog list, so track it locally (pane label) and remember its pane host.
+    const paneId = paneIdOf(chat);
     if (chat.temporary) {
       setTempChats((prev) => [...prev.filter((c) => c.id !== chat.id), chat]);
+      // Same pane-id keying as spawnShell (paneIdOf): the pane opens with
+      // chat.key, so paneHost must be keyed by the pane id or PaneGrid's
+      // lookup misses and the attach goes out host-less ("Couldn't attach" —
+      // WARDEN-1422 QA round 4).
       const hostOf = chat.host || THIS_MACHINE;
-      setPaneHost((p) => (p[chat.id] === hostOf ? p : { ...p, [chat.id]: hostOf }));
+      setPaneHost((p) => (p[paneId] === hostOf ? p : { ...p, [paneId]: hostOf }));
     } else {
       void refresh();
     }
-    openChat(chat.key || chat.id);
+    openChat(paneId);
   }, [refresh, openChat]);
 
   // Respawn a STOPPED saved session (WARDEN-1422): one action recreating the

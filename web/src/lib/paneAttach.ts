@@ -1,6 +1,23 @@
 import type { Chat } from '@/lib/types';
 
 /**
+ * The id a pane OPENS with — and therefore the key the `paneHost` map is
+ * written and read under (App's spawnShell/handlePaneSpawned writes,
+ * openChat's re-prime, PaneGrid's `host={paneHost[t.id]}` read).
+ *
+ * The server's spawn response carries BOTH ids: `id` is the composite
+ * `"host:session"` and `key` is the bare tmux session. A pane is opened with
+ * `chat.key || chat.id`, so any paneHost write keyed by the composite id is
+ * unreachable by the pane's own lookup — the attach then goes out host-less
+ * and the server skips its refreshHost seed ("Couldn't attach", WARDEN-1422
+ * QA round 4). Route every pane-id through this one derivation so the write
+ * key and the open id can never drift again.
+ */
+export function paneIdOf(chat: Chat | null | undefined): string {
+  return chat?.key || chat?.id || '';
+}
+
+/**
  * The host key for a pane — its resolved host (the chat's host wins, e.g.
  * 'myserver' or '(local)', falling back to the restore hint (`host` prop) then
  * '(local)').
