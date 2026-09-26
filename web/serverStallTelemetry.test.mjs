@@ -205,6 +205,41 @@ test('routeSegmentsOf reads the STATIC segments of a live express router', () =>
   assert.ok(!segments.has('id'), 'and it is not smuggled in unprefixed either');
 });
 
+test('routeSegmentsOf walks into a MOUNTED express.Router — the git route table resolves', () => {
+  // WARDEN-1444: `app.use(createGitRouter(...))` (src/server.js) mounts
+  // src/gitRoutes.js's routes one level down the stack, as a middleware layer
+  // with no `.route`. A top-level-only walk silently omitted all 15 of those
+  // mounted-router segments (the 14 git-* endpoints plus cross-agent-diff),
+  // so a stall overlapping one of them folded to
+  // `get-api-id` instead of naming it. This is a REAL express 5 app — the
+  // hand-built fake stacks above cannot tell the difference, and that blind
+  // spot is the bug.
+  const express = require('express');
+  const app = express();
+  const router = express.Router();
+  router.get('/api/git-status', (req, res) => res.json({ ok: true }));
+  router.get('/api/sessions/:id', (req, res) => res.json({ ok: true })); // a :param inside the router too
+  app.use(router);
+  app.get('/api/health', (req, res) => res.json({ ok: true })); // flat positive control
+
+  const segments = routeSegmentsOf(app);
+  assert.ok(segments.has('git-status'), 'a route on a mounted Router contributes its static segments');
+  assert.ok(segments.has('health'), 'the flat route is unaffected');
+  assert.ok(!segments.has('id') && !segments.has(':id'),
+    'a :param inside a mounted Router is still never a known literal');
+
+  // And end-to-end: with the live set injected, the fold NAMES the git route
+  // instead of folding it to the placeholder.
+  const sent = [];
+  const producer = createServerStallTelemetry({
+    consent: () => true,
+    send: (s) => sent.push(s),
+    knownSegments: () => routeSegmentsOf(app),
+  });
+  producer.recordStall(stallRecord(1500, [{ label: 'GET /api/git-status', overlapMs: 1400 }]));
+  assert.equal(producer.flushNow().culprits[0].culprit, 'get-api-git-status');
+});
+
 test('routeSegmentsOf is defensive — an unreachable router yields an empty set', () => {
   // Losing the live set costs RESOLUTION (routes stop being distinguishable in
   // the aggregate), never SAFETY: the aggregator falls back to its own vendored

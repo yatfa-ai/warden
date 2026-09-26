@@ -148,17 +148,23 @@ const LABEL_SCOPES = new Set(['sweep', 'ws']);
  */
 const MAX_ROUTE_SEGMENTS = 4;
 
-// Every STATIC segment of warden's route table (src/server.js), as a closed
-// literal set. Used when no live set is injected — the unit tests run against
-// this, and src/telemetry-stalls-coverage.test.js fails the build if a route
-// added to server.js introduces a segment this set does not name. A missing
+// Every STATIC segment of warden's route table — src/server.js's flat app.*
+// routes AND the routes registered on the mounted express.Router
+// (src/gitRoutes.js, the git-* endpoints) — as a closed literal set. Used when
+// no live set is injected — the unit tests run against this, and
+// src/telemetry-stalls-coverage.test.js fails the build if a route added to
+// any src/*.js file introduces a segment this set does not name. A missing
 // segment is not a leak (it folds to `id`), it is a LOSS OF RESOLUTION: the
 // route stops being distinguishable in the aggregate.
 const ROUTE_SEGMENTS = Object.freeze([
   'activity', 'agent-notes', 'agent-states', 'agents', 'api', 'budget', 'chats',
   'claude-session', 'claude-sessions', 'claude-sessions-all',
-  'claude-sessions-search', 'collections', 'companion', 'config', 'diagnostics',
-  'directives', 'discover', 'file-exists', 'fleet', 'health', 'hosts', 'key',
+  'claude-sessions-search', 'collections', 'companion', 'config',
+  'cross-agent-diff', 'diagnostics',
+  'directives', 'discover', 'file-exists', 'fleet', 'git-blame', 'git-branch',
+  'git-cat-file', 'git-conflict', 'git-diff', 'git-ls', 'git-log',
+  'git-range-diff', 'git-reflog', 'git-remote', 'git-show', 'git-stash',
+  'git-stash-show', 'git-status', 'health', 'hosts', 'key',
   'kill', 'pane', 'pane-export', 'pane-latency', 'pane-project', 'paste-image', 'pins', 'read-file', 'rename', 'reset',
   'respawn', 'resume', 'search-files', 'search-pane', 'send', 'series',
   'session-kill', 'session-tags', 'sessions', 'spawn', 'ssh-hosts', 'stalls',
