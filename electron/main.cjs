@@ -63,6 +63,11 @@ const { buildServerStallEvent } = require('./telemetry-stall-event.cjs');
 // (the `names` category's own carrying event).
 const { buildWorkspaceNamesEvent } = require('./telemetry-names-event.cjs');
 const { buildWorkspaceShapeEvent } = require('./telemetry-shape-event.cjs');
+// WARDEN-1468 — the ONE consent-gated window receipt (see createWindowReceipt
+// in telemetry-receipt.cjs): the five hand-copied consent-gate → build → record
+// receipts below collapse onto it, and web/telemetry-receipt.test.mjs pins
+// WHICH consent category each named receipt rides.
+const { createWindowReceipt } = require('./telemetry-receipt.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
 const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
@@ -378,6 +383,22 @@ const telemetryPipeline = createTelemetryPipeline({
 // app.whenReady() reads the persisted consent.
 telemetry.setRecord(telemetryPipeline.record);
 
+// WARDEN-1468 — the ONE consent-gated window receipt every metrics / incidents
+// / names window rides (the five named receipt functions below collapse onto
+// it; their IPC and server-message call sites keep their names). The gate lives
+// HERE — `consent()` reads telemetryPrefs live, exactly as the pipeline's
+// resolver above does — and the labels stay read PER CALL from the same seams
+// the removed hand-copies used (the Electron app's release label,
+// process.platform). `now` is passed through as the function reference the
+// builders invoke, exactly as every removed copy passed `now: Date.now`.
+const receiveTelemetryWindow = createWindowReceipt({
+  consent: () => resolveTelemetryConsent(telemetryPrefs),
+  record: (e) => telemetryPipeline.record(e),
+  schemaVersion: SCHEMA_VERSION,
+  labels: () => ({ appVersion: app.getVersion(), platform: process.platform }),
+  now: Date.now,
+});
+
 // WARDEN-1258 — turn a server-child metrics window (the 'telemetry-metrics' IPC
 // message) into an `operational-metrics` schema event and record it through the
 // standard pipeline. The per-category consent gate lives HERE at the producer
@@ -390,17 +411,7 @@ telemetry.setRecord(telemetryPipeline.record);
 // hostile snapshot is dropped pre-send, never trusted because it came from our
 // child.
 function recordOperationalMetricsWindow(snapshot) {
-  if (resolveTelemetryConsent(telemetryPrefs)['operational-metrics'] !== true) return;
-  const event = buildOperationalMetricsEvent({
-    snapshot,
-    schemaVersion: SCHEMA_VERSION,
-    // The same non-identifying labels the incident builders attach (read from
-    // the same seams: the Electron app's release label, process.platform).
-    appVersion: app.getVersion(),
-    platform: process.platform,
-    now: Date.now,
-  });
-  if (event) telemetryPipeline.record(event);
+  receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot);
 }
 
 // WARDEN-1385 — the RENDERER's pane-latency window (web/src/lib/paneLatency.ts,
@@ -419,18 +430,8 @@ function recordOperationalMetricsWindow(snapshot) {
 // exit code. The file is written ONLY on accepted windows (consent-gated by
 // construction), so nothing out-of-consent is ever persisted.
 function recordRendererPaneMetrics(snapshot) {
-  if (resolveTelemetryConsent(telemetryPrefs)['operational-metrics'] !== true) return;
-  const event = buildOperationalMetricsEvent({
-    snapshot,
-    schemaVersion: SCHEMA_VERSION,
-    runtime: 'renderer',
-    appVersion: app.getVersion(),
-    platform: process.platform,
-    now: Date.now,
-  });
-  if (!event) return;
-  telemetryPipeline.record(event);
-  persistLastPaneLatency(snapshot);
+  const e = receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot, { runtime: 'renderer' });
+  if (e) persistLastPaneLatency(snapshot);
 }
 
 // WARDEN-1424 — the RENDERER's workspace-shape COUNT window
@@ -445,15 +446,7 @@ function recordRendererPaneMetrics(snapshot) {
 // liveness signal); unlike the pane windows, nothing here persists to disk —
 // counts of the CURRENT workspace are not culprit data.
 function recordWorkspaceShapeWindow(snapshot) {
-  if (resolveTelemetryConsent(telemetryPrefs)['operational-metrics'] !== true) return;
-  const event = buildWorkspaceShapeEvent({
-    snapshot,
-    schemaVersion: SCHEMA_VERSION,
-    appVersion: app.getVersion(),
-    platform: process.platform,
-    now: Date.now,
-  });
-  if (event) telemetryPipeline.record(event);
+  receiveTelemetryWindow('operational-metrics', buildWorkspaceShapeEvent, snapshot);
 }
 
 // WARDEN-1385 — crash-sentinel culprit data (userData/pane-latency-last.json).
@@ -490,15 +483,7 @@ function readLastPaneLatency() {
 // category the main process's own `performance-stall` already travels under. No
 // new category was added for it, and none should be.
 function recordServerStallWindow(snapshot) {
-  if (resolveTelemetryConsent(telemetryPrefs).incidents !== true) return;
-  const event = buildServerStallEvent({
-    snapshot,
-    schemaVersion: SCHEMA_VERSION,
-    appVersion: app.getVersion(),
-    platform: process.platform,
-    now: Date.now,
-  });
-  if (event) telemetryPipeline.record(event);
+  receiveTelemetryWindow('incidents', buildServerStallEvent, snapshot);
 }
 
 // WARDEN-1416 — turn a server-child workspace-NAMES window (the
@@ -513,15 +498,7 @@ function recordServerStallWindow(snapshot) {
 // and its event goes nowhere without its own conscious opt-in. It is never
 // gated by (or folded into) a metrics category.
 function recordWorkspaceNamesWindow(snapshot) {
-  if (resolveTelemetryConsent(telemetryPrefs).names !== true) return;
-  const event = buildWorkspaceNamesEvent({
-    snapshot,
-    schemaVersion: SCHEMA_VERSION,
-    appVersion: app.getVersion(),
-    platform: process.platform,
-    now: Date.now,
-  });
-  if (event) telemetryPipeline.record(event);
+  receiveTelemetryWindow('names', buildWorkspaceNamesEvent, snapshot);
 }
 
 // Apply the current telemetry prefs to the source + pipeline. Called at boot
