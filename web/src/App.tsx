@@ -22,7 +22,7 @@ import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSnippets, useSetSnippets, useFileViewerViewMode, useSetFileViewerViewMode, useTerminalFontSize, useSetTerminalFontSize, useTerminalScrollback, useSetTerminalScrollback, useTerminalFontFamily, useSetTerminalFontFamily, useTerminalCursorStyle, useSetTerminalCursorStyle, useCopyOnSelect, useSetCopyOnSelect, useOnExitBehavior, useSetOnExitBehavior, useTimestampFormat, useSetTimestampFormat, useHostLabels, useSetHostLabels, useAgentFilter, useSetAgentFilter, useAgentSort, useSetAgentSort, useDefaultNewChatPreset, useSetDefaultNewChatPreset, useDefaultNewChatPresetByHost, useSetDefaultNewChatPresetByHost, useDefaultNewChatHost, useSetDefaultNewChatHost, useDefaultNewChatCwd, useSetDefaultNewChatCwd, useDefaultNewChatCwdByHost, useSetDefaultNewChatCwdByHost, useCustomPresets, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, usePaneLayout, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts, usePaneColRatios, usePaneRowRatios, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -50,7 +50,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
+import { useConfigPersistence, type AppPersistedSnapshot } from '@/lib/useConfigPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
@@ -272,8 +272,9 @@ function App() {
   // shared store (lib/uiStore.ts) — AppearanceSection subscribes (it is the
   // only writer of all six) and PaneGrid subscribes to paneLayout; App
   // subscribes for its own runtime reads (the [theme]/[density] effects, the
-  // openChat focus gate, the terminalThemeId derivation) plus the persisted
-  // snapshot + reset partition.
+  // openChat focus gate, the terminalThemeId derivation) plus the reset
+  // partition. Since slice 16 (WARDEN-1471) the persisted snapshot is NOT an
+  // App-side reason any more: useConfigPersistence reads the store half.
   const theme = useTheme();
   const setTheme = useSetTheme();
   // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula'). The
@@ -293,7 +294,10 @@ function App() {
   const [resolvedThemeId, setResolvedThemeId] = useState<ThemeId>(() => resolveThemeId(theme));
   const density = useDensity();
   const setDensity = useSetDensity();
-  const paneLayout = usePaneLayout();
+  // paneLayout (WARDEN-1471, slice 16): App keeps only the SETTER — the reset
+  // partition needs it; the value rides useConfigPersistence's single store
+  // subscription into the same saveUi effect (PaneGrid subscribes to the
+  // store directly for its own reads).
   const setPaneLayout = useSetPaneLayout();
   // Draggable resize-gutter ratios (WARDEN-660): per-axis PaneGrid track
   // weights ([] = equal split, the default). Pure client-side pref (like
@@ -305,17 +309,15 @@ function App() {
   // WARDEN-1433 (roadmap WARDEN-1204 slice 14) — migrated onto the shared
   // uiStore with the other panel prefs: PaneGrid is the pair's only reader AND
   // only writer, so it subscribes to the store directly and the four JSX pass
-  // sites + four Props entries are gone. App keeps ONLY the value
-  // subscriptions, for the same two reasons every migrated fact keeps its
-  // App-side read: the values feed PersistedPrefSnapshot (the compile-locked
-  // single writer) and the subscription is what re-renders App when a pane
-  // resize commits, so the saveUi effect fires. The setters are NOT kept:
-  // unlike the health pair (slice 13) the ratios are NOT resettable — both
-  // keys sit in RESET_PRESERVED_KEYS (WARDEN-934: "they are panel layout,
-  // which the shipped button promises to keep") — so no resetSetters entry
-  // ever needed them, and an unused local would only fail noUnusedLocals.
-  const paneColRatios = usePaneColRatios();
-  const paneRowRatios = usePaneRowRatios();
+  // sites + four Props entries are gone. WARDEN-1471 (slice 16) then removed
+  // even App's value subscriptions: the store half of the persisted snapshot
+  // is read by useConfigPersistence, so App no longer needs the values to
+  // re-render the saveUi effect — and the setters were already gone (the
+  // ratios are NOT resettable: both keys sit in RESET_PRESERVED_KEYS —
+  // WARDEN-934: "they are panel layout, which the shipped button promises to
+  // keep" — so no resetSetters entry ever needed them, and an unused local
+  // would only fail noUnusedLocals).
+
   // "Pane on agent exit" behavior: what an already-open pane does when its agent
   // process exits (chat.active goes true→false). 'keep' (default) is today's exact
   // behavior (dead terminal left for manual close); 'dim' marks it exited while
@@ -332,15 +334,16 @@ function App() {
   // seven terminal-config props PaneGrid carried to PaneTile without ever
   // reading them are gone entirely.
   //
-  // App still subscribes for the same two single-writer reasons as `snippets`:
-  // (1) each value must appear in the PersistedPrefSnapshot below so the ONE
-  // compile-locked saveUi effect keeps writing it, and (2) the reset partition
-  // (resetSetters) must keep a setter for each. The write path is unchanged end
-  // to end: store.setX → this subscription re-renders App → the snapshot's
-  // field changes → useConfigPersistence's effect fires → persistUiState →
-  // localStorage. The store seeds itself from loadUi() at module load, the same
-  // persisted read the useState lazy initializers did.
-  const onExitBehavior = useOnExitBehavior();
+  // App-side reads: this slice-3 comment recorded the two reasons every
+  // migrated fact kept an App subscription — the persisted snapshot and the
+  // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
+  // 31 store facts: the snapshot's store half is subscribed once inside
+  // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
+  // only the setters the reset partition needs. The write path is unchanged
+  // end to end: store.setX → that subscription re-renders App → the merged
+  // snapshot's field changes → the saveUi effect fires → persistUiState →
+  // localStorage. The store seeds itself from loadUi() at module load, the
+  // same persisted read the useState lazy initializers did.
   const setOnExitBehavior = useSetOnExitBehavior();
   // "Auto-focus new pane": whether opening/resuming/splitting a chat moves
   // keyboard focus to the new pane (default true = today's behavior). When false
@@ -354,18 +357,18 @@ function App() {
   const autoFocusNewPane = useAutoFocusNewPane();
   const setAutoFocusNewPane = useSetAutoFocusNewPane();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
-  // above) — PaneTile and AppearanceSection subscribe; App subscribes only to
-  // keep the persisted snapshot + reset partition whole.
-  const terminalFontSize = useTerminalFontSize();
+  // above) — PaneTile and AppearanceSection subscribe. Since WARDEN-1471
+  // (slice 16) App keeps only the SETTER (the reset partition); the value
+  // rides the hook's store subscription.
   const setTerminalFontSize = useSetTerminalFontSize();
   // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the attention/notification pair
   // migrated onto the shared store (see onExitBehavior above) — NotificationsSection
   // (the writer), useAttentionRollup's three poller gates and useTokenBudget's
   // OS-notification gate subscribe to it directly, and the DesktopAlertPrefs
-  // Settings bag is retired. App subscribes only to keep the persisted snapshot +
-  // reset partition whole. The WARDEN-1274 "what the master toggle still gates"
+  // Settings bag is retired. Since WARDEN-1471 (slice 16) App keeps only the
+  // SETTERS (the reset partition); the values ride the hook's store
+  // subscription. The WARDEN-1274 "what the master toggle still gates"
   // note moved with the fact (see UiStoreState in lib/uiStore.ts).
-  const attentionDesktopAlerts = useAttentionDesktopAlerts();
   const setAttentionDesktopAlerts = useSetAttentionDesktopAlerts();
   // Per-state Attention toggle (WARDEN-344): which pane states raise the badge.
   // Each defaults ON; persisted by the saveUi effect below and forwarded to the
@@ -373,7 +376,6 @@ function App() {
   // readout since WARDEN-1274 retired the alert. WARDEN-1360: only the states the
   // passive readout can substantiate remain (stuck / done) — erroring / waiting /
   // blocked were substring guesses and their buckets (and knobs) are gone.
-  const attentionStates = useAttentionStates();
   const setAttentionStates = useSetAttentionStates();
   // Per-chat watch state + single/bulk toggles + the derived O(1) lookup Set live
   // in useWatchState (WARDEN-696 slice 2). watchedChats is still persisted by the
@@ -382,8 +384,8 @@ function App() {
     initialWatched: uiState.watchedChats ?? [],
   });
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
-  // above).
-  const terminalScrollback = useTerminalScrollback();
+  // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
+  // rides the hook's store subscription.
   const setTerminalScrollback = useSetTerminalScrollback();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above). The store seed preserves the truthiness fallback below VERBATIM —
@@ -391,8 +393,9 @@ function App() {
   // '' must seed the real stack, never '' (a `??`-only seed would let '' reach
   // xterm and blank a pane). The reset deviation documented at
   // resetUiPrefDefaults (this pref resets to DEFAULT_TERMINAL_FONT_FAMILY, not
-  // to DEFAULT_UI's '') lives there and is untouched.
-  const terminalFontFamily = useTerminalFontFamily();
+  // to DEFAULT_UI's '') lives there and is untouched. Since WARDEN-1471
+  // (slice 16) App keeps only the SETTER; the value rides the hook's store
+  // subscription.
   const setTerminalFontFamily = useSetTerminalFontFamily();
   // Terminal color scheme: 'auto' follows the effective app theme (above);
   // 'dark'/'light' force the terminal surface. Pure client-side pref (like
@@ -409,8 +412,8 @@ function App() {
   // exact cursor).
   //
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
-  // above).
-  const terminalCursorStyle = useTerminalCursorStyle();
+  // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
+  // rides the hook's store subscription.
   const setTerminalCursorStyle = useSetTerminalCursorStyle();
   // "Copy on select" (WARDEN-285): when ON, completing a text selection in any
   // agent pane copies it to the clipboard immediately (no Ctrl/Cmd+C). Default
@@ -418,8 +421,8 @@ function App() {
   // mirrors it into a ref its selection handler reads).
   //
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
-  // above).
-  const copyOnSelect = useCopyOnSelect();
+  // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
+  // rides the hook's store subscription.
   const setCopyOnSelect = useSetCopyOnSelect();
   // Timestamp format (WARDEN-213): how every timestamp surface reads — 'relative'
   // (default = "2m"/"3h" buckets) or 'absolute' (clock time). Pure client-side
@@ -427,24 +430,22 @@ function App() {
   // threaded to every timestamp display via the shared formatTimestamp helper,
   // and never sent to the backend.
   // WARDEN-1342 (slice 4): the pref lives on the shared uiStore — same plain-value
-  // signatures, so the persistedSnapshot field and the resetSetters entry below
-  // are untouched (the slice-3 pattern).
-  const timestampFormat = useTimestampFormat();
+  // signatures, so the resetSetters entry below is untouched (the slice-3
+  // pattern). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
+  // rides the hook's store subscription.
   const setTimestampFormat = useSetTimestampFormat();
   // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped
   // in WARDEN-91. These were ChatSidebar-local useState with their own save
   // effect, which App's saveUi spread (which omits both keys) then clobbered on
   // every unrelated state change — wiping them from disk so the controls reset
   // to 'all'/'manual' on reload. WARDEN-1204 slice 7: the pair lives on the
-  // shared client-state store (lib/uiStore.ts) — App SUBSCRIBES for the same
-  // two single-writer reasons as every migrated pref (the PersistedPrefSnapshot
-  // field below and the resetSetters entry), and ChatSidebar + its three
+  // shared client-state store (lib/uiStore.ts) — ChatSidebar + its three
   // AgentFilterSortControls mounts subscribe directly, so the four JSX pass
-  // sites into ChatSidebar are gone. Pure client-side pref; the store seeds
-  // itself from loadUi() with the same 'all'/'manual' defaults DEFAULT_UI has.
-  const agentFilter = useAgentFilter();
+  // sites into ChatSidebar are gone. WARDEN-1471 (slice 16): App keeps only the
+  // SETTERS (the reset partition); the values ride the hook's store
+  // subscription. Pure client-side pref; the store seeds itself from loadUi()
+  // with the same 'all'/'manual' defaults DEFAULT_UI has.
   const setAgentFilter = useSetAgentFilter();
-  const agentSort = useAgentSort();
   const setAgentSort = useSetAgentSort();
   // WARDEN-468: HealthDashboard "Group agents by: Health | Host | Project" toggle
   // (WARDEN-237; Project added in WARDEN-741). Was a HealthDashboard-local
@@ -456,12 +457,11 @@ function App() {
   // WARDEN-1426 (roadmap WARDEN-1204 slice 13) — migrated onto the shared
   // uiStore together with healthCollapsedHosts below. HealthDashboard is the
   // pair's ONLY reader and ONLY writer and is mounted in exactly one place, so
-  // it SUBSCRIBES directly and the four JSX pass sites into it are gone. App
-  // still subscribes for the same two single-writer reasons as `snippets`: the
-  // PersistedPrefSnapshot field below and the reset partition's setter. The
-  // store seeds itself from loadUi() with the same 'health' default DEFAULT_UI
-  // has, through loadUi's own 3-way enum allow-list.
-  const healthGroupBy = useHealthGroupBy();
+  // it SUBSCRIBES directly and the four JSX pass sites into it are gone.
+  // WARDEN-1471 (slice 16): App keeps only the SETTER (the reset partition);
+  // the value rides the hook's store subscription. The store seeds itself from
+  // loadUi() with the same 'health' default DEFAULT_UI has, through loadUi's
+  // own 3-way enum allow-list.
   const setHealthGroupBy = useSetHealthGroupBy();
   // File Viewer markdown view mode (WARDEN-480): 'rendered' (default = docs/
   // README reading) or 'source' (raw markdown). One global remembered choice,
@@ -474,15 +474,13 @@ function App() {
   // SUBSCRIBES directly, so the four PURE pass-through carriers between App and
   // it (ChatSidebar, PaneGrid, HealthDashboard, PaneTile) no longer carry it.
   //
-  // App still subscribes for the same two single-writer reasons as `snippets`:
-  // (1) the value must appear in the PersistedPrefSnapshot below so the ONE
-  // compile-locked saveUi effect keeps writing it, and (2) the reset partition
-  // (resetSetters) must keep a setter for it. The write path is unchanged end to
-  // end: store.setFileViewerViewMode → this subscription re-renders App → the
-  // snapshot's `fileViewerViewMode` changes → useConfigPersistence's effect
-  // fires → persistUiState → localStorage. The store seeds itself from loadUi()
-  // at module load, the same persisted read the useState lazy initializer did.
-  const fileViewerViewMode = useFileViewerViewMode();
+  // WARDEN-1471 (slice 16): App keeps only the SETTER (the reset partition);
+  // the value rides the hook's store subscription. The write path is unchanged
+  // end to end: store.setFileViewerViewMode → that subscription re-renders
+  // App → the merged snapshot's `fileViewerViewMode` changes → the saveUi
+  // effect fires → persistUiState → localStorage. The store seeds itself from
+  // loadUi() at module load, the same persisted read the useState lazy
+  // initializer did.
   const setFileViewerViewMode = useSetFileViewerViewMode();
   // WARDEN-490 — per-host display labels (friendly names). A raw host string
   // ('(local)' / SSH host) → the human's label, shown in every host-tag display
@@ -505,9 +503,9 @@ function App() {
   //
   // WARDEN-1426 (roadmap WARDEN-1204 slice 13) — migrated onto the shared
   // uiStore with healthGroupBy above, on the same terms: HealthDashboard
-  // subscribes directly, App keeps the snapshot field + the resetSetters entry,
-  // and the store's `?? {}` seed reproduces the retired initializer's fallback.
-  const healthCollapsedHosts = useHealthCollapsedHosts();
+  // subscribes directly, and the store's `?? {}` seed reproduces the retired
+  // initializer's fallback. WARDEN-1471 (slice 16): App keeps only the SETTER
+  // (the reset partition); the value rides the hook's store subscription.
   const setHealthCollapsedHosts = useSetHealthCollapsedHosts();
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
@@ -526,25 +524,17 @@ function App() {
   // is retired, and uiStore.test.mjs's guard keeps `loadUi(` out of
   // web/src/components/ so the invariant is enforced, not remembered.
   //
-  // App still subscribes for the same two single-writer reasons as `snippets`:
-  // (1) each value must appear in the PersistedPrefSnapshot below so the ONE
-  // compile-locked saveUi effect keeps writing it, and (2) the reset partition
-  // (resetSetters) must keep a setter for each. The write path is unchanged end
-  // to end: store.setX → this subscription re-renders App → the snapshot's
-  // field changes → useConfigPersistence's effect fires → persistUiState →
+  // WARDEN-1471 (slice 16): App keeps only the SETTERS (the reset partition);
+  // the values ride useConfigPersistence's single store subscription into the
+  // same saveUi effect: store.setX → that subscription re-renders App → the
+  // merged snapshot's field changes → the effect fires → persistUiState →
   // localStorage. The store seeds itself from loadUi() at module load, the same
   // persisted read the useState lazy initializers did.
-  const defaultNewChatPreset = useDefaultNewChatPreset();
   const setDefaultNewChatPreset = useSetDefaultNewChatPreset();
-  const defaultNewChatHost = useDefaultNewChatHost();
   const setDefaultNewChatHost = useSetDefaultNewChatHost();
-  const defaultNewChatCwd = useDefaultNewChatCwd();
   const setDefaultNewChatCwd = useSetDefaultNewChatCwd();
-  const defaultNewChatCwdByHost = useDefaultNewChatCwdByHost();
   const setDefaultNewChatCwdByHost = useSetDefaultNewChatCwdByHost();
-  const defaultNewChatPresetByHost = useDefaultNewChatPresetByHost();
   const setDefaultNewChatPresetByHost = useSetDefaultNewChatPresetByHost();
-  const customPresets = useCustomPresets();
   const setCustomPresets = useSetCustomPresets();
   // Saved instruction snippets (WARDEN-323): a named, reusable intervention
   // library surfaced at the Broadcast dialog (insert-only) and a focused pane's
@@ -560,17 +550,18 @@ function App() {
   // directly instead of receiving this list through their ancestors, so the
   // pure pass-through hops between App and each of them are gone.
   //
-  // App still subscribes, for exactly two reasons — both of them the
-  // single-writer persistence design, which this slice deliberately does NOT
-  // touch: (1) the value must appear in the PersistedPrefSnapshot below so the
-  // ONE compile-locked saveUi effect keeps writing it, and (2) the reset
-  // partition (resetSetters) must keep a setter for it. So the write path is
-  // unchanged end to end: store.setSnippets → this subscription re-renders App
-  // → the snapshot's `snippets` changes identity → useConfigPersistence's
-  // effect fires → persistUiState → localStorage. The store seeds itself from
-  // loadUi() at module load, which is the same persisted read the useState
-  // lazy initializer did.
-  const snippets = useSnippets();
+  // App still subscribed, for exactly two reasons — both of them the
+  // single-writer persistence design — until WARDEN-1471 (slice 16) retired
+  // the first: the value used to be subscribed and listed in the snapshot so
+  // the ONE compile-locked saveUi effect kept writing it; the snapshot's store
+  // half is now subscribed ONCE inside useConfigPersistence
+  // (useShallow(selectPersistedStorePrefs)), so App keeps only the setter the
+  // reset partition needs. The write path is unchanged end to end:
+  // store.setSnippets → that subscription re-renders App → the merged
+  // snapshot's `snippets` changes identity → the saveUi effect fires →
+  // persistUiState → localStorage. The store seeds itself from loadUi() at
+  // module load, which is the same persisted read the useState lazy
+  // initializer did.
   const setSnippets = useSetSnippets();
   // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
   // button (WARDEN-429 — unifies the prior split-only defaultSplitShell, migrated
@@ -765,25 +756,22 @@ function App() {
     applyDensity(density);
   }, [density]);
 
-  // The persisted-pref snapshot assembled here (App is the composition root) and
-  // passed to useConfigPersistence, which owns the saveUi WRITE effect +
-  // handleConfigChange (WARDEN-696). Typed as PersistedPrefSnapshot — bidirectionally
-  // locked to PERSISTED_PREF_KEYS (a key in the source but missing here is a
-  // missing-property compile error; a key here but absent from the source is an
-  // excess-property error). This single type-checked list replaced the two
-  // duplicated UNCHECKED hand-lists that caused WARDEN-442/468/500.
-  const persistedSnapshot: PersistedPrefSnapshot = {
+  // App's half of the persisted-pref snapshot, assembled here (App is the
+  // composition root) and passed to useConfigPersistence, which owns the
+  // saveUi WRITE effect + handleConfigChange (WARDEN-696) and merges it with
+  // the store half it reads itself. Typed as AppPersistedSnapshot — since
+  // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
+  // as useState (the workspace set, panel geometry, watchedChats, paneHost);
+  // the 31 store-owned facts are NOT re-listed here. The partition is
+  // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
+  // complement of the store's STORE_PERSISTED_KEYS against
+  // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
+  // REQUIRED property and its absence from this literal is a tsc error — the
+  // WARDEN-442/468/500 dropped-key class stays closed on both halves.
+  const persistedSnapshot: AppPersistedSnapshot = {
     workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
     healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth,
-    terminalFontSize, attentionDesktopAlerts, attentionStates,
-    watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme,
-    terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout,
-    paneColRatios, paneRowRatios,
-    onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset,
-    defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd,
-    defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost,
-    agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts,
-    hostLabels,
+    watchedChats, paneHost,
   };
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
@@ -896,10 +884,12 @@ function App() {
   // startup") and expose handleConfigChange — the post-Settings orchestration
   // that reloads chats/ssh-hosts, re-broadcasts notification prefs, and refreshes
   // backend config prefs so toggles take effect without a page reload. The saveUi
-  // WRITE effect + this callback live in useConfigPersistence (WARDEN-696); the
-  // snapshot above is assembled here (composition root) and passed in. This call
-  // sits AFTER refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so
-  // the deps are initialized (no TDZ).
+  // WRITE effect + this callback live in useConfigPersistence (WARDEN-696);
+  // App's snapshot half is assembled here (composition root) and passed in —
+  // since WARDEN-1471 (slice 16) the hook itself reads the store half, so App
+  // no longer carries a subscription per store fact. This call sits AFTER
+  // refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so the deps
+  // are initialized (no TDZ).
   const { handleConfigChange } = useConfigPersistence({
     persistedSnapshot,
     restoreOnStartup,

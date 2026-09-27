@@ -25,8 +25,11 @@
 // Persistence stays exactly where it was — SINGLE-WRITER, deliberately:
 //
 //     store.setSnippets(next)
-//       → App's useUiStore subscription re-renders App
-//       → the `snippets` field of App's PersistedPrefSnapshot changes identity
+//       → useConfigPersistence's store-half subscription re-renders App
+//         (slice 16: ONE shallow-compared subscription for all 31 store facts,
+//         via selectPersistedStorePrefs below — App itself no longer carries a
+//         per-fact subscription just to feed the snapshot)
+//       → the `snippets` field of the merged PersistedPrefSnapshot changes
 //       → useConfigPersistence's saveUi effect fires (its deps are the
 //         snapshot's values)
 //       → persistUiState → localStorage
@@ -34,8 +37,12 @@
 // There is deliberately NO store-owned write-through persistence here. Adding
 // one would create a SECOND writer to the same key and break the compile-locked
 // single-writer design (PersistedPrefSnapshot's Required<Pick<…>> lock +
-// storage.test.mjs's PERSISTED_PREF_KEYS exhaustiveness guard). Revisit only
-// once the subscription pattern is proven across several prefs.
+// storage.test.mjs's PERSISTED_PREF_KEYS exhaustiveness guard). The
+// slice-1 note asked to revisit "once the subscription pattern is proven across
+// several prefs" — proven across 31 by slice 15, and slice 16 (WARDEN-1471)
+// answered it on the READ side only: STORE_PERSISTED_KEYS +
+// selectPersistedStorePrefs give the persistence layer one derived key list,
+// while the write stays exactly the ONE saveUi call site it always was.
 //
 // WHY A FACTORY *AND* A SINGLETON
 // ───────────────────────────────
@@ -51,6 +58,7 @@ import {
   loadObs,
   resetObsPrefDefaults,
   DEFAULT_TERMINAL_FONT_FAMILY,
+  PERSISTED_PREF_KEYS,
   type Snippet,
   type TerminalCursorStyle,
   type OnExitBehavior,
@@ -92,7 +100,7 @@ export interface UiStoreState {
    * and by the "Reset appearance & UI preferences" action.
    */
   snippets: Snippet[];
-  /** Replace the snippet library. The persisted write follows via App's snapshot. */
+  /** Replace the snippet library. The persisted write follows via useConfigPersistence's merged snapshot. */
   setSnippets: (snippets: Snippet[]) => void;
   /**
    * The File Viewer's Rendered ⇄ Source markdown toggle (WARDEN-480), made one
@@ -103,7 +111,7 @@ export interface UiStoreState {
    * (WARDEN-1288, roadmap WARDEN-1204 slice 2) and those hops are deleted.
    */
   fileViewerViewMode: 'rendered' | 'source';
-  /** Flip the File Viewer's view mode. The persisted write follows via App's snapshot. */
+  /** Flip the File Viewer's view mode. The persisted write follows via useConfigPersistence's merged snapshot. */
   setFileViewerViewMode: (mode: 'rendered' | 'source') => void;
   /**
    * Terminal font size in px (8–24, WARDEN-125). Read by PaneTile (the clamp +
@@ -112,7 +120,7 @@ export interface UiStoreState {
    * context-menu entries, and by AppearanceSection.
    */
   terminalFontSize: number;
-  /** Set the terminal font size. The persisted write follows via App's snapshot. */
+  /** Set the terminal font size. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTerminalFontSize: (n: number) => void;
   /**
    * Terminal scrollback depth in lines (100–100000, WARDEN-174). Read by
@@ -120,7 +128,7 @@ export interface UiStoreState {
    * change on reopen) and AppearanceSection (its only writer).
    */
   terminalScrollback: number;
-  /** Set the terminal scrollback depth. The persisted write follows via App's snapshot. */
+  /** Set the terminal scrollback depth. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTerminalScrollback: (n: number) => void;
   /**
    * Terminal font family — the CSS font-family string xterm renders
@@ -132,7 +140,7 @@ export interface UiStoreState {
    * the Custom… free-text field).
    */
   terminalFontFamily: string;
-  /** Set the terminal font family. The persisted write follows via App's snapshot. */
+  /** Set the terminal font family. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTerminalFontFamily: (v: string) => void;
   /**
    * Terminal cursor shape × blink (blink/steady × block/underline/bar,
@@ -142,7 +150,7 @@ export interface UiStoreState {
    * payoff vs WARDEN-190.
    */
   terminalCursorStyle: TerminalCursorStyle;
-  /** Set the terminal cursor style. The persisted write follows via App's snapshot. */
+  /** Set the terminal cursor style. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTerminalCursorStyle: (v: TerminalCursorStyle) => void;
   /**
    * "Copy on select" (WARDEN-285): completing a text selection in a pane
@@ -151,7 +159,7 @@ export interface UiStoreState {
    * panes) and AppearanceSection (its only writer). Default OFF.
    */
   copyOnSelect: boolean;
-  /** Set copy-on-select. The persisted write follows via App's snapshot. */
+  /** Set copy-on-select. The persisted write follows via useConfigPersistence's merged snapshot. */
   setCopyOnSelect: (v: boolean) => void;
   /**
    * "Pane on agent exit" behavior — keep | dim | auto-close (WARDEN-248). Read
@@ -159,7 +167,7 @@ export interface UiStoreState {
    * only writer). 'keep' is today's exact behavior.
    */
   onExitBehavior: OnExitBehavior;
-  /** Set the on-exit behavior. The persisted write follows via App's snapshot. */
+  /** Set the on-exit behavior. The persisted write follows via useConfigPersistence's merged snapshot. */
   setOnExitBehavior: (v: OnExitBehavior) => void;
   /**
    * The dashboard-wide Timestamp format (WARDEN-213) — Relative ("3h") vs
@@ -172,7 +180,7 @@ export interface UiStoreState {
    * AppearanceSection. Default 'relative'.
    */
   timestampFormat: TimestampFormat;
-  /** Set the timestamp format. The persisted write follows via App's snapshot. */
+  /** Set the timestamp format. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTimestampFormat: (v: TimestampFormat) => void;
   /**
    * Per-host display labels (WARDEN-490) — raw host string ('(local)' / SSH
@@ -187,7 +195,7 @@ export interface UiStoreState {
    * empty map (or a host with no entry) = no label = the raw host.
    */
   hostLabels: HostLabels;
-  /** Replace the label map. The persisted write follows via App's snapshot. */
+  /** Replace the label map. The persisted write follows via useConfigPersistence's merged snapshot. */
   setHostLabels: (labels: HostLabels) => void;
   /**
    * The sidebar fleet Filter (all/yatfa/claude/manual — WARDEN-442's pair,
@@ -203,7 +211,7 @@ export interface UiStoreState {
    * remains the single writer. Default 'all'.
    */
   agentFilter: AgentFilter;
-  /** Set the sidebar fleet filter. The persisted write follows via App's snapshot. */
+  /** Set the sidebar fleet filter. The persisted write follows via useConfigPersistence's merged snapshot. */
   setAgentFilter: (filter: AgentFilter) => void;
   /**
    * The sidebar fleet Sort (manual/name/host/status/activity — the other half
@@ -213,7 +221,7 @@ export interface UiStoreState {
    * non-manual value can never tint an inactive control. Default 'manual'.
    */
   agentSort: AgentSort;
-  /** Set the sidebar fleet sort. The persisted write follows via App's snapshot. */
+  /** Set the sidebar fleet sort. The persisted write follows via useConfigPersistence's merged snapshot. */
   setAgentSort: (sort: AgentSort) => void;
   /**
    * The new-chats spawn family (roadmap WARDEN-1204 slice 8, WARDEN-1383) —
@@ -232,35 +240,35 @@ export interface UiStoreState {
    * ??-only like every other fact.
    */
   defaultNewChatPreset: string;
-  /** Set the default spawn agent type. The persisted write follows via App's snapshot. */
+  /** Set the default spawn agent type. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultNewChatPreset: (v: string) => void;
   /** Per-host spawn agent-type overrides ('(local)' / SSH host → preset name). */
   defaultNewChatPresetByHost: Record<string, string>;
-  /** Replace the per-host preset map. The persisted write follows via App's snapshot. */
+  /** Replace the per-host preset map. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultNewChatPresetByHost: (v: Record<string, string>) => void;
   /** The host the ＋ new chat form pre-selects ('(local)' or an SSH host). */
   defaultNewChatHost: string;
-  /** Set the default spawn host. The persisted write follows via App's snapshot. */
+  /** Set the default spawn host. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultNewChatHost: (v: string) => void;
   /** The cwd pre-filled in the spawn form. Blank = the host's home directory. */
   defaultNewChatCwd: string;
-  /** Set the global default spawn cwd. The persisted write follows via App's snapshot. */
+  /** Set the global default spawn cwd. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultNewChatCwd: (v: string) => void;
   /** Per-host spawn cwd overrides (host → cwd path). */
   defaultNewChatCwdByHost: Record<string, string>;
-  /** Replace the per-host cwd map. The persisted write follows via App's snapshot. */
+  /** Replace the per-host cwd map. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultNewChatCwdByHost: (v: Record<string, string>) => void;
   /** The user-defined quick-fill presets (named commands beyond claude/shell). */
   customPresets: CustomPreset[];
-  /** Replace the custom-preset list (Settings CRUD). The persisted write follows via App's snapshot. */
+  /** Replace the custom-preset list (Settings CRUD). The persisted write follows via useConfigPersistence's merged snapshot. */
   setCustomPresets: (v: CustomPreset[]) => void;
   /** The default shell the spawn form's shell preset + App's split button open. Blank = host login shell. */
   defaultShell: string;
-  /** Set the global default shell. The persisted write follows via App's snapshot. */
+  /** Set the global default shell. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultShell: (v: string) => void;
   /** Per-host default-shell overrides (host → shell name). */
   defaultShellByHost: Record<string, string>;
-  /** Replace the per-host shell map. The persisted write follows via App's snapshot. */
+  /** Replace the per-host shell map. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDefaultShellByHost: (v: Record<string, string>) => void;
   /**
    * The attention/notification pair (roadmap WARDEN-1204 slice 11, WARDEN-1408).
@@ -287,11 +295,11 @@ export interface UiStoreState {
    * per state) already normalize a persisted payload.
    */
   attentionDesktopAlerts: boolean;
-  /** Set the master desktop-alert opt-in. The persisted write follows via App's snapshot. */
+  /** Set the master desktop-alert opt-in. The persisted write follows via useConfigPersistence's merged snapshot. */
   setAttentionDesktopAlerts: (v: boolean) => void;
   /** Per-state Attention badge display filters (stuck / done since WARDEN-1360; each defaults ON). */
   attentionStates: { stuck?: boolean; done?: boolean };
-  /** Replace the per-state filter bag. The persisted write follows via App's snapshot. */
+  /** Replace the per-state filter bag. The persisted write follows via useConfigPersistence's merged snapshot. */
   setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
   /**
    * The six remaining AppearancePrefs pairs (roadmap WARDEN-1204 slice 12,
@@ -319,14 +327,14 @@ export interface UiStoreState {
    * `resolvedThemeId` in sync) and AppearanceSection (its only writer).
    */
   theme: Theme;
-  /** Set the app theme. The persisted write follows via App's snapshot. */
+  /** Set the app theme. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTheme: (v: Theme) => void;
   /**
    * Row/header spacing — 'comfortable' | 'compact' (WARDEN-133). Read by App's
    * applyDensity effect; AppearanceSection is its only writer.
    */
   density: Density;
-  /** Set the density. The persisted write follows via App's snapshot. */
+  /** Set the density. The persisted write follows via useConfigPersistence's merged snapshot. */
   setDensity: (v: Density) => void;
   /**
    * How open panes are arranged — 'auto' | 'stacked' | 'side-by-side'. Read by
@@ -335,7 +343,7 @@ export interface UiStoreState {
    * is its only writer.
    */
   paneLayout: PaneLayout;
-  /** Set the pane layout. The persisted write follows via App's snapshot. */
+  /** Set the pane layout. The persisted write follows via useConfigPersistence's merged snapshot. */
   setPaneLayout: (v: PaneLayout) => void;
   /**
    * Whether opening/resuming/splitting a chat moves keyboard focus to the new
@@ -343,7 +351,7 @@ export interface UiStoreState {
    * (it gates the setFocused calls) and AppearanceSection (its only writer).
    */
   autoFocusNewPane: boolean;
-  /** Set auto-focus-on-open. The persisted write follows via App's snapshot. */
+  /** Set auto-focus-on-open. The persisted write follows via useConfigPersistence's merged snapshot. */
   setAutoFocusNewPane: (v: boolean) => void;
   /**
    * "Restore workspace on startup" — 'previous' | 'empty'. The ONE UiState
@@ -354,7 +362,7 @@ export interface UiStoreState {
    * pref lives is independent of it. AppearanceSection is its only writer.
    */
   restoreOnStartup: RestoreOnStartup;
-  /** Set the startup-restore pref. The persisted write follows via App's snapshot. */
+  /** Set the startup-restore pref. The persisted write follows via useConfigPersistence's merged snapshot. */
   setRestoreOnStartup: (v: RestoreOnStartup) => void;
   /**
    * Terminal color scheme — 'auto' (follow the effective app theme) |
@@ -364,7 +372,7 @@ export interface UiStoreState {
    * re-themes open panes live); AppearanceSection is its only writer.
    */
   terminalColorScheme: TerminalColorScheme;
-  /** Set the terminal color scheme. The persisted write follows via App's snapshot. */
+  /** Set the terminal color scheme. The persisted write follows via useConfigPersistence's merged snapshot. */
   setTerminalColorScheme: (v: TerminalColorScheme) => void;
   /**
    * The Fleet Health pair (roadmap WARDEN-1204 slice 13, WARDEN-1426) — the
@@ -388,7 +396,7 @@ export interface UiStoreState {
    * precedent above — so lib/ never imports from components/.
    */
   healthGroupBy: 'health' | 'host' | 'project';
-  /** Set the health grouping mode. The persisted write follows via App's snapshot. */
+  /** Set the health grouping mode. The persisted write follows via useConfigPersistence's merged snapshot. */
   setHealthGroupBy: (v: 'health' | 'host' | 'project') => void;
   /**
    * The per-host expand/collapse state INSIDE Host grouping (WARDEN-237,
@@ -398,7 +406,7 @@ export interface UiStoreState {
    * written by its per-host collapse toggle. Default {} = every host expanded.
    */
   healthCollapsedHosts: Record<string, boolean>;
-  /** Set the collapsed-hosts map. The persisted write follows via App's snapshot. */
+  /** Set the collapsed-hosts map. The persisted write follows via useConfigPersistence's merged snapshot. */
   setHealthCollapsedHosts: (v: Record<string, boolean>) => void;
   /**
    * The draggable resize-gutter ratios (WARDEN-660; roadmap WARDEN-1204 slice
@@ -420,9 +428,9 @@ export interface UiStoreState {
    */
   paneColRatios: number[];
   paneRowRatios: number[];
-  /** Commit the column ratios (PaneGrid pointerUp). The persisted write follows via App's snapshot. */
+  /** Commit the column ratios (PaneGrid pointerUp). The persisted write follows via useConfigPersistence's merged snapshot. */
   setPaneColRatios: (v: number[]) => void;
-  /** Commit the row ratios (PaneGrid pointerUp). The persisted write follows via App's snapshot. */
+  /** Commit the row ratios (PaneGrid pointerUp). The persisted write follows via useConfigPersistence's merged snapshot. */
   setPaneRowRatios: (v: number[]) => void;
   /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
@@ -459,6 +467,128 @@ export interface UiStoreState {
   observerAttentionFilters: NonNullable<ObsUi['attentionFilters']>;
   /** Replace the Attention filter shape (the tab's two Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
   setObserverAttentionFilters: (v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>) => void;
+}
+
+/**
+ * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
+ * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
+ * owns — exactly the 31 persisted facts migrated onto the store by slices 1–15.
+ *
+ * WHAT IT IS FOR
+ * ──────────────
+ * Until slice 16, App re-declared this list by hand: it subscribed to every
+ * store fact (`const x = useX()`) and listed it in `persistedSnapshot` ONLY so
+ * useConfigPersistence's single saveUi effect would keep writing it — "the
+ * subscription is what re-renders App so the saveUi effect fires". With the
+ * pattern proven across 31 facts (the revisit this header's slice-1 note asked
+ * for), persistence becomes a property of the store: one derived key list, one
+ * selector, one shallow-compared subscription inside the hook. App keeps only
+ * the facts it genuinely reads at runtime (theme, density, autoFocusNewPane,
+ * terminalColorScheme, hostLabels, defaultShell) plus restoreOnStartup (passed
+ * to persistUiState as its own argument).
+ *
+ * The compile gate: each element must be BOTH a UiStoreState key AND a
+ * PERSISTED_PREF_KEYS member, so
+ *   - a key that is not on the store (a typo, or an App-owned useState fact
+ *     like workspaces/watchedChats/paneHost) is a compile error, and
+ *   - the four ObsUi observer facts (observerViewMode + the three filter
+ *     shapes) and restoreOnStartup are excluded AUTOMATICALLY — they are on
+ *     UiStoreState but not in PERSISTED_PREF_KEYS (they persist through
+ *     ObserverTabs' saveObs and persistUiState's separate argument,
+ *     respectively).
+ *
+ * COMPLETENESS is deliberately NOT what `satisfies` gives (it only rejects
+ * invalid elements) — it is enforced from BOTH sides:
+ *   - removing a key here moves it into AppPersistedSnapshot's Exclude
+ *     complement, so App's 10-key literal misses a REQUIRED property → tsc;
+ *   - uiStore.test.mjs's partition test rejects duplicates and non-store keys
+ *     at runtime.
+ * storage.ts stays the owner of shape and defaults; this list only names which
+ * of its keys the store carries.
+ */
+export const STORE_PERSISTED_KEYS = [
+  'snippets',
+  'fileViewerViewMode',
+  'terminalFontSize',
+  'terminalScrollback',
+  'terminalFontFamily',
+  'terminalCursorStyle',
+  'copyOnSelect',
+  'onExitBehavior',
+  'timestampFormat',
+  'hostLabels',
+  'agentFilter',
+  'agentSort',
+  'defaultNewChatPreset',
+  'defaultNewChatPresetByHost',
+  'defaultNewChatHost',
+  'defaultNewChatCwd',
+  'defaultNewChatCwdByHost',
+  'customPresets',
+  'defaultShell',
+  'defaultShellByHost',
+  'attentionDesktopAlerts',
+  'attentionStates',
+  'theme',
+  'density',
+  'paneLayout',
+  'autoFocusNewPane',
+  'terminalColorScheme',
+  'healthGroupBy',
+  'healthCollapsedHosts',
+  'paneColRatios',
+  'paneRowRatios',
+] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
+
+/**
+ * The store half of the persisted snapshot: a pure projection of those 31
+ * facts off a UiStoreState. ONE place knows the list — this selector and
+ * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
+ * persistence read can never drift from the declaration.
+ *
+ * Consumed two ways, both compile-locked to the same tuple:
+ *   - useConfigPersistence subscribes through it (wrapped in zustand v5's
+ *     useShallow, so App re-renders only when one of the facts actually
+ *     changes) and merges the result into the ONE saveUi snapshot;
+ *   - uiStore.test.mjs's flushSnapshotToDisk stands in for App's side of the
+ *     round trip with the SAME selector instead of a hand-copied field list.
+ */
+export function selectPersistedStorePrefs(
+  state: UiStoreState,
+): Pick<UiStoreState, (typeof STORE_PERSISTED_KEYS)[number]> {
+  return {
+    snippets: state.snippets,
+    fileViewerViewMode: state.fileViewerViewMode,
+    terminalFontSize: state.terminalFontSize,
+    terminalScrollback: state.terminalScrollback,
+    terminalFontFamily: state.terminalFontFamily,
+    terminalCursorStyle: state.terminalCursorStyle,
+    copyOnSelect: state.copyOnSelect,
+    onExitBehavior: state.onExitBehavior,
+    timestampFormat: state.timestampFormat,
+    hostLabels: state.hostLabels,
+    agentFilter: state.agentFilter,
+    agentSort: state.agentSort,
+    defaultNewChatPreset: state.defaultNewChatPreset,
+    defaultNewChatPresetByHost: state.defaultNewChatPresetByHost,
+    defaultNewChatHost: state.defaultNewChatHost,
+    defaultNewChatCwd: state.defaultNewChatCwd,
+    defaultNewChatCwdByHost: state.defaultNewChatCwdByHost,
+    customPresets: state.customPresets,
+    defaultShell: state.defaultShell,
+    defaultShellByHost: state.defaultShellByHost,
+    attentionDesktopAlerts: state.attentionDesktopAlerts,
+    attentionStates: state.attentionStates,
+    theme: state.theme,
+    density: state.density,
+    paneLayout: state.paneLayout,
+    autoFocusNewPane: state.autoFocusNewPane,
+    terminalColorScheme: state.terminalColorScheme,
+    healthGroupBy: state.healthGroupBy,
+    healthCollapsedHosts: state.healthCollapsedHosts,
+    paneColRatios: state.paneColRatios,
+    paneRowRatios: state.paneRowRatios,
+  };
 }
 
 /**
