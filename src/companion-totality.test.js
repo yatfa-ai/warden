@@ -886,20 +886,31 @@ describe('WARDEN-1412 companion-totality sweep', () => {
     // all — adds ZERO gate sites, drives no sweep leg (the driven-leg list is
     // hand-maintained), and ships GREEN. Nothing drives a file nobody noticed.
     //
-    // THE INSTRUMENT. Every raw remote op in this tree begins at one of ssh.js's
-    // six remote-spawn exports — run, runWithPool, validateHost, attach,
-    // attachPty, buildSshArgv (ssh.js's own `spawn(SSH_BIN, …)` sites are :115
-    // inside run/validateHost's argv path, :603 in attach, :624 in attachPty).
-    // So the census counts CALL-SITE REFERENCES TO THOSE IMPORTED BINDINGS,
-    // per non-test src file, and pins every file that carries one.
+    // THE INSTRUMENT. The census binding set is DERIVED from ssh.js's export
+    // list, not hand-listed (WARDEN-1462). Every raw remote op in this tree
+    // reaches a remote host by invoking one of ssh.js's RAW_TRANSPORT_BINDINGS
+    // — either the six remote-spawn primitives (run, runWithPool, validateHost,
+    // attach, attachPty, buildSshArgv — ssh.js's own `spawn(SSH_BIN, …)` sites
+    // are :115 inside run/validateHost's argv path, :603 in attach, :624 in
+    // attachPty) or one of the four public WRAPPERS of those primitives that
+    // ssh.js also exports (runTmux, attachTmux, attachInteractiveTmux,
+    // detectClaude — classified in the list below). The original six-binding
+    // hand list missed the wrappers, so an ungated op written against runTmux —
+    // the natural way to add a tmux op — shipped GREEN (arm A below proves it).
+    // So the census counts CALL-SITE REFERENCES TO EVERY CLASS-(a) IMPORTED
+    // BINDING, per non-test src file, and pins every file that carries one.
     //
     // COUNTING RULE (stated because a naive rule is worse than none):
-    //   • Only files whose `import { … } from './ssh.js'` names at least one of
-    //     the six participate. shellQuote/isTransportFailure-only importers —
-    //     git.js, gitRoutes.js, observer.js, claudeSessions.js,
-    //     sessionRecovery.js, tmux.js — are invisible BY CONSTRUCTION, and
-    //     childCapture.js deliberately imports no ssh transport at all
-    //     (in-file comment, childCapture.js:18).
+    //   • Only files whose `import { … } from './ssh.js'` names at least one
+    //     class-(a) binding participate. Local-only importers — git.js,
+    //     gitRoutes.js, observer.js, claudeSessions.js, sessionRecovery.js,
+    //     all shellQuote/isTransportFailure-only — are invisible BY
+    //     CONSTRUCTION, and childCapture.js deliberately imports no ssh
+    //     transport at all (in-file comment, childCapture.js:18). tmux.js is
+    //     deliberately NOT in that list since WARDEN-1462: the old comment
+    //     claimed it was invisible by construction, which was false — it
+    //     imports the raw wrappers runTmux/attachTmux/attachInteractiveTmux
+    //     (tmux.js:5), so it participates and is pinned below.
     //   • Counted on the source with COMMENTS AND STRING/TEMPLATE LITERALS
     //     STRIPPED, and with the ssh.js import statement itself blanked. That
     //     is not fussiness: a raw `\brun\b` token census over this tree is pure
@@ -940,20 +951,73 @@ describe('WARDEN-1412 companion-totality sweep', () => {
     //      src/pasteImage.js: expected {"buildSshArgv":1}, found
     //      {"buildSshArgv":2}". Reverted → GREEN.
     // The detector sees exactly the WARDEN-1348 shape it exists for.
+    //
+    // WARDEN-1462 ARMS — driven and reverted when this slice landed. Arms 3–4
+    // were run against the ORIGINAL six-binding census too, and both shipped
+    // GREEN there: that is the hole this slice closes, reproduced, not assumed.
+    //   3. UNGATED WRAPPER OP, unlisted file (arm A). A temp consumer
+    //      src/warden-mutant-a.js importing runTmux from ./ssh.js and calling
+    //      runTmux(chat, ['list-sessions']) — no gate of any kind. GREEN under
+    //      the six-binding census; RED here with "unlisted file(s) reach the
+    //      raw ssh transport: warden-mutant-a.js", naming the file.
+    //   4. UNGATED WRAPPER OP, count drift (arm B). An ungated
+    //      `(deps.runTmux ?? runTmux)(chat, ['list-sessions'])` export appended
+    //      to tmux.js. GREEN under the six-binding census; RED here with
+    //      "raw-transport census moved in src/tmux.js" and the runTmux count
+    //      moving 8 → 9.
+    //   5. UNCLASSIFIED EXPORT (completeness). A dummy
+    //      `export function fooRemote(){}` added to ssh.js turned RED from the
+    //      completeness assertion below, naming fooRemote and the two classes.
+    //      Reverted → GREEN.
     // -----------------------------------------------------------------------
-    const RAW_BINDINGS = ['run', 'runWithPool', 'validateHost', 'attach', 'attachPty', 'buildSshArgv'];
+    // THE CLASSIFICATION (WARDEN-1462). ssh.js's 28 exports partition into
+    // exactly two classes, and the completeness assertion re-derives the export
+    // list from ssh.js's source on EVERY run: a NEW export in neither class
+    // fails RED naming itself, so the hand-list failure mode above cannot
+    // recur. Each classification below was verified by READING the function.
+    //
+    // RAW_BINDINGS = class (a): invoking it reaches a remote host over ssh.
+    //   • the six remote-spawn primitives — buildSshArgv :73, validateHost
+    //     :384, run :435, runWithPool :560, attach :600, attachPty :621;
+    //   • the four public wrappers of those primitives, each verified to reach
+    //     chat.host/the host argument: runTmux :738 (runWithPool, falling back
+    //     to run on pool failure), attachTmux :768 (attachPty(chat.host, …)),
+    //     attachInteractiveTmux :926 (attach(chat.host, …)), and detectClaude
+    //     :823 (remote candidate probes delivered through deliverRemoteScript
+    //     with `run: deps.runWithPool ?? runWithPool` as its toggle-off
+    //     transport — the gated default shape, like chats.js's legs).
+    const RAW_BINDINGS = ['run', 'runWithPool', 'validateHost', 'attach', 'attachPty', 'buildSshArgv',
+      'runTmux', 'attachTmux', 'attachInteractiveTmux', 'detectClaude'];
+    // LOCAL_ONLY_BINDINGS = class (b): never reaches a remote host. Pure
+    //   string/path builders (shellQuote :13, splitCmd :26, buildAttachRemoteScript
+    //   :615, toMsysPath :668, buildRunCommand :733, buildAttachCommand :763,
+    //   buildAttachInteractiveCommand :917), the local-machine transports
+    //   (runLocalTmux :686, attachLocalTmux :715, whereWindows :785 — this
+    //   machine's tmux/`where`, not ssh), connection-pool plumbing that carries
+    //   NO remote command (ensureControlMaster :168 spawns ssh with `-N` — pool
+    //   management only; startConnectionPoolCleanup :355 — a local timer), a
+    //   pure failure classifier (isTransportFailure :502), the error class
+    //   (HostConnectionError :372) and the constants (SSH_BIN :50, SSH_BASE_OPTS
+    //   :44, LOCAL_ENV :633, TMUX_BIN :663).
+    const LOCAL_ONLY_BINDINGS = ['shellQuote', 'splitCmd', 'SSH_BIN', 'SSH_BASE_OPTS',
+      'ensureControlMaster', 'startConnectionPoolCleanup', 'HostConnectionError',
+      'isTransportFailure', 'buildAttachRemoteScript', 'LOCAL_ENV', 'TMUX_BIN',
+      'toMsysPath', 'runLocalTmux', 'attachLocalTmux', 'buildRunCommand',
+      'buildAttachCommand', 'whereWindows', 'buildAttachInteractiveCommand'];
 
-    // Per-file expected call-site counts of the six bindings, re-derived LIVE
-    // against origin/main @ d2d72cc. Every row is a CITED deliberate raw path:
-    // class (a) the transport core, (b) a gated toggle-off branch, (c) a named
-    // allow-list exception. Rows are the routing decision's audit trail — the
-    // census PINS them, so growth or shrink is visible on the next push.
+    // Per-file expected call-site counts of the raw-transport bindings,
+    // re-derived LIVE against origin/main @ 8cd0a31 (WARDEN-1462). Every row is
+    // a CITED deliberate raw path: class (a) the transport core, (b) a gated
+    // toggle-off branch, (c) a named allow-list exception. Rows are the routing
+    // decision's audit trail — the census PINS them, so growth or shrink is
+    // visible on the next push.
     const RAW_TRANSPORT_CENSUS = {
       // ---- class (a): the deliberate raw core ----------------------------
-      // ssh.js IS the transport (buildSshArgv :73, validateHost :384, run :435,
-      // runWithPool :560, attach :600, attachPty :621) — it defines the six
-      // rather than importing them, so it carries no ssh.js import and is
-      // invisible to this instrument by construction, asserted separately below.
+      // ssh.js IS the transport — it defines all ten raw-transport bindings
+      // (the six primitives plus the runTmux/attachTmux/attachInteractiveTmux/
+      // detectClaude wrappers) rather than importing them, so it carries no
+      // ssh.js import and is invisible to this instrument by construction,
+      // asserted separately below.
       'companion.js': {
         // The bootstrap legs: a channel cannot install itself over the channel.
         // `run as defaultRun` (:33) reaches the tree through the injection
@@ -965,6 +1029,20 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       'chats.js': {
         run: 1,          // :366 discoverManual's `deps.run ?? run` — activity read, behind viaCompanion()
         runWithPool: 3,  // :265 discover + :367 discoverManual injection rebinds, :715 capturePanes' raw else-branch
+      },
+      'tmux.js': {
+        // WARDEN-1462. tmux.js is the routing layer BELOW the chat ops: every
+        // wrapper reference sits in the toggle-off/LOCAL else-branch — or the
+        // `{unsupported:true}` stale-cached-binary fall-through — of an
+        // `chat.host !== '(local)' && isCompanionTransportEnabled() &&
+        // !isCompanionExcludedHost(chat.host)` gate, so a raw reach here is a
+        // routed op's OFF leg (or its LOCAL arm), never an unguarded path.
+        runTmux: 8,                // read :63, sendViaRunTmux :110 (send's raw arm
+                                   // + send's {unsupported:true} fall-through),
+                                   // sendKey :190, hasSession :240, probeSession :263,
+                                   // resize :312, spawn :361, kill :385
+        attachTmux: 1,             // :434 attach's OFF/LOCAL else-branch
+        attachInteractiveTmux: 1,  // :563 attachInteractive's OFF/LOCAL else-branch
       },
       'paneContainer.js': {
         // :292, the else-branch of the gated ternary at :289–291
@@ -987,6 +1065,20 @@ describe('WARDEN-1412 companion-totality sweep', () => {
         //   cleanable, so the endpoint works regardless of toggle state
         //   (comments :2420–2422; re-asserted as a sweep leg above).
         validateHost: 2,
+        // WARDEN-1462. detectClaude's default path probes remote hosts through
+        // deliverRemoteScript (companion.js :1832) with
+        // `run: deps.runWithPool ?? runWithPool` as its toggle-off transport
+        // (ssh.js :832), so the routing guard lives INSIDE the route:
+        // toggle-ON rides the companion channel, toggle-OFF rides pooled raw
+        // ssh, and LOCAL short-circuits inside detectClaude before any
+        // transport. Each call site is therefore the endpoint of an
+        // already-routed route — the same class-(b) shape as chats.js's
+        // discovery legs, with the gate above the site rather than at it.
+        detectClaude: 3,           // :1956 /api/claude-sessions remote leg
+                                   // (behind remoteClaudeSessionsDetail's
+                                   // unreachable pre-check), :1960 the same
+                                   // endpoint's LOCAL leg (no transport at
+                                   // all), :2204 resolveClaudeCmd
       },
     };
 
@@ -1105,12 +1197,44 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       // it must never appear in this census at all. If ssh.js ever imports one
       // of its own exports from itself, the instrument's premise is broken.
       assert.ok(!('ssh.js' in found),
-        'src/ssh.js appeared in the raw-transport census — it DEFINES the six remote-spawn exports (buildSshArgv/validateHost/run/runWithPool/attach/attachPty) and must not import them');
+        'src/ssh.js appeared in the raw-transport census — it DEFINES the raw-transport bindings (the six primitives buildSshArgv/validateHost/run/runWithPool/attach/attachPty plus the runTmux/attachTmux/attachInteractiveTmux/detectClaude wrappers) and must not import them');
       const sshText = fs.readFileSync(path.join(srcDir, 'ssh.js'), 'utf8');
       for (const b of RAW_BINDINGS) {
         assert.ok(new RegExp(`^export\\s+(?:async\\s+)?function\\s+${b}\\b`, 'm').test(sshText),
           `src/ssh.js no longer exports ${b}() — the raw-transport census counts the wrong bindings; re-derive RAW_BINDINGS from ssh.js's remote-spawn exports`);
       }
+
+      // (4b) COMPLETENESS (WARDEN-1462): every ssh.js export sits in EXACTLY
+      // one census class. The export list is re-derived from ssh.js's SOURCE
+      // on every run — never trusted from the lists above — so a NEW export
+      // cannot ship unclassified. An unclassified transport-adjacent export is
+      // precisely the blind spot this census exists to close: the original
+      // six-binding hand list went GREEN on an ungated runTmux op for exactly
+      // this reason, and only a derivation (not a longer hand list) closes it.
+      const exportNames = new Set();
+      for (const m of sshText.matchAll(/^export\s+(?:async\s+)?function\s+([\w$]+)/gm)) exportNames.add(m[1]);
+      for (const m of sshText.matchAll(/^export\s+class\s+([\w$]+)/gm)) exportNames.add(m[1]);
+      for (const m of sshText.matchAll(/^export\s+(?:const|let|var)\s+([\w$]+)/gm)) exportNames.add(m[1]);
+      for (const m of sshText.matchAll(/^export\s*\{([^}]*)\}/gm)) {
+        for (const piece of m[1].split(',')) {
+          const name = piece.split(/\s+as\s+/).pop().trim();
+          if (name) exportNames.add(name);
+        }
+      }
+      assert.ok(exportNames.size > 0, 'the ssh.js export derivation found no exports — the census classification is unverified');
+      const classified = new Set([...RAW_BINDINGS, ...LOCAL_ONLY_BINDINGS]);
+      assert.strictEqual(classified.size, RAW_BINDINGS.length + LOCAL_ONLY_BINDINGS.length,
+        'RAW_BINDINGS and LOCAL_ONLY_BINDINGS overlap — every ssh.js export must sit in EXACTLY one class; move the shared name(s) into the class that is actually true of them');
+      const unclassified = [...exportNames].filter((n) => !classified.has(n)).sort();
+      assert.deepStrictEqual(unclassified, [],
+        `unclassified ssh.js export(s): ${unclassified.join(', ')} — classify each one by READING it: ` +
+        'if invoking it can reach a remote host over ssh (a primitive or a wrapper of one), add it to RAW_BINDINGS and pin every file that references it in RAW_TRANSPORT_CENSUS; ' +
+        'if it is local-only or pure (string/path builder, local-machine transport, pool plumbing carrying no remote command, classifier, error class, constant), add it to LOCAL_ONLY_BINDINGS. ' +
+        'An unclassified export is invisible to this census — the exact hole an ungated op walks through.');
+      const phantom = [...classified].filter((n) => !exportNames.has(n)).sort();
+      assert.deepStrictEqual(phantom, [],
+        `RAW_BINDINGS/LOCAL_ONLY_BINDINGS name ssh.js export(s) that no longer exist: ${phantom.join(', ')} — ` +
+        'an export was renamed or removed; re-derive both lists from ssh.js\'s export sites (and re-pin any census row whose binding disappeared)');
 
       // (5) The instrument only sees files that IMPORT the six by name. Pin
       // that premise: a namespace import, a re-export or a dynamic import of
