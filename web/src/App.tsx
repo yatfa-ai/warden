@@ -1265,6 +1265,22 @@ function App() {
       sendWindow: (snap) => forwardWorkspaceShape(snap),
     });
   }, []);
+  // WARDEN-1466 — the PEAKS need an event-driven tick: the singleton's interval
+  // and pagehide both call flush(), which folds only the CLOSING sample, so an
+  // open-then-close burst inside one 5-minute window shipped a peak equal to
+  // max(open, close) and the promise in workspaceShapeTelemetry.ts's header
+  // was false. This effect folds ONE observation into the window's peak
+  // accumulators on every workspaces/chats change — exact (no sampling period
+  // for a short burst to fall inside), cheap (one read + two comparisons, no
+  // timer, no state), and counts-only like everything on this channel. The
+  // singleton is build-once, so the no-arg call returns the SAME instance with
+  // the real read closure. Declared AFTER the build-once effect above and the
+  // chatsRef sync effect (React runs effects in declaration order), so the
+  // first tick meets a seeded sampler and current refs. Guarded by
+  // web/workspaceShapeTickGuard.test.mjs.
+  useEffect(() => {
+    getWorkspaceShapeSampler().sampler.tick();
+  }, [workspaces, chats]);
   // WARDEN-1408 (slice 11): the persisted prefs the rollup gates on (the
   // desktop-alerts opt-in + per-state filters) are subscribed INSIDE the hook
   // from the shared store now — the runtime inputs (openPanes, watchedChats,

@@ -112,9 +112,11 @@ export function createWorkspaceShapeSampler({
 
   /**
    * Tick the window: fold the current observation into the peaks. Cheap (one
-   * read + two comparisons); called on the flush interval so a 5-minute window
-   * carries at least the closing sample, and available for callers that want a
-   * denser peak estimate without changing the flush cadence.
+   * read + two comparisons); called by App's event-driven effect on EVERY
+   * workspaces/chats change (WARDEN-1466), so an intra-window burst is folded
+   * at the moment it happens. The flush interval does NOT tick — it CLOSES
+   * the window (flush folds only the closing sample), and a timer-driven tick
+   * would only sample, so a burst shorter than its period would still vanish.
    */
   function tick(): void {
     observe(sample());
