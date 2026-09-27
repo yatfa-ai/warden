@@ -1,150 +1,50 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+// ChatSidebar — rebuilt around its four jobs (WARDEN-1422, "Ink · Saved"):
+//
+//   A) START a session — the spawn control: a plain shell (host ▾ + directory +
+//      optional name + Start shell). SpawnControl owns it.
+//   B) CONNECT to an agent — HOSTS are the primary navigation (top of root,
+//      green accent, live counts). HostsSection owns it.
+//   C) CONTINUE a session — the temporary/persistent lifecycle. A host view
+//      lists ONLY that host's saved sessions, split working / stopped; the
+//      recently-closed flyout is the only route back to a closed temp.
+//   D) SEE git status — the Source Control panel, unchanged behavior, at the
+//      bottom of root, collapsed by default.
+//
+// Superseded model (withdrawn by the owner): the sidebar is no longer an
+// inventory of every capability. The open-panes list, the claude-history
+// resume list, the "needs you" row indicators, token counts, the fleet
+// filter/sort controls, and the Open-chat browser page are gone — unsaved
+// sessions are never listed, and the sidebar's session list is short by
+// construction because only named-and-saved sessions appear in it.
+
+import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
+import { Bookmark, History } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
-import { EmptyState } from '@/components/EmptyState';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from '@/components/ui/context-menu';
-import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
-import { BroadcastDialog } from './BroadcastDialog';
-import { KillDialog } from './KillDialog';
-import { KeySendDialog } from './KeySendDialog';
-import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
-import { formatKillToast, runKillFanout } from '@/lib/kill';
-import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
-import { showFanoutToast } from '@/lib/fanoutToast';
-import { copyWithToast } from '@/lib/clipboardToast';
-import { runFanout } from '@/lib/fanout';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { RECENTLY_CLOSED_PREVIEW, type RecentlyClosedEntry } from '@/lib/storage';
-import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useAgentFilter, useAgentSort } from '@/lib/uiStore';
-import { parseLoadedPins, nextPins } from '@/lib/pinSync';
-import { formatTimestamp } from '@/lib/formatTimestamp';
-import { useTimestampFormat } from '@/lib/uiStore';
-import { formatTokens } from '@/lib/formatTokens';
-import {
-  matchesAgentFilter, sortChats, findChat, displayNameFor,
-} from '@/lib/agentFilter';
+import type { RecentlyClosedEntry } from '@/lib/storage';
+import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/uiStore';
 import { chatMatchesCriteria } from '@/lib/collections';
 import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
-import type { Chat, Collection, AgentStateRow } from '@/lib/types';
-import { StatusDot } from '@/components/StatusDot';
-import type { GitCommit, ClaudeSession } from './sidebar/types';
-import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
-import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
-import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
+import type { Chat, Collection } from '@/lib/types';
+import type { GitCommit } from './sidebar/types';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import type { SourceControlGitInfo } from './sidebar/SourceControlPanel';
 import { useGitStatus, useInvalidateGitStatus } from '@/lib/gitStatusHooks';
-import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
-import { computeTagsInUse, filterSessionsByTags, addTag, removeTag, MAX_TAGS_PER_SESSION, parseLoadedTags } from '@/lib/sessionTags';
-import { fetchBounded, readListBody, readListResponse, readResponse } from '@/lib/api';
-
-// Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
-// './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
-export type { ClaudeSession, SessionSearchResult, TokenUsage } from './sidebar/types';
-
-interface Props {
-  chats: Chat[];
-  sshHosts: string[];
-  // WARDEN-372: the sidebar root is panes-first. openPanes is the active
-  // workspace's pane set (grid order); recentlyClosed is that workspace's
-  // per-workspace recovery list. The tabs model (activeTabs/hiddenTabs) is gone.
-  openPanes: Set<string>;
-  recentlyClosed: RecentlyClosedEntry[];
-  // WARDEN-431: the focused pane id (whichever pane is focused in the grid) —
-  // the Source Control panel re-points to this pane's repo. null when nothing is
-  // focused (the panel renders nothing).
-  focused?: string | null;
-  onOpenChat: (id: string) => void;
-  onClosePane: (id: string) => void;
-  onReopenClosed: (id: string) => void;
-  onKill: (id: string) => void;
-  onRename: (session: string, kind: string, name: string, host?: string) => void;
-  onResume: (id: string, description: string, cwd: string, host: string) => void;
-  onRefresh: () => void;
-  onDiscoverHost: (host: string) => void;
-  loading: boolean;
-  lastRefreshAt?: number | null;
-  // Display customization
-  showHostTags?: boolean;
-  showTypeBadges?: boolean;
-  showStatusIndicators?: boolean;
-  showProjectBadges?: boolean;
-  hideOfflineHosts?: boolean;
-  // Open the full-page "Open chat" browser view (App-level boolean). Replaces the
-  // former in-sidebar modal trigger.
-  onOpenChatBrowser: () => void;
-  // Host connectivity statuses (polled at the App level so they stay live while
-  // the full-page browser view — which replaces this sidebar — is open).
-  hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
-  // Follow poll cadence (WARDEN-749): forwarded straight to the FileViewer, the
-  // same resolved value PaneGrid's FileViewer receives, so Follow honors the
-  // dashboard cadence regardless of which surface opened the file.
-  pollIntervalMs: number;
-  // WARDEN-378: per-chat "watch" set (pane keys) + the toggle handler. Owned by App
-  // (persisted via its saveUi effect); read-only here except for the toggle, which
-  // delegates to App. Threaded to every chat row so the watch affordance + its
-  // active state render consistently across the fleet list and the open-panes list.
-  watchedChats: Set<string>;
-  // WARDEN-514: per-key CURRENT-state lookup for watched chats (row.key ?? row.id →
-  // AgentStateRow). Threaded to each row so a watched chat that CURRENTLY needs the
-  // human (waiting/erroring/stuck/blocked) shows a persistent, state-aware indicator
-  // on its own row — even when its pane is closed (the header AttentionBadge is open-
-  // gated, so a watched-but-CLOSED pane never reaches it). Built by App from the
-  // rollup's already-fetched watchedStates exposure (zero extra SSH cost); read-only
-  // here. A watched key absent from the map (before the first poll / on a transient
-  // fetch blip) → the row degrades to the neutral watch glyph (the safe default).
-  watchedStates: Record<string, AgentStateRow>;
-  onToggleWatch: (key: string) => void;
-  // WARDEN-581 — bulk WATCH for the multi-select action bar, the group twin of
-  // toggleWatch: add/remove every selected key in one state write. Owned by App
-  // (single writer of the `warden:ui` blob) and threaded down here as a delegated
-  // handler, mirroring onToggleWatch. The bar's Watch/Unwatch LABEL is computed
-  // here from watchedChats ∩ the selection (below), so this stays a pure callback.
-  // (WARDEN-1274: its sibling, bulk SNOOZE, went with the alert channel it
-  // silenced — there is no longer anything for a snooze to suppress.)
-  onToggleWatchMany: (keys: string[], on: boolean) => void;
-  // WARDEN-442 (slice 7 of roadmap WARDEN-1204): the sidebar fleet
-  // Filter (all/yatfa/claude/manual) + Sort pair lives on the shared
-  // client-state store (lib/uiStore.ts), and this component SUBSCRIBES to both
-  // values — it is the surface that APPLIES them (matchesAgentFilter +
-  // sortChats across the root/host/collection views). Persistence is
-  // unchanged: App's PersistedPrefSnapshot keeps both fields, so the ONE
-  // compile-locked saveUi effect remains the single writer of the `warden:ui`
-  // blob. The AgentFilterSortControls popover mounts below subscribe for
-  // themselves too — no props for the pair travel through here anymore.
-  // WARDEN-431: Source Control section collapse state + setter. Owned by App
-  // (persisted via its saveUi effect, like sidebarCollapsed); the panel component
-  // receives them as props so it stays self-contained for the sidebar redesign
-  // (WARDEN-257).
-  sourceControlCollapsed?: boolean;
-  onSourceControlCollapsedChange?: (collapsed: boolean) => void;
-}
-
-const LABEL: Record<string, string> = { '(local)': 'this machine' };
-
-// WARDEN-742: preview row count for the per-host past-session resume list. The
-// backend caps the per-host payload at SESSION_SEARCH_PER_HOST (20), so this is
-// strictly a preview ceiling — "show more" reveals the rest of what was fetched
-// (at most 8 more rows). Kept separate from RECENTLY_CLOSED_PREVIEW so the two
-// lists can evolve independently.
-const SESSION_PREVIEW = 12;
+import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
+import { SpawnControl } from './sidebar/SpawnControl';
+import { HostsSection } from './sidebar/HostsSection';
+import { RecentlyClosedFlyout } from './sidebar/RecentlyClosedFlyout';
+import { SavedSessionRow, SavedRowSkeleton, splitSaved, byRecencyDesc } from './sidebar/SavedSessionRows';
 
 // Query-string builders (module-level so the fetchers' useCallback deps stay stable).
 // incoming/outgoing ignore the limit arg — their limit is hardcoded at 50.
@@ -155,20 +55,10 @@ const buildOutgoingParams = () => `limit=50&range=outgoing`;
 // Shared skeleton for fetchGitLog / fetchGitLogIncoming / fetchGitLogOutgoing: GET
 // /api/git-log?id=…&<buildParams(limit)>, cache commits per chatId (re-expand is
 // instant), toggle a per-chatId loading flag, and cache [] on failure so a re-expand
-// won't loop (WARDEN-620).
-//
-// WARDEN-1014: the response-READING step is the shared `readListResponse` from
-// lib/api.ts, so BOTH halves of the backend's error convention are honoured — a
-// non-2xx AND a 200 whose body carries `{error}` beside the `gitDefaults` empty array
-// (src/gitRoutes.js:490 no-cwd, :494 catch-all). Previously `j.error` was dropped and
-// `Array.isArray(j.commits)` accepted the server's placeholder as data, so a cwd-less
-// chat or an unreachable SSH host rendered "no commits" — indistinguishable from a
-// fresh repo (the WARDEN-89 false-empty). `setError` is the channel added alongside
-// `setCommits`; the caching-[]-on-failure policy is deliberately UNCHANGED, so the
-// re-expand guard still can't loop — the error simply now rides with it.
-//
-// Deps are all stable (useState setters, a string literal, module consts) so the
-// callback keeps a stable identity, matching the original useCallback(fn, []).
+// won't loop (WARDEN-620). The response READING step is the shared
+// `readListResponse` from lib/api.ts, so BOTH halves of the backend's error
+// convention are honoured (WARDEN-1014). Carried over verbatim from the
+// pre-rebuild sidebar — git behavior is unchanged in this redesign.
 function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label, buildParams }: {
   setCommits: (updater: (prev: Record<string, GitCommit[]>) => Record<string, GitCommit[]>) => void;
   setError: (updater: (prev: Record<string, string | null>) => Record<string, string | null>) => void;
@@ -182,14 +72,10 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
     setLoading((p) => ({ ...p, [chatId]: true }));
     setError((p) => ({ ...p, [chatId]: null }));
     try {
-      // WARDEN-1144: bounded on the shared deadline. The flag and the fetch sit in
-      // different places here — `setLoading` is keyed PER CHAT in the component while
-      // the fetch lives in this shared helper — so a stall on one chat's expand would
-      // hold that chat's `loading` entry true with nothing left to clear it. One-shot
-      // shape (fires on expand, nothing ticks), so the primitive's defaults apply.
+      // WARDEN-1144: bounded on the shared deadline. One-shot shape (fires on
+      // expand, nothing ticks), so the primitive's defaults apply.
       const r = await fetchBounded(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
-      // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
-      // catch instead of becoming an empty list with no error (WARDEN-1014 review).
+      // Tolerant on !ok, STRICT on 2xx (WARDEN-1014 review).
       const j = await readListBody(r);
       const { items, error } = readListResponse<GitCommit>(r, j, 'commits', label);
       setCommits((p) => ({ ...p, [chatId]: items }));
@@ -206,268 +92,68 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, pollIntervalMs, watchedChats, watchedStates, onToggleWatch, onToggleWatchMany, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
-  const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
-  const [offlineExpanded, setOfflineExpanded] = useState(false);
-  const hostLabels = useHostLabels();
-  // WARDEN-442 (slice 7): the fleet filter/sort pair is read straight from the
-  // shared store — this component APPLIES it (matchesAgentFilter + sortChats
-  // below), and the AgentFilterSortControls mounts subscribe for themselves,
-  // so neither the pair nor its setters arrives as a prop anymore.
-  const agentFilter = useAgentFilter();
-  const agentSort = useAgentSort();
-  // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
-  // (5 previewed → up to the 20-entry cap).
-  const [showAllClosed, setShowAllClosed] = useState(false);
-  // WARDEN-742: "show more" affordance for the per-host past-session resume list.
-  // A top-level boolean is fine — the host drill-in shows one host's sessions at a
-  // time, and navigating away resets `view`, unmounting the list (no stale
-  // cross-host expansion state). Same shape as showAllClosed.
-  const [showAllSessions, setShowAllSessions] = useState(false);
-  const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  // WARDEN-1342 (slice 4): the pref is read here from the shared store — the
-  // surfaces this sidebar renders (rows, UpdatedAgo, its FileViewer) subscribe
-  // for themselves, so the pass-through prop is gone.
-  const timestampFormat = useTimestampFormat();
-  const [collections, setCollections] = useState<Collection[]>([]);
-  const [tabSearchQuery, setTabSearchQuery] = useState('');
-  const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
-  const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
-  // WARDEN-1240: pin persistence bookkeeping. The server's PUT /api/pins
-  // replaces the whole stored list wholesale, so the client must never write
-  // from an unverified snapshot. `pinsRef` mirrors the state so serialized
-  // toggles always build on the last confirmed set (rapid clicks no longer
-  // race); `pinsLoadedRef` gates writes on a verified load — a failed or
-  // error-bodied GET is "unknown", never "no pins", so it can never be written
-  // back as an empty list.
-  const pinsRef = useRef<Set<string>>(new Set());
-  const pinsLoadedRef = useRef(false);
-  const pinWriteChainRef = useRef<Promise<void>>(Promise.resolve());
-  // WARDEN-305: per-agent notes — id → short human annotation (mirrors pins).
-  const [agentNotes, setAgentNotes] = useState<Record<string, string>>({});
-  // WARDEN-342: per-past-session tags — claude-session id → short reusable labels
-  // (local sidecar). activeTagFilters scopes the ☁ sessions list to sessions bearing
-  // any of the selected tags (union semantics).
-  const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
-  // WARDEN-1345: tag persistence bookkeeping (mirrors the pins refs above). PUT
-  // /api/session-tags REPLACES the stored list for the key, so the client must
-  // never write from an unverified snapshot: `tagsRef` mirrors the state so
-  // serialized writes always build on the last confirmed map (rapid adds to one
-  // session no longer race the same stale array); `tagsLoadedRef` gates writes
-  // on a verified load — a failed or error-bodied GET is "unknown", never "no
-  // tags", so the first add can never wipe a session's real tags on disk.
-  const tagsRef = useRef<Record<string, string[]>>({});
-  const tagsLoadedRef = useRef(false);
-  const tagWriteChainRef = useRef<Promise<void>>(Promise.resolve());
-  const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
-  // WARDEN-1196: `error` is the per-host failure reason (null/absent = the last fetch
-  // succeeded). Written by fetchHostSessions from readResponse, so it is non-null for
-  // BOTH a non-2xx AND a 200 carrying {error} — the latter is how the backend reports
-  // an unreachable host, since the SSH failure is server-side and the HTTP call itself
-  // succeeds. `claudeAvailable` stays OPTIONAL and is genuinely absent on that path:
-  // an unreachable host cannot answer whether claude is installed, so the ⚠ warning's
-  // strict `=== false` gate must not be satisfied.
-  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean; error?: string | null }>>({});
-  const [loadingHost, setLoadingHost] = useState<string | null>(null);
+export interface ChatSidebarProps {
+  /** SAVED sessions only (yatfa agents + catalog chats) — temporaries never ride this list. */
+  chats: Chat[];
+  /** Running UNSAVED shells per discovered host — the footer-line / empty-state count. Never rendered as rows. */
+  tempChats: Chat[];
+  /** Full host list: [THIS_MACHINE, ...sshHosts]. */
+  hosts: string[];
+  /** The active workspace's just-closed pane snapshots (accident-insurance flyout). */
+  recentlyClosed: RecentlyClosedEntry[];
+  /** The focused pane id — the Source Control panel re-points to this pane's repo. */
+  focused?: string | null;
+  onOpenChat: (id: string) => void;
+  /** Start a shell: (host, cwd, name?) — name absent = temporary (never listed). */
+  onSpawnShell: (host: string, cwd: string, name?: string) => Promise<boolean>;
+  /** Promote a closed temporary session into its host's saved list. */
+  onSaveSession: (id: string) => void;
+  /** Reopen a closed temp as a pane — it stays temporary. */
+  onReopenClosed: (id: string) => void;
+  /** Recreate a stopped saved session: a fresh process, same name + directory. */
+  onRespawn: (id: string) => void;
+  /** Delete a saved session (kill + forget; confirm-gated in App). */
+  onKill: (id: string) => void;
+  onRename: (session: string, kind: string, name: string, host?: string) => void;
+  onRefresh: () => void;
+  onDiscoverHost: (host: string) => void;
+  loading: boolean;
+  /** Host connectivity (the shared /api/hosts/status poll): offline hosts are unknown, not empty. */
+  hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
+  /** Per-host discovery failure reason (the unreachable state's "⟨reason⟩"). */
+  discoverErrors: Record<string, string>;
+  /** ids just saved from the closed-temp flyout — the one-shot "saved" pill. */
+  recentlySavedIds: Set<string>;
+  sourceControlCollapsed?: boolean;
+  onSourceControlCollapsedChange?: (collapsed: boolean) => void;
+  /** Forward poll cadence to the FileViewer (unchanged from the pre-rebuild sidebar). */
+  pollIntervalMs: number;
+}
 
-  // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
-  const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
-  const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
-  // WARDEN-1014: the failure reason per chatId for each of the three git-log caches
-  // (null = the last fetch succeeded). Written by useGitLogFetcher from
-  // readListResponse, so it is non-null for BOTH a non-2xx AND a 200 carrying
-  // {error}. Forwarded to SourceControlPanel beside the cache it describes.
-  const [gitLogError, setGitLogError] = useState<Record<string, string | null>>({});
-  // incoming (behind) commit history per chatId — the commits @{u} has that HEAD
-  // doesn't (the "↓N behind" half of WARDEN-153's count). A separate cache from the
-  // local gitLog so each half refreshes independently and the popover shows both.
-  // limit 50 (not 5): the whole behind list is the point, and it's cached so a
-  // re-expand is instant. Only fetched when behindCount > 0 — the badge gates the
-  // section — but the call is harmless on a non-behind repo (returns []).
-  const [gitLogIncoming, setGitLogIncoming] = useState<Record<string, GitCommit[]>>({});
-  const [gitLogIncomingLoading, setGitLogIncomingLoading] = useState<Record<string, boolean>>({});
-  const [gitLogIncomingError, setGitLogIncomingError] = useState<Record<string, string | null>>({});
-  // outgoing (ahead/unpushed) commit history per chatId — the commits HEAD has that
-  // @{u} doesn't (the "↑N unpushed" half of WARDEN-153's count, explorable per
-  // WARDEN-252). A separate cache from gitLog/gitLogIncoming so each third refreshes
-  // independently and the popover shows all three. limit 50 (not 5): the whole
-  // unpushed list is the point, and it's cached so a re-expand is instant. Only
-  // fetched when aheadCount > 0 — the badge gates the section — but the call is
-  // harmless on a non-ahead repo (returns []).
-  const [gitLogOutgoing, setGitLogOutgoing] = useState<Record<string, GitCommit[]>>({});
-  const [gitLogOutgoingLoading, setGitLogOutgoingLoading] = useState<Record<string, boolean>>({});
-  const [gitLogOutgoingError, setGitLogOutgoingError] = useState<Record<string, string | null>>({});
-  // Per-file diff dialog (WARDEN-151): which chatId + path is shown in the DiffViewer.
-  // `staged` (WARDEN-369): when true the DiffViewer fetches `git diff --cached` (what
-  // will be committed) instead of the combined worktree-vs-HEAD diff — set by clicking
-  // a STAGED file in the dirty-file list.
-  const [diffTarget, setDiffTarget] = useState<{ chatId: string; path: string; staged?: boolean } | null>(null);
-  // Per-file conflict dialog (WARDEN-428): which chatId + path is shown in the
-  // ConflictView. Set by clicking a CONFLICTED file (UU/AA/UD/…) in the dirty-file
-  // list — opens the read-only ours-vs-theirs stage-blob view instead of the staged
-  // diff, which is not a usable ours/theirs view for an unmerged path.
-  const [conflictTarget, setConflictTarget] = useState<{ chatId: string; path: string } | null>(null);
-  // Per-file read dialog (WARDEN-478): which chatId + path is shown in the FileViewer,
-  // set by the per-agent git panel's "open file" affordance on a dirty/committed file
-  // row. Mirrors diffTarget/conflictTarget: read-only fetch + render, no new backend
-  // endpoint (FileViewer reads /api/read-file, /api/git-blame, /api/git-log internally).
-  // The optional `line` deep-links into the FileViewer scrolled to + highlighting that
-  // row (WARDEN-801: the fleet CODE-grep match). Per-agent open-file callers pass no
-  // line (open at top); onNavigate resets it on a path change so a stale highlight
-  // never survives a breadcrumb/dir-click navigation (mirrors PaneGrid WARDEN-334).
-  const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string; line?: number } | null>(null);
+type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection };
+
+export function ChatSidebar({
+  chats, tempChats, hosts, recentlyClosed, focused, onOpenChat, onSpawnShell, onSaveSession,
+  onReopenClosed, onRespawn, onKill, onRename, onRefresh, onDiscoverHost, loading,
+  hostStatuses, discoverErrors, recentlySavedIds, sourceControlCollapsed, onSourceControlCollapsedChange, pollIntervalMs,
+}: ChatSidebarProps) {
+  const [view, setView] = useState<SidebarView>({ kind: 'root' });
+  const [flyoutOpen, setFlyoutOpen] = useState(false);
+  // ONE live search per the design: the header field IS the filter, on every
+  // view (root = cross-host saved search; host/collection = scoped to the view).
+  // No second box anywhere.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [collections, setCollections] = useState<Collection[]>([]);
+  // The host whose discover is in flight after entering it — gates the
+  // loading skeletons in the host view.
+  const [enteringHost, setEnteringHost] = useState<string | null>(null);
+  const hostLabels = useHostLabels();
   const { prefs } = useNotificationPrefs();
 
-  // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
-  // the ChatSidebar level so it can span the active/idle fleet lists in whichever
-  // fleet view (host or collection) is open. Keyed by `c.key || c.id` — the same
-  // identity openPanes/pinnedChatIds use — so a row stays selected across the
-  // active→idle regrouping within one view. Selection is scoped to the current
-  // fleet view: navigating away (back to root, into a host/collection, or opening
-  // a chat) clears it, so the human's mental model is "the agents I picked in THIS
-  // list," never a stale cross-view mix. v1 wires selection into ChatRow (the
-  // fleet lists) only — the root open-pane rows (OpenPaneRow) are intentionally
-  // excluded.
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [broadcastOpen, setBroadcastOpen] = useState(false);
-  const [killOpen, setKillOpen] = useState(false);
-  const [interruptOpen, setInterruptOpen] = useState(false);
-
-  // WARDEN-1196: the response READ goes through the shared `readResponse`/`readListBody`
-  // pair from lib/api.ts, so BOTH halves of warden's error convention are honoured — a
-  // non-2xx AND a 200 carrying {error}. The second half is the load-bearing one here:
-  // an unreachable host is an SSH failure that happens SERVER-side, so the HTTP request
-  // itself succeeds with a 200 and a well-formed body. The old code had no `r.ok` gate
-  // and no `j.error` read (`j.sessions || []`), and its `catch` → toast leg could not
-  // fire for exactly that reason — our own server answered 200 and `r.json()` parsed —
-  // so a dead host rendered as a confident "claude not found — install it".
-  //
-  // `claudeAvailable` is read as a strict boolean rather than passed through: on the
-  // failure path the key is ABSENT, and it must stay `undefined` (never coerced to
-  // `false`) or the ⚠ warning's `=== false` gate would fire for an unreachable host —
-  // the very bug this closes.
-  const fetchHostSessions = async (host: string) => {
-    setLoadingHost(host);
-    try {
-      // WARDEN-1144: bounded — this gates `loadingHost`, whose only clear is the
-      // `setLoadingHost(null)` after this await. A stall held the host's rescan
-      // spinner forever. One-shot (a click), so the defaults apply.
-      const r = await fetchBounded(`/api/claude-sessions?host=${encodeURIComponent(host)}`);
-      // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx body
-      // that fails to parse is a real failure and must reach the catch below rather
-      // than becoming a confident empty list (WARDEN-1014).
-      const body = await readListBody(r);
-      const { record, error } = readResponse(r, body, 'sessions');
-      const sessions = Array.isArray(record.sessions) ? (record.sessions as ClaudeSession[]) : [];
-      setHostSessions((p) => ({
-        ...p,
-        [host]: {
-          // A failure keeps NO stale rows: the point is that we do not know what is on
-          // this host, so showing the last successful scan's sessions beside an error
-          // would be its own quieter version of the same lie.
-          sessions: error ? [] : sessions,
-          claudeAvailable: typeof record.claudeAvailable === 'boolean' ? record.claudeAvailable : undefined,
-          error,
-        },
-      }));
-    } catch (error) {
-      console.error('[fetchHostSessions] Failed:', error);
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      // A thrown fetch/parse is the same class of "we could not read this host" as the
-      // 200-with-{error} leg, so it lands in the SAME state field and renders the same
-      // failure row — not only a toast the human may have disabled.
-      setHostSessions((p) => ({ ...p, [host]: { sessions: [], error: message } }));
-      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${message}`);
-    }
-    setLoadingHost(null);
-  };
-
-  // WARDEN-1211: the focused pane's git status is now a READ of the SHARED
-  // per-agent cache (`['git-status', key]`, owned by lib/gitStatusQuery +
-  // lib/gitStatusHooks) — the same key Fleet Health's fan reads — so the two
-  // surfaces can no longer disagree about one agent, and an agent held by both
-  // costs ONE fetch, not two.
-  //
-  // What replaced what (behaviours preserved, mechanism changed):
-  // - The old private `fetch('/api/git-status?id=…')` and the WARDEN-975
-  //   single-entry `gitStatus` map are GONE; `gitStatusQuery.data` is the fact.
-  // - LATE-RESPONSE GUARD (the old gitReqRef): inherent now. Each key's fetch
-  //   writes only its OWN cache entry and the section always reads the FOCUSED
-  //   key's entry — a late A response can never overwrite B's, so switching
-  //   focus A → B with A resolving last still leaves B on screen.
-  // - BRANCH-LESS → "no repo": kept as a CONSUMER-side read (finding A). The
-  //   shared fetcher's strict WARDEN-89 gate (`r.ok && !j.error`) routes an
-  //   unreachable/error agent to the query's error state; a SUCCESSFUL payload
-  //   with no `branch` is still a valid empty read — `gitInfo` stays undefined
-  //   and SourceControlPanel returns null (its `!gitInfo?.branch` gate), never
-  //   an error. The previously-focused repo's status cannot linger: the read is
-  //   keyed to `focused`, not a mutable map.
-  const gitStatusQuery = useGitStatus(focused);
-  const invalidateGitStatus = useInvalidateGitStatus();
-  // Git status is non-critical: log a settled fetch failure without a toast.
+  // Per-agent notes (WARDEN-305): keyed by chat id; load on mount, write per-key.
+  const [agentNotes, setAgentNotes] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (gitStatusQuery.error) console.error('[git-status] Failed:', gitStatusQuery.error);
-  }, [gitStatusQuery.error]);
-
-  // Recent commits. `limit` defaults to WHATS_NEW_FETCH_LIMIT (50) so the per-agent
-  // "What's new since your last visit" marker counts every commit since the last
-  // visit (a rare visitor can have dozens); showing up to 50 (vs the old 5) is a
-  // benign superset, not a regression (WARDEN-356 review: "count capped at 5").
-  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setError: setGitLogError, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', label: 'commits', buildParams: buildGitLogParams });
-  // Incoming (behind, HEAD..@{u}) via range=incoming (WARDEN-225); limit hardcoded at 50.
-  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setError: setGitLogIncomingError, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', label: 'incoming commits', buildParams: buildIncomingParams });
-  // Outgoing (ahead/unpushed, @{u}..HEAD) via range=outgoing (WARDEN-252); limit hardcoded at 50.
-  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setError: setGitLogOutgoingError, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', label: 'outgoing commits', buildParams: buildOutgoingParams });
-
-  // WARDEN-1345: fetch + verify the tag sidecar. ONE loader shared by the mount
-  // effect and the write gate (which retries the load once before refusing to
-  // write) — factored rather than hand-copied so the two paths can never drift.
-  // A response is adopted only when it is ok AND parses (parseLoadedTags); any
-  // other outcome leaves the load gate closed — the client holds "unknown"
-  // (rendered as no chips) rather than believing "no tags", which could then be
-  // written back over the stored list by the first PUT.
-  const loadSessionTags = async (): Promise<boolean> => {
-    try {
-      const r = await fetch('/api/session-tags');
-      const j = await r.json();
-      const tags = r.ok ? parseLoadedTags(j) : null;
-      if (!tags) {
-        console.error('[session-tags] Load failed: unverified response', { ok: r.ok, body: j });
-        return false;
-      }
-      tagsLoadedRef.current = true;
-      tagsRef.current = tags;
-      setSessionTags(tags);
-      return true;
-    } catch (error) {
-      console.error('[session-tags] Failed:', error);
-      return false;
-    }
-  };
-
-  // Load pinned chat ids + per-agent notes from the backend on mount.
-  // WARDEN-1240: a pins response is only adopted when it is ok AND actually a
-  // pin list (parseLoadedPins). A failure leaves the load gate closed — the
-  // client holds "unknown" (rendered as nothing pinned) rather than believing
-  // "no pins", and the first toggle retries the load before writing so the
-  // unknown state can never be written back as an empty list.
-  useEffect(() => {
-    const fetchPins = async () => {
-      try {
-        const r = await fetch('/api/pins');
-        const j = await r.json();
-        const pins = r.ok ? parseLoadedPins(j) : null;
-        if (pins) {
-          pinsLoadedRef.current = true;
-          pinsRef.current = pins;
-          setPinnedChatIds(pins);
-        } else {
-          console.error('[pins] Load failed: unverified response', { ok: r.ok, body: j });
-        }
-      } catch (error) {
-        console.error('[pins] Failed:', error);
-      }
-    };
     const fetchNotes = async () => {
       try {
         const r = await fetch('/api/agent-notes');
@@ -477,65 +163,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         console.error('[agent-notes] Failed:', error);
       }
     };
-    fetchPins();
-    fetchNotes();
-    loadSessionTags();
+    void fetchNotes();
   }, []);
-
-  // Toggle a chat's pinned state and persist it (WARDEN-1240). Every write is
-  // serialized through `pinWriteChainRef` and builds on `pinsRef` — the last
-  // confirmed set, not the React snapshot — so rapid clicks each land their own
-  // change instead of racing near-identical arrays where only the last survives.
-  // If the mount-time load never verified, the first toggle re-attempts it and
-  // refuses to write when it still fails: an unknown pin state is never written
-  // back over the stored list. On success we adopt the server's returned list.
-  const togglePin = (chatId: string) => {
-    const attempt = async () => {
-      if (!pinsLoadedRef.current) {
-        try {
-          const r = await fetch('/api/pins');
-          const j = await r.json();
-          const pins = r.ok ? parseLoadedPins(j) : null;
-          if (!pins) {
-            console.error('[pins-save] Aborted: pin state unverified, refusing to overwrite stored list');
-            return;
-          }
-          pinsLoadedRef.current = true;
-          pinsRef.current = pins;
-          setPinnedChatIds(pins);
-        } catch (error) {
-          console.error('[pins-save] Aborted: pin load retry failed:', error);
-          return;
-        }
-      }
-      const newPins = nextPins(pinsRef.current, chatId);
-      try {
-        const r = await fetch('/api/pins', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pins: Array.from(newPins) }),
-        });
-        if (r.ok) {
-          const j = await r.json();
-          const confirmed = parseLoadedPins(j) ?? newPins;
-          pinsRef.current = confirmed;
-          setPinnedChatIds(confirmed);
-        } else {
-          console.error('[pins-save] Failed: non-ok response', r.status);
-        }
-      } catch (error) {
-        console.error('[pins-save] Failed:', error);
-      }
-    };
-    pinWriteChainRef.current = pinWriteChainRef.current.then(attempt, attempt);
-  };
-
-  // WARDEN-305: set or clear a per-agent note and persist it. Unlike pins, this
-  // sends the per-key change (id + note) and adopts the server's merged map on
-  // success, so it is immune to both the rapid-click race and the wiped-list
-  // failure mode (WARDEN-1240).
-  // Empty/blank text clears the note (server deletes the key).
-  const setNote = async (chatId: string, text: string) => {
+  const setNote = useCallback(async (chatId: string, text: string) => {
     try {
       const r = await fetch('/api/agent-notes', {
         method: 'PUT',
@@ -549,261 +179,43 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     } catch (error) {
       console.error('[agent-notes-save] Failed:', error);
     }
-  };
+  }, []);
 
-  // WARDEN-342: set a past session's tags and persist the whole list (local sidecar
-  // keyed by claude-session id). WARDEN-1345: the server cleans/dedupes/caps and
-  // REPLACES the stored list for the key, so — exactly like the pins path
-  // (WARDEN-1240) — every write is serialized through `tagWriteChainRef` and its
-  // payload is built INSIDE the chain from `tagsRef` (the last confirmed map, not
-  // the React snapshot), so rapid adds to one session each land their own change
-  // instead of racing the same stale array. `nextTags` maps the session's
-  // confirmed list to the list to persist, or null to abort (nothing to write).
-  // If the mount load never verified, the write re-attempts the load ONCE and
-  // refuses when it still fails: an unknown tag state is never written back over
-  // the stored list. On success we adopt the server's returned list into
-  // `tagsRef` and local state (and drop the key when it's empty).
-  const updateSessionTags = (id: string, nextTags: (current: readonly string[]) => string[] | null) => {
-    const attempt = async () => {
-      if (!tagsLoadedRef.current) {
-        const loaded = await loadSessionTags();
-        if (!loaded) {
-          console.error('[session-tags-save] Aborted: tag state unverified, refusing to overwrite stored list');
-          return;
-        }
-      }
-      const tags = nextTags(tagsRef.current[id] || []);
-      if (tags === null) return;
-      try {
-        const r = await fetch('/api/session-tags', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, tags }),
-        });
-        if (!r.ok) {
-          console.error('[session-tags-save] Failed: non-ok response', r.status);
-          return;
-        }
-        const j = await r.json();
-        const next = { ...tagsRef.current };
-        if (Array.isArray(j.tags) && j.tags.length) next[id] = j.tags;
-        else delete next[id];
-        tagsRef.current = next;
-        setSessionTags(next);
-      } catch (error) {
-        console.error('[session-tags-save] Failed:', error);
-      }
-    };
-    tagWriteChainRef.current = tagWriteChainRef.current.then(attempt, attempt);
-  };
-  const addSessionTag = (id: string, tag: string) => {
-    // Explicit count-cap check — NOT a reference comparison: addTag returns a NEW
-    // array on every path (even a rejected add), so identity cannot signal rejection.
-    // Past MAX_TAGS_PER_SESSION the server silently truncates and answers ok with the
-    // shortened list, so a PUT from here would discard the user's tag with no error
-    // to consume (WARDEN-1241). SessionTagChips already swaps its affordance for a
-    // visible "max" note at the cap; this backstop also covers the in-flight race
-    // (a PUT landing while the inline Input is open) and any future add path.
-    // WARDEN-1345: it reads the CONFIRMED map (`tagsRef`) inside the serialized
-    // chain, not the render snapshot, so the cap decision sees what earlier
-    // in-flight writes will have persisted.
-    updateSessionTags(id, (current) => {
-      if (current.length >= MAX_TAGS_PER_SESSION) return null;
-      return addTag(current, tag);
-    });
-  };
-  const removeSessionTag = (id: string, tag: string) => {
-    updateSessionTags(id, (current) => removeTag(current, tag));
-  };
-  const toggleTagFilter = (tag: string) => {
-    setActiveTagFilters((prev) => {
-      const next = new Set(prev);
-      if (next.has(tag)) next.delete(tag); else next.add(tag);
-      return next;
-    });
-  };
+  // ---- git plumbing — behavior UNCHANGED by the redesign; the Source Control
+  // panel still describes only the focused pane's repo, at the bottom of root. ----
+  const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
+  const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
+  const [gitLogError, setGitLogError] = useState<Record<string, string | null>>({});
+  const [gitLogIncoming, setGitLogIncoming] = useState<Record<string, GitCommit[]>>({});
+  const [gitLogIncomingLoading, setGitLogIncomingLoading] = useState<Record<string, boolean>>({});
+  const [gitLogIncomingError, setGitLogIncomingError] = useState<Record<string, string | null>>({});
+  const [gitLogOutgoing, setGitLogOutgoing] = useState<Record<string, GitCommit[]>>({});
+  const [gitLogOutgoingLoading, setGitLogOutgoingLoading] = useState<Record<string, boolean>>({});
+  const [gitLogOutgoingError, setGitLogOutgoingError] = useState<Record<string, string | null>>({});
+  const [diffTarget, setDiffTarget] = useState<{ chatId: string; path: string; staged?: boolean } | null>(null);
+  const [conflictTarget, setConflictTarget] = useState<{ chatId: string; path: string } | null>(null);
+  const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string; line?: number } | null>(null);
 
-  // --- Multi-select broadcast (WARDEN-292) -------------------------------------
-  // A broadcast is a chat operation (it types into agent tmux sessions), so its
-  // result toast is gated on the same pref as kill/resume/rename (notifyChatOps)
-  // — success AND failure — matching App.tsx's convention for chat-op feedback.
-  const toggleSelect = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-  const selectAll = (ids: string[]) => setSelectedIds(new Set(ids));
-  const clearSelection = () => setSelectedIds(new Set());
+  const gitStatusQuery = useGitStatus(focused);
+  const invalidateGitStatus = useInvalidateGitStatus();
+  useEffect(() => {
+    if (gitStatusQuery.error) console.error('[git-status] Failed:', gitStatusQuery.error);
+  }, [gitStatusQuery.error]);
 
-  // Selection is scoped to the current fleet view — clear it whenever the view
-  // changes (root ↔ host ↔ collection). Opening a chat from a fleet view also
-  // navigates to root (openFromHost), so this covers the "selected, then peeked
-  // at a chat" path too: the selection has been discharged or abandoned by then.
-  useEffect(() => { setSelectedIds(new Set()); }, [view]);
+  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setError: setGitLogError, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', label: 'commits', buildParams: buildGitLogParams });
+  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setError: setGitLogIncomingError, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', label: 'incoming commits', buildParams: buildIncomingParams });
+  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setError: setGitLogOutgoingError, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', label: 'outgoing commits', buildParams: buildOutgoingParams });
 
-  // Resolve the selected ids to their chats (in chats order) for the confirm
-  // dialog's target list. Stale ids (an agent that died between selecting and
-  // sending) simply don't resolve here and are absent from the list — but they
-  // are STILL sent to in handleBroadcastSend (which iterates selectedIds, not
-  // this list) so a dead target is reported as a per-agent failure rather than
-  // silently dropped.
-  const selectedChats = useMemo(
-    () => (selectedIds.size === 0 ? [] : chats.filter((c) => selectedIds.has(c.key || c.id))),
-    [chats, selectedIds],
-  );
+  // Git status stays live while a pane stays focused: invalidate on catalog refresh.
+  useEffect(() => {
+    if (focused) invalidateGitStatus(focused);
+  }, [focused, chats, invalidateGitStatus]);
 
-  // WARDEN-581 — drives the action bar's Watch/Unwatch button label. The button
-  // offers "Watch N" when ANY selected agent isn't currently watched (the action
-  // then adds the whole group), else "Unwatch N" (every selected agent is already
-  // watched, so the action removes the group). Recomputed each render from the
-  // live selection + watchedChats; defaults to 'watch' for an empty selection
-  // (the bar is hidden then anyway, so the value is unused).
-  const watchMode: 'watch' | 'unwatch' = selectedChats.some((c) => !watchedChats.has(c.key || c.id))
-    ? 'watch'
-    : 'unwatch';
-
-  // WARDEN-342: host-view tag surfaces. These memos MUST live at the top level (not
-  // inside the `view.kind === 'host'` branch) — hooks can't be called conditionally,
-  // and the host branch is a conditional return. Guard on view.kind inside the body.
-  // The pure query/mutation logic lives in @/lib/sessionTags (unit-tested there):
-  // computeTagsInUse hides orphans (a tag on a vanished session is never shown) and
-  // filterSessionsByTags applies the active-filter union. Deps are all stable refs
-  // (view/hostSessions only change on navigation/fetch), so the memos hold in-view.
-  const tagsInUse = useMemo(() => {
-    if (view.kind !== 'host') return [];
-    return computeTagsInUse(hostSessions[view.host]?.sessions || [], sessionTags);
-  }, [view, hostSessions, sessionTags]);
-  const visibleSessions = useMemo(() => {
-    if (view.kind !== 'host') return [];
-    return filterSessionsByTags(hostSessions[view.host]?.sessions || [], sessionTags, activeTagFilters);
-  }, [view, hostSessions, sessionTags, activeTagFilters]);
-  // WARDEN-742: the per-host past-session resume list shows SESSION_PREVIEW rows,
-  // with a "show more" that reveals the rest of the already-fetched (and tag-filtered)
-  // set. The backend caps the payload at SESSION_SEARCH_PER_HOST (20), so this is a
-  // client-side reveal only — no pagination/hasMore plumbing. Defined in the main
-  // body (not inside renderHost) so the memo-derived visibleSessions stays the single
-  // source of truth the closure reads.
-  const sessionPreview = showAllSessions ? visibleSessions : visibleSessions.slice(0, SESSION_PREVIEW);
-  const hasMoreSessions = visibleSessions.length > SESSION_PREVIEW;
-
-  // Fan the message out to every selected agent via the existing per-target
-  // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
-  // The request loop itself is the shared runFanout (@/lib/fanout, WARDEN-974) —
-  // the same one batch Kill and batch Interrupt use — so the allSettled-over-fetch
-  // shape is no longer re-typed here. Promise.allSettled (not Promise.all) so a
-  // partial failure — one host unreachable, one session dead — is reported
-  // per-agent and does NOT abort the other sends. Never throws: failure is
-  // encoded in the summary. Returns the summary so the BroadcastDialog can close
-  // on completion.
-  const handleBroadcastSend = async (text: string) => {
-    const ids = Array.from(selectedIds);
-    const results = await runFanout('/api/send', ids, (id) => ({ id, text }));
-    const nameOf = (id: string) => displayNameFor(chats, id);
-    const summary = summarizeBroadcast(results, ids, nameOf);
-    showFanoutToast(formatBroadcastToast(summary), prefs.notifyChatOps);
-    // The broadcast's intent is discharged — clear the selection regardless of
-    // outcome. Failed targets remain visible in the toast; the human can
-    // re-select and retry if needed.
-    setSelectedIds(new Set());
-    return summary;
-  };
-
-  // Fan a KILL out to every selected agent via the shared runKillFanout
-  // (WARDEN-328; reused by Fleet Health WARDEN-371). The fan-out itself
-  // (Promise.allSettled over /api/kill + summarize) lives in @/lib/kill so both
-  // surfaces share one copy; this component supplies the surface-specific
-  // reconciliation (onSettled: re-read the catalog + re-discover each distinct
-  // host) and keeps the view concerns (toast, selection clear) here.
-  //
-  // runKillFanout never throws — partial failure (one host unreachable, one
-  // session already dead) is encoded in the summary, not aborted — and returns
-  // the summary so the result toast can surface it. Stale ids (an agent that
-  // died between selecting and killing) are still killed-at and reported as a
-  // per-agent failure rather than silently dropped.
-  const handleKillSelected = async () => {
-    const ids = Array.from(selectedIds);
-    const nameOf = (id: string) => displayNameFor(chats, id);
-    const summary = await runKillFanout(ids, nameOf, async () => {
-      // Reconcile rows after the fan-out: re-read the catalog (manual tmux chats
-      // are forgotten server-side) AND re-discover each unique host so yatfa
-      // (auto-discovered) agents reflect the dead tmux session immediately rather
-      // than waiting for the 60s poll — mirroring performKill's refresh() +
-      // discoverHost(host) per kill, deduped across the batch's hosts.
-      onRefresh();
-      const hosts = new Set<string>();
-      selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
-      hosts.forEach((h) => onDiscoverHost(h));
-    });
-    showFanoutToast(formatKillToast(summary), prefs.notifyChatOps);
-    // The kill's intent is discharged — clear the selection regardless of
-    // outcome. Failed targets remain visible in the toast; the human can
-    // re-select and retry if needed.
-    setSelectedIds(new Set());
-    return summary;
-  };
-
-  // Fan a CONTROL KEY (Ctrl-C / Esc) out to every selected agent via the shared
-  // runKeySendFanout (@/lib/keysend; the non-destructive sibling of runKillFanout,
-  // WARDEN-492). The fan-out itself (Promise.allSettled over /api/key +
-  // summarize) lives in @/lib/keysend so both interrupt surfaces (sidebar +
-  // Fleet Health) share one copy; this component keeps the view concerns (toast,
-  // selection clear) here.
-  //
-  // runKeySendFanout never throws — partial failure (one host unreachable, one
-  // session dead) is encoded in the summary, not aborted — and returns the
-  // summary so the result toast can surface it. Interrupt is NON-DESTRUCTIVE: no
-  // session is destroyed, so (unlike kill) there is nothing to reconcile — a
-  // signaled agent reclassifies off stuck/erroring on the next classifyPane
-  // tick. Stale ids are still signaled-at and reported as a per-agent failure.
-  const handleInterruptSelected = async (key: string) => {
-    const ids = Array.from(selectedIds);
-    const nameOf = (id: string) => displayNameFor(chats, id);
-    const summary = await runKeySendFanout(ids, key, nameOf);
-    showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
-    // The interrupt's intent is discharged — clear the selection regardless of
-    // outcome. Failed targets remain visible in the toast; the human can
-    // re-select and retry if needed.
-    setSelectedIds(new Set());
-    return summary;
-  };
-
-  // WARDEN-581 — bulk watch/unwatch for the multi-select action bar. This is pure
-  // local state (watchedChats) with no fan-out: route the selected
-  // keys + the computed on/off to App's toggleWatchMany (one state write; the OS
-  // permission request fires once inside it), surface a confirmation toast, and
-  // clear the selection. The bar's label (watchMode below) decides on vs off.
-  const handleWatchSelected = () => {
-    const keys = Array.from(selectedIds);
-    if (keys.length === 0) return;
-    const on = watchMode === 'watch';
-    onToggleWatchMany(keys, on);
-    toast.success(`${on ? 'Watching' : 'Stopped watching'} ${keys.length} agent${keys.length === 1 ? '' : 's'}`);
-    setSelectedIds(new Set());
-  };
-
-  const enterHost = (host: string) => {
-    const status = hostStatuses[host];
-    if (status?.status === 'offline') {
-      // Show helpful error instead of navigating
-      if (prefs.notifyErrors) toast.error(`Cannot reach ${host} — SSH connection failed. Please check:
-• Network connectivity
-• SSH daemon is running
-• SSH keys are configured`);
-      return;
-    }
-    setView({ kind: 'host', host });
-    fetchHostSessions(host);
-    onDiscoverHost(host);
-  };
-
-  // Collections management
-  const fetchCollections = async (): Promise<Collection[]> => {
+  // ---- collections ----
+  const fetchCollections = useCallback(async (): Promise<Collection[]> => {
     try {
-      // WARDEN-1144: bounded. This read has no loading flag of its own, but it is
-      // awaited by CollectionsSection's refresh (which does), and its result gates
-      // the collection view's contents.
+      // WARDEN-1144: bounded. Awaited by CollectionsSection's refresh; its result
+      // gates the collection view's contents.
       const r = await fetchBounded('/api/collections');
       const j = await r.json();
       const list = j.collections || [];
@@ -814,29 +226,21 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       if (prefs.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
       return [];
     }
-  };
+  }, [prefs.notifyErrors]);
 
-  const enterCollection = (collection: Collection) => { setView({ kind: 'collection', collection }); };
+  const enterCollection = (collection: Collection) => { setView({ kind: 'collection', collection }); setSearchQuery(''); };
 
-  const handleCreateCollection = () => { setCreateDialogOpen(true); fetchCollections(); };
+  const handleCreateCollection = () => { setCreateDialogOpen(true); void fetchCollections(); };
 
   const handleCollectionCreated = (collection: Collection) => {
-    fetchCollections();
+    void fetchCollections();
     enterCollection(collection);
   };
 
-  // WARDEN-396: sync ChatSidebar's derived collection state when a card is
-  // renamed or deleted from CollectionsSection's context menu (which owns its
-  // own card list + refresh). On delete, leave the live view if the deleted
-  // collection was the one open; always re-fetch so the CreateCollectionDialog
-  // duplicate-name check stays accurate after a rename/delete.
-  // WARDEN-553: on edit, the open view also holds the edited collection as a
-  // SNAPSHOT in `view.collection` — fetchCollections refreshes the `collections`
-  // array but NOT that snapshot, so the membership list would render stale
-  // criteria while the card count updates. Refresh the snapshot from the
-  // freshly-fetched list when the edited id is the open view (or reset to root
-  // if the collection is gone — same sync-bug class as the delete case).
-  const handleCollectionChange = async (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => {
+  // WARDEN-396/553 (carried over): sync derived collection state when a card
+  // mutates from CollectionsSection's own menu; refresh the open view's
+  // snapshot when the edited collection is the one open.
+  const handleCollectionChange = useCallback(async (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => {
     if (change.type === 'delete' && view.kind === 'collection' && view.collection.id === change.id) {
       setView({ kind: 'root' });
     }
@@ -845,657 +249,413 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       const updated = fresh.find((c) => c.id === change.id);
       setView(updated ? { kind: 'collection', collection: updated } : { kind: 'root' });
     }
-  };
+  }, [view, fetchCollections]);
 
-  // Fetch collections on mount
   useEffect(() => {
-    fetchCollections();
+    void fetchCollections();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // WARDEN-975/1211: git status is fetched for the FOCUSED pane ONLY — the single
-  // repo the git section describes. On focus change the shared query mounts fresh
-  // (a new key has no cached entry → one fetch); on every catalog refresh (`chats`)
-  // this effect INVALIDATES the focused key so the section stays live while a pane
-  // stays focused — the same beat the old private fetch fired on. Read-only GET.
-  useEffect(() => {
-    if (focused) invalidateGitStatus(focused);
-  }, [focused, chats, invalidateGitStatus]);
-
-  const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
-  const hosts = [THIS_MACHINE, ...sshHosts];
-
-  // "Hide offline hosts" display pref (WARDEN-164): when ON, SSH hosts whose last
-  // polled status is 'offline' collapse out of the live host list into an
-  // expandable "Offline (N)" summary row. THIS_MACHINE and online/unknown hosts
-  // are never hidden — only explicitly 'offline' ones. Derived on every render,
-  // so the 30s status poll drives it: a recovered host re-appears inline and a
-  // dropped one collapses away, with no extra wiring. When OFF (default),
-  // isOfflineHidden is always false → visibleHosts === hosts, no summary.
-  const hideOffline = hideOfflineHosts === true;
-  const isOfflineHidden = (h: string) =>
-    hideOffline && h !== THIS_MACHINE && hostStatuses[h]?.status === 'offline';
-
-  const offlineHosts = hosts.filter(isOfflineHidden);
-  const visibleHosts = hosts.filter((h) => !isOfflineHidden(h));
-
-  // Renders one host row. Shared by the live list and the expanded offline
-  // summary so the two stay identical — expanding the summary reveals the exact
-  // same rows (the WARDEN-178 colorblind-safe StatusDot, incl. offline=square,
-  // + retry/inspect still works via enterHost).
-  const renderHost = (h: string) => {
-    const n = chats.filter((c) => c.host === h && c.active).length;
-    const hostStatus = hostStatuses[h];
-    // THIS_MACHINE ("this machine" / local) has no SSH address, so its menu
-    // omits "Copy SSH address"; "Copy host name" copies the friendly label.
-    const isLocal = h === THIS_MACHINE;
-    return (
-      <ContextMenu key={h}>
-        <ContextMenuTrigger asChild>
-          <button onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-            <StatusDot
-              tone={n ? 'green' : 'muted'}
-              variant={n ? 'solid' : 'ring'}
-              label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
-            />
-            <span className="flex-1 min-w-0 wrap-anywhere">{hostLabelFor(h, hostLabels) || LABEL[h] || h}</span>
-            {isLocal && <span className="text-[10px] text-cyan-400">local</span>}
-            {!isLocal && (
-              <StatusDot
-                tone={hostStatus?.status === 'online' ? 'green' : hostStatus?.status === 'offline' ? 'red' : 'gray'}
-                variant={hostStatus?.status === 'online' ? 'solid' : hostStatus?.status === 'offline' ? 'square' : 'ring'}
-                label={
-                  hostStatus?.status === 'online'
-                    ? `Online${hostStatus?.latency_ms ? ` (${hostStatus.latency_ms}ms)` : ''}`
-                    : hostStatus?.status === 'offline' ? 'Offline' : 'Unknown'
-                }
-                title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
-                  `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
-                  hostStatus?.status || 'unknown'}
-              />
-            )}
-            {n > 0 && <span className="text-[10px] text-muted-foreground">{n}</span>}
-            <span className="text-muted-foreground/60">›</span>
-          </button>
-        </ContextMenuTrigger>
-        <ContextMenuContent>
-          <ContextMenuItem onSelect={() => enterHost(h)}>Open</ContextMenuItem>
-          <ContextMenuItem onSelect={() => onDiscoverHost(h)}>Discover</ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => copyWithToast(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
-          {!isLocal && (
-            <ContextMenuItem onSelect={() => copyWithToast(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
-          )}
-        </ContextMenuContent>
-      </ContextMenu>
-    );
+  // ---- navigation ----
+  const enterHost = (host: string) => {
+    setView({ kind: 'host', host });
+    setSearchQuery('');
+    // Opening a host is a visit: refresh its live working/stopped split.
+    setEnteringHost(host);
+    void Promise.resolve(onDiscoverHost(host)).catch(() => {}).finally(() => {
+      setEnteringHost((h) => (h === host ? null : h));
+    });
   };
+  const goBack = () => { setView({ kind: 'root' }); setSearchQuery(''); };
 
-  // Shared <ChatRow> body for the active/idle × collection/host render loops
-  // (WARDEN-860). The four call sites differ by exactly two axes — the open
-  // handler (openFromCollection vs openFromHost) and the `dim` flag (idle rows
-  // dim to opacity-60; active rows pass false, equivalent to omitting it under
-  // ChatRow's `dim?` prop). Everything else is byte-identical and lives here
-  // once so the loops can't drift. `id` resolves `c.key || c.id`; the bare
-  // `c.id` sites (React key, note, pin) keep the chat's stable id, as before.
-  const renderChatRow = (c: Chat, openFrom: (id: string) => void, dim: boolean) => {
-    const id = c.key || c.id;
+  // ---- derived data ----
+  // The recently-closed flyout lists CLOSED TEMPORARY sessions: a pane whose
+  // saved session still exists has nothing a reopen could lose and nothing a
+  // save could promote, so it never appears here (its row still lives in the
+  // host view).
+  const savedIdSet = new Set(chats.map((c) => c.key || c.id));
+  const closedTemps = recentlyClosed.filter((e) => !savedIdSet.has(e.id));
+
+  // The saved sessions a view lists, filtered by the ONE live search: name,
+  // session id, cwd and host all match (the auto-generated names are gone, so
+  // a directory fragment is a legitimate way to find a session).
+  const matchesQuery = useCallback((c: Chat, q: string) => {
+    const query = q.trim().toLowerCase();
+    if (!query) return true;
     return (
-      <ChatRow
-        key={c.id}
-        c={c}
-        open={openPanes.has(id)}
-        onOpen={() => openFrom(id)}
-        hostStatus={hostStatuses[c.host]?.status}
-        onKill={() => onKill(id)}
-        onRename={onRename}
-        dim={dim}
-        showHostTags={showHostTags}
-        showTypeBadges={showTypeBadges}
-        showStatusIndicators={showStatusIndicators}
-        showProjectBadges={showProjectBadges}
-        isPinned={pinnedChatIds.has(c.id)}
-        onTogglePin={() => togglePin(c.id)}
-        selected={selectedIds.has(id)}
-        onToggleSelect={() => toggleSelect(id)}
-        selectionActive={selectedIds.size > 0}
-        note={agentNotes[c.id]}
-        onSetNote={(text: string) => setNote(c.id, text)}
-        isWatched={watchedChats.has(id)}
-        watchState={watchedStates[id]}
-        onToggleWatch={() => onToggleWatch(id)}
-      />
+      (c.name || '').toLowerCase().includes(query) ||
+      (c.key || '').toLowerCase().includes(query) ||
+      (c.session || '').toLowerCase().includes(query) ||
+      (c.cwd || '').toLowerCase().includes(query) ||
+      (c.host || '').toLowerCase().includes(query)
     );
-  };
+  }, []);
 
-  // Shared fleet-action dialog group (broadcast / kill / key-send) for the
-  // collection, host and root returns (WARDEN-1231). The three copies were
-  // byte-identical — every dialog reads the same multi-select state
-  // (selectedChats) and the same handlers, so nothing needs parameterising; the
-  // helper closes over all of it. Invoked in each view's own return because
-  // host/collection are early-return branches — a single copy at the root would
-  // never mount while a fleet view (where selection lives) is active. Only one
-  // view is mounted at a time, so only one dialog instance exists.
-  const renderFleetDialogs = () => (
+  const hostLabel = (h: string) => hostLabelFor(h, hostLabels) || (h === THIS_MACHINE ? 'this machine' : h);
+
+  // Shared row binder: one place wires a Chat to the row's actions so the
+  // host / collection / search lists cannot drift.
+  const bindRow = (c: Chat) => ({
+    chat: c,
+    focused: (c.key || c.id) === focused,
+    justSaved: recentlySavedIds.has(c.key || c.id),
+    note: agentNotes[c.id],
+    onOpen: () => onOpenChat(c.key || c.id),
+    onDelete: () => onKill(c.key || c.id),
+    onRename: (name: string) => onRename(c.key || c.id, c.kind || 'tmux', name, c.host),
+    onSetNote: (text: string) => { void setNote(c.id, text); },
+    // Only warden-owned chats respawn (kind 'tmux'); an EMPTY cmd is still a
+    // real command — the host's own login shell (WARDEN-223).
+    onRespawn: c.kind === 'tmux' && c.cmd != null ? () => onRespawn(c.key || c.id) : undefined,
+  });
+
+  const renderRows = (list: Chat[], opts: { showHost?: boolean; query?: string } = {}) => (
     <>
-      <BroadcastDialog
-        open={broadcastOpen}
-        onOpenChange={setBroadcastOpen}
-        targets={selectedChats}
-        onSend={handleBroadcastSend}
-      />
-      <KillDialog
-        open={killOpen}
-        onOpenChange={setKillOpen}
-        targets={selectedChats}
-        onKill={handleKillSelected}
-      />
-      <KeySendDialog
-        open={interruptOpen}
-        onOpenChange={setInterruptOpen}
-        targets={selectedChats}
-        onSend={handleInterruptSelected}
-      />
+      {list.map((c) => (
+        <SavedSessionRow
+          key={c.id}
+          {...bindRow(c)}
+          showHost={opts.showHost}
+          hostLabel={opts.showHost ? hostLabel(c.host) : undefined}
+          query={opts.query}
+        />
+      ))}
     </>
   );
 
-  // Wrapper functions for loading states
-  const handleResume = async (id: string, description: string, cwd: string, host: string) => {
-    if (resumingSessionId) return; // Prevent double-click
-    setResumingSessionId(id);
-    try {
-      await onResume(id, description, cwd, host);
-    } finally {
-      setResumingSessionId(null);
-    }
-  };
+  const renderNoMatch = (q: string, onClear: () => void) => (
+    <div className="mx-2 my-2 wrap-anywhere rounded-lg border border-dashed border-border px-2.5 py-2 text-[11px] leading-snug text-muted-foreground" data-testid="no-match">
+      No saved session matches &quot;{q}&quot; —{' '}
+      <button className="text-foreground underline hover:bg-accent" onClick={onClear}>clear the search</button>.
+      {' '}Running shells are not searched: they are not saved.
+    </div>
+  );
 
-  if (view.kind === 'collection') {
-    const { collection: C } = view;
-    let agents = collections.length > 0
-      ? chats.filter((chat) => {
-          // Apply the same filtering logic as getAgentsInCollection
-          // (web/src/lib/collections.ts — the single matcher shared with the card
-          // count + the backend). No criteria → include every agent.
-          if (!C.criteria) return true;
-          return chatMatchesCriteria(chat, C.criteria);
-        })
-      : [];
+  const renderSearchCount = (matched: number, total: number, q: string) => (
+    <div className="flex-none border-b border-border/50 px-2.5 py-1 text-[10px] text-muted-foreground" data-testid="search-count">
+      {matched} of {total} saved sessions match &quot;{q}&quot;
+    </div>
+  );
 
-    // Apply agent filter + sort to collection agents (WARDEN-372: no 'hidden' case).
-    agents = sortChats(agents.filter((c) => matchesAgentFilter(c, agentFilter)), agentSort);
+  const renderSubnote = (children: React.ReactNode) => (
+    <div className="wrap-anywhere px-2.5 pb-1 text-[10px] leading-snug text-muted-foreground">{children}</div>
+  );
 
-    const active = agents.filter((c) => c.active);
-    const idle = agents.filter((c) => !c.active);
-    const openFromCollection = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
+  // ---- view bodies ----
 
-    return (
-      <div className="@container flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
-        <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
-          <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 active:scale-95 transition-all duration-150 ease-out" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
-          <span
-            className="w-2 h-2 rounded-full shrink-0"
-            style={{ backgroundColor: C.metadata?.color || '#6366f1' }}
-          />
-          <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{C.name}</span>
-          {/* WARDEN-949: the collection list APPLIES matchesAgentFilter + sortChats
-              (:1009) but offered no control, so a sticky agentFilter (WARDEN-442)
-              followed the user in here and silently narrowed the list — below the
-              card's own count, with no way to see or clear it without leaving the
-              view. No hideHostSort: a collection can span hosts, so "Host" is a
-              meaningful sort here (unlike the single-host view). */}
-          <AgentFilterSortControls />
-          {/* WARDEN-338: one-click broadcast to the whole collection. Resolves the
-              collection's live membership (the same `agents` array the list renders,
-              so the target set is byte-for-byte what the action bar's "All" button
-              selects) and opens BroadcastDialog pre-targeted at exactly those agents.
-              Nothing sends until the dialog's Confirm (the safety gate). Disabled when
-              the collection has no matching agents — no zero-target confirm dialog. */}
-          <Button
-            type="button"
-            size="xs"
-            variant="secondary"
-            disabled={agents.length === 0}
-            onClick={() => {
-              selectAll(agents.map((c) => c.key || c.id));
-              setBroadcastOpen(true);
-            }}
-            title={
-              agents.length === 0
-                ? 'no agents in this collection to broadcast to'
-                : `Broadcast to all ${agents.length} agent${agents.length === 1 ? '' : 's'}`
-            }
-          >
-            Broadcast {agents.length}
-          </Button>
-        </div>
-        <ScrollArea className="flex-1 min-h-0">
-          <div className="p-1.5 flex flex-col gap-0.5">
-            {C.metadata?.description && (
-              <div className="px-2 pt-1 pb-2 text-[10px] text-muted-foreground">{C.metadata.description}</div>
-            )}
-            {(active.length > 0 || idle.length > 0) && (
-              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
-            )}
-            {active.map((c) => renderChatRow(c, openFromCollection, false))}
-            {idle.length > 0 && (
-              <>
-                <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => renderChatRow(c, openFromCollection, true))}
-              </>
-            )}
-            {agents.length === 0 && (
-              <div className="p-3">
-                <EmptyState type="no-results" message="no agents match this collection" />
-              </div>
-            )}
-          </div>
-        </ScrollArea>
-        {selectedIds.size > 0 && (
-          <SelectionActionBar
-            count={selectedIds.size}
-            onSelectAll={() => selectAll(agents.map((c) => c.key || c.id))}
-            onClear={clearSelection}
-            onSend={() => setBroadcastOpen(true)}
-            onInterrupt={() => setInterruptOpen(true)}
-            onWatch={handleWatchSelected}
-            watchMode={watchMode}
-            onKill={() => setKillOpen(true)}
-          />
-        )}
-        {renderFleetDialogs()}
-      </div>
-    );
-  }
-
-  if (view.kind === 'host') {
-    const H = view.host;
+  const renderHostView = (H: string) => {
     const hostChats = chats.filter((c) => c.host === H);
+    const offline = hostStatuses[H]?.status === 'offline';
+    const unreachable = offline || !!discoverErrors[H];
+    const discovering = enteringHost === H || (hostChats.length > 0 && hostChats.every((c) => c.active == null));
+    // WARDEN-1422 round-2 review: only a temp the probe POSITIVELY answered
+    // stopped (`active === false`) may not claim to be "running" in copy. An
+    // unknown row (`active == null`, an unanswered probe) still counts — the
+    // server GCs positively-stopped temps, this is the client-side race guard
+    // for a poll that raced a death.
+    const tempCount = tempChats.filter((c) => c.host === H && c.active !== false).length;
+    const q = searchQuery.trim();
+    const { working, stopped } = splitSaved(hostChats.filter((c) => matchesQuery(c, q)));
+    const workingSorted = [...working].sort((a, b) => {
+      // A just-saved session leads the working list (the one-shot "saved" pill
+      // marks it), then most-recently-active first.
+      const aj = recentlySavedIds.has(a.key || a.id) ? 1 : 0;
+      const bj = recentlySavedIds.has(b.key || b.id) ? 1 : 0;
+      if (aj !== bj) return bj - aj;
+      return byRecencyDesc(a, b);
+    });
+    const stoppedSorted = [...stopped].sort(byRecencyDesc);
 
-    // Apply agent filter + sort to host chats (WARDEN-372: no 'hidden' case).
-    const sortedHostChats = sortChats(
-      hostChats.filter((c) => matchesAgentFilter(c, agentFilter)),
-      agentSort,
-    );
-
-    const active = sortedHostChats.filter((c) => c.active);
-    const idle = sortedHostChats.filter((c) => !c.active);
-    const info = hostSessions[H] || {};
-    const sessions = info.sessions || [];
-    // Per-host token total over the LOADED sessions for this host (up to the
-    // fetch limit). The single-host resume list has no cross-host "totals"
-    // field (that lives on /api/claude-sessions-all), so this is summed from the
-    // per-row tokenUsage the backend now attaches. Honest as this host's visible
-    // window, not a fleet total. (WARDEN-367.)
-    const hostTokenTotal = sessions.reduce((acc, s) => acc + (s.tokenUsage?.total || 0), 0);
-    // WARDEN-342: tagsInUse + visibleSessions are computed at the top level (hooks
-    // can't live in this conditional branch) and are already scoped to this host.
-    const openFromHost = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
     return (
-      <div className="@container flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
-        <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
-          <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
-          <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{hostLabelFor(H, hostLabels) || LABEL[H] || H}</span>
-          <AgentFilterSortControls hideHostSort />
-          {/* WARDEN-975: the per-host header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N) and
-              collision badges (⚠/⏱/⇄) are gone. They described git OUTSIDE the focused
-              pane — which the product decision says has no value — and every one of
-              their popover rows opened a pane. The header keeps filter/sort + rescan. */}
-          <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
-            {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
-          </button></IconTooltip>
-        </div>
-        <ScrollArea className="flex-1 min-h-0">
-          <div className="p-1.5 flex flex-col gap-0.5">
-            {(active.length > 0 || idle.length > 0) && (
-              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
-            )}
-            {active.map((c) => renderChatRow(c, openFromHost, false))}
-            {idle.length > 0 && (
+      <>
+        {q && renderSearchCount(working.length + stopped.length, hostChats.length, q)}
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="flex flex-col gap-0.5 pb-2">
+            {unreachable ? (
+              // UNKNOWN, NOT EMPTY: a host we cannot reach has no readable saved
+              // list — showing nothing would claim its sessions are absent.
+              <div className="mx-2 my-2 wrap-anywhere rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-2 text-[11px] leading-snug text-red-400" data-testid="host-unreachable">
+                Could not reach {hostLabel(H)} — {discoverErrors[H] || 'the host is not responding'}. Its saved sessions are unknown, not absent.{' '}
+                <button className="underline hover:text-foreground" onClick={() => onDiscoverHost(H)}>retry</button>
+              </div>
+            ) : discovering ? (
               <>
-                <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => renderChatRow(c, openFromHost, true))}
+                {renderSubnote('Loading saved sessions…')}
+                {[1, 2, 3, 4].map((i) => <SavedRowSkeleton key={i} />)}
               </>
-            )}
-            <div className="mt-3 mb-1 border-t border-border/50" />
-            {H !== THIS_MACHINE && loadingHost === H && !sessions.length && (
-              <>
-                <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">scanning sessions</div>
-                {[1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)}
-              </>
-            )}
-            {/* WARDEN-1196 — the host could not be READ. Distinct from both siblings
-                below/above it: this is "we do not know what is on this machine",
-                whereas the ⚠ warning is a claim ABOUT the machine ("claude is not
-                installed") and the EmptyState is a claim about its CONTENTS ("there is
-                nothing here"). Both of those are factual assertions we are not entitled
-                to make when the fetch failed, which is exactly how a dropped tunnel used
-                to render as "install claude" — a wrong instruction the user would act on.
-                Offers the only useful action (retry) instead of a false remediation. */}
-            {info.error && (
-              <div className="mx-1 my-2 px-2 py-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/30 rounded-md flex items-start gap-2">
-                <span className="min-w-0 flex-1 wrap-anywhere">
-                  ✖ could not reach {hostLabelFor(H, hostLabels) || LABEL[H] || H} — {info.error}. Sessions on this host are unknown, not absent.
+            ) : hostChats.length === 0 && !q ? (
+              // EMPTY answers the question it will actually be asked: where did
+              // my shells go? They are running, unnamed, as panes.
+              <div className="flex flex-col items-center gap-1.5 px-4 py-8 text-center text-muted-foreground" data-testid="host-empty">
+                <Bookmark aria-hidden="true" className="size-4.5" />
+                <span className="text-xs text-foreground">Nothing saved on {hostLabel(H)}</span>
+                <span className="wrap-anywhere text-[11px] leading-snug">
+                  {tempCount === 1
+                    ? '1 shell is running here as a pane. Name it and it will be listed here.'
+                    : `${tempCount} shells are running here as panes. Name one and it will be listed here.`}
                 </span>
                 <Button
-                  variant="ghost"
-                  size="xs"
-                  className="h-auto p-0 text-[11px] underline hover:bg-transparent hover:text-foreground shrink-0"
-                  onClick={() => fetchHostSessions(H)}
-                  disabled={loadingHost === H}
+                  variant="secondary"
+                  size="sm"
+                  className="mt-1 h-6 gap-1 text-[10.5px]"
+                  onClick={() => void onSpawnShell(H, '')}
                 >
-                  retry
+                  + Start a shell
                 </Button>
               </div>
-            )}
-            {/* The ⚠ install-claude instruction is suppressed on a failed fetch: with the
-                host unreachable the backend omits `claudeAvailable` entirely, so this
-                strict `=== false` gate cannot fire. The explicit `!info.error` term is
-                belt-and-suspenders for any future route that sends both. */}
-            {!info.error && info.claudeAvailable === false && (
-              <div className="mx-1 my-2 px-2 py-2 text-[11px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
-                ⚠ claude not found on {hostLabelFor(H, hostLabels) || LABEL[H] || H} — install it to resume sessions here.
-              </div>
-            )}
-            <div className="px-2 pt-1 pb-1 flex items-baseline gap-2">
-              <div className="text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions (history — click to resume)</div>
-              {hostTokenTotal > 0 && (
-                <span className="text-[10px] text-muted-foreground/70 truncate" title="Total tokens across this host's loaded session history (model-agnostic).">
-                  {formatTokens(hostTokenTotal)}
-                </span>
-              )}
-            </div>
-            <SessionTagFilterRow tagsInUse={tagsInUse} active={activeTagFilters} onToggle={toggleTagFilter} onClear={() => setActiveTagFilters(new Set())} />
-            {sessionPreview.map((s) => {
-              const running = hostChats.some((c) => c.key === `resume-${s.id.slice(0, 8)}`);
-              const isLoading = resumingSessionId === s.id;
-              const sTags = sessionTags[s.id] || [];
-              return (
-                <ContextMenu key={s.id}>
-                  <ContextMenuTrigger asChild>
-                    {/* Row container (group) holds the resume <button> + tag chips as
-                        SIBLINGS, not nested — nested interactive elements are invalid
-                        HTML. `group` reveals the "+ tag" affordance on hover. The row
-                        itself is the ContextMenuTrigger, so right-clicking anywhere on
-                        it opens the themed menu (Resume · Copy session ID/cwd/summary). */}
-                    <div className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs transition-all duration-150 ease-out hover:bg-accent ${isLoading ? 'opacity-50' : ''}`}>
-                      {/* The themed hover tooltip sits on the resume <button>, not the row
-                          div: a Radix Tooltip (asChild) and a Radix ContextMenu (asChild)
-                          cannot share one DOM node — each needs its provider in scope, and
-                          Slot only merges props one level deep, so nesting ContextMenu
-                          inside IconTooltip would clone the tooltip's pointer handlers onto
-                          the <ContextMenu> provider (which drops them) and silently kill the
-                          tooltip. Putting the tooltip on the inner button gives it a real DOM
-                          anchor; the non-loading path adds no wrapper element (asChild). */}
-                      <IconTooltip
-                        disabled={isLoading}
-                        label={
-                          <span className="flex flex-col text-left gap-0.5">
-                            <span>resume <span className="font-mono">{s.id}</span></span>
-                            <span className="opacity-70">{s.cwd}</span>
-                          </span>
-                        }
-                      >
-                        <button
-                          onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
-                          disabled={isLoading}
-                          className="flex flex-col gap-0.5 text-left active:bg-accent/80 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
-                        >
-                          <span className="min-w-0 wrap-anywhere">
-                            {isLoading ? (
-                              <Skeleton className="h-3 w-3/4 inline-block" />
-                            ) : (
-                              s.summary || <span className="text-muted-foreground">(no summary)</span>
-                            )}
-                            {running && <span className="ml-1 text-green-400">● live</span>}
-                          </span>
-                          <span className="min-w-0 wrap-anywhere text-[10px] text-muted-foreground">
-                            {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}${s.tokenUsage?.total ? ` · ${formatTokens(s.tokenUsage.total)}` : ''}`}
-                          </span>
-                        </button>
-                      </IconTooltip>
-                      <SessionTagChips tags={sTags} onAdd={(tag) => addSessionTag(s.id, tag)} onRemove={(tag) => removeSessionTag(s.id, tag)} />
+            ) : (
+              <>
+                {workingSorted.length > 0 && (
+                  <>
+                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
+                      working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
                     </div>
-                  </ContextMenuTrigger>
-                  <ContextMenuContent>
-                    <ContextMenuItem onSelect={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}>
-                      Resume
-                    </ContextMenuItem>
-                    <ContextMenuSeparator />
-                    <ContextMenuItem onSelect={() => copyWithToast(s.id)}>Copy session ID</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => copyWithToast(s.cwd)}>Copy working directory</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => copyWithToast(s.summary)}>Copy summary</ContextMenuItem>
-                  </ContextMenuContent>
-                </ContextMenu>
-              );
-            })}
-            {hasMoreSessions && (
-              <Button variant="ghost" size="xs" onClick={() => setShowAllSessions((v) => !v)} className="mx-2 mt-0.5 self-start text-xs text-muted-foreground hover:text-foreground">
-                {showAllSessions ? 'show less' : `show ${visibleSessions.length - SESSION_PREVIEW} more`}
-              </Button>
+                    {renderSubnote('Click to reconnect to the running session.')}
+                    {renderRows(workingSorted, { query: q })}
+                  </>
+                )}
+                {stoppedSorted.length > 0 && (
+                  <>
+                    <div className="mx-2 mt-2.5 border-t border-border/50" />
+                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
+                    </div>
+                    {renderSubnote(<>Respawn starts a <strong className="font-semibold text-foreground">fresh</strong> process under the same name in the same directory — the stopped one cannot be resurrected.</>)}
+                    {renderRows(stoppedSorted, { query: q })}
+                  </>
+                )}
+                {/* The unsaved shells are accounted for here — the ONE place the
+                    "where are my shells?" question has an answer. */}
+                {tempCount > 0 && (
+                  <>
+                    <div className="mx-2 mt-2.5 border-t border-border/50" />
+                    {renderSubnote(
+                      tempCount === 1
+                        ? '1 shell is running on this host as a pane. It is not saved, so it is not listed — name it to keep it.'
+                        : `${tempCount} shells are running on this host as panes. They are not saved, so they are not listed — name one to keep it.`,
+                    )}
+                  </>
+                )}
+              </>
             )}
-            {visibleSessions.length === 0 && activeTagFilters.size > 0 && (
-              <div className="mx-1 my-1 px-2 py-1.5 text-[11px] text-muted-foreground">
-                no sessions match the selected tag{activeTagFilters.size > 1 ? 's' : ''} — <button className="underline hover:text-foreground" onClick={() => setActiveTagFilters(new Set())}>clear filter</button>
-              </div>
-            )}
-            {/* WARDEN-1196: `!info.error` — "there is nothing here" is a claim about the
-                host's CONTENTS, which we cannot make when we could not read it. The
-                failure row above renders instead, so the two are mutually exclusive. */}
-            {!info.error && sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
-              <EmptyState type="nothing-here" message={hostChats.length === 0 ? undefined : 'no agents match the current filter'} />
+            {q && workingSorted.length + stoppedSorted.length === 0 && !unreachable && !discovering && renderNoMatch(q, () => setSearchQuery(''))}
+          </div>
+        </ScrollArea>
+      </>
+    );
+  };
+
+  const renderCollectionView = (C: Collection) => {
+    let members = chats.filter((chat) => {
+      if (!C.criteria) return true;
+      return chatMatchesCriteria(chat, C.criteria);
+    });
+    const q = searchQuery.trim();
+    members = members.filter((c) => matchesQuery(c, q));
+    const { working, stopped } = splitSaved(members);
+    const workingSorted = [...working].sort(byRecencyDesc);
+    const stoppedSorted = [...stopped].sort(byRecencyDesc);
+
+    return (
+      <>
+        {C.metadata?.description && !q && (
+          <div className="wrap-anywhere flex-none px-2.5 pb-1 pt-2 text-[10px] leading-snug text-muted-foreground">{C.metadata.description}</div>
+        )}
+        {q && renderSearchCount(members.length, chats.filter((chat) => !C.criteria || chatMatchesCriteria(chat, C.criteria)).length, q)}
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="flex flex-col gap-0.5 pb-2">
+            {members.length === 0 ? (
+              q ? renderNoMatch(q, () => setSearchQuery('')) : (
+                <div className="px-3 py-4 text-center text-[11px] text-muted-foreground">no saved sessions match this collection</div>
+              )
+            ) : (
+              <>
+                {workingSorted.length > 0 && (
+                  <>
+                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
+                      working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
+                    </div>
+                    {/* cross-host view: the host is the one extra piece of metadata */}
+                    {renderRows(workingSorted, { showHost: true, query: q })}
+                  </>
+                )}
+                {stoppedSorted.length > 0 && (
+                  <>
+                    <div className="mx-2 mt-2.5 border-t border-border/50" />
+                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
+                    </div>
+                    {renderRows(stoppedSorted, { showHost: true, query: q })}
+                  </>
+                )}
+              </>
             )}
           </div>
         </ScrollArea>
-        {selectedIds.size > 0 && (
-          <SelectionActionBar
-            count={selectedIds.size}
-            onSelectAll={() => selectAll(sortedHostChats.map((c) => c.key || c.id))}
-            onClear={clearSelection}
-            onSend={() => setBroadcastOpen(true)}
-            onInterrupt={() => setInterruptOpen(true)}
-            onWatch={handleWatchSelected}
-            watchMode={watchMode}
-            onKill={() => setKillOpen(true)}
-          />
-        )}
-        {renderFleetDialogs()}
-      </div>
+      </>
     );
-  }
+  };
 
-  // ROOT VIEW — open panes + per-workspace recently-closed + hosts.
-  // WARDEN-372: this was a "tabs" working set (activeTabs with hide/unhide, drag-
-  // reorder, and a project-filter chip row). It is now the active workspace's
-  // openPanes in grid order — the list MIRRORS the pane grid (no sidebar reorder,
-  // no sort), narrowed only by the search box + agent filter. Closing a pane
-  // records it in recentlyClosed (below) for one-click reopen.
-  const filteredPanes = [...openPanes].filter((id) => {
-    const c = findChat(chats, id);
-    const query = tabSearchQuery.toLowerCase();
-    // A pane whose chat has left the catalog (e.g. a dead pane pending close) still
-    // shows so the user can close it; it just can't match a name/host/type filter.
-    if (!c) return query === '';
-    const name = displayName(c).toLowerCase();
-    const host = (c.host || '').toLowerCase();
-    const type = chatType(c).toLowerCase();
-    const matchesSearch = name.includes(query) || host.includes(query) || type.includes(query);
-    return matchesSearch && matchesAgentFilter(c, agentFilter);
-  });
-
-  // The recently-closed list shows a few entries with a "show more" affordance that
-  // expands to the full (storage-capped) list. Already-open entries still render
-  // (dimmed via the open dot) so the user sees the recovery state.
-  const closedPreview = showAllClosed ? recentlyClosed : recentlyClosed.slice(0, RECENTLY_CLOSED_PREVIEW);
-  const hasMoreClosed = recentlyClosed.length > RECENTLY_CLOSED_PREVIEW;
-
-  return (
-    <div className="@container flex flex-col h-full min-h-0">
-      <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-3 py-2 compact:py-1.5 border-b shrink-0">
-        <span className="text-xs text-muted-foreground @max-[20rem]:hidden">open</span>
-        <Input
-          placeholder="filter..."
-          value={tabSearchQuery}
-          onChange={(e) => setTabSearchQuery(e.target.value)}
-          className="h-6 text-[10px] px-2 flex-1 max-w-[120px] min-w-20"
-        />
-        <AgentFilterSortControls hideSort />
-        {/* WARDEN-975: the root fleet header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N), its
-            collision badges (⚠/⏱/⇄), its "triage first" callout and the fleet-wide
-            commit/code search (WARDEN-534/559/589) are all gone. Each described or
-            searched git OUTSIDE the focused pane, and each was a pane-opening control
-            — the callout terminally so (pickGitTriageTop deliberately EXCLUDED the
-            focused pane, so it always pointed at some other agent and its only action
-            was to open that agent's pane), and the fleet search barely less so: its
-            group headers and result rows both called onOpenChat, and its rows carried
-            per-agent ↑unpushed STATE, not just history. The ticket's binding
-            statements are absolute rather than comparative — "remove EVERY fleet-level
-            git surface", "nothing else renders git, and no git control navigates
-            anywhere", "the sidebar header and per-host headers ... keeping only
-            filter, count and refresh" — so the header now holds exactly filter, count,
-            updated-ago and refresh. Git lives only in the Source Control section
-            below, scoped to the focused pane. Fleet Health keeps its own pane-
-            independent fleet git fan-out (FleetRecentCommits / useFleetGitStatus),
-            which is explicitly out of scope. */}
-        <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
-        <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} /></span>
-        <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
-          {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
-        </button>
-      </div>
-      <NewChatForm onSpawned={handleSpawned} />
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="p-1.5 flex flex-col gap-0.5">
-          {/* WARDEN-431 + WARDEN-975: the git section — the ONLY place git appears in
-              the sidebar, describing ONLY the focused pane. It re-points to whichever
-              pane is focused and renders nothing when that pane has no git repo. It now
-              carries everything the per-row branch badge used to: the branch/detached +
-              ahead/behind/freshness/stash/magnitude summary on its header line, the
-              grouped working-tree buckets, and (expanded) the recent / unpushed /
-              incoming commit lists with their lazy fetch, per-commit diffs and
-              file-opening. Every handler is bound to `focused`, so no control here can
-              act on — or navigate to — any other pane. */}
-          <SourceControlPanel
-            chatId={focused}
-            gitInfo={(focused ? gitStatusQuery.data : undefined) as SourceControlGitInfo | undefined}
-            onOpenDiff={(path, staged) => { if (focused) setDiffTarget({ chatId: focused, path, staged }); }}
-            onOpenConflict={(path) => { if (focused) setConflictTarget({ chatId: focused, path }); }}
-            onOpenFile={(path) => { if (focused) setFileTarget({ chatId: focused, path }); }}
-            commits={focused ? gitLog[focused] : undefined}
-            commitsLoading={focused ? gitLogLoading[focused] : undefined}
-            commitsError={focused ? gitLogError[focused] : undefined}
-            onFetchCommits={() => { if (focused) fetchGitLog(focused); }}
-            incomingCommits={focused ? gitLogIncoming[focused] : undefined}
-            incomingLoading={focused ? gitLogIncomingLoading[focused] : undefined}
-            incomingError={focused ? gitLogIncomingError[focused] : undefined}
-            onFetchIncoming={() => { if (focused) fetchGitLogIncoming(focused); }}
-            outgoingCommits={focused ? gitLogOutgoing[focused] : undefined}
-            outgoingLoading={focused ? gitLogOutgoingLoading[focused] : undefined}
-            outgoingError={focused ? gitLogOutgoingError[focused] : undefined}
-            onFetchOutgoing={() => { if (focused) fetchGitLogOutgoing(focused); }}
-            collapsed={!!sourceControlCollapsed}
-            onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}
-          />
-          {loading && openPanes.size === 0 ? (
-            <>
-              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">loading panes</div>
-              {[1, 2, 3].map((i) => <ChatRowSkeleton key={i} />)}
-            </>
-          ) : null}
-          {openPanes.size > 0 && (
-            <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">open panes</div>
-          )}
-          {filteredPanes.map((id) => {
-            const c = findChat(chats, id);
-            return (
-              <OpenPaneRow
-                key={id}
-                id={id}
-                c={c}
-                isOpen={openPanes.has(id)}
-                onOpen={() => onOpenChat(id)}
-                onClose={() => onClosePane(id)}
-                onRename={onRename}
-                onKill={() => onKill(id)}
-                showHostTags={showHostTags}
-                showTypeBadges={showTypeBadges}
-                showStatusIndicators={showStatusIndicators}
-                showProjectBadges={showProjectBadges}
-                note={c ? agentNotes[c.id] : undefined}
-                onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
-                isWatched={watchedChats.has(id)}
-                watchState={watchedStates[id]}
-                onToggleWatch={() => onToggleWatch(id)}
-              />
-            );
-          })}
-          {filteredPanes.length === 0 && openPanes.size > 0 && (
-            <div className="text-xs text-muted-foreground p-3 text-center">{tabSearchQuery ? `no panes match "${tabSearchQuery}"` : 'no panes match the current filter'}</div>
-          )}
-          {openPanes.size === 0 && !loading && (
-            <EmptyState type="no-panes" />
-          )}
-          {recentlyClosed.length > 0 && (
-            <>
-              <div className="mt-3 mb-1 border-t border-border/50" />
-              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">recently closed</div>
-              {closedPreview.map((entry) => {
-                const open = openPanes.has(entry.id);
-                return (
-                  <Button
-                    key={entry.id}
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onReopenClosed(entry.id)}
-                    className="w-full justify-start gap-2 px-2 text-xs text-muted-foreground hover:text-foreground"
-                    title={`reopen ${entry.name}`}
-                  >
-                    <StatusDot tone={open ? 'green' : 'muted'} variant={open ? 'solid' : 'ring'} label={open ? 'Open' : 'Reopen'} />
-                    <span className="flex-1 min-w-0 wrap-anywhere whitespace-normal text-left">{entry.name || entry.id}</span>
-                    {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{hostLabelFor(entry.host, hostLabels) || entry.host}</span>}
-                    <span className="text-[10px] text-muted-foreground/70 shrink-0">{formatTimestamp(entry.closedAt, timestampFormat)}</span>
-                  </Button>
-                );
-              })}
-              {hasMoreClosed && (
-                <Button variant="ghost" size="xs" onClick={() => setShowAllClosed((v) => !v)} className="mx-2 mt-0.5 self-start text-xs text-muted-foreground hover:text-foreground">
-                  {showAllClosed ? 'show less' : `show ${recentlyClosed.length - RECENTLY_CLOSED_PREVIEW} more`}
-                </Button>
+  const renderRootView = () => {
+    const q = searchQuery.trim();
+    if (q) {
+      // Cross-host saved search: the count line + grouped results (host in the
+      // metadata), exactly one search field in the product.
+      const matches = chats.filter((c) => matchesQuery(c, q));
+      const { working, stopped } = splitSaved(matches);
+      const workingSorted = [...working].sort(byRecencyDesc);
+      const stoppedSorted = [...stopped].sort(byRecencyDesc);
+      return (
+        <>
+          {renderSearchCount(matches.length, chats.length, q)}
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="flex flex-col gap-0.5 pb-2">
+              {matches.length === 0 ? (
+                renderNoMatch(q, () => setSearchQuery(''))
+              ) : (
+                <>
+                  {workingSorted.length > 0 && (
+                    <>
+                      <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
+                        working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
+                      </div>
+                      {renderRows(workingSorted, { showHost: true, query: q })}
+                    </>
+                  )}
+                  {stoppedSorted.length > 0 && (
+                    <>
+                      <div className="mx-2 mt-2.5 border-t border-border/50" />
+                      <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
+                      </div>
+                      {renderRows(stoppedSorted, { showHost: true, query: q })}
+                    </>
+                  )}
+                </>
               )}
-            </>
-          )}
-          <div className="px-2 pt-2 pb-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onOpenChatBrowser}
-              className="w-full justify-start gap-1 text-xs text-blue-400 hover:text-blue-300"
-            >
-              <span>↗</span>
-              <span>Open chat…</span>
-            </Button>
-          </div>
-          <div className="mt-3 mb-1 border-t border-border/50" />
-          <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">hosts</div>
+            </div>
+          </ScrollArea>
+        </>
+      );
+    }
+    return (
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col pb-2">
+          {/* JOB B — hosts are the primary navigation */}
+          <HostsSection
+            hosts={hosts}
+            chats={chats}
+            tempChats={tempChats}
+            hostStatuses={hostStatuses}
+            onEnterHost={enterHost}
+            onDiscoverHost={(h) => { void onDiscoverHost(h); }}
+          />
+          <div className="mx-2 mt-2.5 border-t border-border/50" />
+          {/* collections demote to a muted secondary section beneath hosts */}
           <CollectionsSection
             chats={chats}
             onEnterCollection={enterCollection}
             onCreateCollection={handleCreateCollection}
-            onCollectionChange={handleCollectionChange}
+            onCollectionChange={(c) => { void handleCollectionChange(c); }}
           />
-          {visibleHosts.map(renderHost)}
-          {offlineHosts.length > 0 && (
-            <>
-              <SectionToggle
-                expanded={offlineExpanded}
-                onClick={() => setOfflineExpanded(!offlineExpanded)}
-                label={`Offline (${offlineHosts.length})`}
-                title="Offline hosts are collapsed — click to expand"
-              />
-              {offlineExpanded && offlineHosts.map(renderHost)}
-            </>
-          )}
+          <div className="mx-2 mt-2.5 border-t border-border/50" />
+          {/* JOB D — git status: an add-on at the bottom, collapsed by default */}
+          <div className="mx-1.5 mt-1.5">
+            <SourceControlPanel
+              chatId={focused}
+              gitInfo={(focused ? gitStatusQuery.data : undefined) as SourceControlGitInfo | undefined}
+              onOpenDiff={(path, staged) => { if (focused) setDiffTarget({ chatId: focused, path, staged }); }}
+              onOpenConflict={(path) => { if (focused) setConflictTarget({ chatId: focused, path }); }}
+              onOpenFile={(path) => { if (focused) setFileTarget({ chatId: focused, path }); }}
+              commits={focused ? gitLog[focused] : undefined}
+              commitsLoading={focused ? gitLogLoading[focused] : undefined}
+              commitsError={focused ? gitLogError[focused] : undefined}
+              onFetchCommits={() => { if (focused) void fetchGitLog(focused); }}
+              incomingCommits={focused ? gitLogIncoming[focused] : undefined}
+              incomingLoading={focused ? gitLogIncomingLoading[focused] : undefined}
+              incomingError={focused ? gitLogIncomingError[focused] : undefined}
+              onFetchIncoming={() => { if (focused) void fetchGitLogIncoming(focused); }}
+              outgoingCommits={focused ? gitLogOutgoing[focused] : undefined}
+              outgoingLoading={focused ? gitLogOutgoingLoading[focused] : undefined}
+              outgoingError={focused ? gitLogOutgoingError[focused] : undefined}
+              onFetchOutgoing={() => { if (focused) void fetchGitLogOutgoing(focused); }}
+              collapsed={!!sourceControlCollapsed}
+              onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}
+            />
+          </div>
+          <div className="h-2.5" />
         </div>
       </ScrollArea>
+    );
+  };
+
+  const title = view.kind === 'host' ? hostLabel(view.host) : view.kind === 'collection' ? view.collection.name : '';
+  const searchPlaceholder = view.kind === 'host' ? 'search this host…' : view.kind === 'collection' ? 'search this collection…' : 'search saved sessions…';
+
+  return (
+    <div className="@container relative flex h-full min-h-0 flex-col">
+      {/* header — title (when not root) · THE search field · recently-closed · refresh.
+          At the narrow tier the field wraps to its own full-width line instead of
+          being squeezed out of existence (the exhibit's narrow header). */}
+      <div className="flex flex-none flex-wrap items-center gap-[5px] border-b border-border/50 px-2 py-[7px]">
+        {view.kind !== 'root' && (
+          <IconTooltip label="back">
+            <button
+              className="rounded px-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              onClick={goBack}
+              aria-label="back"
+            >
+              ‹
+            </button>
+          </IconTooltip>
+        )}
+        {title && <span className="max-w-[44%] flex-none wrap-anywhere text-[11.5px] text-foreground">{title}</span>}
+        <Input
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder={searchPlaceholder}
+          aria-label={searchPlaceholder.replace('…', '')}
+          spellCheck={false}
+          className="h-[22px] min-w-[7rem] flex-1 basis-[7rem] px-1.5 text-[10.5px] @max-[13rem]:order-last @max-[13rem]:basis-full"
+        />
+        <span className="ml-auto flex flex-none items-center gap-0.5 @max-[13rem]:order-2">
+          <IconTooltip label={`recently closed — ${closedTemps.length} temporary session${closedTemps.length === 1 ? '' : 's'} you closed; they disappear on their own`}>
+            <button
+              className="relative inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              onClick={() => setFlyoutOpen(!flyoutOpen)}
+              aria-label={`recently closed (${closedTemps.length})`}
+              aria-expanded={flyoutOpen}
+            >
+              <History aria-hidden="true" className="size-3" />
+              {closedTemps.length > 0 && <span className="text-[9.5px]">{closedTemps.length}</span>}
+            </button>
+          </IconTooltip>
+          <IconTooltip label="refresh">
+            <button
+              className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50"
+              onClick={onRefresh}
+              disabled={loading}
+              aria-label="refresh"
+            >
+              {loading ? '…' : '↻'}
+            </button>
+          </IconTooltip>
+        </span>
+      </div>
+
+      {/* JOB A — spawn: a plain shell, honestly labelled */}
+      <SpawnControl hosts={hosts} host={view.kind === 'host' ? view.host : undefined} onSpawn={onSpawnShell} />
+
+      <RecentlyClosedFlyout
+        open={flyoutOpen}
+        onOpenChange={setFlyoutOpen}
+        entries={closedTemps}
+        onReopen={(id) => { setFlyoutOpen(false); onReopenClosed(id); }}
+        onSave={(id) => { setFlyoutOpen(false); onSaveSession(id); }}
+      />
+
+      {view.kind === 'root' ? renderRootView() : view.kind === 'host' ? renderHostView(view.host) : renderCollectionView(view.collection)}
+
       <CreateCollectionDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
@@ -1524,7 +684,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
-      {renderFleetDialogs()}
     </div>
   );
 }

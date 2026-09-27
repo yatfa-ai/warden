@@ -168,6 +168,9 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({ hosts: [] }));
     // Two local catalog chats: one respawnable (cmd that stays alive), one
     // cmd-less (must be rejected — mirrors yatfa chats which have no cmd).
+    // WARDEN-1422: "cmd-less" means the cmd KEY is ABSENT — an EMPTY cmd is a
+    // real command now (the host's own login shell, the plain-shell spawn) and
+    // a stopped session carrying it must respawn.
     // Plus a bare-`claude` chat: detectClaude('(local)') honors CLAUDE_CODE_EXECPATH,
     // so a fake binary placed OFF-PATH there is what resolveClaudeCmd must substitute.
     const claudeDir = path.join(tempHome, 'fake-claude');
@@ -186,7 +189,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
       path.join(wardenDir, 'chats.json'),
       JSON.stringify([
         { kind: 'tmux', host: LOCAL, session, name: 'respawn target', cwd: '', cmd: 'sleep 3600' },
-        { kind: 'tmux', host: LOCAL, session: nocmdSession, name: 'no cmd', cwd: '', cmd: '' },
+        { kind: 'tmux', host: LOCAL, session: nocmdSession, name: 'no cmd', cwd: '' },
         { kind: 'tmux', host: LOCAL, session: claudeSession, name: 'claude chat', cwd: '', cmd: 'claude --dangerously-skip-permissions' },
       ]),
     );

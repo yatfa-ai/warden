@@ -1406,7 +1406,7 @@ describe('discoverManual() routes its catalog legs onto the companion channel (W
       'the pooled transport must NOT ride in deps.run — that slot is the companion bootstrap’s');
   });
 
-  it('COMPANION-OR-FAIL (alive-check): a dead channel reads every session inactive — zero raw transports, no stamps, no activity fan', async () => {
+  it('COMPANION-OR-FAIL (alive-check): a dead channel reads every session UNKNOWN — zero raw transports, no stamps, no activity fan', async () => {
     let poolCalls = 0, runCalls = 0, stamps = 0, activityDeliveries = 0;
     const res = await discoverManual('prod', ENTRIES, {}, {}, {
       isCompanionTransportEnabled: () => true,
@@ -1423,8 +1423,12 @@ describe('discoverManual() routes its catalog legs onto the companion channel (W
     assert.strictEqual(runCalls, 0);
     assert.strictEqual(activityDeliveries, 0, 'no session reads active -> the activity fan never fires');
     assert.strictEqual(stamps, 0);
-    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]), [[false, null], [false, null]],
-      'ok:false -> the has-session loop parses nothing -> inactive, persisted lastActivity hydrated');
+    // WARDEN-1422 rework: an UNANSWERED probe is unknown (null), not a fabricated
+    // inactive — the display reads the same (falsy), but the temporary-entry GC
+    // keys on strict `active === false`, so a dead channel can never be flattened
+    // into "confirmed stopped" and strip running unnamed shells from chats.json.
+    assert.deepStrictEqual(res.map((r) => [r.active, r.lastActivity]), [[null, null], [null, null]],
+      'ok:false -> the has-session loop parses nothing -> UNKNOWN (null), persisted lastActivity hydrated');
   });
 
   it('COMPANION-OR-FAIL (activity leg): a dead channel surfaces through the existing .then guard — no stamp, no throw, zero raw transports', async () => {

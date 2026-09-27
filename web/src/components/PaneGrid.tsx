@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
+import type { PaneAttachPhase } from '@/lib/paneAttach';
 import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
@@ -144,9 +145,20 @@ interface Props {
   // two pane IDS — never a visible index, which can be a subset (WARDEN-108).
   // Must be a stable useCallback in App (handler-identity discipline).
   onReorderPanes: (dragId: string, targetId: string) => void;
+  // WARDEN-1422 (QA round 5): per-pane reconnect tokens. App bumps a pane's
+  // token when that pane must re-attach NOW — a sidebar respawn of its chat
+  // succeeded, or a resume click hit the pane while it sat in session_dead.
+  // Pure pass-through to PaneTile (read per tile as reconnectTokens?.[t.id]);
+  // the fold into the attach trigger lives inside PaneTile.
+  reconnectTokens?: Record<string, number>;
+  // WARDEN-1422 (QA round 5): attach-phase reports from each tile, bound
+  // per-pane (the onSplitShell/onSearchWorkspace binding pattern) so App's
+  // handler receives the pane id. Pure pass-through; App's handler writes a
+  // ref. Optional — absent only means App never asked for phase reports.
+  onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -812,6 +824,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     issueLinkTrackers={issueLinkTrackers}
                     onSpawned={onSpawned}
                     pollIntervalMs={pollIntervalMs}
+                    reconnectToken={reconnectTokens?.[t.id]}
+                    onPhaseChange={onPanePhaseChange ? (phase) => onPanePhaseChange(t.id, phase) : undefined}
                   />
                 </div>
               );

@@ -15,7 +15,7 @@ import { useHostLabels } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
 import { readClipboardImage, deliverImagePaste, shouldRouteNativePasteToTerminal } from '@/lib/pasteImage';
 import { shouldRouteNativeCutToTerminal, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
-import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
+import { hostKeyOf, attachEffectDeps, reconnectBumpPending, type PaneAttachPhase } from '@/lib/paneAttach';
 import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type Snippet } from '@/lib/storage';
 import {
@@ -248,9 +248,23 @@ interface Props {
   onSpawned: (chat: Chat) => void;
   // Follow poll cadence (WARDEN-749): pure pass-through to this pane's FileViewer.
   pollIntervalMs: number;
+  // WARDEN-1422 (QA round 5): App's per-pane reconnect token — the pane MUST
+  // re-attach NOW. App bumps this pane's entry in its reconnectTokens map when
+  // (a) a sidebar respawn of this chat succeeded, or (b) a resume click
+  // (openChat's already-open branch) hit this pane while it sat in
+  // session_dead. Only CHANGES of this number matter: they fold into
+  // `retryNonce` below (the one re-attach trigger), and the value itself never
+  // enters the attach effect's deps — the [id, retryNonce] contract
+  // (attachEffectDeps) is untouched. Absent/undefined reads as 0.
+  reconnectToken?: number;
+  // WARDEN-1422 (QA round 5): report each attach-phase change up to App so a
+  // resume click on an OPEN pane can tell "stuck in session_dead" (bump the
+  // reconnect token — re-attach now) from any other phase (focus only).
+  // App's handler is a stable callback writing a ref; no state churn.
+  onPhaseChange?: (phase: PaneAttachPhase) => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs, reconnectToken, onPhaseChange }: Props) {
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
   // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
@@ -296,7 +310,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   //   host_unreachable  — SSH can't deliver (or 15s watchdog fired with no
   //                       attach); unresponsive panel.
   //   error             — resolve/attach threw; minimal error panel.
-  type Phase = 'connecting' | 'connected' | 'session_dead' | 'host_unreachable' | 'error';
+  type Phase = PaneAttachPhase;
   const [phase, setPhase] = useState<Phase>('connecting');
   // Mirror phase into a ref so the elapsed-seconds interval (attach effect) can
   // stop itself the instant we leave 'connecting'. The interval closure can't
@@ -307,6 +321,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // left open.
   const phaseRef = useRef<Phase>('connecting');
   useEffect(() => { phaseRef.current = phase; }, [phase]);
+  // WARDEN-1422 (QA round 5): report each phase change so App's resume click
+  // (openChat's already-open branch) can tell a pane stuck in session_dead —
+  // the one phase where clicking to resume must RE-ATTACH, because the panel
+  // on screen is stale whenever the session has come back (e.g. respawned
+  // from the sidebar) — from a live or already-attaching pane. Re-reports the
+  // same phase on a handler identity change; App's handler is a ref write,
+  // so the repeat is idempotent.
+  useEffect(() => { onPhaseChange?.(phase); }, [phase, onPhaseChange]);
   // Seconds elapsed since the current attach attempt began — shown while
   // connecting so a slow/unresponsive host reads as "connecting… Ns", not a
   // static spinner. Reset on each attach.
@@ -1256,26 +1278,38 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // Re-run the attach effect (Retry / after Re-spawn) by bumping its nonce dep.
   const retryAttach = () => setRetryNonce((n) => n + 1);
 
+  // WARDEN-1422 (QA round 5): fold a CHANGE of the external reconnect token
+  // (`reconnectToken` prop — App bumps it on a sidebar respawn of this chat,
+  // or on a resume click that found this pane in session_dead) into the
+  // internal `retryNonce`, the attach effect's one re-attach trigger. The
+  // last-seen token lives in a ref initialized to the MOUNT-time value, so a
+  // pane OPENED after a respawn — its first render already carrying the
+  // post-bump token — attaches exactly once, and only a genuinely NEW bump
+  // re-attaches. The token itself never widens the attach effect's deps (the
+  // attachEffectDeps contract); it converts here, and only here.
+  const reconnectLastSeenRef = useRef(reconnectToken ?? 0);
+  useEffect(() => {
+    const token = reconnectToken ?? 0;
+    if (reconnectBumpPending(reconnectLastSeenRef.current, token)) {
+      reconnectLastSeenRef.current = token;
+      retryAttach();
+    }
+  }, [reconnectToken]);
+
   // [Open shell here]: spawn a host shell at the chat's cwd, OUTSIDE any docker
-  // container, via the same /api/spawn path NewChatForm uses. Pass an explicit
-  // `bash` cmd — an empty cmd would default to `claude` (server.js), not a shell.
+  // container, via the same /api/spawn path the sidebar uses. An UNNAMED spawn is
+  // TEMPORARY (WARDEN-1422): it runs as a pane and is never listed in the
+  // sidebar — the right shape for a recovery shell. The explicit `bash` cmd is
+  // still honored (an omitted cmd on the named path defaults to claude).
   // On success the new shell chat is opened (replacing this dead pane) and this
   // pane closes.
   const openShell = async () => {
     if (!chat || busy) return;
     setBusy(true);
-    const shellSession = `shell-${Math.random().toString(36).slice(2, 8)}`;
     const res = await postJson<{ chat: Chat }>('/api/spawn', {
       host: chat.host,
       cwd: chat.cwd || '',
       cmd: 'bash',
-      session: shellSession,
-      // WARDEN-490: routed through hostTagOf to dedup the inline (local) → 'local'
-      // logic, but deliberately WITHOUT a label — this `name` is sent to the
-      // backend (/api/spawn body), and a display label must never leave the
-      // machine. The friendly label still shows in this shell's PANE HEADER
-      // (hostTag above), which is pure display.
-      name: `shell @ ${hostTagOf(chat.host)}`,
     });
     setBusy(false);
     if (!res.ok || !res.data) { if (prefs.notifyErrors) toast.error(res.error || 'Failed to open shell'); return; }
@@ -1635,7 +1669,9 @@ function RecoveryPanel({
 }) {
   // Re-spawn is offered only for chats warden owns (manual/spawned kind:'tmux'
   // with a stored cmd); yatfa chats are externally managed and carry no cmd.
-  const respawnable = chat?.kind === 'tmux' && Boolean(chat?.cmd);
+  // WARDEN-1422: an EMPTY cmd is a real command (the host login shell, the
+  // plain-shell spawn) — only a missing cmd is unrespawnable.
+  const respawnable = chat?.kind === 'tmux' && chat?.cmd != null;
   return (
     <div
       className="absolute inset-0 z-10 flex items-center justify-center bg-background/80 p-4 text-center backdrop-blur-sm"

@@ -2354,6 +2354,36 @@ test('the helper is pure — it does not mutate the input live object', () => {
   assert.deepEqual(live, snapshot, 'input live object is unchanged');
 });
 
+// WARDEN-1422 job D: the Source Control section is collapsed BY DEFAULT — git
+// status is an add-on at the bottom of root, behind hosts and sessions. This
+// supersedes WARDEN-431's expand-by-default coercion, which made the default
+// unreachable for every fresh profile.
+console.log('\nsourceControlCollapsed — WARDEN-1422 collapses the default; an explicit stored boolean still wins');
+test('a fresh profile (nothing stored) loads COLLAPSED (WARDEN-1422, supersedes WARDEN-431 expand-by-default)', () => {
+  reset();
+  assert.equal(loadUi().sourceControlCollapsed, true);
+});
+test('a payload with the field ABSENT also loads collapsed (the default owns the missing case)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().sourceControlCollapsed, true);
+});
+test('an explicitly stored false survives the flip — a user\'s deliberate expand is not stomped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ sourceControlCollapsed: false }));
+  assert.equal(loadUi().sourceControlCollapsed, false);
+});
+test('an explicitly stored true loads collapsed (WARDEN-431 round-trip unchanged)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ sourceControlCollapsed: true }));
+  assert.equal(loadUi().sourceControlCollapsed, true);
+});
+test('a wrong-type value degrades to the collapsed default (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ sourceControlCollapsed: 'yes' }));
+  assert.equal(loadUi().sourceControlCollapsed, true);
+});
+
 // PERSISTED_PREF_KEYS is the single source of truth for what App's saveUi effect
 // persists. This exhaustiveness guard fails loudly the moment a UiState pref key
 // stops round-tripping — the regression net that would have caught

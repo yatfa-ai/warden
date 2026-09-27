@@ -4,7 +4,7 @@
 // Both share one shape; tmux.js switches between docker-exec and bare tmux by
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
-import { loadCatalog, stampCatalogActivity } from './config.js';
+import { loadCatalog, stampCatalogActivity, mutateCatalog } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats, windowActivityToMs, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
@@ -235,14 +235,58 @@ export function compareChats(a, b, pins) {
 // heavy tmux.exe fork, and with the 60s lifecycle poll (WARDEN-147) PLUS the
 // frontend's own 60s local re-discover, that froze the whole server whenever a
 // tick landed — every HTTP request (open settings, etc.) queued behind it. One
-// call regardless of N; membership tested in JS. Returns an empty Set when no
-// tmux server is running (list-sessions exits non-zero) so every catalog chat
-// correctly reads inactive. ASYNC since WARDEN-440: the single list-sessions
-// spawn goes through async runLocalTmux so it never blocks the event loop.
-async function localAliveSessions() {
-  const res = await runLocalTmux(['list-sessions', '-F', '#{session_name}']);
-  if (!res.ok) return new Set();
-  return new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean));
+// call regardless of N; membership tested in JS. The RESULT carries the
+// probe's own verdict: `ok` says whether list-sessions ANSWERED, and `alive` is
+// the session-name set. ok covers THREE tmux answers, not two: a healthy server
+// listing its sessions; the server saying "no server running"; and — since the
+// WARDEN-1422 round-2 review — nothing else. `list-sessions` exits 1 in two
+// different situations and they are OPPOSITES for a caller that destroys on
+// absence: the server answered "nothing is alive" (tmux shuts its server down
+// when the last session ends, so this is the ordinary everything-is-dead
+// answer — exit 1 with stderr "no server running …" or "error connecting to …
+// (No such file or directory)"; the native Windows mirror in winsession.js
+// emits the first), versus the probe genuinely failing to ask (spawn error
+// code -1, a timeout, a broken install — any other stderr). The first is a
+// SUCCESSFUL answer of an empty world → ok: true, alive: empty Set, and the
+// temporary-entry GC runs on it (a temp whose death took the last session —
+// and therefore the whole server — down with it must still be collected). The
+// second is "could not ask" → ok: false: "could not ask" must never be
+// flattened into "confirmed stopped", and GC on it would strip running unnamed
+// shells out of chats.json and leave their panes unresolvable and unsavable
+// (WARDEN-1422 round-1 review). ASYNC since WARDEN-440: the single
+// list-sessions spawn goes through async runLocalTmux so it never blocks the
+// event loop. `transport` is a test seam (defaults to runLocalTmux; no
+// production caller passes it) so the no-server classification is pinnable
+// through runLocalTmux's own result shape — the exact seam the round-2 slip
+// ran through.
+export async function localAliveSessions(transport = runLocalTmux) {
+  const res = await transport(['list-sessions', '-F', '#{session_name}']);
+  if (res.ok) {
+    return {
+      ok: true,
+      alive: new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean)),
+    };
+  }
+  if (isNoServerProbeAnswer(res)) return { ok: true, alive: new Set() };
+  return { ok: false, alive: new Set() };
+}
+
+// Does this runLocalTmux result SHAPE mean "tmux answered: no server running"
+// (a positive nothing-alive verdict, not a failed probe)? tmux's own two
+// wordings for that verdict, both exit code 1: `no server running on <path>`
+// (the server has shut down after its last session ended) and
+// `error connecting to <path> (No such file or directory)` (same state, the
+// socket wording). The native Windows session manager (winsession.js) emits
+// `no server running` for the same state. Exported for the temporary-sessions
+// test, which pins the classification through runLocalTmux's result shape —
+// the exact seam the round-2 slip ran through: the old code folded BOTH exit-1
+// shapes into "the probe did not answer", so a dead temp on a serverless
+// machine was never collected and kept being reported as a running pane.
+export function isNoServerProbeAnswer(res) {
+  if (!res || res.ok || res.code !== 1) return false;
+  const stderr = String(res.stderr || '');
+  return stderr.includes('no server running')
+    || /^error connecting to .+\(No such file or directory\)\s*$/m.test(stderr);
 }
 
 export async function discover(host, cfg, opts = {}, deps = {}) {
@@ -368,14 +412,28 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   const stampFn = deps.stampCatalogActivity ?? stampCatalogActivity;
   const sessions = entries.map((e) => e.session).filter((s) => NAME_RE.test(s));
   const activeMap = {};
+  // WARDEN-1422 rework: the probe's ANSWER is carried, not just its parse.
+  // `probeAnswered` stays false when no valid name asked anything (empty
+  // `sessions`) or when the probe itself FAILED (res.ok false — SSH blip,
+  // companion-channel death, timeout); entries then hydrate `active: null` —
+  // the same unknown-not-stopped model toCatalogChat already speaks for lazy
+  // discovery — instead of a fabricated `false`. Display reads null exactly as
+  // it read the old false (falsy → inactive), but the temporary-entry GC in
+  // discoverHost keys on `active === false` STRICTLY, so an unanswered probe
+  // can never be misread as "confirmed stopped" and delete running unnamed
+  // shells from chats.json (see gcDeadTemporaryEntries).
+  let probeAnswered = false;
   if (sessions.length) {
     const script = `for s in ${sessions.join(' ')}; do if tmux has-session -t "$s" >/dev/null 2>&1; then printf '1 %s\\n' "$s"; else printf '0 %s\\n' "$s"; fi; done`;
     const res = viaCompanion(host, deps)
       ? await (deps.deliverRemoteScript ?? deliverRemoteScript)(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000, run: runWithPoolFn }, cfg, deps)
       : await runWithPoolFn(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 }, cfg);
-    if (res.ok) for (const line of res.stdout.split('\n')) {
-      const m = line.match(/^([01]) (\S+)$/);
-      if (m) activeMap[m[2]] = m[1] === '1';
+    if (res.ok) {
+      probeAnswered = true;
+      for (const line of res.stdout.split('\n')) {
+        const m = line.match(/^([01]) (\S+)$/);
+        if (m) activeMap[m[2]] = m[1] === '1';
+      }
     }
   }
 
@@ -383,7 +441,7 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   // Inactive sessions hydrate lastActivity from the persisted catalog entry so a
   // chat that just went dead still carries a usable last-known-activity for
   // recency ordering in Fleet Health (WARDEN-245).
-  const result = entries.map(e => ({ ...e, active: !!activeMap[e.session], lastActivity: e.lastActivity ?? null }));
+  const result = entries.map(e => ({ ...e, active: probeAnswered ? !!activeMap[e.session] : null, lastActivity: e.lastActivity ?? null }));
   const activeEntries = result.filter(e => e.active);
 
   // Second pass: capture activity timestamps concurrently for all active sessions.
@@ -471,11 +529,14 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
     await Promise.all(Object.entries(byHost).map(async ([host, entries]) => {
       // Local: ONE async list-sessions (runLocalTmux) resolves every catalog
       // chat's alive/dead state via Set membership — not N blocking has-session
-      // calls.
+      // calls. On a FAILED probe (!ok) every entry reads inactive — the same
+      // display verdict the old empty-Set return gave — but nothing is destroyed
+      // on that reading: the temporary-entry GC lives in discoverHost and gates
+      // on the probe's ok there (WARDEN-1422 rework).
       let actives;
       if (host === LOCAL) {
-        const alive = await localAliveSessions();
-        actives = entries.map((e) => ({ e, active: alive.has(e.session) }));
+        const { ok: probeOk, alive } = await localAliveSessions();
+        actives = entries.map((e) => ({ e, active: probeOk ? alive.has(e.session) : false }));
       } else {
         actives = (await discoverManualFn(host, entries, cfg, { activity: opts.activity })).map((e) => ({ e, active: e.active }));
       }
@@ -490,6 +551,7 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
         cwd: e.cwd, cmd: e.cmd,
         active, status: active ? 'running' : 'idle',
         lastActivity: e.lastActivity ?? null,
+        ...(e.temporary ? { temporary: true } : {}),
       }));
 
       // Capture activity timestamps concurrently for active local sessions.
@@ -527,6 +589,11 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
     }));
   }
 
+  // WARDEN-1422: the lifecycle diff observes SAVED sessions and yatfa agents.
+  // Unnamed shells are unlisted everywhere and must not emit lifecycle noise
+  // (an agent_ended ping for a shell nobody named is exactly the false signal
+  // the event log exists to avoid).
+  all = all.filter((c) => !c.temporary);
   const pins = new Set(cfg.pins || []);
   all.sort((a, b) => compareChats(a, b, pins));
   return { chats: all, errors };
@@ -549,7 +616,31 @@ function toCatalogChat(host, entry, active, lastActivity) {
     active,
     status: active == null ? 'unknown' : (active ? 'running' : 'idle'),
     lastActivity: lastActivity ?? entry.lastActivity ?? null,
+    // WARDEN-1422: an unnamed shell's temporary flag rides the discovered chat so
+    // the listing layer (/api/chats, /api/discover, /api/health) can filter it from
+    // every surface while the in-memory cache — and therefore resolve()/pane
+    // attach/kill — still sees it.
+    ...(entry.temporary ? { temporary: true } : {}),
   };
+}
+// Remove dead temporary entries from the catalog: "temporary + stopped → gone
+// permanently, appears nowhere" (WARDEN-1422). A temporary shell's whole point
+// is that nobody named it, so once its tmux session dies there is nothing to
+// respawn and no list it could ever reappear in — keeping the entry would only
+// litter chats.json. Called from the on-demand discover paths (host click /
+// per-host poll), which already resolved aliveness; serialized through
+// mutateCatalog like every other catalog write. Best-effort: a failure must not
+// break the discover that triggered it.
+async function gcDeadTemporaryEntries(host, deadEntries) {
+  if (!deadEntries.length) return;
+  try {
+    await mutateCatalog((catalog) => {
+      const dead = new Set(deadEntries.map((d) => `${d.host || host}:${d.session}`));
+      return catalog.filter((e) => !dead.has(`${e.host || LOCAL}:${e.session}`));
+    });
+  } catch (err) {
+    console.warn(`Failed to gc dead temporary sessions on ${host}:`, err instanceof Error ? err.message : String(err));
+  }
 }
 
 // Disk-only catalog list — ZERO ssh. Used for the instant initial /api/chats in lazy mode.
@@ -563,7 +654,16 @@ export async function catalogChats(cfg) {
 // Discover ONE host on demand: yatfa docker containers + that host's catalog chats, with
 // live active/lastActivity. Called when the user clicks a host. SSH cost is bounded to the
 // single host. Returns { host, chats }.
-export async function discoverHost(host, cfg) {
+//
+// `deps` is a test seam mirroring discover()'s (:259), discoverManual()'s (:376) and
+// discoverAll()'s (:482): localAliveSessions / discover / discoverManual are injectable so
+// the WARDEN-1422 rework's GC gates — "a failed aliveness probe must never be read as
+// confirmed stopped" — are observable end-to-end (catalog entry survives) without real
+// tmux or ssh. Defaults are the real functions; no production caller passes a 3rd argument.
+export async function discoverHost(host, cfg, deps = {}) {
+  const discoverFn = deps.discover ?? discover;
+  const localAliveSessionsFn = deps.localAliveSessions ?? localAliveSessions;
+  const discoverManualFn = deps.discoverManual ?? discoverManual;
   const pins = new Set(cfg.pins || []);
   const chats = [];
 
@@ -572,8 +672,19 @@ export async function discoverHost(host, cfg) {
     // ONE async list-sessions (runLocalTmux) resolves every local catalog chat's
     // alive/dead state — not N blocking has-session calls (this runs on the
     // frontend's 60s /api/discover refresh for THIS_MACHINE too).
-    const alive = await localAliveSessions();
-    const objs = entries.map((e) => ({
+    const { ok: probeOk, alive } = await localAliveSessionsFn();
+    // WARDEN-1422: a temporary shell whose tmux session died is gone for good —
+    // drop its catalog entry so chats.json never accumulates unlisted corpses.
+    // WARDEN-1422 rework: GC ONLY on an answered probe. A failed list-sessions
+    // (broken tmux, spawn error, connect blip) reports NOTHING — its empty set is
+    // "could not ask", not "confirmed stopped" — and GC-ing on it stripped every
+    // running unnamed shell from chats.json, leaving live panes unresolvable and
+    // unsavable. A failed probe therefore GCs nothing; the entries are re-read on
+    // the next poll and dropped there once tmux answers again.
+    const deadTemps = probeOk ? entries.filter((e) => e.temporary && !alive.has(e.session)) : [];
+    await gcDeadTemporaryEntries(host, deadTemps);
+    const deadTempSessions = new Set(deadTemps.map((d) => d.session));
+    const objs = entries.filter((e) => !deadTempSessions.has(e.session)).map((e) => ({
       e, o: toCatalogChat(LOCAL, e, alive.has(e.session), null),
     })).map((x) => x.o);
     await Promise.all(objs.filter((o) => o.active).map((o) =>
@@ -601,12 +712,22 @@ export async function discoverHost(host, cfg) {
     ));
     chats.push(...objs);
   } else {
-    const yatfa = await discover(host, cfg); // already in chat shape
+    const yatfa = await discoverFn(host, cfg); // already in chat shape
     if (yatfa.ok) chats.push(...yatfa.chats);
     const entries = (await loadCatalog()).filter((e) => (e.host || LOCAL) === host);
     if (entries.length) {
-      const manual = await discoverManual(host, entries, cfg); // sets .active + .lastActivity
-      chats.push(...manual.map((m) => toCatalogChat(host, m, m.active, m.lastActivity)));
+      const manual = await discoverManualFn(host, entries, cfg, {}, deps); // sets .active + .lastActivity
+      // WARDEN-1422: a dead temporary shell is gone for good — drop the entry
+      // AND the just-discovered object for it (a shell that died between the
+      // spawn and this poll must not ride temporaryChats). The `=== false` is
+      // LOAD-BEARING (WARDEN-1422 rework): discoverManual hydrates `active: null`
+      // when its has-session probe did not ANSWER (ssh blip, companion-channel
+      // death) — unknown, not stopped — and a null must never GC the entry, or
+      // one blip strips every running unnamed shell on the host from chats.json.
+      const deadTemps = manual.filter((m) => m.temporary && m.active === false);
+      await gcDeadTemporaryEntries(host, deadTemps);
+      const deadTempSessions = new Set(deadTemps.map((d) => d.session));
+      chats.push(...manual.filter((m) => !deadTempSessions.has(m.session)).map((m) => toCatalogChat(host, m, m.active, m.lastActivity)));
     }
   }
 

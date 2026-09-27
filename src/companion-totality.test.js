@@ -623,7 +623,10 @@ describe('WARDEN-1412 companion-totality sweep', () => {
     it('discovery catalog legs OFF — nothing is active, nothing rides the channel', async () => {
       const before = wireCount('exec');
       const entries = await guard(discoverManual(HOST, [CATALOG_ENTRY], {}), 20000, 'discoverManual OFF');
-      assert.strictEqual(entries[0].active, false, 'the raw alive-check could not run');
+      // WARDEN-1422 rework: a failed raw alive-check reads UNKNOWN (null), not a
+      // fabricated false — a transport failure must never be readable as
+      // "confirmed stopped" (the temporary-entry GC keys on strict === false).
+      assert.strictEqual(entries[0].active, null, 'the raw alive-check could not run — unknown, not stopped');
       assert.strictEqual(wireCount('exec'), before);
     });
 

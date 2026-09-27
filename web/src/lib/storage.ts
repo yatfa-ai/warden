@@ -483,7 +483,8 @@ export interface UiState {
   // WARDEN-431: the Source Control section (the single place a focused pane's
   // repo changes now show) collapsed state. A sidebar-internal section collapse
   // — preserved on "reset prefs to defaults" like the panel collapses above, not
-  // reset. Default false (expanded), matching the sidebar/observer panels. Pure
+  // reset. Default true (collapsed) since WARDEN-1422 job D — git status is an
+  // add-on at the bottom of root, behind hosts and sessions; expandable. Pure
   // client-side pref; never sent to the backend.
   sourceControlCollapsed?: boolean;
   sidebarWidth?: number;
@@ -1032,7 +1033,9 @@ export const DEFAULT_UI: UiState = {
   workspaces: [DEFAULT_WORKSPACE],
   activeWorkspaceId: DEFAULT_WORKSPACE.id,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
-  sourceControlCollapsed: false,
+  // WARDEN-1422 job D: git status is an add-on at the bottom of root — collapsed
+  // by default, expandable. Supersedes WARDEN-431's expand-by-default.
+  sourceControlCollapsed: true,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
   attentionStates: { stuck: true, done: true },
@@ -1224,10 +1227,14 @@ export function loadUi(): UiState {
         sidebarCollapsed: v.sidebarCollapsed ?? false,
         observerCollapsed: v.observerCollapsed ?? false,
         healthCollapsed: v.healthCollapsed ?? true,
-        // WARDEN-431: only an explicitly-stored `true` collapses the Source
-        // Control section; absent / false / wrong-type stays expanded (the
-        // conservative default) — defensive like copyOnSelect/attentionDesktopAlerts.
-        sourceControlCollapsed: v.sourceControlCollapsed === true,
+        // WARDEN-431: a sidebar-internal section collapse, persisted per user.
+        // WARDEN-1422 flips the DEFAULT to collapsed (git status is job D, an
+        // add-on at the bottom of root), so an ABSENT value now reads collapsed;
+        // an explicitly stored boolean — either way — still wins, so a user's
+        // deliberate expand survives the flip. The old `=== true` coercion read
+        // the WARDEN-431 expanded-by-default into every fresh profile and made
+        // DEFAULT_UI unreachable.
+        sourceControlCollapsed: typeof v.sourceControlCollapsed === 'boolean' ? v.sourceControlCollapsed : true,
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
