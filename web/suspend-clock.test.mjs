@@ -92,8 +92,9 @@ test('a double suspend is idempotent — one open window, not two', () => {
   sc.onSuspend(); // OS repeating itself
   assert.equal(sc.stats().suspendedNow, true);
   clock.advance(1000);
-  sc.onResume(); // closes ONE window, at the FIRST suspend's timestamp
+  const closed = sc.onResume(); // closes ONE window, at the FIRST suspend's timestamp
   assert.equal(sc.stats().closedWindows, 1);
+  assert.deepEqual(closed, { from: 1000, to: 3000 }, 'closes at the FIRST suspend\'s stamp, not the repeat\'s (WARDEN-1467)');
 });
 
 test('a resume with no suspend is ignored', () => {
@@ -199,6 +200,45 @@ test('snapshot hands back the full replay state: closed windows + any in-flight 
   assert.deepEqual(snap.closed, [{ from: 1000, to: 1010 }]);
   assert.equal(snap.openFrom, 1020);
   assert.notEqual(snap.closed[0], sc.snapshot().closed[0], 'copies, not live references');
+});
+
+// ==========================================================================
+// WARDEN-1467 — the two documented edges no other assertion reads at the
+// exact boundary. The header comment's contract is strict on the
+// suspend-START boundary ("a block ending exactly when the suspend began is
+// causally pre-suspend and stays reportable") and the onSuspend guard keeps
+// the FIRST stamp of a repeated suspend. Every earlier probe of the start
+// edge stops 1 ms short ((0, 1999) against a suspend at 2000), so relaxing
+// the comparators to <= is invisible; and the idempotence test only counted
+// windows, never reading WHICH stamp closed. Each assertion here is a
+// mutation kill for exactly that: w.from < to, openFrom < to, and the
+// openFrom guard — each paired with a +1 control proving the probe itself
+// fires on the overlap side of the same edge.
+// ==========================================================================
+
+test('a block ending exactly at the suspend instant stays reportable (strict START boundary, closed window)', () => {
+  const sc = createSuspendClock();
+  sc.onSuspend(2000);
+  sc.onResume(62000); // window [2000, 62000]
+  assert.equal(sc.spansSuspend(1000, 2000), false, 'ended at the suspend instant → causally pre-suspend, reportable');
+  assert.equal(sc.spansSuspend(1000, 2001), true, 'one tick into the suspend overlaps the window (paired control)');
+});
+
+test('a block ending exactly at the suspend instant stays reportable (strict START boundary, OPEN window)', () => {
+  const clock = fakeClock();
+  const sc = createSuspendClock({ now: clock.now });
+  clock.advance(5000);
+  sc.onSuspend(); // suspended at 6000, never resumed
+  assert.equal(sc.spansSuspend(5000, 6000), false, 'ended at the suspend instant → pre-suspend even while suspended');
+  assert.equal(sc.spansSuspend(5000, 6001), true, 'one tick into the suspend spans the OPEN window (paired control)');
+});
+
+test('a repeated suspend keeps the FIRST stamp — snapshot and the closed window both', () => {
+  const sc = createSuspendClock();
+  sc.onSuspend(1000);
+  sc.onSuspend(2000); // OS repeating itself (a Modern Standby doze), not a second sleep
+  assert.equal(sc.snapshot().openFrom, 1000, 'the repeat must not overwrite the in-flight stamp');
+  assert.deepEqual(sc.onResume(5000), { from: 1000, to: 5000 }, 'onResume forwards the FIRST stamp — this is what main.cjs ships to the fork');
 });
 
 console.log(`\n✓ SUSPEND-CLOCK TESTS PASS (${passed})`);
