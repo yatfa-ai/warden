@@ -7,16 +7,15 @@
 // mirroring the titled-container pattern the Webhook block already shipped.
 // Extracted from SettingsPage (WARDEN-664); behavior is unchanged — this only
 // surfaces the existing persistence split that decomposition made structural.
-import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { useAttentionDesktopAlerts, useSetAttentionDesktopAlerts, useAttentionStates, useSetAttentionStates } from '@/lib/uiStore';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
+import { WriteOnlySecretField } from '../rows/WriteOnlySecretField';
 import { type WebhookTestVerdict } from '@/lib/webhook/testAlert';
 import { type ConfigData, type SetConfig } from '../types';
 
@@ -68,11 +67,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
   const attentionStates = useAttentionStates();
   const setAttentionStates = useSetAttentionStates();
 
-  // WARDEN-883 — confirm the irreversible secret removal before queueing it.
-  const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
-
   return (
-    <>
     <SettingsSection title="Notifications" className={hidden ? 'hidden' : undefined}>
       {/* Channel 1 of 3 — In-app toasts. Backend /api/config: drafted into
           `config` here, committed only when the human presses Save in the
@@ -294,61 +289,29 @@ export function NotificationsSection(props: NotificationsSectionProps) {
           </p>
         </div>
 
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="webhookSecret">Shared secret (optional)</Label>
-          <div className="flex items-center gap-2">
-            <Input
-              id="webhookSecret"
-              type="password"
-              className="flex-1"
-              value={webhookSecretInput}
-              onChange={(e) => {
-                setWebhookSecretInput(e.target.value);
-                // An edited secret invalidates any prior test result (WARDEN-970).
-                setWebhookTestVerdict(null);
-              }}
-              placeholder={
-                webhookSecretPendingClear
-                  ? 'Will be removed on Save'
-                  : webhookSecretSet
-                    ? `••••• set${webhookSecretTail ? ` (…${webhookSecretTail})` : ''}`
-                    : 'Not set'
-              }
-            />
-            {/* WARDEN-883 — Remove surfaces only when a secret is stored and not
-                already queued for removal. The confirm dialog gates the click. */}
-            {webhookSecretSet && !webhookSecretPendingClear && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="shrink-0"
-                onClick={() => setConfirmRemoveOpen(true)}
-              >
-                Remove
-              </Button>
-            )}
-          </div>
-          {webhookSecretPendingClear ? (
-            <p className="text-xs text-amber-600 dark:text-amber-400">
-              The saved secret will be removed when you press Save.{' '}
-              <Button
-                type="button"
-                variant="link"
-                size="sm"
-                className="h-auto p-0 align-baseline"
-                onClick={undoRemoveWebhookSecret}
-              >
-                Undo
-              </Button>
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {webhookSecretSet
-                ? `A secret is saved${webhookSecretTail ? ` (ends …${webhookSecretTail})` : ''}. It is sent as Authorization: Bearer and X-Webhook-Secret. Type a new one to replace it; leave blank to keep it.`
-                : 'Optional. Sent as Authorization: Bearer and X-Webhook-Secret so your endpoint can verify the request. Leave blank if your topic needs no auth.'}
-            </p>
-          )}
-        </div>
+        <WriteOnlySecretField
+          id="webhookSecret"
+          label="Shared secret (optional)"
+          noun="secret"
+          isSet={webhookSecretSet}
+          tail={webhookSecretTail}
+          input={webhookSecretInput}
+          onInputChange={(v) => {
+            setWebhookSecretInput(v);
+            // An edited secret invalidates any prior test result (WARDEN-970).
+            setWebhookTestVerdict(null);
+          }}
+          pendingClear={webhookSecretPendingClear}
+          onRemove={removeWebhookSecret}
+          onUndo={undoRemoveWebhookSecret}
+          savedHint={(tail) =>
+            `A secret is saved${tail ? ` (ends …${tail})` : ''}. It is sent as Authorization: Bearer and X-Webhook-Secret. Type a new one to replace it; leave blank to keep it.`
+          }
+          emptyHint="Optional. Sent as Authorization: Bearer and X-Webhook-Secret so your endpoint can verify the request. Leave blank if your topic needs no auth."
+          confirmTitle="Remove saved webhook secret?"
+          confirmDescription="The stored shared secret will be deleted from config.json, and webhook alerts will be sent without Authorization: Bearer / X-Webhook-Secret. You'll need to re-enter a secret if your topic requires auth. Applies when you press Save."
+          confirmLabel="Remove secret"
+        />
 
         <div className="flex flex-col gap-2">
           <span className="text-sm font-medium">Which alerts to push</span>
@@ -426,17 +389,5 @@ export function NotificationsSection(props: NotificationsSectionProps) {
         </div>
       </div>
     </SettingsSection>
-
-    {/* WARDEN-883 — confirm the secret removal before queueing the clear. */}
-    <ConfirmDialog
-      open={confirmRemoveOpen}
-      onOpenChange={(o) => { if (!o) setConfirmRemoveOpen(false); }}
-      title="Remove saved webhook secret?"
-      description="The stored shared secret will be deleted from config.json, and webhook alerts will be sent without Authorization: Bearer / X-Webhook-Secret. You'll need to re-enter a secret if your topic requires auth. Applies when you press Save."
-      confirmLabel="Remove secret"
-      destructive
-      onConfirm={() => { removeWebhookSecret(); setConfirmRemoveOpen(false); }}
-    />
-    </>
   );
 }
