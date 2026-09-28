@@ -85,6 +85,18 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
           Enter bare SSH host aliases, comma-separated. Takes effect on the next
           operation; a newly excluded host's live channel is closed immediately.
         </p>
+        {/* WARDEN-1475 — the list has a SECOND writer now, and an operator who
+            finds a host here that they never typed needs to know why. Removing a
+            host's companion (Health → host row → "Remove companion") adds it here,
+            which is what makes that removal durable: without the entry the 60s
+            lifecycle tick re-uploaded the binary within a minute, silently undoing
+            the removal. Taking the host off this list is therefore also the one
+            gesture that lets warden install the companion again. */}
+        <p className="text-xs text-muted-foreground">
+          Removing a host's companion (Health → host row → <em>Remove companion</em>) also adds
+          it here, so warden does not re-install the binary on the next poll. Take the host
+          off this list to let it install the companion again.
+        </p>
       </div>
     </SettingsSection>
   );

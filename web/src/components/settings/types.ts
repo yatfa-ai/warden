@@ -128,6 +128,15 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
   // default SSH path while every other host keeps the channel — so a Windows
   // host (no companion PTY, ever) doesn't force the fleet-global toggle off.
   // Empty array = nothing excluded = behavior identical to the plain toggle.
+  //
+  // WARDEN-1475 — this list has TWO writers. Besides the Settings input, a
+  // successful "Remove companion" (POST /api/companion/uninstall) records the
+  // host here, which is what makes the removal DURABLE: the backend's
+  // getChannel refuses to bootstrap a listed host, so the unconditional 60s
+  // lifecycle tick can no longer re-upload the binary and silently undo the
+  // removal. The two intentions are indistinguishable once written, and
+  // deliberately so — both mean "never bootstrap this host, route it over raw
+  // SSH", and both are reversed by the same one gesture (take it off the list).
   companionExcludedHosts: string[];
   confirmDestructiveActions: boolean;
   notifyChatOps: boolean;

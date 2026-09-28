@@ -84,7 +84,7 @@ import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, deliverRemoteScript, pingProbe } from './companion.js';
+import { isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, recordCompanionUninstall, deliverRemoteScript, pingProbe } from './companion.js';
 import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 // WARDEN-1381 — the WebSocket layer (observe wss + streamWss + the upgrade router).
@@ -2505,6 +2505,11 @@ app.post('/api/respawn', async (req, res) => {
 // {error}; it does not fall back to raw SSH. Not gated on the companion flag:
 // a host that had the flag on (then off) must still be cleanable, so the
 // endpoint works regardless of the current toggle state.
+//
+// WARDEN-1475: a successful removal is also PERSISTED (recordCompanionUninstall
+// + save + afterSave, below) so the uninstall survives the next lifecycle tick
+// and a restart. Response carries `excluded` — whether the host is now on the
+// persisted no-bootstrap list — so the UI can say the removal will hold.
 app.post('/api/companion/uninstall', async (req, res) => {
   const host = String(req.body?.host || '');
   if (!host || host === LOCAL) {
@@ -2527,7 +2532,40 @@ app.post('/api/companion/uninstall', async (req, res) => {
       const stderr = (result.stderr || '').trim();
       return res.status(500).json({ error: stderr || `failed to remove companion on ${host}` });
     }
-    res.json({ ok: true });
+    // WARDEN-1475 — PERSIST THE REMOVAL. uninstallCompanion's writes are all
+    // in-memory (channelCache / companionStatus / companionOps /
+    // bootstrapFailures), so before this slice the very next ordinary op —
+    // including the unconditional 60s lifecycle tick, which needs no human
+    // gesture — re-uploaded the binary and respawned the channel: the
+    // operator's removal was undone by the system within ~60 seconds, with no
+    // error and no user-visible signal (roadmap WARDEN-270's Removability
+    // outcome, "nothing gets installed that cannot be taken off").
+    //
+    // uninstallCompanion has ALREADY recorded the fact into `cfg` and applied
+    // it to the live env gate (recordCompanionUninstall) — what is missing is
+    // the DISK write, and that is exactly what this route owns: `save` /
+    // `afterSave` live in this file's import graph, and keeping them out of
+    // companion.js preserves uninstallCompanion's `deps.run`/`deps.manifest`
+    // test seam. The call below is the idempotent backstop (it no-ops for the
+    // host the uninstall just added), so the persist cannot silently depend on
+    // WHERE the recording happened.
+    recordCompanionUninstall(host, cfg);
+    const persisted = cfg.companionExcludedHosts?.includes(host) ?? false;
+    if (persisted) {
+      // PUT /api/config's shape verbatim, so the removal takes effect live
+      // (afterSave → applyCompanionExclusions re-serializes the env gate every
+      // routing predicate reads) AND survives a restart, instead of one or the
+      // other.
+      await save(cfg);
+      afterSave(cfg, {
+        companionOverridden: companionEnvOverridden,
+        forwardTelemetryConfig,
+        applyCompanionToggle,
+        applyCompanionExclusions,
+        restartBudgetPoll,
+      });
+    }
+    res.json({ ok: true, excluded: persisted });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

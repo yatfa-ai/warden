@@ -1116,7 +1116,14 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
       // /api/kill sibling declared above, runFanout in lib/fanout.ts, which
       // likewise gates on r.ok and lets the body inform only the error string.
       if (r.ok) {
-        toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`);
+        // WARDEN-1475 — the removal is now DURABLE: the backend records the
+        // host on the persisted companionExcludedHosts list so the 60s
+        // lifecycle tick cannot silently re-install the binary. Say so, and
+        // say where to reverse it — a bare "Removed" would leave the operator
+        // unable to find the one gesture that undoes it.
+        toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`, {
+          description: 'Added to "Companion excluded hosts" (Settings → Performance) so it is not re-installed. This host now uses the default SSH path.',
+        });
         setRemoveCompanionHost(null);
         // Reflect the removal immediately. The host-status surface that carries
         // the per-host companion field — and so feeds the row's WARDEN-878
@@ -1775,6 +1782,14 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
         description={
           <>
             Removes warden&apos;s companion binary from <code className="bg-muted px-1 rounded">{removeCompanionHost ?? ''}</code> and stops its cached SSH connection. <code className="bg-muted px-1 rounded">~/.warden</code> is removed only if empty — your other files there are kept.
+            {/* WARDEN-1475 — say what the removal now DOES, because it changed
+                meaning. It used to be an in-memory teardown the next 60s
+                lifecycle tick silently undid; it is now durable, which means it
+                adds the host to the persisted "Companion excluded hosts" list
+                and the host rides the default SSH path until you take it off.
+                A confirm that did not say so would hide both halves: that the
+                removal holds, and where to reverse it. */}
+            {' '}The host is added to <strong>Companion excluded hosts</strong> (Settings → Performance) so warden does not re-install it on the next poll — its operations keep working over the default SSH path. Remove it from that list to install the companion again.
           </>
         }
         confirmLabel={removingCompanion ? 'Removing…' : 'Remove'}

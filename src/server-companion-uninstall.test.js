@@ -86,4 +86,36 @@ describe('POST /api/companion/uninstall — WARDEN-882 (HTTP guards)', () => {
     assert.ok(body.error, 'returns an error message');
     assert.ok(elapsed < 30000, `fails fast (validateHost short-circuits): ${elapsed}ms`);
   });
+
+  // WARDEN-1475 — the route now PERSISTS a successful removal (the durable
+  // no-bootstrap fact, so the 60s lifecycle tick cannot silently re-install the
+  // binary; see src/companion-uninstall-durable.test.js for the mechanism).
+  //
+  // ⚠️ THE SUCCESS PATH IS UNREACHABLE FROM THIS SANDBOX, and that is a fact
+  // about the environment, not a coverage choice: the route's FIRST act is
+  // validateHost, which spawns real ssh — absent here — so no request can ever
+  // get past the 400 above to the uninstall, let alone to the save. The
+  // persist's own contract (what is recorded, idempotence, sanitizer refusal,
+  // live-apply, restart survival, both directions) is covered at the unit level
+  // in companion-uninstall-durable.test.js, which drives the shipped deps seams.
+  // What IS decidable here is the NEGATIVE, and it is the one that matters for
+  // a config file: a request that never reaches a successful removal must not
+  // write anything.
+  it('a request that never reaches a successful removal persists NOTHING (no stray config write)', async () => {
+    const configPath = path.join(tempHome, '.yatfa-warden', 'config.json');
+    const before = fs.readFileSync(configPath, 'utf8');
+
+    await post({});                                  // 400 — missing host
+    await post({ host: '(local)' });                 // 400 — LOCAL refused
+    await post({ host: 'some-nonexistent-host-xyz' }); // 400 — unreachable
+
+    const after = fs.readFileSync(configPath, 'utf8');
+    assert.strictEqual(after, before,
+      'config.json is byte-identical — a refused removal must never record a no-bootstrap fact');
+    const cfg = JSON.parse(after);
+    assert.ok(!(cfg.companionExcludedHosts ?? []).includes('some-nonexistent-host-xyz'),
+      'and the unreachable host was never added to the exclusion list');
+    assert.ok(!(cfg.companionExcludedHosts ?? []).includes('(local)'),
+      'nor was LOCAL, which the companion never serves');
+  });
 });
