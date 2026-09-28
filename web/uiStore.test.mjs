@@ -66,9 +66,9 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
-const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, resetObsPrefDefaults } =
+const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, resetObsPrefDefaults, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } = await import(join(tmpDir, 'uiStore.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -81,72 +81,25 @@ const test = (name, fn) => {
 
 // The persistence hop App + useConfigPersistence perform, called exactly as
 // useConfigPersistence.ts calls it. `store` stands in for App's subscription:
-// reading `store.getState().snippets` here IS what App's `useSnippets()` gives
-// its PersistedPrefSnapshot. `restoreOnStartup` defaults to the STORE's own
-// value since WARDEN-1420 (slice 12) migrated that pref — App reads it through
-// `useRestoreOnStartup()` and passes it to useConfigPersistence as
-// persistUiState's separate argument — and an explicit override stays available
-// for the empty-mode launch test below.
+// reading the store through `selectPersistedStorePrefs(store.getState())` here
+// IS what the hook's useShallow(selectPersistedStorePrefs) subscription gives
+// the merged PersistedPrefSnapshot (WARDEN-1471, slice 16 — the selector IS
+// the production snapshot half, so this harness can no longer drift from it
+// the way the hand-copied 31-field list it replaced could). `restoreOnStartup`
+// defaults to the STORE's own value since WARDEN-1420 (slice 12) migrated that
+// pref — App reads it through `useRestoreOnStartup()` and passes it to
+// useConfigPersistence as persistUiState's separate argument — and an explicit
+// override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
+  // The store-owned half rides the PRODUCTION selector (the 31 STORE_PERSISTED_KEYS
+  // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
+  // keys (workspaces / activeWorkspaceId / paneHost, the four panel collapses,
+  // the two panel widths, watchedChats) plus every DEFAULT_UI field the merged
+  // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
   const snapshot = {
     ...loadUi(),
-    snippets: s.snippets,
-    fileViewerViewMode: s.fileViewerViewMode,
-    // WARDEN-1322: the six terminal prefs ride the same snapshot — App's
-    // PersistedPrefSnapshot carries every one of them (compile-locked), so the
-    // honest stand-in for "App re-rendered" mirrors every MIGRATED fact, not
-    // just the slice under test. (Slice 3's note said "all eight facts" — true
-    // when the store held snippets + fileViewerViewMode + these six; the list
-    // has grown with every slice since, so the claim is stated by shape now
-    // rather than by a count that silently goes stale.)
-    terminalFontSize: s.terminalFontSize,
-    terminalScrollback: s.terminalScrollback,
-    terminalFontFamily: s.terminalFontFamily,
-    terminalCursorStyle: s.terminalCursorStyle,
-    copyOnSelect: s.copyOnSelect,
-    onExitBehavior: s.onExitBehavior,
-    // WARDEN-1342 (slice 4): same compile-locked snapshot field.
-    timestampFormat: s.timestampFormat,
-    // WARDEN-1204 slice 6: same compile-locked snapshot field.
-    hostLabels: s.hostLabels,
-    // WARDEN-1375 (slice 7): same compile-locked snapshot field.
-    agentFilter: s.agentFilter,
-    agentSort: s.agentSort,
-    // WARDEN-1383 (slice 8): the eight spawn-family snapshot fields.
-    defaultNewChatPreset: s.defaultNewChatPreset,
-    defaultNewChatPresetByHost: s.defaultNewChatPresetByHost,
-    defaultNewChatHost: s.defaultNewChatHost,
-    defaultNewChatCwd: s.defaultNewChatCwd,
-    defaultNewChatCwdByHost: s.defaultNewChatCwdByHost,
-    customPresets: s.customPresets,
-    defaultShell: s.defaultShell,
-    defaultShellByHost: s.defaultShellByHost,
-    // WARDEN-1408 (slice 11): the attention/notification pair — same
-    // compile-locked snapshot fields.
-    attentionDesktopAlerts: s.attentionDesktopAlerts,
-    attentionStates: s.attentionStates,
-    // WARDEN-1420 (slice 12): the six remaining appearance prefs. FIVE are
-    // compile-locked snapshot fields; `restoreOnStartup` is the ONE UiState
-    // field persistUiState takes as a SEPARATE argument (it is excluded from
-    // PERSISTED_PREF_KEYS), so it rides the call below rather than the bag —
-    // exactly as App passes it to useConfigPersistence.
-    theme: s.theme,
-    density: s.density,
-    paneLayout: s.paneLayout,
-    autoFocusNewPane: s.autoFocusNewPane,
-    terminalColorScheme: s.terminalColorScheme,
-    // WARDEN-1426 (slice 13): the Fleet Health pair — same compile-locked
-    // snapshot fields. App keeps them (it subscribes keep-local-names) even
-    // though HealthDashboard is now the only surface that reads or writes them.
-    healthGroupBy: s.healthGroupBy,
-    healthCollapsedHosts: s.healthCollapsedHosts,
-    // WARDEN-1433 (slice 14): the pane-ratio pair — same compile-locked
-    // snapshot fields. App keeps only the value subscriptions (PaneGrid is the
-    // pair's only reader AND writer; the ratios are NOT resettable, so there
-    // is no resetSetters entry to keep a setter for).
-    paneColRatios: s.paneColRatios,
-    paneRowRatios: s.paneRowRatios,
+    ...selectPersistedStorePrefs(s),
   };
   saveUi(persistUiState(snapshot, restoreOnStartup ?? store.getState().restoreOnStartup, loadUi(), startedEmpty));
 };
@@ -2312,6 +2265,65 @@ test("'saveObs(' lives in exactly TWO production call sites — ObserverTabs.tsx
     files.map((p) => p.slice(__dirname.length + 1)).sort(),
     ['src/App.tsx', 'src/components/ObserverTabs.tsx', 'src/lib/storage.ts'],
     "saveObs( must appear in exactly TWO production call sites (ObserverTabs.tsx's compile-locked save effect + App.tsx's Settings-reset disk write) plus its storage.ts definition — a third writer bypasses the Required<ObsUi> save bag",
+  );
+});
+
+console.log('\nstructural guard: the store / App ownership partition of PERSISTED_PREF_KEYS (WARDEN-1471, slice 16)');
+test('STORE_PERSISTED_KEYS partitions PERSISTED_PREF_KEYS: no duplicates, every key persisted-shaped, every key live on the store', () => {
+  // The invariant this guards: the store-owned half of the persisted snapshot
+  // is declared ONCE (STORE_PERSISTED_KEYS in uiStore.ts) and every consumer
+  // — useConfigPersistence's subscription, the merged PersistedPrefSnapshot,
+  // and this file's flushSnapshotToDisk — derives from it. Three legs, each
+  // catching a different corruption:
+  //
+  //   1. NO DUPLICATES — a repeated element would make the selector (and the
+  //      dep array inside the hook) carry the same fact twice, silently.
+  //   2. PERSISTED-SHAPE — every STORE key must be a PERSISTED_PREF_KEYS
+  //      member, so a key that persists elsewhere (the four ObsUi observer
+  //      facts via ObserverTabs' saveObs; restoreOnStartup via persistUiState's
+  //      separate argument) cannot sneak in. `satisfies` enforces this at
+  //      compile time; this leg re-states it at runtime because this harness
+  //      runs the TRANSPILED module where types are gone.
+  //   3. LIVE ON THE STORE — every STORE key must exist on
+  //      createUiStore().getState(), so the selector and the hook can never
+  //      select a key the store does not carry.
+  //
+  // A key REMOVED from STORE_PERSISTED_KEYS is caught on the other side, by
+  // tsc: it then falls into AppPersistedSnapshot's Exclude complement, and
+  // App's 10-key literal misses a REQUIRED property (verified this slice).
+  // What this test adds is the runtime half of the same fence — the harness
+  // here has no typechecker to lean on.
+  const persistedKeys = new Set(PERSISTED_PREF_KEYS);
+  const storeKeys = [...STORE_PERSISTED_KEYS];
+  assert.equal(
+    new Set(storeKeys).size,
+    storeKeys.length,
+    `STORE_PERSISTED_KEYS holds a duplicate: ${storeKeys.join(', ')}`,
+  );
+  const state = createUiStore().getState();
+  for (const key of storeKeys) {
+    assert.ok(
+      persistedKeys.has(key),
+      `STORE_PERSISTED_KEYS member '${key}' is not a PERSISTED_PREF_KEYS key — facts persisted outside the saveUi snapshot (the ObsUi observer facts via saveObs; restoreOnStartup via persistUiState's argument) must not ride the store-owned snapshot half`,
+    );
+    assert.ok(
+      key in state,
+      `STORE_PERSISTED_KEYS member '${key}' does not exist on createUiStore().getState() — the selector and the hook would read undefined`,
+    );
+    assert.ok(
+      typeof state[key] !== 'function',
+      `STORE_PERSISTED_KEYS member '${key}' resolved to a function on the store state — the tuple must name FACTS (values), not setters`,
+    );
+  }
+  // The partition itself, stated as the union the two halves compose: every
+  // persisted key is owned by exactly one side, so the store half plus the
+  // complement reconstructs the full persisted key set.
+  const union = new Set([...storeKeys, ...persistedKeys]);
+  assert.equal(union.size, persistedKeys.size);
+  assert.deepEqual(
+    union,
+    persistedKeys,
+    'STORE_PERSISTED_KEYS ∪ (PERSISTED_PREF_KEYS − STORE_PERSISTED_KEYS) must reconstruct PERSISTED_PREF_KEYS',
   );
 });
 
