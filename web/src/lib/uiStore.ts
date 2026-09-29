@@ -4,9 +4,11 @@
 //
 // WHAT THIS IS FOR
 // ────────────────
-// warden's persistence half is healthy: ONE compile-locked write effect
-// (useConfigPersistence.ts) is the single writer to localStorage. The SHARING
-// half is what did not exist — a shared pref lived in an App.tsx `useState` and
+// warden's persistence half is healthy: compile-locked write effects are the
+// only writers to localStorage — ONE per storage namespace (slice 16:
+// useConfigPersistence.ts owns warden:ui:v3; slice 17: useObsPersistence.ts
+// owns warden:observer:v1). The SHARING half is what did not exist — a shared
+// pref lived in an App.tsx `useState` and
 // was handed down as a prop through every intermediate component between App
 // and the surface that actually reads it. `snippets` (WARDEN-323) was the worst
 // case: 8 reading surfaces behind 7 App pass-sites, with intermediate hops that
@@ -34,15 +36,27 @@
 //         snapshot's values)
 //       → persistUiState → localStorage
 //
-// There is deliberately NO store-owned write-through persistence here. Adding
-// one would create a SECOND writer to the same key and break the compile-locked
-// single-writer design (PersistedPrefSnapshot's Required<Pick<…>> lock +
+// There is deliberately NO store-owned write-through persistence here — the
+// store module never writes; the persistence layer is always a HOOK reading
+// the store (so both namespaces' writers stay the exact shape slice 16
+// proved: one derived key list, one selector, one subscription, one write
+// call, compile-locked to its namespace's key source). Per NAMESPACE the
+// single-writer design holds: warden:ui:v3 has exactly ONE saveUi call site
+// (useConfigPersistence), and since slice 17 (WARDEN-1477) warden:observer:v1
+// has exactly ONE always-mounted saveObs writer (useObsPersistence) beside
+// the component half's booted-gated bag effect and the Settings-reset disk
+// write — a three-site census the uiStore.test.mjs saveObs guard pins.
+// Adding a store-internal write-through would still create a SECOND writer
+// to the same key and break the compile-locked single-writer design
+// (PersistedPrefSnapshot's Required<Pick<…>> lock +
 // storage.test.mjs's PERSISTED_PREF_KEYS exhaustiveness guard). The
 // slice-1 note asked to revisit "once the subscription pattern is proven across
 // several prefs" — proven across 31 by slice 15, and slice 16 (WARDEN-1471)
 // answered it on the READ side only: STORE_PERSISTED_KEYS +
 // selectPersistedStorePrefs give the persistence layer one derived key list,
-// while the write stays exactly the ONE saveUi call site it always was.
+// while the write stays exactly the ONE saveUi call site it always was
+// (slice 17 gave the second namespace the same treatment: OBS_STORE_KEYS +
+// selectPersistedObsPrefs below, persisted by useObsPersistence).
 //
 // WHY A FACTORY *AND* A SINGLETON
 // ───────────────────────────────
@@ -63,6 +77,8 @@ import {
   type TerminalCursorStyle,
   type OnExitBehavior,
   type CustomPreset,
+  type ObsResetKey,
+  type ObsUiPrefs,
 } from '@/lib/storage';
 import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
@@ -445,12 +461,23 @@ export interface UiStoreState {
    * yank/dead-link pair; WARDEN-981's nonce). ObserverTabs and App both
    * SUBSCRIBE here now, so the command channels are deleted.
    *
-   * These are the first ObsUi-namespace facts on the store, and the store is
-   * deliberately NOT their persistence writer: the single ObsUi writer stays
-   * ObserverTabs' `satisfies Required<ObsUi>` saveObs effect (the uiStore.test.mjs
-   * saveObs guard pins exactly two call sites). The setters write state only.
-   * The value shapes are imported from storage.ts (NonNullable<ObsUi[...]>) —
-   * storage stays the owner of shape and defaults; nothing is re-declared here.
+   * These are the first ObsUi-namespace facts on the store, and since
+   * WARDEN-1477 (slice 17) the store IS their persistence writer:
+   * selectPersistedObsPrefs (below) + OBS_STORE_KEYS give them the same
+   * derived-key-list persistence the warden:ui:v3 half got in slice 16, and
+   * useObsPersistence (App-mounted, ALWAYS on) persists them by writing the
+   * disk document under these live values (the ObsUi saveObs call) —
+   * durability no longer depends on a component's lifecycle (previously the
+   * ONLY writer was ObserverTabs' booted-gated saveObs effect, so App's own
+   * "View Activity" deep-link wrote the store with the panel unmounted — or
+   * mounted-but-unbooted — and the write was lost on restart). ObserverTabs'
+   * bag effect remains the COMPONENT half's writer (openIds/activeId, the
+   * workspace facts that are meaningless before boot reconciliation) and
+   * harmlessly re-asserts the four prefs it already holds live store values
+   * for; the uiStore.test.mjs saveObs guard pins exactly THREE call sites.
+   * The setters write state only. The value shapes are imported from
+   * storage.ts (NonNullable<ObsUi[...]>) — storage stays the owner of shape
+   * and defaults; nothing is re-declared here.
    */
   observerViewMode: NonNullable<ObsUi['viewMode']>;
   /** Set the Observer's visible tab (App's "View Activity" deep-links, the tab buttons). */
@@ -588,6 +615,59 @@ export function selectPersistedStorePrefs(
     healthCollapsedHosts: state.healthCollapsedHosts,
     paneColRatios: state.paneColRatios,
     paneRowRatios: state.paneRowRatios,
+  };
+}
+
+/**
+ * The ObsUi namespace's store-half tuple (roadmap WARDEN-1204 slice 17,
+ * WARDEN-1477): the four store facts whose live values ARE the ObsUi
+ * reset-prefs (OBS_RESET_KEYS — viewMode + the three per-tab filter shapes,
+ * which slice 15 migrated onto the store as the observer*-prefixed facts).
+ *
+ * The element type is the intersection the slice's design turns on: a key must
+ * be BOTH a fact on this store (keyof UiStoreState — a typo or a setter name is
+ * a compile error) AND the `observer`-prefixed projection of an ObsResetKey
+ * (`observer${Capitalize<ObsResetKey>}` — a store fact that does not OWN an
+ * ObsUi reset-pref cannot sneak in). That is the ObsUi twin of
+ * STORE_PERSISTED_KEYS' `keyof UiStoreState & PERSISTED_PREF_KEYS` lock, with
+ * the prefix convention spelled instead of assumed.
+ *
+ * COMPLETENESS (all four OBS_RESET_KEYS covered, no extras) is enforced on the
+ * READ side by selectPersistedObsPrefs' `ObsUiPrefs` return annotation below
+ * and re-stated at runtime by uiStore.test.mjs's ObsUi partition test — the
+ * same both-sides shape the slice-16 tuple uses (its completeness half lives in
+ * AppPersistedSnapshot's Exclude complement).
+ */
+export const OBS_STORE_KEYS = [
+  'observerViewMode',
+  'observerActivityFilters',
+  'observerDirectiveFilters',
+  'observerAttentionFilters',
+] as const satisfies readonly (keyof UiStoreState & `observer${Capitalize<ObsResetKey>}`)[];
+
+/**
+ * The ObsUi store half: a pure projection of the four observer facts off a
+ * UiStoreState, keyed by their OBS-UI pref names (viewMode/activityFilters/
+ * directiveFilters/attentionFilters) so the writer can spread it DIRECTLY over
+ * a loadObs() document — no renaming, no second shape to keep in sync.
+ *
+ * The `ObsUiPrefs` return annotation (= Required<Pick<ObsUi, ObsResetKey>>,
+ * storage.ts) is the compile enforcement on this side: an OBS_RESET_KEYS entry
+ * missing from the literal is a missing-property error, an extra key is an
+ * excess-property error, and each RHS read must be a real store fact — so this
+ * selector can never drift from OBS_RESET_KEYS, from OBS_STORE_KEYS, or from
+ * the store's own shape.
+ *
+ * Consumed by useObsPersistence (App-mounted, the always-mounted ObsUi writer
+ * this slice adds) wrapped in useShallow, exactly as useConfigPersistence
+ * consumes selectPersistedStorePrefs for the warden:ui:v3 half.
+ */
+export function selectPersistedObsPrefs(state: UiStoreState): ObsUiPrefs {
+  return {
+    viewMode: state.observerViewMode,
+    activityFilters: state.observerActivityFilters,
+    directiveFilters: state.observerDirectiveFilters,
+    attentionFilters: state.observerAttentionFilters,
   };
 }
 
