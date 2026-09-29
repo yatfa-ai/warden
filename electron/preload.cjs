@@ -145,4 +145,15 @@ contextBridge.exposeInMainWorld('wardenTelemetry', {
   // the mid-flip re-check), and the pipeline's redact → validate remain the
   // wire's last line of defense.
   reportWorkspaceShape: (snapshot) => ipcRenderer.send('telemetry:renderer-shape', snapshot),
+
+  // WARDEN-1479 — forward the renderer's closed feature-usage window (the
+  // feature-adoption category's carrying event: CLOSED-SET capability names +
+  // per-capability use counts; no chat name, no content, no path, no
+  // credential anywhere in the shape, and the schema validator rejects any
+  // key outside the shape's own set or any name outside the kebab pattern).
+  // Fire-and-forget via `send`, mirroring reportWorkspaceShape: main is the
+  // consent gate (the receipt handler refuses the feature-adoption category,
+  // the mid-flip re-check), and the pipeline's redact → validate remain the
+  // wire's last line of defense.
+  reportFeatureUsage: (snapshot) => ipcRenderer.send('telemetry:renderer-usage', snapshot),
 });

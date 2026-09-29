@@ -81,6 +81,14 @@ const GET_TOP_LEVEL_KEYS = [
   'telemetryIncidentsEnabled',
   'telemetryNamesEnabled',
   'telemetryOperationalMetricsEnabled',
+  // WARDEN-1479 — the pin MOVED by exactly one ADDITIVE entry: the FOURTH
+  // consent category's toggle (feature-adoption, the 2026-08-19 telemetry
+  // authorization's last unexercised clause). Registry order 41, appending
+  // after telemetryOperationalMetricsEnabled(40) in registry order; the tail
+  // entries below (bounds, issueLinks) each shifted one rank (41→42, 42→43,
+  // 43→44) — the same additive-append discipline WARDEN-1331/1388
+  // established, applied at the registry's own join.
+  'telemetryFeatureAdoptionEnabled',
   // WARDEN-1331 — the pin MOVED by exactly one ADDITIVE entry: `bounds`, the
   // numeric-range metadata buildGetResponse now serves so the Settings UI can
   // derive its advertised min/max from the server instead of hand-copying it.
@@ -417,7 +425,8 @@ describe('/api/config PUT post-save side-effects — the four afterSave steps (W
     const forward = sent.find((m) => m && m.type === 'telemetry-config');
     assert.ok(forward, 'process.send was called with a telemetry-config message');
     // WARDEN-1116 — consent travels as a per-CATEGORY map, not named booleans.
-    assert.deepStrictEqual(forward.categories, { incidents: false, names: false, 'operational-metrics': false },
+    // WARDEN-1479 — the fourth category joins the forwarded map additively.
+    assert.deepStrictEqual(forward.categories, { incidents: false, names: false, 'operational-metrics': false, 'feature-adoption': false },
       'forwarded the per-category consent map');
     assert.strictEqual(forward.endpoint, 'https://recv.example/ingest', 'forwarded endpoint');
     assert.strictEqual(forward.authToken, TELEMETRY_SECRET,

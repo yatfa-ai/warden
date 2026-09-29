@@ -15,8 +15,9 @@ import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, forwardWorkspaceShape, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
+import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
@@ -1315,6 +1316,23 @@ function App() {
       sendWindow: (snap) => forwardWorkspaceShape(snap),
     });
   }, []);
+  // WARDEN-1479 — the feature-usage sampler: ONE bounded `feature-usage`
+  // event per 5-minute window of CLOSED-SET capability names + counts (the
+  // feature-adoption category's carrying event). COUNT-DRIVEN SILENCE: an
+  // idle window sends nothing — feature-usage is NOT a liveness signal;
+  // receiver silence means app-closed, consent-off, or a quiet session. The
+  // seed call sites (search dialog, spawn control, appearance section, and
+  // this component's own handlers) record through the SAME module singleton;
+  // this build-once call supplies the Electron bridge transport (a child may
+  // have gotten the singleton first — the transport upgrades in place). In
+  // Electron MAIN is the consent gate (the receipt refuses the
+  // feature-adoption category); in a plain browser the sampler is a bounded
+  // no-op.
+  useEffect(() => {
+    getFeatureUsageSampler({
+      sendWindow: (snap) => forwardFeatureUsage(snap),
+    });
+  }, []);
   // WARDEN-1466 — the PEAKS need an event-driven tick: the singleton's interval
   // and pagehide both call flush(), which folds only the CLOSING sample, so an
   // open-then-close burst inside one 5-minute window shipped a peak equal to
@@ -1624,7 +1642,13 @@ function App() {
     }));
     openChat(id);
   }, [updateActiveWorkspace, openChat, setPaneHost]);
-  const toggleMax = useCallback((id: string) => setMaximized((m) => (m === id ? null : id)), []);
+  // WARDEN-1479 — the feature-adoption seed: each maximize/restore toggle is
+  // one use of the pane-maximize capability (counts only; the name is a
+  // closed-set literal).
+  const toggleMax = useCallback((id: string) => {
+    getFeatureUsageSampler().sampler.recordFeatureUse('pane-maximize');
+    setMaximized((m) => (m === id ? null : id));
+  }, []);
   // Stable toggles for keyboard shortcuts: useCallback with functional updates gives
   // them empty deps and a stable identity, so PaneGrid's keydown effect doesn't
   // tear down/re-subscribe on every App render (matching every other PaneGrid handler).
@@ -1817,6 +1841,8 @@ function App() {
   // across workspaces. Underlying chats/tmux sessions are never affected by a
   // move — only which workspace's grid the pane renders in.
   const selectWorkspace = useCallback((id: string) => {
+    // WARDEN-1479 — the feature-adoption seed: a workspace switch is one use.
+    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-switch');
     setActiveWorkspaceId(id);
   }, []);
 
@@ -1825,6 +1851,8 @@ function App() {
   const createWorkspace = useCallback((seedPaneId?: string) => {
     const id = globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}`;
     setWorkspaces((prev) => [...prev, { id, name: `Workspace ${prev.length + 1}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null, recentlyClosed: [] }]);
+    // WARDEN-1479 — the feature-adoption seed: a workspace create is one use.
+    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
     setActiveWorkspaceId(id);
     return id;
   }, []);
@@ -1929,7 +1957,10 @@ function App() {
   // bridge and returns a no-op unsubscribe, so the `npm run dev` browser and
   // `node web/smoke.cjs` are byte-unaffected — neither has an application menu
   // to fire it.
-  useEffect(() => onOpenSettings(() => setSettingsOpen(true)), []);
+  useEffect(() => onOpenSettings(() => {
+    getFeatureUsageSampler().sampler.recordFeatureUse('settings');
+    setSettingsOpen(true);
+  }), []);
   // WARDEN-1356 — the application menu's Edit ▸ Select All item. The item is a
   // wired click (the bare role is inert on the agent-pane surface: xterm's
   // helper textarea is empty and webContents.selectAll() fires no DOM event the
@@ -2230,7 +2261,7 @@ function App() {
       ) : (
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
-        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
+        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => { if (sidebarCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-sidebar'); setSidebarCollapsed(!sidebarCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
         <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{openPanes.length} open</span>
         {/* Workspace tab strip (WARDEN-256) — the flexible, bounded middle region.
@@ -2259,9 +2290,9 @@ function App() {
           />
           <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
-          <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
-          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
-          <IconTooltip label="settings" side="bottom"><button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
+          <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => { if (healthCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-health'); setHealthCollapsed(!healthCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
+          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { if (observerCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-observer'); setObserverCollapsed(!observerCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
+          <IconTooltip label="settings" side="bottom"><button onClick={() => { getFeatureUsageSampler().sampler.recordFeatureUse('settings'); setSettingsOpen(true); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
         </div>
       </header>
       <main className="flex flex-1 min-h-0">
@@ -2293,7 +2324,12 @@ function App() {
               discoverErrors={discoverErrors}
               recentlySavedIds={recentlySavedIds}
               sourceControlCollapsed={sourceControlCollapsed}
-              onSourceControlCollapsedChange={setSourceControlCollapsed}
+              onSourceControlCollapsedChange={(c) => {
+                // WARDEN-1479 — the feature-adoption seed: the EXPAND direction
+                // of the source-control panel is one use of the capability.
+                if (!c) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-source-control');
+                setSourceControlCollapsed(c);
+              }}
               pollIntervalMs={pollIntervalMs}
             />
           </ErrorBoundary>
@@ -2377,6 +2413,7 @@ function App() {
           // Set the App-level viewing session, then close the search dialog. The
           // viewer (rendered just below) survives the dialog closing because its
           // open state + session live here, not inside the dialog.
+          getFeatureUsageSampler().sampler.recordFeatureUse('session-view');
           setViewingSession({ id, host, label });
           setShowGlobalSearch(false);
         }}

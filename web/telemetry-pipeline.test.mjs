@@ -74,13 +74,13 @@ function fakeSend() {
 // express: the user consented to names but to no collecting category, so nothing
 // is sent at all.
 const CONSENT = Object.freeze({
-  OFF: Object.freeze({ incidents: false, names: false, 'operational-metrics': false }),
+  OFF: Object.freeze({ incidents: false, names: false, 'operational-metrics': false, 'feature-adoption': false }),
   INCIDENTS: Object.freeze({ incidents: true, names: false }),
   BOTH: Object.freeze({ incidents: true, names: true }),
   NAMES_ONLY: Object.freeze({ incidents: false, names: true }),
   // WARDEN-1424 — the metrics category ALONE: the state that carries the
   // renderer's workspace-shape snapshot.
-  METRICS_ONLY: Object.freeze({ incidents: false, names: false, 'operational-metrics': true }),
+  METRICS_ONLY: Object.freeze({ incidents: false, names: false, 'operational-metrics': true, 'feature-adoption': false }),
 });
 
 // A consent resolver that returns a fixed per-category state.
@@ -181,15 +181,15 @@ function validEventWithPathIdentifier() {
 test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline(); // no injectables
-  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false });
+  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false, 'feature-adoption': false });
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 0, 'default (no transport wired) must not send');
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 8);
-  // WARDEN-1424 — v8 adds `workspace-shape`.
-  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
+  assert.equal(SCHEMA_VERSION, 9);
+  // WARDEN-1424 — v8 adds `workspace-shape`. WARDEN-1479 — v9 adds `feature-usage`.
+  assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage']);
 });
 
 test('effectiveConsent normalizes through the ONE authority — garbage resolves to nothing', () => {
@@ -198,7 +198,7 @@ test('effectiveConsent normalizes through the ONE authority — garbage resolves
   // a corrupt object, or any non-object all resolve to nothing enabled.
   for (const bad of [undefined, null, 'base', 'extended', 'off', 'weird', 42, [], { incidents: 'yes' }, { unknown: true }]) {
     const pipeline = createTelemetryPipeline({ consent: () => bad, redact, send: fakeSend() });
-    assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false },
+    assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false, 'feature-adoption': false },
       `nothing enabled for ${JSON.stringify(bad)}`);
   }
 });
@@ -357,7 +357,7 @@ test('a throwing consent resolver degrades to nothing enabled (telemetry must no
     redact,
     send,
   });
-  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false });
+  assert.deepEqual({ ...pipeline.effectiveConsent() }, { incidents: false, names: false, 'operational-metrics': false, 'feature-adoption': false });
   assert.doesNotThrow(() => pipeline.record(validEventWithCredential()));
   assert.equal(send.calls.length, 0);
 });

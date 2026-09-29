@@ -41,6 +41,11 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
+// v9 (WARDEN-1479): + 'feature-usage' — the feature-adoption category's
+// carrying event: one bounded window of CLOSED-SET capability names +
+// per-capability use counts (see the canonical web/src/lib/telemetry/schema.ts
+// for the full bump note). This inline copy stays byte-aligned with the
+// canonical module; the drift tests pin the pair.
 // v8 (WARDEN-1424): + 'workspace-shape' — the renderer's COUNT snapshot of its
 // own workspace state (workspaces / panes / chats + window peaks; see the
 // canonical web/src/lib/telemetry/schema.ts for the full bump note).
@@ -57,9 +62,9 @@ const {
 // event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
 // note). This inline copy stays byte-aligned with the canonical module; the
 // drift tests pin the pair.
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
-const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
+const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage']);
 
 const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer', SERVER: 'server' });
 
@@ -406,6 +411,14 @@ function validateBaseEvent(event) {
     // no string field exists in the type, so no identifier can ride it.
     if (event.runtime !== RUNTIME.RENDERER) return false;
     if (!isValidWorkspaceShape(event)) return false;
+  } else if (event.type === 'feature-usage') {
+    // WARDEN-1479 — the feature-adoption category's carrying event. Runtime
+    // pin mirrored from workspace-shape: the capability seams live in the
+    // renderer's own UI handlers, so only a `renderer`-runtime event is a
+    // truthful feature-usage event. Closed key set over a kebab-name +
+    // positive-count map; the name pattern is the hard-exclusion proof.
+    if (event.runtime !== RUNTIME.RENDERER) return false;
+    if (!isValidFeatureUsage(event)) return false;
   }
   // Hard-exclusion proof: the built event must not leak an identifier.
   //   - The free-text MESSAGE is fully redacted at the collection boundary, so
@@ -551,6 +564,50 @@ function isValidWorkspaceShape(e) {
   // smaller than the count the window closed on.
   if (e.peakPanesOpen < e.panesOpen) return false;
   if (e.peakChats < e.chats) return false;
+  return true;
+}
+
+// WARDEN-1479 — the `feature-usage` closed key set + shape check, mirroring
+// the canonical schema's isFeatureUsageShape. A closed key set over a
+// kebab-name + positive-count map; the name pattern doubles as this module's
+// hard-exclusion proof (the capability name is the only string the type
+// carries, and a path/hostname can never match it).
+const FEATURE_USAGE_KEYS = Object.freeze([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt', 'features',
+]);
+const FEATURE_USAGE_KEY_SET = new Set(FEATURE_USAGE_KEYS);
+const FEATURE_NAME_RE = OP_NAME_RE;
+// Held generously above the producer's distinct-name cap (32), mirroring the
+// canonical schema's MAX_FEATURES_PER_EVENT.
+const MAX_FEATURES = 64;
+
+const FEATURE_USAGE_ROW_KEY_SET = new Set(['name', 'count']);
+
+function isValidFeatureUsageFeature(f) {
+  if (!f || typeof f !== 'object') return false;
+  for (const k of Object.keys(f)) {
+    if (!FEATURE_USAGE_ROW_KEY_SET.has(k)) return false;
+  }
+  if (typeof f.name !== 'string' || !FEATURE_NAME_RE.test(f.name)) return false;
+  // A POSITIVE integer: a zero-use capability is never folded (the producer
+  // does not emit it), so zero/negative/non-integer is a malformed row.
+  if (!Number.isInteger(f.count) || f.count <= 0) return false;
+  return true;
+}
+
+function isValidFeatureUsage(e) {
+  for (const k of Object.keys(e)) {
+    if (!FEATURE_USAGE_KEY_SET.has(k)) return false;
+  }
+  if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.features) || e.features.length === 0 || e.features.length > MAX_FEATURES) return false;
+  const seen = new Set();
+  for (const f of e.features) {
+    if (!isValidFeatureUsageFeature(f)) return false;
+    if (seen.has(f.name)) return false; // a folded map: one row per name
+    seen.add(f.name);
+  }
   return true;
 }
 

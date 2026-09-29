@@ -303,6 +303,7 @@ export const SETTINGS_SECTIONS = [
       { anchorId: 'telemetryIncidentsEnabled', terms: ['Anonymous errors, crashes & freezes'] },
       { anchorId: 'telemetryNamesEnabled', terms: ['Chat & session names'] },
       { anchorId: 'telemetryOperationalMetricsEnabled', terms: ['Operational metrics'] },
+      { anchorId: 'telemetryFeatureAdoptionEnabled', terms: ['Feature adoption'] },
       { anchorId: 'telemetryEndpoint', terms: ['Receiver endpoint'] },
       { anchorId: 'telemetryAuthToken', terms: ['Receiver auth token (optional)', 'secret'] },
       // Section-level intent + the test-connection button (no id of its own).

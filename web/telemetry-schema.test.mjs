@@ -79,15 +79,15 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 8 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 9 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 8);
+  assert.equal(SCHEMA_VERSION, 9);
 });
 
-test('BASE_EVENT_TYPES is exactly the seven anonymous-or-consented base-tier kinds', () => {
+test('BASE_EVENT_TYPES is exactly the eight anonymous-or-consented base-tier kinds', () => {
   // WARDEN-1424 — v8 adds `workspace-shape`, the renderer's counts-only shape
   // snapshot riding the operational-metrics category.
-  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape']);
+  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage']);
 });
 
 test('RUNTIME is exactly { main, renderer, server }', () => {
@@ -554,6 +554,124 @@ test('workspace-names carries NO field beyond the disclosed shape', () => {
     Object.keys(workspaceNamesFixture).sort(),
     ['appVersion', 'chatCount', 'chats', 'platform', 'runtime', 'schemaVersion', 'timestamp', 'truncated', 'type', 'windowEndedAt', 'windowStartedAt'],
   );
+});
+
+
+// ==========================================================================
+// (g) feature-usage (WARDEN-1479) — the `feature-adoption` category's
+//     carrying event
+// ==========================================================================
+
+const featureUsageFixture = {
+  schemaVersion: SCHEMA_VERSION,
+  type: 'feature-usage',
+  runtime: 'renderer',
+  timestamp: 1735689600000,
+  appVersion: '0.1.83',
+  platform: 'linux',
+  windowStartedAt: 1735689300000,
+  windowEndedAt: 1735689600000,
+  features: [
+    { name: 'global-search', count: 3 },
+    { name: 'settings', count: 1 },
+  ],
+};
+
+test('validateBaseEvent accepts the feature-usage fixture (v9 round trip)', () => {
+  assert.equal(validateBaseEvent(featureUsageFixture), true, 'feature-usage fixture validates');
+  assert.equal(validateEvent(featureUsageFixture), true, 'validateEvent accepts it too');
+});
+
+test('feature-usage is PINNED to the renderer runtime', () => {
+  // The capability seams live in the renderer's own UI handlers; any other
+  // runtime would be a lie about where the use was observed.
+  for (const runtime of ['main', 'server', 'worker', undefined]) {
+    assert.equal(
+      validateBaseEvent({ ...featureUsageFixture, runtime }),
+      false,
+      `feature-usage with runtime ${JSON.stringify(runtime)} must be rejected`,
+    );
+  }
+});
+
+test('feature-usage carries a CLOSED-SET name map — hostile names are rejected', () => {
+  for (const name of ['Global-Search', 'global_search', 'a'.repeat(65), '../etc/passwd', 'prod.internal', 'refactor auth', '', 42]) {
+    assert.equal(
+      validateBaseEvent({ ...featureUsageFixture, features: [{ name, count: 1 }] }),
+      false,
+      `name ${JSON.stringify(String(name).slice(0, 20))} must be rejected`,
+    );
+  }
+});
+
+test('feature-usage counts are POSITIVE integers — zero/negative/float/string are rejected', () => {
+  for (const count of [0, -1, 1.5, 'two', NaN, null]) {
+    assert.equal(
+      validateBaseEvent({ ...featureUsageFixture, features: [{ name: 'global-search', count }] }),
+      false,
+      `count ${JSON.stringify(count)} must be rejected`,
+    );
+  }
+});
+
+test('feature-usage is a FOLDED MAP — duplicate names are rejected; counts never a row-per-use', () => {
+  assert.equal(
+    validateBaseEvent({ ...featureUsageFixture, features: [{ name: 'global-search', count: 1 }, { name: 'global-search', count: 2 }] }),
+    false,
+    'two rows for one capability is rejected',
+  );
+});
+
+test('feature-usage rejects an EMPTY window (count-driven silence is structural)', () => {
+  assert.equal(
+    validateBaseEvent({ ...featureUsageFixture, features: [] }),
+    false,
+    'an empty features array is a shape violation — an idle window sends nothing at all',
+  );
+});
+
+test('feature-usage rejects more rows than the schema footprint bound', () => {
+  const clone = JSON.parse(JSON.stringify(featureUsageFixture));
+  clone.features = Array.from({ length: 65 }, (_, i) => ({ name: `cap-${i}`, count: 1 }));
+  assert.equal(validateBaseEvent(clone), false, '65 rows exceed the 64 cap');
+});
+
+test('feature-usage carries NO field beyond the disclosed shape (closed key set)', () => {
+  // The forcing function for "this type collects exactly what the consent
+  // summary says": any injected key — including an identifier field from
+  // another category — rejects the event.
+  assert.deepEqual(
+    Object.keys(featureUsageFixture).sort(),
+    ['appVersion', 'features', 'platform', 'runtime', 'schemaVersion', 'timestamp', 'type', 'windowEndedAt', 'windowStartedAt'],
+  );
+  for (const extra of [
+    { chatName: 'Refactor auth' },
+    { sessionName: 'claude-7b3a2f1' },
+    { path: '/home/alice/secret' },
+    { host: 'deploy@prod.internal' },
+  ]) {
+    assert.equal(
+      validateBaseEvent({ ...featureUsageFixture, ...extra }),
+      false,
+      `an injected ${Object.keys(extra)[0]} key must be rejected`,
+    );
+  }
+});
+
+test('feature-usage rejects malformed windows / rows', () => {
+  for (const mutate of [
+    (e) => { delete e.windowStartedAt; },
+    (e) => { e.windowEndedAt = 'soon'; },
+    (e) => { e.features = 'nope'; },
+    (e) => { e.features = [{ name: 'global-search' }]; },
+    (e) => { e.features = [{ count: 1 }]; },
+    (e) => { e.features = ['global-search']; },
+    (e) => { delete e.features; },
+  ]) {
+    const clone = JSON.parse(JSON.stringify(featureUsageFixture));
+    mutate(clone);
+    assert.equal(validateBaseEvent(clone), false, `mutation must invalidate: ${mutate.toString().slice(0, 60)}`);
+  }
 });
 
 console.log(`\n✓ TELEMETRY-SCHEMA TESTS PASS (${passed})`);

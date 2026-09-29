@@ -52,6 +52,25 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v9 (WARDEN-1479): added the `feature-usage` event type — the LAST unbuilt
+// consent category's carrying event. The design's 2026-08-19 authorization
+// (WARDEN-443) names feature adoption verbatim as approved scope ("every user
+// action is to be measured, in aggregate, behind the user's consent"); until
+// now a user who enabled feature-adoption consent had nothing to enable. This
+// type gives the new `feature-adoption` category its producer-side event: ONE
+// bounded aggregate per 5-minute window carrying CLOSED-SET capability names
+// (constant kebab-case literals chosen at development time, the same discipline
+// `operational-metrics` operation names use — the validator enforces the shape
+// so no path, hostname, chat name or arbitrary string can ever ride one) and
+// the per-capability use COUNT for the window. Counts of named capabilities
+// only — never chat names, content, paths, or credentials; there is no
+// free-text field anywhere in the shape. Bounded: at most the producer's
+// feature cap distinct keys per event (the validator holds a generous ceiling
+// above the producer's cap, the same posture MAX_CULPRITS_PER_EVENT /
+// MAX_CHATS_PER_EVENT take). PINNED to the `renderer` runtime — the capability
+// seams live in the renderer's own UI handlers, so any other runtime would be
+// a lie about where the use was observed. Client + receiver bump together so
+// the x-telemetry-schema handshake (the receiver's ingest.mjs) does not 415.
 // v8 (WARDEN-1424): added the `workspace-shape` event type — the COUNT snapshot
 // that closes the last uncovered fact in the telemetry channel's founding
 // sentence (WARDEN-1265: the channel cannot answer "how many panes are open").
@@ -121,10 +140,10 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
-export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape'] as const);
+export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage'] as const);
 export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
@@ -430,8 +449,74 @@ export interface WorkspaceShapeEvent {
   peakChats: number;
 }
 
+// ---------------------------------------------------------------------------
+// Feature usage (WARDEN-1479) — the `feature-adoption` category's carrying
+// event: the design's last unbuilt consent category gets its producer.
+//
+// ONE bounded aggregate per 5-minute window of WHICH APP CAPABILITIES the user
+// exercised, and how many times each: opens and invocations like global
+// search, settings, pane maximize, session transcript view, the four
+// expandable panels, workspace switch/create, chat spawn, theme change. The
+// name set is CLOSED BY CONSTRUCTION at the producer — the vocabulary is a
+// compile-time union in the producer module and every `recordFeatureUse`
+// call site names a literal — and the validator enforces the SAME kebab-case
+// pattern `operational-metrics` operation names use, so a path (needs a
+// separator), a hostname (needs a dot) or a chat name (needs its own
+// characters) can never ride the name axis even from a hostile caller. There
+// is no free-text field anywhere in the shape.
+//
+// COUNT-DRIVEN SILENCE: a window in which the user exercised nothing sends
+// NOTHING (the producer's `hasAnything` folds on counts). Feature-usage is
+// therefore NOT a liveness signal — receiver silence means app-closed,
+// consent-off, OR a quiet session. This is the deliberate opposite of the
+// `workspace-shape` type, whose snapshot doubles as the consented liveness
+// signal.
+//
+// OVERFLOW POLICY (stated per the schema's bounded-aggregate convention): the
+// producer folds at most its own distinct-name cap per window (32 in the
+// producer module, against a seeded vocabulary of ~12) — a name beyond the
+// producer's cap folds into the producer's reserved `feature-overflow` key
+// (count preserved, name dropped — the same reserved-key posture the
+// operational-metrics aggregator uses). The validator's ceiling
+// (MAX_FEATURES_PER_EVENT = 64) is held GENEROUSLY above the producer's cap
+// so a future vocabulary growth does not need a schema bump; a window
+// carrying MORE entries than the ceiling is rejected as a shape violation,
+// never silently truncated.
+//
+// It rides ONLY the new `feature-adoption` category — its own conscious
+// opt-in, never folded into a metrics category — and is PINNED to the
+// `renderer` runtime (the capability seams live in the renderer's UI
+// handlers; the validator enforces the pin, exactly like the
+// workspace-shape/workspace-names/server-stall pins).
+// ---------------------------------------------------------------------------
+
+/** One capability's folded use count for the window. */
+export interface FeatureUsageFeature {
+  /** Closed-set kebab-case capability literal (≤64 chars). */
+  name: string;
+  /** Uses of this capability folded into the window (positive integer). */
+  count: number;
+}
+
+/** A window of the renderer's feature-adoption counts. */
+export interface FeatureUsageEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: 'feature-usage';
+  /** Always `renderer` — the type exists precisely to report that runtime. */
+  runtime: Runtime;
+  timestamp: number;
+  appVersion?: string; // non-identifying release label; optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
+  /** When the window opened (epoch-ms, from the producer). */
+  windowStartedAt: number;
+  /** When the window closed (epoch-ms, from the producer). */
+  windowEndedAt: number;
+  /** The folded per-capability counts (bounded; closed-set names). */
+  features: FeatureUsageFeature[];
+}
+
 /** Any base-tier event, discriminated by `type`. */
-export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent | WorkspaceShapeEvent;
+export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent | WorkspaceShapeEvent | FeatureUsageEvent;
 
 // ---------------------------------------------------------------------------
 // Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
@@ -603,6 +688,72 @@ const WORKSPACE_SHAPE_KEYS = Object.freeze([
 ] as const);
 const WORKSPACE_SHAPE_KEY_SET = new Set<string>(WORKSPACE_SHAPE_KEYS);
 
+// A `feature-usage` capability name: the SAME constant kebab-case shape an
+// `operational-metrics` operation name carries (WARDEN-1479). This is the
+// structural hard-exclusion proof for the name axis — no path (needs a
+// separator), no hostname (needs a dot), no chat/agent name (needs its own
+// characters) can match, so the capability name can never become a channel
+// for user data even if a producer call site were bypassed.
+const FEATURE_NAME_RE = OPERATION_NAME_RE;
+// The feature-usage footprint bound: held GENEROUSLY above the producer's own
+// distinct-name cap (32) so a future vocabulary growth does not need a schema
+// bump — the same posture MAX_CULPRITS_PER_EVENT / MAX_CHATS_PER_EVENT take.
+// A window carrying more entries than this ceiling is a shape violation
+// (rejected, never truncated — the overflow policy lives at the producer).
+const MAX_FEATURES_PER_EVENT = 64;
+
+// The closed ROW key set — a feature row carries exactly {name, count}. An
+// injected `chatName` (or any other key) on a row rejects the event at the
+// validator, the same closed-key guarantee the event level carries.
+const FEATURE_USAGE_ROW_KEYS = Object.freeze(['name', 'count'] as const);
+const FEATURE_USAGE_ROW_KEY_SET = new Set<string>(FEATURE_USAGE_ROW_KEYS);
+
+/** True iff `f` is a structurally valid FeatureUsageFeature. */
+function isFeatureUsageFeature(f: unknown): f is FeatureUsageFeature {
+  if (!f || typeof f !== 'object') return false;
+  const o = f as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (!FEATURE_USAGE_ROW_KEY_SET.has(k)) return false;
+  }
+  if (typeof o.name !== 'string' || !FEATURE_NAME_RE.test(o.name)) return false;
+  // A count is a POSITIVE integer: a capability with zero uses is not folded
+  // into the window at all (the producer never emits it), so a zero/negative/
+  // non-integer count is a malformed row, not an empty observation.
+  if (typeof o.count !== 'number' || !Number.isInteger(o.count) || o.count <= 0) return false;
+  return true;
+}
+
+// The feature-usage event's closed key set — the type's own fields plus the
+// base-tier envelope. Like `workspace-shape`, the schema itself refuses any
+// other key: an injected `chatName`, `path` or arbitrary string key rejects
+// the event at the validator, which makes "no identifier can ride the
+// feature-usage channel" a STRUCTURAL guarantee rather than a producer promise.
+const FEATURE_USAGE_KEYS = Object.freeze([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt', 'features',
+] as const);
+const FEATURE_USAGE_KEY_SET = new Set<string>(FEATURE_USAGE_KEYS);
+
+/** True iff `e` is a structurally valid FeatureUsageEvent. */
+function isFeatureUsageShape(e: Record<string, unknown>): boolean {
+  for (const k of Object.keys(e)) {
+    if (!FEATURE_USAGE_KEY_SET.has(k)) return false;
+  }
+  if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
+  if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.features) || e.features.length === 0 || e.features.length > MAX_FEATURES_PER_EVENT) return false;
+  for (const f of e.features) {
+    if (!isFeatureUsageFeature(f)) return false;
+  }
+  // The names are a folded MAP — one row per capability, never two.
+  const seen = new Set<string>();
+  for (const f of e.features as FeatureUsageFeature[]) {
+    if (seen.has(f.name)) return false;
+    seen.add(f.name);
+  }
+  return true;
+}
+
 /** True iff `e` is a structurally valid WorkspaceShapeEvent. */
 function isWorkspaceShapeShape(e: Record<string, unknown>): boolean {
   for (const k of Object.keys(e)) {
@@ -668,6 +819,14 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
       // workspace-shape event. The shape itself is counts-only over a closed
       // key set (see isWorkspaceShapeShape).
       return e.runtime === RUNTIME.RENDERER && isWorkspaceShapeShape(e);
+    case 'feature-usage':
+      // WARDEN-1479 — the feature-adoption category's carrying event: one
+      // bounded window of closed-set capability names + use counts. Runtime
+      // pin mirrored from workspace-shape: the capability seams live in the
+      // renderer's own UI handlers, so only a `renderer`-runtime event is a
+      // truthful feature-usage event. The shape is a closed key set over a
+      // kebab-name + positive-count map (see isFeatureUsageShape).
+      return e.runtime === RUNTIME.RENDERER && isFeatureUsageShape(e);
     default:
       return false;
   }

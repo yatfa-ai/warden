@@ -63,6 +63,7 @@ const { buildServerStallEvent } = require('./telemetry-stall-event.cjs');
 // (the `names` category's own carrying event).
 const { buildWorkspaceNamesEvent } = require('./telemetry-names-event.cjs');
 const { buildWorkspaceShapeEvent } = require('./telemetry-shape-event.cjs');
+const { buildFeatureUsageEvent } = require('./telemetry-usage-event.cjs');
 // WARDEN-1468 — the ONE consent-gated window receipt (see createWindowReceipt
 // in telemetry-receipt.cjs): the five hand-copied consent-gate → build → record
 // receipts below collapse onto it, and web/telemetry-receipt.test.mjs pins
@@ -447,6 +448,21 @@ function recordRendererPaneMetrics(snapshot) {
 // counts of the CURRENT workspace are not culprit data.
 function recordWorkspaceShapeWindow(snapshot) {
   receiveTelemetryWindow('operational-metrics', buildWorkspaceShapeEvent, snapshot);
+}
+
+// WARDEN-1479 — the RENDERER's feature-usage window
+// (web/src/lib/featureUsageTelemetry.ts, forwarded over the
+// telemetry:renderer-usage bridge). Same double gate as the shape windows:
+// the sampler retains only the closed-set name + count map it reports, and
+// THIS receipt refuses the feature-adoption category before anything is
+// built or recorded (the mid-flip re-check — a window can be in flight when
+// the user revokes). Recorded with `runtime: 'renderer'` so the counts are
+// attributable to the surface the capabilities were exercised on (the
+// builder pins the same value; the extra states the receipt's intent beside
+// its sibling receipts). Unlike the shape producer, an idle window sends
+// nothing at the producer — feature-usage is not a liveness signal.
+function recordFeatureUsageWindow(snapshot) {
+  receiveTelemetryWindow('feature-adoption', buildFeatureUsageEvent, snapshot, { runtime: 'renderer' });
 }
 
 // WARDEN-1385 — crash-sentinel culprit data (userData/pane-latency-last.json).
@@ -1409,6 +1425,23 @@ ipcMain.on('telemetry:renderer-metrics', (_event, snapshot) => {
 ipcMain.on('telemetry:renderer-shape', (_event, snapshot) => {
   try {
     recordWorkspaceShapeWindow(snapshot);
+  } catch {
+    /* a telemetry forward must never crash the host */
+  }
+});
+
+// WARDEN-1479 — the renderer's feature-usage window (closed-set capability
+// names + per-capability counts, the feature-adoption category's carrying
+// event; never a chat name, a title, a path or a hostname — the schema's
+// closed-key + kebab-name checks drop any injected extra). Fire-and-forget
+// `send`, same discipline as the shape forward above: main is the consent
+// gate (recordFeatureUsageWindow refuses the feature-adoption category), so
+// the renderer forwarding unconditionally captures nothing until the user
+// opts in. A malformed snapshot yields null from the builder and is dropped
+// here — never trusted because it came from our own window.
+ipcMain.on('telemetry:renderer-usage', (_event, snapshot) => {
+  try {
+    recordFeatureUsageWindow(snapshot);
   } catch {
     /* a telemetry forward must never crash the host */
   }

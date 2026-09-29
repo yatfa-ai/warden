@@ -77,7 +77,8 @@ import {
 } from './telemetry-consent.cjs';
 
 // GET-order rank of the first telemetry consent category. Categories occupy
-// consecutive ranks from here in registry order — 38/39 today, preserving the
+// consecutive ranks from here in registry order — 38/39/40/41 today (the
+// fourth, feature-adoption, joined at 41 in WARDEN-1479), preserving the
 // byte-pinned position the legacy telemetryBaseEnabled/telemetryExtendedEnabled
 // pair held.
 const TELEMETRY_CONSENT_ORDER = 38;
@@ -654,13 +655,15 @@ export const CONFIG_FIELDS = [
   {
     key: 'bounds',
     exposure: 'derived',
-    order: 41,
+    order: 42,
     // WARDEN-1331 — the numeric-range metadata key. NOT a config field: nothing
     // is persisted, nothing is accepted on PUT (derived exposure guarantees
     // both — applyConfigPut/deriveDefaults/resetConfig all skip 'derived'), and
-    // it emits at the END of the byte-pinned GET order (rank 41, after the
-    // telemetry consent keys at 38/39/40) so the pin moves by exactly one
-    // additive entry.
+    // it emits at the END of the byte-pinned GET order (rank 42, after the
+    // telemetry consent keys at 38/39/40/41) so the pin moves by exactly one
+    // additive entry. WARDEN-1479 — the rank moved 41→42 by exactly one
+    // ADDITIVE entry: the fourth consent category (feature-adoption) took
+    // rank 41 in registry order, extending the consecutive telemetry block.
     // buildBounds() derives it from the same `clamp` / `uiRange` descriptors
     // the PUT guards read, so a range is declared once and both the server's
     // enforcement and the UI's advertised min/max come from that one place.
@@ -672,7 +675,9 @@ export const CONFIG_FIELDS = [
     exposure: 'public',
     type: 'boolean',
     resolve: 'identity',
-    order: 42,
+    order: 43,
+    // WARDEN-1479 — rank moved 42→43 by the additive fourth consent category
+    // (bounds moved 41→42 for the same reason).
     // Issue-key links in terminal panes (WARDEN-1388 / roadmap WARDEN-1386
     // slice 1). OFF BY DEFAULT — the whole integration is invisible until a
     // human turns it on: while off, the frontend's link provider emits byte-
@@ -688,7 +693,8 @@ export const CONFIG_FIELDS = [
     exposure: 'public',
     type: 'issueLinkTrackers',
     resolve: 'arrayOrEmpty',
-    order: 43,
+    order: 44,
+    // WARDEN-1479 — rank moved 43→44 by the additive fourth consent category.
     // The per-project tracker mapping (WARDEN-1388): one sanitized structured
     // entry `{ project, prefix, tracker }` per mapping, stated BY A HUMAN —
     // the project→prefix→tracker link is never inferred from container names

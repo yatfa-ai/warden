@@ -295,6 +295,9 @@ test('consentToPrefs projects onto the persisted config keys', () => {
     telemetryIncidentsEnabled: true,
     telemetryNamesEnabled: false,
     telemetryOperationalMetricsEnabled: false,
+    // WARDEN-1479 — the fourth category's key, off for a state that never
+    // enabled it (the registry order is the pin's order).
+    telemetryFeatureAdoptionEnabled: false,
   });
 });
 
@@ -309,15 +312,15 @@ console.log('\nMIGRATION — a pre-WARDEN-1116 config carries forward with no be
 
 test('the legacy pair maps to the equivalent categories', () => {
   assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }) },
-    { incidents: true, names: true, 'operational-metrics': false });
+    { incidents: true, names: true, 'operational-metrics': false, 'feature-adoption': false });
   assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true, telemetryExtendedEnabled: false }) },
-    { incidents: true, names: false, 'operational-metrics': false });
+    { incidents: true, names: false, 'operational-metrics': false, 'feature-adoption': false });
   assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: false, telemetryExtendedEnabled: false }) },
     ALL_OFF);
 });
 
 test('a base-only legacy config does NOT silently enable names', () => {
-  assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true }) }, { incidents: true, names: false, 'operational-metrics': false });
+  assert.deepEqual({ ...resolveConsent({ telemetryBaseEnabled: true }) }, { incidents: true, names: false, 'operational-metrics': false, 'feature-adoption': false });
 });
 
 test('a stale extended-WITHOUT-base legacy pair migrates to nothing enabled', () => {
