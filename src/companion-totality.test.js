@@ -833,8 +833,9 @@ describe('WARDEN-1412 companion-totality sweep', () => {
   // -------------------------------------------------------------------------
   // THE GATE CENSUS — the completeness tie. The sweep is only as good as its
   // enumeration, so the enumeration is checked LIVE against the tree on every
-  // run (the census grew 30 → 36 while the ticket sat in review — never trust a
-  // stored count). If this fails, a gate site was added or removed: re-run
+  // run (the census grew 30 → 36 while the ticket sat in review, then 36 → 37
+  // with WARDEN-1475's getChannel no-bootstrap gate — never trust a stored
+  // count). If this fails, a gate site was added or removed: re-run
   //   git grep -n isCompanionExcludedHost -- 'src/*.js' | grep -v test
   // and, for a NEW routed op family, TEACH THE SWEEP: add an ON leg + an OFF
   // control leg above (and extend CHANNEL_METHODS if the Go vocabulary grew).
@@ -848,7 +849,8 @@ describe('WARDEN-1412 companion-totality sweep', () => {
     const CENSUS = {
       'chats.js': 4,        // discover + viaCompanion(×2 legs) + capturePanes
       'cli.js': 2,          // import + cmdDash's useCompanion
-      'companion.js': 10,   // the module's own doc line, predicate, status maps, op backstops
+      'companion.js': 11,   // the module's own doc line, predicate, status maps, the getChannel
+                            // no-bootstrap gate (WARDEN-1475), op backstops
       'paneContainer.js': 2,// import + runWalk's remote route
       'pasteImage.js': 2,   // import + deliverPastedImage's remote gate (the WARDEN-1348 site)
       'server.js': 2,       // import + pollFleetStates eligibility
@@ -876,8 +878,8 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       assert.deepStrictEqual(unlisted, [],
         `new gate-site file(s) appeared: ${unlisted.join(', ')} — add census rows AND sweep legs for their op families`);
       const total = Object.values(found).reduce((a, b) => a + b, 0);
-      assert.strictEqual(total, 36,
-        `total gate sites changed (${total} ≠ 36) — update CENSUS and re-verify the sweep covers the new/removed family`);
+      assert.strictEqual(total, 37,
+        `total gate sites changed (${total} ≠ 37) — update CENSUS and re-verify the sweep covers the new/removed family`);
     });
 
     // -----------------------------------------------------------------------

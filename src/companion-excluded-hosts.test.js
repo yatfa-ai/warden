@@ -567,8 +567,27 @@ describe('WARDEN-1390 wsLayer legs: pane subscriptions never touch an excluded h
   // subscribePanes write on the fake channel, and (b) a teardown unsubscribe
   // that slipped the grouping filter would be observable the same way — without
   // either, the ws layer needs no real ssh.
+  //
+  // WARDEN-1475: getChannel now REFUSES an excluded host outright (the durable
+  // no-bootstrap gate an operator's uninstall writes to this same list), so the
+  // excluded host can no longer be seeded through it directly. Seed it the only
+  // way the state is genuinely reachable in production — bootstrap it while it
+  // is NOT excluded, then apply the exclusion — which is the WARDEN-1390
+  // exclusion-mid-flight case these tests are about. The live channel the
+  // observability argument above depends on still exists either way, and the
+  // exclusion is restored before any ws traffic runs.
   async function seedChannel(host) {
     const { deps } = makeDeps();
+    if (isCompanionExcludedHost(host)) {
+      const restore = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+      process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+      try {
+        await getChannel(host, { connectTimeout: 1 }, deps);
+      } finally {
+        process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = restore;
+      }
+      return;
+    }
     await getChannel(host, { connectTimeout: 1 }, deps);
   }
 

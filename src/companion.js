@@ -1095,6 +1095,33 @@ export async function getChannel(host, cfg = {}, deps = {}) {
   if (failure && Date.now() - failure.at < BOOTSTRAP_RETRY_COOLDOWN_MS) {
     throw failure.err;
   }
+  // WARDEN-1475 — THE DURABILITY BACKSTOP. A host on the per-host exclusion list
+  // must never have a channel BOOTSTRAPPED for it, and that list is now written
+  // by two different intentions: the operator typing a host into Settings, and
+  // the operator REMOVING the companion from a host (see recordCompanionUninstall
+  // below). Before this gate, `uninstallCompanion` was a pure in-memory teardown
+  // and the very next ordinary op — including the unconditional 60s lifecycle
+  // tick, which needs no human gesture — re-uploaded the binary and respawned the
+  // channel within ~60 seconds, silently undoing the removal.
+  //
+  // It sits HERE, not at companionOp, because there are THREE non-test
+  // getChannel call sites (companionOp, attachSession, the pane-sync release
+  // leg) and a gate at the op skeleton alone would not cover the other two. The
+  // other two already have their own precedents (attachPreflight throws; the
+  // release leg serves from liveChannelFor rather than bootstrapping) — this is
+  // the one place that covers all of them structurally, so a NEW call site
+  // inherits the guarantee instead of having to remember it.
+  //
+  // Ordering is deliberate: AFTER the cache check (a caller coalescing onto an
+  // in-flight bootstrap still awaits it — the WARDEN-1390 release race decides
+  // that outcome, and it already kills the superseded channel) and BEFORE the
+  // `bootstrapping` status stamp, so a refused host never flickers into a state
+  // it will not reach. The reader (getCompanionStatus) reports the exclusion
+  // reason for such a host anyway.
+  if (isCompanionExcludedHost(host)) {
+    throw new CompanionTransportError(host, 'this host is excluded from companion transport by the companionExcludedHosts setting',
+      `Remove ${host} from Settings → Performance ("Companion excluded hosts") to let warden bootstrap the companion on it again (it is currently served by the default SSH path). A host is also added to that list when you remove its companion binary, so the removal survives restarts until you take it off.`);
+  }
   // WARDEN-878: mark bootstrapping BEFORE the promise is created so the host
   // reads "bootstrapping" (not "inactive") on the status surface while the first
   // channel comes up. getChannel runs this body synchronously through to the
@@ -1215,6 +1242,11 @@ export async function getChannel(host, cfg = {}, deps = {}) {
 // runFn/defaultRun path the probe uses. ~/.warden is removed only-if-empty.
 // LOCAL is refused (the companion serves remote hosts only). `deps.run` /
 // `deps.manifest` are the same test seam bootstrap uses (deps.run ?? defaultRun).
+//
+// WARDEN-1475: every write below is PROCESS-LIFETIME in-memory state, which is
+// exactly why the removal used to be undone by the next tick. The DURABLE half
+// of a removal is recordCompanionUninstall (below) + the caller's save/afterSave
+// — this function stays pure so its deps seam is unchanged.
 export async function uninstallCompanion(host, cfg = {}, deps = {}) {
   if (host === LOCAL) {
     return { host, ok: false, code: -1, stderr: 'companion transport does not apply to the local host' };
@@ -1256,10 +1288,22 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
   const remotePath = remoteBinaryPath(manifest.version);
   try {
     const res = await runFn(host, buildUninstallScript(remotePath), {}, cfg);
+    const ok = !!res?.ok;
+    // WARDEN-1475 — THE DURABLE FACT, recorded only on SUCCESS: a removal that
+    // FAILED (the rm never ran, the binary is still on the host) must not
+    // suppress that host's transport. recordCompanionUninstall mutates `cfg`
+    // and live-applies the exclusion, so THIS process refuses the next
+    // bootstrap immediately — which is what closes the measured defect at the
+    // function level (one ordinary op after a removal now uploads nothing and
+    // spawns no channel). The caller owns the DISK write; see that function's
+    // note and POST /api/companion/uninstall. The return shape is deliberately
+    // UNCHANGED (callers and tests pin {host, ok, code, stderr} exactly) — the
+    // route re-derives whether a persist is needed from `cfg` itself.
+    if (ok) recordCompanionUninstall(host, cfg);
     return {
       host,
-      ok: !!res?.ok,
-      code: typeof res?.code === 'number' ? res.code : (res?.ok ? 0 : -1),
+      ok,
+      code: typeof res?.code === 'number' ? res.code : (ok ? 0 : -1),
       stderr: res?.stderr || '',
     };
   } catch (e) {
@@ -1268,6 +1312,89 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
     // companion-or-fail contract stays in the return shape, not thrown.
     return { host, ok: false, code: -1, stderr: e?.message ?? String(e) };
   }
+}
+
+// ---------------- the durable half of a removal (WARDEN-1475) ----------------
+// uninstallCompanion's four map deletes are all PROCESS-LIFETIME in-memory
+// state, which is exactly why the removal used to be undone by the next tick:
+// the unconditional 60s lifecycle tick re-uploaded the binary and respawned the
+// channel with no error and no user-visible signal. A removal has to be
+// recorded somewhere that survives a restart, and the ONLY such place is the
+// persisted config.
+//
+// ── WHY THE EXCLUSION LIST, AND NOT A NEW `companionUninstalledHosts` KEY ─────
+// This takes route (a) — reuse the WARDEN-1390 `companionExcludedHosts` list —
+// and the deciding argument is NOT the cheaper schema/web lockstep (real, but
+// secondary). It is COMPANION-OR-FAIL:
+//
+//   A new key would need its own gate. A gate that only stops the BOOTSTRAP
+//   leaves every routing site still CHOOSING the companion path for the host,
+//   and companion-or-fail means those ops then FAIL rather than falling back —
+//   an operator who removed a binary would find the host's panes, attach and
+//   discovery broken, which is a worse outcome than the defect. Making the new
+//   key route the host over raw SSH instead is precisely what the exclusion
+//   list ALREADY does, at every gate site, plus the companionOp backstop, the
+//   attachPreflight throw and the pane-sync release leg. A second key would be
+//   a parallel copy of that whole mechanism.
+//
+// THE COST, stated so a future reader need not re-derive it: the list now
+// carries TWO intentions — "route this host over raw SSH" (a user's typed
+// choice) and "the operator removed the binary" — and they are
+// INDISTINGUISHABLE once written. The consequences are bounded and deliberate:
+// re-installing is one gesture (take the host off the Settings list) in either
+// case, the indicator reason reads `excluded-by-setting` either way, and the
+// list's own semantics ("never bootstrap, always raw SSH") are exactly what a
+// removed host needs. If a future slice must tell the two apart (e.g. to word
+// the indicator differently), route (b) is the upgrade path: a new key
+// declaring `type: 'companionExcludedHosts'` reuses the sanitizer with zero new
+// sanitizer code, and getChannel's gate composes the two lists.
+//
+// NOTE the deliberate NON-collapse: uninstallCompanion still clears
+// `bootstrapFailures` (WARDEN-1399's contract — a removal must not inherit a
+// stale FAILURE suppression). That is a DIFFERENT fact from this one, which is
+// a DELIBERATE OPERATOR REMOVAL. Both hold at once.
+//
+// ── WHAT THIS DOES AND DELIBERATELY DOES NOT DO ──────────────────────────────
+// It mutates the caller's `cfg` and applies the list to the runtime env gate
+// (applyCompanionExclusions — already this module's own function), so the
+// refusal is LIVE on the very next op in this process. It does NOT persist:
+// `save`/`afterSave` live in server.js's import graph, and the POST
+// /api/companion/uninstall route owns that write, following PUT /api/config's
+// exact `await save(cfg)` → `afterSave(cfg, {…})` shape. That split is what
+// keeps uninstallCompanion's `deps.run` / `deps.manifest` test seam untouched
+// while still closing the defect at the function level.
+//
+// ⚠️ PASS THE LIVE `cfg`. applyCompanionExclusions OVERWRITES the env list from
+// what it is given, so calling this with a cfg that does not carry the project's
+// real `companionExcludedHosts` would drop the other exclusions from the gate.
+// Every production caller passes server.js's live `cfg` object.
+//
+// Returns {changed, hosts}: `changed` is false when the host was ALREADY on the
+// list (a re-removal, or a host the user had excluded by hand), so the caller
+// can skip a pointless config write.
+export function recordCompanionUninstall(host, cfg = {}) {
+  const current = Array.isArray(cfg.companionExcludedHosts) ? cfg.companionExcludedHosts : [];
+  if (typeof host !== 'string' || host.trim().length === 0 || host === LOCAL) {
+    return { changed: false, hosts: current };
+  }
+  const entry = host.trim();
+  if (current.includes(entry)) return { changed: false, hosts: current };
+  // Run the write through the SAME whole-field sanitizer the PUT boundary uses,
+  // so a hand-edited config.json that slipped a malformed entry past load can
+  // never be re-persisted (or serialized into the env gate) by this path. A
+  // sanitizer refusal (null) means the EXISTING list is malformed or the cap is
+  // reached — record nothing rather than persist a value the PUT guard rejects.
+  const next = sanitizeCompanionExcludedHosts([...current, entry]);
+  if (!next) return { changed: false, hosts: current };
+  cfg.companionExcludedHosts = next;
+  // Live-apply, same contract as boot/afterSave: the env gate every routing
+  // predicate reads is re-serialized now, so the next op refuses without a
+  // restart. This also runs releaseExcludedHostState for the newly excluded
+  // host — the five further per-host maps (paneSubscriptions, agentStateWatched,
+  // paneDeltaCache, …) uninstall does not touch on its own, which is the
+  // correct teardown for a removed host, not an accident.
+  applyCompanionExclusions(next);
+  return { changed: true, hosts: next };
 }
 
 // --------------------------- the shared op skeleton ---------------------------

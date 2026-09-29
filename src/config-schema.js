@@ -408,6 +408,20 @@ export const CONFIG_FIELDS = [
     // Sanitized on PUT via sanitizeCompanionExcludedHosts: entries must be
     // comma-free, non-empty strings (whole field refused otherwise — a
     // silently-dropped exclusion would be invisible breakage).
+    //
+    // WARDEN-1475 — this field has TWO writers. Besides the Settings input, a
+    // successful companion REMOVAL (POST /api/companion/uninstall →
+    // recordCompanionUninstall) records the host here through the SAME
+    // sanitizer, because the removal has to survive a restart: every other
+    // thing uninstallCompanion writes is a process-lifetime in-memory map, so
+    // the unconditional 60s lifecycle tick used to re-upload the binary and
+    // respawn the channel within ~60 seconds, silently undoing the operator's
+    // removal (roadmap WARDEN-270's Removability outcome). The two intentions
+    // are indistinguishable once written, deliberately: both mean "never
+    // bootstrap this host, route it over the default SSH path", and both are
+    // reversed by the same one gesture — take the host off this list. See the
+    // recordCompanionUninstall block comment in src/companion.js for the
+    // route-(a)-vs-(b) trade-off that decision rests on.
   },
   // Optional telemetry — OFF BY DEFAULT, INDEPENDENT PER-CATEGORY consent
   // (WARDEN-1116 / roadmap WARDEN-446 / design WARDEN-443 Principle 2). Nothing

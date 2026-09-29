@@ -1782,21 +1782,56 @@ describe('getChannel bootstrap-failure cooldown (WARDEN-1399)', () => {
     assert.strictEqual(calls.run, 2, 'no third probe within the new window');
   });
 
-  it('uninstallCompanion clears the record — the next op after a removal retries immediately', async () => {
-    const { deps } = failingDeps();
-    await assert.rejects(() => getChannel('storm-uninstall', {}, deps), () => true);
-    assert.ok(_bootstrapFailureForTests('storm-uninstall'), 'precondition: record stamped');
+  // WARDEN-1475 CONTRACT CHANGE — this test's two halves now pull apart, and
+  // that separation is the point. WARDEN-1399's half is UNCHANGED and still
+  // asserted: a removal must not inherit a stale bootstrap-FAILURE suppression,
+  // so uninstallCompanion still clears the cooldown record (the :1788/:1795
+  // preconditions below). What changed is the "retries immediately" half: a
+  // deliberate operator REMOVAL is a different fact from a failure record, and
+  // it must now SURVIVE — before this ticket the next ordinary op (including
+  // the unconditional 60s lifecycle tick) re-uploaded the binary and respawned
+  // the channel, silently undoing the removal within ~60 seconds. So the next
+  // op is now refused by the durable no-bootstrap fact, NOT by the cooldown —
+  // and the refusal message proves WHICH gate answered.
+  it('uninstallCompanion clears the failure record (WARDEN-1399) but the removal itself now suppresses the next bootstrap (WARDEN-1475)', async () => {
+    const savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+    try {
+      process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+      applyCompanionExclusions([]);
+      const { deps } = failingDeps();
+      await assert.rejects(() => getChannel('storm-uninstall', {}, deps), () => true);
+      assert.ok(_bootstrapFailureForTests('storm-uninstall'), 'precondition: record stamped');
 
-    const res = await uninstallCompanion('storm-uninstall', {}, {
-      manifest: TEST_MANIFEST,
-      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
-    });
-    assert.strictEqual(res.ok, true, 'precondition: uninstall succeeded');
-    assert.strictEqual(_bootstrapFailureForTests('storm-uninstall'), undefined, 'uninstall cleared the record');
+      // cfg is the live config object the route owns; uninstallCompanion records
+      // the durable removal into it (and live-applies the env gate).
+      const cfg = { companionExcludedHosts: [] };
+      const res = await uninstallCompanion('storm-uninstall', cfg, {
+        manifest: TEST_MANIFEST,
+        run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+      });
+      assert.strictEqual(res.ok, true, 'precondition: uninstall succeeded');
+      assert.strictEqual(_bootstrapFailureForTests('storm-uninstall'), undefined,
+        'WARDEN-1399 INTACT: uninstall still cleared the failure record');
+      assert.deepStrictEqual(cfg.companionExcludedHosts, ['storm-uninstall'],
+        'WARDEN-1475: the removal was recorded as a durable no-bootstrap fact on cfg');
 
-    const healed = fakeDeps();
-    const ch = await getChannel('storm-uninstall', {}, healed.deps);
-    assert.ok(ch instanceof CompanionChannel, 'the next op got a fair bootstrap attempt (not suppressed)');
+      // A HEALTHY deps set — so a bootstrap would certainly succeed if anything
+      // still let it run. The refusal below is therefore the removal's, not a
+      // lingering failure's.
+      const healed = fakeDeps();
+      await assert.rejects(() => getChannel('storm-uninstall', {}, healed.deps), (e) => {
+        assert.ok(e instanceof CompanionTransportError, 'the refusal is a transport error');
+        assert.match(e.message, /excluded from companion transport/,
+          `the REMOVAL gate answered, not the failure cooldown: ${e.message}`);
+        return true;
+      });
+      assert.strictEqual(healed.calls.upload, 0, 'no binary was re-uploaded');
+      assert.strictEqual(healed.calls.spawnChannel, 0, 'no channel was respawned');
+    } finally {
+      if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+      else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
+      applyCompanionExclusions([]);
+    }
   });
 
   it('excluding a host clears the record (releaseExcludedHostState) — re-inclusion retries immediately', async () => {
@@ -2416,14 +2451,21 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
     const { deps } = deathTransportDeps();
     const ch = await getChannel('prod-uninst', {}, deps);
     assert.strictEqual(getCompanionStatus('prod-uninst').state, 'active', 'precondition: active');
-    const res = await uninstallCompanion('prod-uninst', {}, {
+    const res = await uninstallCompanion('prod-uninst', { companionExcludedHosts: [] }, {
       manifest: TEST_MANIFEST,
       run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
     });
     assert.strictEqual(res.ok, true, 'precondition: the uninstall script ran');
     assert.strictEqual(ch.dead, true, 'the uninstall killed the channel (its death listener ran)');
     assert.strictEqual(_channelCacheHasForTests('prod-uninst'), false, 'cache entry gone');
-    assert.deepStrictEqual(getCompanionStatus('prod-uninst'), { state: 'inactive' },
+    // WARDEN-1475 CONTRACT CHANGE: the state half of this pin is UNCHANGED —
+    // `inactive` is still the whole verdict, and the death write still must not
+    // survive a removal. What is ADDITIVE is the `reason`: a removal now
+    // records a durable no-bootstrap fact (so the next lifecycle tick cannot
+    // silently re-install the binary), and the host-row indicator reads that
+    // reason so the dark channel says WHY instead of looking broken. Asserted
+    // as the EXACT shape, not loosened, so a future change to it is visible.
+    assert.deepStrictEqual(getCompanionStatus('prod-uninst'), { state: 'inactive', reason: 'excluded-by-setting' },
       'the death write must not survive — let alone resurrect — a deliberately removed host');
   });
 
@@ -2466,14 +2508,24 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
 });
 describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => {
   let savedEnv;
+  // WARDEN-1475: a successful uninstall now live-applies a durable exclusion
+  // (applyCompanionExclusions writes the process env gate), so this suite must
+  // save/restore that env too or its writes leak into every later suite.
+  let savedExclusionEnv;
   beforeEach(() => {
     savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
     process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+    applyCompanionExclusions([]);
     _resetChannelCacheForTests();
   });
   afterEach(() => {
     if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
     else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    applyCompanionExclusions([]);
+    if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+    else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
   });
 
   // A transport that answers ping (bootstrap succeeds) and ACKs every other op.
@@ -2597,13 +2649,15 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
     await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
     assert.ok(_getCompanionOpsForTests().has('ops-uninstalled'), 'precondition: tally exists');
 
-    await uninstallCompanion('ops-uninstalled', {}, {
+    await uninstallCompanion('ops-uninstalled', { companionExcludedHosts: [] }, {
       manifest: TEST_MANIFEST,
       run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
     });
     assert.strictEqual(_getCompanionOpsForTests().get('ops-uninstalled'), undefined,
       'the tally is cleared with the status');
-    assert.deepStrictEqual(getCompanionStatus('ops-uninstalled'), { state: 'inactive' });
+    // WARDEN-1475: `inactive` is unchanged; the ADDITIVE `reason` is the durable
+    // removal now recorded as a no-bootstrap fact (see the uninstall suite).
+    assert.deepStrictEqual(getCompanionStatus('ops-uninstalled'), { state: 'inactive', reason: 'excluded-by-setting' });
   });
 
   it('channel death does NOT clear the tally (a process-lifetime signal, by design)', async () => {
@@ -2647,7 +2701,23 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
 });
 
 describe('uninstallCompanion() (WARDEN-882 Removability — companion-or-fail)', () => {
-  beforeEach(() => _resetChannelCacheForTests());
+  // WARDEN-1475: a successful uninstall now records a DURABLE no-bootstrap fact
+  // and live-applies it to the process env gate, so this suite must save/restore
+  // that env or its writes leak into every later suite. Each test that drives a
+  // successful removal passes its own `cfg` ({companionExcludedHosts: []}) so the
+  // recording lands on a scratch object rather than a shared one.
+  let savedExclusionEnv;
+  before(() => { savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS; });
+  beforeEach(() => {
+    process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
+    applyCompanionExclusions([]);
+    _resetChannelCacheForTests();
+  });
+  after(() => {
+    applyCompanionExclusions([]);
+    if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
+    else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
+  });
 
   it('tears down the cached channel for the host BEFORE the script runs, then runs it via runFn with the right path', async () => {
     // Seed the cache with a real live channel (the state uninstall must clear).
@@ -2757,13 +2827,18 @@ describe('uninstallCompanion() (WARDEN-882 Removability — companion-or-fail)',
         { state: 'active', version: TEST_VER },
         'precondition: the host reads active with a version before removal');
 
-      const res = await uninstallCompanion('prod-status-clear', {}, {
+      const res = await uninstallCompanion('prod-status-clear', { companionExcludedHosts: [] }, {
         manifest: TEST_MANIFEST,
         run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
       });
       assert.strictEqual(res.ok, true, 'removal succeeded');
 
-      assert.deepStrictEqual(getCompanionStatus('prod-status-clear'), { state: 'inactive' },
+      // WARDEN-1475: `inactive` is unchanged — the companion IS absent. The
+      // ADDITIVE `reason` is the durable no-bootstrap fact the removal now
+      // records, which is what stops the next lifecycle tick re-installing the
+      // binary; the host row renders it as "excluded" so the dark channel says
+      // WHY rather than looking broken.
+      assert.deepStrictEqual(getCompanionStatus('prod-status-clear'), { state: 'inactive', reason: 'excluded-by-setting' },
         'the host-status surface reads inactive (companion absent) after removal');
       assert.ok(!('prod-status-clear' in getAllCompanionStatuses()),
         'the removed host is gone from the all-hosts status map too (no stale version leaks)');
@@ -2781,12 +2856,16 @@ describe('uninstallCompanion() (WARDEN-882 Removability — companion-or-fail)',
       await getChannel('host-removed', {}, bootDeps);
       await getChannel('host-kept', {}, bootDeps);
 
-      await uninstallCompanion('host-removed', {}, {
+      await uninstallCompanion('host-removed', { companionExcludedHosts: [] }, {
         manifest: TEST_MANIFEST,
         run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
       });
 
-      assert.deepStrictEqual(getCompanionStatus('host-removed'), { state: 'inactive' },
+      // WARDEN-1475: the removed host's `reason` is ADDITIVE (the durable
+      // no-bootstrap fact); the per-host scoping this test exists to pin is
+      // unchanged and now covers the new fact too — the untouched host is
+      // neither darkened nor excluded.
+      assert.deepStrictEqual(getCompanionStatus('host-removed'), { state: 'inactive', reason: 'excluded-by-setting' },
         'the targeted host reads absent');
       assert.deepStrictEqual(getCompanionStatus('host-kept'), { state: 'active', version: TEST_VER },
         'an untouched host keeps its active status — uninstall is not a global clear');
