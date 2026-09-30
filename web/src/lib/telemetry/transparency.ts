@@ -96,6 +96,13 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   // the shape, and the validator rejects any key outside this list (the
   // structural hard-exclusion proof for the type).
   'workspace-shape': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'workspaces', 'panesOpen', 'panesActive', 'chats', 'peakPanesOpen', 'peakChats'],
+  // WARDEN-1479 — the feature-adoption category's carrying event: the
+  // bounded closed-set capability name + use-count map. The ONLY strings in
+  // the shape are the closed-set kebab capability names (validator-enforced
+  // pattern, same discipline as operation/culprit keys) — never a chat name,
+  // never content, never a path. Disclosed field-by-field like every other
+  // type — the panel's contract is to name exactly what leaves.
+  'feature-usage': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'features'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the
@@ -256,6 +263,44 @@ function isValidWorkspaceShapeShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// WARDEN-1479 — the `feature-usage` shape check, mirroring the canonical
+// schema's isFeatureUsageShape: a closed key set over a kebab-name +
+// positive-count map, pinned to the renderer runtime. Like the
+// operational-metrics arm below the shape check, the identifier proof runs
+// over the ONLY strings the type carries (the capability names must be
+// kebab-case literals AND identifier-free, so no path/hostname can ride one).
+const FEATURE_USAGE_KEYS = new Set([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt', 'features',
+]);
+const FEATURE_USAGE_NAME_RE = OPERATION_NAME_RE;
+const MAX_FEATURE_USAGE_FEATURES = 64;
+
+function isValidFeatureUsageShape(e: Record<string, unknown>): boolean {
+  const finiteNonNegative = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (e.runtime !== 'renderer') return false;
+  for (const k of Object.keys(e)) {
+    if (!FEATURE_USAGE_KEYS.has(k)) return false;
+  }
+  if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
+  if (!Array.isArray(e.features) || e.features.length === 0 || e.features.length > MAX_FEATURE_USAGE_FEATURES) return false;
+  const seen = new Set<string>();
+  const rowKeys = new Set(['name', 'count']);
+  for (const f of e.features as unknown[]) {
+    if (!f || typeof f !== 'object') return false;
+    const o = f as Record<string, unknown>;
+    for (const k of Object.keys(o)) {
+      if (!rowKeys.has(k)) return false;
+    }
+    if (typeof o.name !== 'string' || !FEATURE_USAGE_NAME_RE.test(o.name)) return false;
+    if (!Number.isInteger(o.count) || (o.count as number) <= 0) return false;
+    if (seen.has(o.name as string)) return false;
+    seen.add(o.name as string);
+  }
+  return true;
+}
+
 /**
  * Base-event schema conformance — a LOCAL copy mirroring the
  * `validateBaseEvent` proof shape from telemetry-source.cjs:212-244. Returns
@@ -317,6 +362,16 @@ export function isValidBaseEvent(event: unknown): boolean {
     // field in the type to run the identifier proof over — the shape check IS
     // the hard-exclusion proof for this type.
     if (!isValidWorkspaceShapeShape(e)) return false;
+  } else if (e.type === 'feature-usage') {
+    // WARDEN-1479 — the feature-adoption category's carrying event: shape-check
+    // per the canonical schema PLUS this module's hard-exclusion proof extended
+    // to the ONLY strings the type carries — the capability names must be
+    // kebab-case literals, so a path/hostname/chat name can never ride the
+    // name axis.
+    if (!isValidFeatureUsageShape(e)) return false;
+    for (const f of e.features as unknown[]) {
+      if (containsIdentifier(String((f as Record<string, unknown>).name))) return false;
+    }
   }
   // Hard-exclusion proof: the redacted message must be free of any identifier;
   // structured frame fields must be free of paths (a bare filename basename is

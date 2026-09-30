@@ -326,6 +326,10 @@ test('every field the affordance is wired to exists in the registry', () => {
     'webhookEnabled', 'webhookUrl', 'webhookAlertBudget', 'webhookAlertDone',
     'telemetryEndpoint', 'telemetryIncidentsEnabled', 'telemetryNamesEnabled',
     'telemetryOperationalMetricsEnabled',
+    // WARDEN-1479 — the fourth consent category's key, appended in registry
+    // order after telemetryOperationalMetricsEnabled (never inserted into the
+    // pinned order above).
+    'telemetryFeatureAdoptionEnabled',
     'tmuxSession', 'connectTimeout',
   ];
   for (const path of wiredPaths) {

@@ -75,6 +75,7 @@ import {
   useTerminalColorScheme,
   useSetTerminalColorScheme,
 } from '@/lib/uiStore';
+import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { type AppearancePrefs } from '../types';
 
 export type AppearanceSectionProps = AppearancePrefs & { hidden: boolean };
@@ -254,7 +255,7 @@ export function AppearanceSection(props: AppearanceSectionProps) {
           <Label htmlFor="theme">Theme</Label>
           <ClientPrefResetToDefaultButton label="Theme" prefKey="theme" value={theme} setter={setTheme} />
         </div>
-        <Select value={theme} onValueChange={(v) => setTheme(v as typeof theme)}>
+        <Select value={theme} onValueChange={(v) => { getFeatureUsageSampler().sampler.recordFeatureUse('theme-change'); setTheme(v as typeof theme); }}>
           <SelectTrigger id="theme" className="w-full">
             <SelectValue />
           </SelectTrigger>

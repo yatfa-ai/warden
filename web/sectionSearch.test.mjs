@@ -229,6 +229,7 @@ const SHIPPED_LABELS = [
   ['telemetry', 'Anonymous errors, crashes & freezes', 'src/lib/telemetry/consent.ts'],
   ['telemetry', 'Chat & session names', 'src/lib/telemetry/consent.ts'],
   ['telemetry', 'Operational metrics', 'src/lib/telemetry/consent.ts'],
+  ['telemetry', 'Feature adoption', 'src/lib/telemetry/consent.ts'],
   ['telemetry', 'Receiver endpoint'],
   ['telemetry', 'Receiver auth token (optional)'],
 

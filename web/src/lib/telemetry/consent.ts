@@ -37,7 +37,7 @@
 // ---------------------------------------------------------------------------
 
 /** A telemetry collection category. Each one is an independent user choice. */
-export type TelemetryCategory = 'incidents' | 'names' | 'operational-metrics';
+export type TelemetryCategory = 'incidents' | 'names' | 'operational-metrics' | 'feature-adoption';
 
 /**
  * How a category relates to the payload:
@@ -88,7 +88,8 @@ export interface LegacyConsentSource {
 export type TelemetryConsentConfigKey =
   | 'telemetryIncidentsEnabled'
   | 'telemetryNamesEnabled'
-  | 'telemetryOperationalMetricsEnabled';
+  | 'telemetryOperationalMetricsEnabled'
+  | 'telemetryFeatureAdoptionEnabled';
 
 export interface TelemetryCategoryDescriptor {
   /** Stable identifier — the key in a {@link TelemetryConsent} map. */
@@ -188,6 +189,34 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategoryDescriptor[] = Obje
     summary:
       'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
     eventTypes: Object.freeze(['operational-metrics', 'workspace-shape']),
+    gatedFields: Object.freeze([]),
+  }),
+  // WARDEN-1479 — the design's LAST unbuilt consent category gets its carrying
+  // event: the 2026-08-19 authorization (WARDEN-443) names feature adoption
+  // verbatim as approved scope, and until now this entry did not exist, so
+  // the category it describes could not be consented to at all. Collects
+  // AGGREGATES ONLY: bounded counts of which CLOSED-SET app capabilities the
+  // user exercised (global search, settings, pane maximize, panel expands,
+  // workspace switch/create, chat spawn, theme change), folded into the same
+  // 5-minute window every producer on this channel closes on. Counts of named
+  // capabilities only — never chat names, never content, never paths, never
+  // credentials; the capability names are constant kebab-case literals the
+  // schema's validator enforces, so no arbitrary string can ride one. A
+  // window in which nothing was exercised sends NOTHING (count-driven
+  // silence) — feature-usage is not a liveness signal, and the producer says
+  // so honestly. It rides ONLY this category: its own conscious opt-in,
+  // never folded into a metrics category. Legacy is empty like
+  // operational-metrics: younger than the WARDEN-1116 migration, there is no
+  // old key to fold forward from.
+  Object.freeze({
+    id: 'feature-adoption' as const,
+    configKey: 'telemetryFeatureAdoptionEnabled' as const,
+    legacy: Object.freeze({}) as LegacyConsentSource,
+    role: 'collecting' as const,
+    label: 'Feature adoption',
+    summary:
+      'Aggregate counts of which app capabilities you use — opens and invocations like search, settings, panels — in bounded 5-minute windows; counts of named capabilities only, never chat names, content, paths, or credentials.',
+    eventTypes: Object.freeze(['feature-usage']),
     gatedFields: Object.freeze([]),
   }),
 ]);

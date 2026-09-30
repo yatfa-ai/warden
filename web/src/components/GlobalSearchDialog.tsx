@@ -23,6 +23,7 @@ import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
 import { fetchBounded, readErrorBody } from '@/lib/api';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
+import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 // A pane grep hit from /api/search-pane (the default, instant leg). Renamed from
@@ -208,7 +209,12 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   // a DOM query, and Radix's own open-auto-focus is disabled so they don't race
   // (mirrors the sibling and the WARDEN-68 file-path entry dialog pattern).
   useEffect(() => {
-    if (open) inputRef.current?.focus();
+    if (open) {
+      // WARDEN-1479 — the feature-adoption seed: opening global search is one
+      // use of the capability (counts only; closed-set literal).
+      getFeatureUsageSampler().sampler.recordFeatureUse('global-search');
+      inputRef.current?.focus();
+    }
   }, [open]);
 
   const doSearch = async () => {

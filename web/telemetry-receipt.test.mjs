@@ -1,5 +1,5 @@
 // WARDEN-1468 — tests for electron/telemetry-receipt.cjs (createWindowReceipt),
-// the ONE consent-gated "window receipt" the five main.cjs receipts collapse
+// the ONE consent-gated "window receipt" the six main.cjs receipts collapse
 // onto, PLUS the static source guard for main.cjs's half of the wiring.
 //
 // WHY THIS FILE EXISTS: `electron/main.cjs` hand-wrote the same consent-gate →
@@ -172,6 +172,12 @@ const RECEIPTS = [
   { fn: 'recordWorkspaceShapeWindow', call: "receiveTelemetryWindow('operational-metrics', buildWorkspaceShapeEvent, snapshot)" },
   { fn: 'recordServerStallWindow', call: "receiveTelemetryWindow('incidents', buildServerStallEvent, snapshot)" },
   { fn: 'recordWorkspaceNamesWindow', call: "receiveTelemetryWindow('names', buildWorkspaceNamesEvent, snapshot)" },
+  // WARDEN-1479 — the SIXTH receipt: the feature-adoption category's carrying
+  // event. `feature-adoption` is its own consent boundary (never folded into
+  // a metrics category); the builder is the usage-event module; the extra
+  // `runtime: 'renderer'` states the origin runtime beside its sibling
+  // renderer receipts (the builder pins the same value).
+  { fn: 'recordFeatureUsageWindow', call: "receiveTelemetryWindow('feature-adoption', buildFeatureUsageEvent, snapshot, { runtime: 'renderer' })" },
 ];
 
 // Extract ONE named function's body: `function <name>(snapshot) {` through the
@@ -182,7 +188,7 @@ function fnBody(name) {
   return m[0];
 }
 
-test('anchors: the shared receiver, its require, and all five named receipts are present', () => {
+test('anchors: the shared receiver, its require, and all six named receipts are present', () => {
   for (const anchor of [
     "require('./telemetry-receipt.cjs')",
     'const receiveTelemetryWindow = createWindowReceipt({',
@@ -192,7 +198,7 @@ test('anchors: the shared receiver, its require, and all five named receipts are
   }
 });
 
-test('the receiver is constructed exactly once (ONE receipt, not a sixth hand-copy)', () => {
+test('the receiver is constructed exactly once (ONE receipt, never a re-hand-copied one)', () => {
   const count = mainSrc.split('createWindowReceipt(').length - 1;
   assert.equal(count, 1, `expected exactly one createWindowReceipt construction in main.cjs, found ${count}`);
 });
@@ -219,7 +225,7 @@ test('the receiver wires the same seams the removed hand-copies used', () => {
   );
 });
 
-test('each of the five named receipts routes through the shared receiver with its CURRENT category → builder pair', () => {
+test('each of the six named receipts routes through the shared receiver with its CURRENT category → builder pair', () => {
   for (const { fn, call } of RECEIPTS) {
     const body = fnBody(fn);
     assert.ok(

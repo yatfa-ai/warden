@@ -81,6 +81,26 @@ const TELEMETRY_CATEGORIES = Object.freeze([
     eventTypes: Object.freeze(['operational-metrics', 'workspace-shape']),
     gatedFields: Object.freeze([]),
   }),
+  // WARDEN-1479 — the design's LAST unbuilt consent category gets its carrying
+  // event. Mirrors the canonical entry in web/src/lib/telemetry/consent.ts
+  // verbatim (the parity test pins the pair). Collects AGGREGATES ONLY:
+  // bounded counts of which CLOSED-SET app capabilities the user exercised,
+  // folded into 5-minute windows; counts of named capabilities only, never
+  // chat names, content, paths, or credentials. A window in which nothing
+  // was exercised sends NOTHING (count-driven silence — feature-usage is
+  // not a liveness signal). It rides ONLY this category. Legacy is empty
+  // like operational-metrics: younger than the WARDEN-1116 migration.
+  Object.freeze({
+    id: 'feature-adoption',
+    configKey: 'telemetryFeatureAdoptionEnabled',
+    legacy: Object.freeze({}),
+    role: 'collecting',
+    label: 'Feature adoption',
+    summary:
+      'Aggregate counts of which app capabilities you use — opens and invocations like search, settings, panels — in bounded 5-minute windows; counts of named capabilities only, never chat names, content, paths, or credentials.',
+    eventTypes: Object.freeze(['feature-usage']),
+    gatedFields: Object.freeze([]),
+  }),
 ]);
 
 const TELEMETRY_CATEGORY_IDS = Object.freeze(TELEMETRY_CATEGORIES.map((c) => c.id));

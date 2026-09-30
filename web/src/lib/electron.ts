@@ -303,6 +303,7 @@ interface WardenTelemetryBridge {
   // Fire-and-forget (send); MAIN is the consent gate (the receipt handler
   // refuses the operational-metrics category, the mid-flip re-check).
   reportWorkspaceShape: (snapshot: unknown) => void;
+  reportFeatureUsage: (snapshot: unknown) => void;
 }
 
 /** A renderer-process error serialized for the telemetry forward (WARDEN-637). */
@@ -532,6 +533,21 @@ export function forwardWorkspaceShape(snapshot: unknown): void {
     b.reportWorkspaceShape(snapshot);
   } catch (e) {
     console.warn('[warden:electron] forwardWorkspaceShape failed', e);
+  }
+}
+
+// WARDEN-1479 — forward the renderer's closed feature-usage window (the
+// feature-adoption category's carrying event: closed-set capability names +
+// counts) to main's consent-gated receipt. Same three-context
+// feature-detection story as forwardWorkspaceShape: present only inside the
+// Electron desktop app, a clean no-op in browser/dev/smoke hosts.
+export function forwardFeatureUsage(snapshot: unknown): void {
+  const b = telemetryBridge();
+  if (!b || typeof b.reportFeatureUsage !== 'function') return;
+  try {
+    b.reportFeatureUsage(snapshot);
+  } catch (e) {
+    console.warn('[warden:electron] forwardFeatureUsage failed', e);
   }
 }
 

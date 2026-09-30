@@ -44,7 +44,7 @@ const { createTelemetryClient } = await import(join(tmpDir, 'client.mjs'));
 const { SCHEMA_VERSION } = await import(join(tmpDir, 'schema.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
-const ALL_OFF = { incidents: false, names: false, 'operational-metrics': false };
+const ALL_OFF = { incidents: false, names: false, 'operational-metrics': false, 'feature-adoption': false };
 
 let passed = 0;
 const test = (name, fn) => {
@@ -158,7 +158,7 @@ test('enabling `names` alone COLLECTS its own event but NOT another category\'s 
   // never carries an INCIDENTS event.
   const c = createTelemetryClient();
   const applied = c.setCategory('names', true);
-  assert.deepEqual({ ...applied }, { incidents: false, names: true, 'operational-metrics': false },
+  assert.deepEqual({ ...applied }, { incidents: false, names: true, 'operational-metrics': false, 'feature-adoption': false },
     'the user\'s choice is stored VERBATIM — not silently clamped back off');
   assert.equal(c.isCollecting(), true, 'names now collects its own event');
   assert.equal(c.record(errorEvent), false, 'but an INCIDENTS event is still refused');
@@ -170,14 +170,14 @@ test('enabling `names` alone COLLECTS its own event but NOT another category\'s 
 test('setConsent({ names:true }) leaves every other category exactly as it was', () => {
   const c = createTelemetryClient();
   c.setConsent({ names: true });
-  assert.deepEqual({ ...c.getConsent() }, { incidents: false, names: true, 'operational-metrics': false },
+  assert.deepEqual({ ...c.getConsent() }, { incidents: false, names: true, 'operational-metrics': false, 'feature-adoption': false },
     'turning one category on never turns another on');
 });
 
 test('setConsent({ incidents:true, names:true }) enables both', () => {
   const c = createTelemetryClient();
   const applied = c.setConsent({ incidents: true, names: true });
-  assert.deepEqual({ ...applied }, { incidents: true, names: true, 'operational-metrics': false });
+  assert.deepEqual({ ...applied }, { incidents: true, names: true, 'operational-metrics': false, 'feature-adoption': false });
   assert.equal(c.isCollecting(), true);
 });
 
@@ -185,7 +185,7 @@ test('revoking `incidents` does NOT revoke `names` (no subordination)', () => {
   const c = createTelemetryClient();
   c.setConsent({ incidents: true, names: true });
   const applied = c.setCategory('incidents', false);
-  assert.deepEqual({ ...applied }, { incidents: false, names: true, 'operational-metrics': false },
+  assert.deepEqual({ ...applied }, { incidents: false, names: true, 'operational-metrics': false, 'feature-adoption': false },
     'names survives — it was never subordinate to incidents');
   // WARDEN-1416 — names still collects its OWN event, but the revoked
   // category's event type is refused immediately (no restart, no clamp).
@@ -197,7 +197,7 @@ test('revoking `names` does NOT revoke `incidents`', () => {
   const c = createTelemetryClient();
   c.setConsent({ incidents: true, names: true });
   const applied = c.setCategory('names', false);
-  assert.deepEqual({ ...applied }, { incidents: true, names: false, 'operational-metrics': false });
+  assert.deepEqual({ ...applied }, { incidents: true, names: false, 'operational-metrics': false, 'feature-adoption': false });
   assert.equal(c.isCollecting(), true, 'incidents keeps collecting');
 });
 
@@ -205,7 +205,7 @@ test('each category toggles independently, in any order, with no ordering depend
   const c = createTelemetryClient();
   assert.equal(c.setCategory('names', true).names, true, 'names can be set FIRST');
   assert.equal(c.setCategory('incidents', true).names, true, 'and survives incidents being set after');
-  assert.deepEqual({ ...c.getConsent() }, { incidents: true, names: true, 'operational-metrics': false });
+  assert.deepEqual({ ...c.getConsent() }, { incidents: true, names: true, 'operational-metrics': false, 'feature-adoption': false });
 });
 
 // ==========================================================================
