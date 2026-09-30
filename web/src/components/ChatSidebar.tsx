@@ -32,7 +32,8 @@ import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import type { RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed } from '@/lib/uiStore';
+import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
 import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { Chat, Collection } from '@/lib/types';
@@ -124,8 +125,6 @@ export interface ChatSidebarProps {
   discoverErrors: Record<string, string>;
   /** ids just saved from the closed-temp flyout — the one-shot "saved" pill. */
   recentlySavedIds: Set<string>;
-  sourceControlCollapsed?: boolean;
-  onSourceControlCollapsedChange?: (collapsed: boolean) => void;
   /** Forward poll cadence to the FileViewer (unchanged from the pre-rebuild sidebar). */
   pollIntervalMs: number;
 }
@@ -135,7 +134,7 @@ type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: '
 export function ChatSidebar({
   chats, tempChats, hosts, recentlyClosed, focused, onOpenChat, onSpawnShell, onSaveSession,
   onReopenClosed, onRespawn, onKill, onRename, onRefresh, onDiscoverHost, loading,
-  hostStatuses, discoverErrors, recentlySavedIds, sourceControlCollapsed, onSourceControlCollapsedChange, pollIntervalMs,
+  hostStatuses, discoverErrors, recentlySavedIds, pollIntervalMs,
 }: ChatSidebarProps) {
   const [view, setView] = useState<SidebarView>({ kind: 'root' });
   const [flyoutOpen, setFlyoutOpen] = useState(false);
@@ -149,6 +148,8 @@ export function ChatSidebar({
   // loading skeletons in the host view.
   const [enteringHost, setEnteringHost] = useState<string | null>(null);
   const hostLabels = useHostLabels();
+  const sourceControlCollapsed = useSourceControlCollapsed();
+  const setSourceControlCollapsed = useSetSourceControlCollapsed();
   const { prefs } = useNotificationPrefs();
 
   // Per-agent notes (WARDEN-305): keyed by chat id; load on mount, write per-key.
@@ -579,8 +580,13 @@ export function ChatSidebar({
               outgoingLoading={focused ? gitLogOutgoingLoading[focused] : undefined}
               outgoingError={focused ? gitLogOutgoingError[focused] : undefined}
               onFetchOutgoing={() => { if (focused) void fetchGitLogOutgoing(focused); }}
-              collapsed={!!sourceControlCollapsed}
-              onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}
+              collapsed={sourceControlCollapsed}
+              onCollapsedChange={(c) => {
+                // WARDEN-1479 — the feature-adoption seed: the EXPAND direction
+                // of the source-control panel is one use of the capability.
+                if (!c) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-source-control');
+                setSourceControlCollapsed(c);
+              }}
             />
           </div>
           <div className="h-2.5" />

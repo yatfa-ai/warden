@@ -92,7 +92,7 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 31 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 32 STORE_PERSISTED_KEYS
   // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
   // keys (workspaces / activeWorkspaceId / paneHost, the four panel collapses,
   // the two panel widths, watchedChats) plus every DEFAULT_UI field the merged
@@ -2504,6 +2504,74 @@ test('STORE_PERSISTED_KEYS partitions PERSISTED_PREF_KEYS: no duplicates, every 
     persistedKeys,
     'STORE_PERSISTED_KEYS ∪ (PERSISTED_PREF_KEYS − STORE_PERSISTED_KEYS) must reconstruct PERSISTED_PREF_KEYS',
   );
+});
+
+// ─── sourceControlCollapsed (WARDEN-1486, roadmap WARDEN-1204 slice 18) ───
+//
+// The sidebar's Source Control section collapse — the LAST cross-component
+// persisted prop pair (App useState → ChatSidebar props + a `?? (() => {})`
+// silent no-op fallback). ChatSidebar now subscribes to the store directly.
+// storage.ts still owns shape/default/sanitizer/RESET_PRESERVED_KEYS.
+console.log('\ncreateUiStore — sourceControlCollapsed seeds from storage.ts, never from a re-declared default');
+test('a fresh store seeds sourceControlCollapsed from DEFAULT_UI (collapsed, WARDEN-1422)', () => {
+  reset();
+  const s = createUiStore().getState();
+  assert.equal(s.sourceControlCollapsed, true);
+  assert.equal(s.sourceControlCollapsed, DEFAULT_UI.sourceControlCollapsed);
+});
+test('a fresh store seeds from the PERSISTED payload; an explicit seed overrides it', () => {
+  reset();
+  saveUi({ ...loadUi(), sourceControlCollapsed: false });
+  assert.equal(createUiStore().getState().sourceControlCollapsed, false);
+  assert.equal(createUiStore({ sourceControlCollapsed: true }).getState().sourceControlCollapsed, true);
+});
+test('setSourceControlCollapsed toggles the fact, notifies subscribers, and writes NOTHING to localStorage', () => {
+  reset();
+  const store = createUiStore();
+  const seen = [];
+  const unsubscribe = store.subscribe((s) => seen.push(s.sourceControlCollapsed));
+  store.getState().setSourceControlCollapsed(false);
+  store.getState().setSourceControlCollapsed(true);
+  unsubscribe();
+  assert.deepEqual(seen, [false, true]);
+  assert.equal(mem.get('warden:ui:v3'), undefined, 'single-writer: the saveUi effect owns the write');
+});
+test('the setter identity is stable across writes (safe in a React dep array)', () => {
+  reset();
+  const store = createUiStore();
+  const before = store.getState().setSourceControlCollapsed;
+  before(false);
+  assert.equal(store.getState().setSourceControlCollapsed, before);
+});
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (32 keys) and rides selectPersistedStorePrefs", () => {
+  reset();
+  assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
+  assert.equal(STORE_PERSISTED_KEYS.length, 32);
+  const store = createUiStore({ sourceControlCollapsed: false });
+  const picked = selectPersistedStorePrefs(store.getState());
+  assert.equal(Object.keys(picked).length, 32);
+  assert.equal(picked.sourceControlCollapsed, false);
+});
+
+console.log('\nround trip: ChatSidebar toggle → store → snapshot → the saveUi effect → loadUi');
+test('an expanded panel survives a restart through the production hop', () => {
+  reset();
+  const store = createUiStore();
+  assert.equal(store.getState().sourceControlCollapsed, true);
+  store.getState().setSourceControlCollapsed(false);
+  flushSnapshotToDisk(store);
+  assert.equal(loadUi().sourceControlCollapsed, false);
+  assert.equal(createUiStore().getState().sourceControlCollapsed, false);
+});
+test('the UI-prefs reset PRESERVES the collapse (RESET_PRESERVED_KEYS, storage.ts untouched)', () => {
+  reset();
+  const defaults = resetUiPrefDefaults();
+  assert.ok(!('sourceControlCollapsed' in defaults), 'sourceControlCollapsed must stay in RESET_PRESERVED_KEYS — a defaults entry means it left the preserved set');
+  const store = createUiStore({ sourceControlCollapsed: false });
+  const s = store.getState();
+  s.setTheme(defaults.theme);
+  flushSnapshotToDisk(store);
+  assert.equal(loadUi().sourceControlCollapsed, false);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

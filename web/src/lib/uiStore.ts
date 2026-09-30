@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 31 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 32 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -449,6 +449,21 @@ export interface UiStoreState {
   /** Commit the row ratios (PaneGrid pointerUp). The persisted write follows via useConfigPersistence's merged snapshot. */
   setPaneRowRatios: (v: number[]) => void;
   /**
+   * The sidebar's Source Control section collapse (WARDEN-431 / WARDEN-1422,
+   * roadmap WARDEN-1204 slice 18, WARDEN-1486) — a viewport affordance, not a
+   * pref: RESET_PRESERVED_KEYS keeps it across Settings → Reset (that intent
+   * lives entirely in storage.ts and is untouched), so there is deliberately
+   * NO entry for it in resetUiPrefDefaults() or App's resetSetters. It was the
+   * LAST cross-component persisted prop pair: App owned the useState and
+   * threaded it into ChatSidebar as `sourceControlCollapsed` +
+   * `onSourceControlCollapsedChange` (whose `?? (() => {})` fallback silently
+   * swallowed a toggle). ChatSidebar (sole reader AND writer) now subscribes
+   * here directly. Default `true` (collapsed — git status is job D, WARDEN-1422).
+   */
+  sourceControlCollapsed: boolean;
+  /** Set the source-control collapse. The persisted write follows via useConfigPersistence's merged snapshot. */
+  setSourceControlCollapsed: (collapsed: boolean) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -499,7 +514,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 31 persisted facts migrated onto the store by slices 1–15.
+ * owns — exactly the 32 persisted facts migrated onto the store by slices 1–15 and 18.
  *
  * WHAT IT IS FOR
  * ──────────────
@@ -565,10 +580,11 @@ export const STORE_PERSISTED_KEYS = [
   'healthCollapsedHosts',
   'paneColRatios',
   'paneRowRatios',
+  'sourceControlCollapsed',
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 31
+ * The store half of the persisted snapshot: a pure projection of those 32
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -615,6 +631,7 @@ export function selectPersistedStorePrefs(
     healthCollapsedHosts: state.healthCollapsedHosts,
     paneColRatios: state.paneColRatios,
     paneRowRatios: state.paneRowRatios,
+    sourceControlCollapsed: state.sourceControlCollapsed,
   };
 }
 
@@ -715,6 +732,7 @@ export type UiStoreSeed = Partial<
     | 'healthCollapsedHosts'
     | 'paneColRatios'
     | 'paneRowRatios'
+    | 'sourceControlCollapsed'
     | 'observerViewMode'
     | 'observerActivityFilters'
     | 'observerDirectiveFilters'
@@ -870,6 +888,12 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setPaneColRatios: (paneColRatios) => set({ paneColRatios }),
     paneRowRatios: seed.paneRowRatios ?? persisted.paneRowRatios ?? [],
     setPaneRowRatios: (paneRowRatios) => set({ paneRowRatios }),
+    // WARDEN-1486 (roadmap WARDEN-1204 slice 18): ??-only, mirroring App's
+    // retired `useState(uiState.sourceControlCollapsed ?? true)` — the literal
+    // mirrors DEFAULT_UI (storage.ts, collapsed since WARDEN-1422), and loadUi's
+    // own sanitizer already accepts only a stored boolean.
+    sourceControlCollapsed: seed.sourceControlCollapsed ?? persisted.sourceControlCollapsed ?? true,
+    setSourceControlCollapsed: (sourceControlCollapsed) => set({ sourceControlCollapsed }),
     // WARDEN-1441 (roadmap WARDEN-1204 slice 15): the Observer panel's four
     // view prefs — the first facts seeded from the SECOND storage namespace
     // (ObsUi / warden:observer:v1, `persistedObs` above), ??-only like every
@@ -1469,4 +1493,23 @@ export function useSetObserverAttentionFilters(): (
   v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>,
 ) => void {
   return useUiStore((s) => s.setObserverAttentionFilters);
+}
+
+/**
+ * The sidebar's Source Control section collapse (WARDEN-431 / WARDEN-1422,
+ * roadmap WARDEN-1204 slice 18). ChatSidebar subscribes here instead of
+ * receiving it (plus a change callback) from App — the last cross-component
+ * persisted prop pair.
+ */
+export function useSourceControlCollapsed(): boolean {
+  return useUiStore((s) => s.sourceControlCollapsed);
+}
+
+/**
+ * The collapse setter (ChatSidebar's SourceControlPanel toggle is the only
+ * writer). Stable across renders (zustand actions are created once with the
+ * store), so it is safe in a dependency array.
+ */
+export function useSetSourceControlCollapsed(): (collapsed: boolean) => void {
+  return useUiStore((s) => s.setSourceControlCollapsed);
 }

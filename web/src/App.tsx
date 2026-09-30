@@ -299,13 +299,11 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
-  // WARDEN-431: Source Control section collapse (the single place a focused
-  // pane's repo changes now show). A sidebar-internal section collapse, persisted
-  // by the saveUi effect below like the panel collapses above. Pure client-side
-  // pref; never sent to the backend. WARDEN-1422 moves the panel to the bottom of
-  // root as an add-on and flips the DEFAULT to collapsed — git status is job D,
-  // behind hosts and sessions in the sidebar's priority order.
-  const [sourceControlCollapsed, setSourceControlCollapsed] = useState(uiState.sourceControlCollapsed ?? true);
+  // WARDEN-431 / WARDEN-1422: the Source Control section collapse migrated onto
+  // the shared store (lib/uiStore.ts, roadmap WARDEN-1204 slice 18, WARDEN-1486)
+  // — ChatSidebar is its only reader and writer and subscribes directly, so App
+  // carries no state, prop pair, or snapshot entry for it (persistence rides the
+  // store half of the snapshot via useConfigPersistence).
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): theme/density/paneLayout/
   // autoFocusNewPane/restoreOnStartup/terminalColorScheme migrated onto the
   // shared store (lib/uiStore.ts) — AppearanceSection subscribes (it is the
@@ -376,7 +374,7 @@ function App() {
   // App-side reads: this slice-3 comment recorded the two reasons every
   // migrated fact kept an App subscription — the persisted snapshot and the
   // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
-  // 31 store facts: the snapshot's store half is subscribed once inside
+  // 32 store facts: the snapshot's store half is subscribed once inside
   // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
   // only the setters the reset partition needs. The write path is unchanged
   // end to end: store.setX → that subscription re-renders App → the merged
@@ -801,7 +799,7 @@ function App() {
   // the store half it reads itself. Typed as AppPersistedSnapshot — since
   // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
   // as useState (the workspace set, panel geometry, watchedChats, paneHost);
-  // the 31 store-owned facts are NOT re-listed here. The partition is
+  // the 32 store-owned facts are NOT re-listed here. The partition is
   // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
   // complement of the store's STORE_PERSISTED_KEYS against
   // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
@@ -809,7 +807,7 @@ function App() {
   // WARDEN-442/468/500 dropped-key class stays closed on both halves.
   const persistedSnapshot: AppPersistedSnapshot = {
     workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
-    healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth,
+    healthCollapsed, sidebarWidth, observerWidth,
     watchedChats, paneHost,
   };
 
@@ -2336,13 +2334,6 @@ function App() {
               hostStatuses={hostStatuses}
               discoverErrors={discoverErrors}
               recentlySavedIds={recentlySavedIds}
-              sourceControlCollapsed={sourceControlCollapsed}
-              onSourceControlCollapsedChange={(c) => {
-                // WARDEN-1479 — the feature-adoption seed: the EXPAND direction
-                // of the source-control panel is one use of the capability.
-                if (!c) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-source-control');
-                setSourceControlCollapsed(c);
-              }}
               pollIntervalMs={pollIntervalMs}
             />
           </ErrorBoundary>
