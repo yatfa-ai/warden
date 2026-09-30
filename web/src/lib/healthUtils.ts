@@ -217,6 +217,30 @@ export interface CompanionStatus {
   ops?: Record<string, CompanionOpTally>;
 }
 
+/**
+ * ONE definition of a /api/hosts/status wire row (WARDEN-1484). Declared against
+ * the server's actual emission: `src/hostStatus.js` `checkHost` returns
+ * `{host, status, latency_ms, error, last_check}` on every probe result, the
+ * cache layer adds `checking` for a host with no result yet ("the signal a
+ * client uses to re-poll"), and `server.js` adds `companion` while the
+ * companion transport is enabled.
+ *
+ * This is the CONTRACT at the boundary, not a render allowlist: `error` and
+ * `last_check` have no client reader today, deliberately. Carrying the full row
+ * means the next wire field is a one-line edit here instead of a hand-edit to an
+ * inline cast (the WARDEN-878 / WARDEN-1312 no-op-at-the-UI trap). `companion`
+ * stays `unknown` on the wire and is normalized by `normalizeCompanionStatus`.
+ */
+export interface HostStatusRow {
+  host: string;
+  status?: string;
+  latency_ms?: number | null;
+  error?: string;
+  last_check?: string | null;
+  checking?: boolean;
+  companion?: unknown;
+}
+
 export interface HostConnectivity {
   status: HostConnectivityStatus;
   latency_ms: number | null;
@@ -301,17 +325,13 @@ function normalizeCompanionOps(raw: unknown): Record<string, CompanionOpTally> |
  * client into re-polling forever.
  */
 export function shouldScheduleCheckingRetry(
-  hosts: unknown,
+  hosts: readonly HostStatusRow[] | undefined,
   state: { subscribers: number; retryPending: boolean },
 ): boolean {
   if (state.subscribers <= 0) return false;
   if (state.retryPending) return false;
   if (!Array.isArray(hosts)) return false;
-  return hosts.some((h) => {
-    if (!h || typeof h !== 'object') return false;
-    const row = h as { host?: unknown; checking?: unknown };
-    return typeof row.host === 'string' && Boolean(row.checking);
-  });
+  return hosts.some((row) => Boolean(row) && typeof row.host === 'string' && Boolean(row.checking));
 }
 
 /**
