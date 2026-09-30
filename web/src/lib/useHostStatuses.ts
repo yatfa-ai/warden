@@ -22,7 +22,7 @@
 //     `shouldScheduleCheckingRetry` (unit-tested in web/healthUtils.test.mjs).
 
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import type { HostConnectivity, HostConnectivityStatus } from '@/lib/healthUtils';
+import type { HostConnectivity, HostConnectivityStatus, HostStatusRow } from '@/lib/healthUtils';
 import { normalizeCompanionStatus, shouldScheduleCheckingRetry } from '@/lib/healthUtils';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 
@@ -52,9 +52,11 @@ export const HOST_STATUSES_KEY = 'host-statuses' as const;
 export interface HostStatusesData {
   /** host -> connectivity, exactly what consumers render. */
   statuses: Record<string, HostConnectivity>;
-  /** The coerced raw host rows, kept so the checking-retry predicate (which
-   * reads the raw `checking` flag dropped during normalization) can run. */
-  hosts: unknown[];
+  /** The full typed wire rows (`HostStatusRow`, incl. `checking`, `error`,
+   * `last_check`), kept losslessly so the checking-retry predicate can read the
+   * `checking` flag the `statuses` map does not carry. `error`/`last_check` have
+   * no client reader yet by design: the row type is the boundary contract. */
+  hosts: HostStatusRow[];
 }
 
 function normalizeStatus(raw: string | undefined): HostConnectivityStatus {
@@ -66,10 +68,12 @@ export async function fetchHostStatuses(): Promise<HostStatusesData> {
   const res = await fetchBounded('/api/hosts/status', FETCH_OPTS);
   if (!res.ok) throw new Error(`hosts/status ${res.status}`);
   const data = await res.json();
-  const hosts = Array.isArray(data?.hosts) ? data.hosts : [];
+  const wireRows: HostStatusRow[] = Array.isArray(data?.hosts) ? data.hosts : [];
+  const hosts: HostStatusRow[] = [];
   const statuses: Record<string, HostConnectivity> = {};
-  for (const h of hosts as Array<{ host: string; status?: string; latency_ms?: number | null; companion?: unknown }>) {
+  for (const h of wireRows) {
     if (!h || typeof h.host !== 'string') continue;
+    hosts.push(h);
     // WARDEN-878: carry the per-host companion field through when the server
     // emitted it (present only while the transport is enabled). Absent → the
     // field stays undefined and the UI renders no companion indicator.
