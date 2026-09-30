@@ -85,8 +85,8 @@ export function useObsPersistence() {
   // of the four values actually changes (plus the initial mount, which writes
   // back exactly what the store seeded from loadObs() — an inert no-op unless
   // disk has drifted).
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design: the dep set is every value of the ObsUi store half (one per OBS_RESET_KEYS entry), derived from the same type-checked selector as the payload — the compile-locked shape means a pref added to OBS_RESET_KEYS but dropped here is a tsc error (selectPersistedObsPrefs' ObsUiPrefs return annotation), not a silently-cold dep array (the WARDEN-442/468/500 class, ObsUi twin).
   useEffect(() => {
     saveObs({ ...loadObs(), ...obsPrefs });
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design: the dep set is every value of the ObsUi store half (one per OBS_RESET_KEYS entry), derived from the same type-checked selector as the payload — the compile-locked shape means a pref added to OBS_RESET_KEYS but dropped here is a tsc error (selectPersistedObsPrefs' ObsUiPrefs return annotation), not a silently-cold dep array (the WARDEN-442/468/500 class, ObsUi twin).
   }, [...Object.values(obsPrefs)]);
 }
