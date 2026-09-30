@@ -514,7 +514,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 32 persisted facts migrated onto the store by slices 1–15.
+ * owns — exactly the 32 persisted facts migrated onto the store by slices 1–15 and 18.
  *
  * WHAT IT IS FOR
  * ──────────────
