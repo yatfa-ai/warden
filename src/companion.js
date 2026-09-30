@@ -1778,7 +1778,8 @@ export async function sendKey(host, { container, session, key } = {}, cfg = {}, 
 // as they read run()'s result today — ZERO parser changes. Companion-or-fail:
 // NEVER falls back to raw SSH (opt out via WARDEN_COMPANION_TRANSPORT).
 //
-// Unlike send/sendKey there is NO stale-binary graceful degradation: the git
+// Like send/sendKey/writeFile (WARDEN-1482) there is NO stale-binary graceful
+// degradation; what makes exec notable on its own terms is that the git
 // surface is a polled FAN (8 probes/agent per Fleet Health view), and a silent
 // per-op fallback would quietly re-pay every handshake this slice removes while
 // the toggle reads "on". A live channel whose binary predates `exec` therefore
@@ -2023,7 +2024,8 @@ export async function deliverRemoteScript(host, fullScript, { innerScript, conta
 // binary surfaces the actionable error; it NEVER silently falls back to raw ssh
 // (that would keep the parallel transport alive on the exact leg this slice
 // exists to remove). There is deliberately NO {unsupported:true} degradation
-// like send/sendKey: a paste has no acceptable second choice, so a binary that
+// (send/sendKey dropped theirs in WARDEN-1482, so all four ops now share this
+// contract): a paste has no acceptable second choice, so a binary that
 // predates writeFile gets execInContext's too-old error (naming the remove-and-
 // retry recovery), not a quiet detour back over ssh.
 //
@@ -2474,8 +2476,9 @@ export function attachSession(host, { script, cols = 100, rows = 30, term } = {}
       // knowledge about the binary: reporting "binary is too old" for a transient
       // network blip right after bootstrap would send the user to delete a
       // perfectly current binary (the channelMethods contract returns [] for
-      // both, which is correct for the degrade-don't-fail sibling ops but wrong
-      // for attach, where the verdict is a hard, actionable error).
+      // both, which is correct for the lenient callers (subscribePanes' poll
+      // fallback, and the companion-or-fail send/sendKey/exec/writeFile ops where
+      // [] yields the too-old envelope) but wrong for attach, where the verdict is a hard, actionable error).
       methods = await channelMethodsStrict(channel, opts);
     } catch (e) {
       throw new Error(`companion attach on ${host} could not verify the binary's capabilities (ping failed: ${e && e.message ? e.message : e}). Retry the pane, set WARDEN_COMPANION_TRANSPORT=0 to attach over the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to attach just it over the default SSH path.`);
@@ -2642,8 +2645,10 @@ function onChannelEvent(channel, name, handler) {
 
 // Resolve the companion's advertised method list, caching it on the channel.
 // Bootstrapping already stashed it from the ping; if it didn't (e.g. an older
-// bootstrap path), fetch it with one ping. Never throws — returns [] on failure
-// so the caller's feature-detect simply degrades to the poll path.
+// bootstrap path), fetch it with one ping. Never throws — returns [] on failure.
+// Callers: subscribePanes (a [] degrades to the channel-riding poll path) and the
+// companion-or-fail ops send/sendKey/exec/writeFile (WARDEN-1482), where a []
+// yields the actionable too-old envelope, never a raw-SSH degrade.
 async function channelMethods(channel, opts = {}) {
   if (Array.isArray(channel._methods)) return channel._methods;
   try {
@@ -2656,7 +2661,8 @@ async function channelMethods(channel, opts = {}) {
 }
 
 // The STRICT sibling, for ops whose missing-method verdict is a hard actionable
-// error (attach) rather than a graceful degrade (subscribePanes/send). Identical
+// error (attach) rather than the lenient variant above (subscribePanes' poll
+// fallback; send/sendKey/exec/writeFile's too-old envelope). Identical
 // except that a ping FAILURE throws instead of collapsing to [] — the caller
 // must be able to tell "the binary answered and lacks the RPC" from "we could
 // not ask". A binary that ANSWERS ping but predates the methods field still
