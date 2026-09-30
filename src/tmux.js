@@ -88,11 +88,11 @@ export async function read(chat, cfg, lines = 500, deps = {}) {
 // directive, is the last one that still paid a full per-message handshake). The
 // companion client returns the SAME raw {ok,code,stdout,stderr} shape runTmux
 // produces, so the call sites are unchanged. LOCAL never routes through the
-// companion. Stale-binary graceful degradation: a cached host binary predating
-// this slice returns {unsupported:true} and send falls back to runTmux (so
-// rolling this out doesn't require every host re-bootstrapped at once); a DEAD
-// channel surfaces {ok:false} and send throws (companion-or-fail, never a silent
-// raw-SSH fallback).
+// companion. Companion-or-fail, uniformly (WARDEN-1482): a cached host binary
+// predating the `send` RPC gets the actionable too-old {ok:false} envelope (as
+// exec/paste/attach do) and a DEAD channel surfaces {ok:false} too — send throws
+// on both; never a silent raw-SSH fallback. sendViaRunTmux is the toggle-OFF/
+// LOCAL path only.
 //
 // `deps.runTmux` / `deps.companionSend` / `deps.isCompanionTransportEnabled` are
 // optional test seams (production callers omit them); mirrors the deps seam in
@@ -103,9 +103,9 @@ let sendSeq = 0;
 // sendViaRunTmux is the default ssh.js runTmux path for send(): the WARDEN-254
 // bracketed-paste sequence (single-line send-keys -l + Enter; multiline
 // set-buffer / paste-buffer -p -d / send-keys Enter, with a best-effort
-// delete-buffer reclaim on failure). Extracted so the companion route can fall
-// back to it verbatim when a stale cached binary predates the companion `send`
-// RPC (graceful degradation), and so the default path is byte-for-byte unchanged.
+// delete-buffer reclaim on failure). The toggle-OFF / LOCAL path ONLY (WARDEN-1482:
+// the companion route never falls back to it — a stale binary throws), kept
+// extracted so the default path is byte-for-byte unchanged.
 async function sendViaRunTmux(chat, cfg, text, deps) {
   const run = deps.runTmux ?? runTmux;
   const s = sess(chat, cfg);
@@ -149,16 +149,13 @@ export async function send(chat, cfg, text, deps = {}) {
       session: sess(chat, cfg),
       text,
     }, cfg, {});
-    if (!res || !res.unsupported) {
-      // Companion-or-fail: map the raw envelope to runTmux's shape and throw on a
-      // real failure (a dead channel, a host-side command error). Never a silent
-      // runTmux fallback — identical to the spawn/kill sibling contract.
-      const r = companionRawResult(res);
-      if (!r.ok) throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
-      return true;
-    }
-    // {unsupported:true} → stale cached binary predating this slice. Fall through
-    // to the unchanged runTmux default path (graceful degradation).
+    // Companion-or-fail: map the raw envelope to runTmux's shape and throw on any
+    // failure (a dead channel, a stale binary's too-old envelope, a host-side
+    // command error). Never a silent runTmux fallback — identical to the
+    // spawn/kill/exec/paste/attach contract.
+    const r = companionRawResult(res);
+    if (!r.ok) throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
+    return true;
   }
   return sendViaRunTmux(chat, cfg, text, deps);
 }
@@ -168,8 +165,8 @@ export async function send(chat, cfg, text, deps = {}) {
 // branch — the trust boundary stays JS-side (the host-side companion runs
 // send-keys for the already-validated key verbatim, never re-validating).
 // Companion routing mirrors send (WARDEN-888): REMOTE + enabled → companion RPC
-// (zero per-op SSH handshakes); {unsupported:true} → runTmux (stale binary); a
-// dead channel → throws (companion-or-fail). LOCAL keeps runTmux. `deps.runTmux`
+// (zero per-op SSH handshakes); a stale binary's too-old envelope or a dead
+// channel → throws (companion-or-fail, WARDEN-1482). LOCAL keeps runTmux. `deps.runTmux`
 // / `deps.companionSendKey` / `deps.isCompanionTransportEnabled` are test seams.
 export async function sendKey(chat, cfg, k, deps = {}) {
   if (!ALLOWED_KEYS.has(k)) throw new Error(`unsupported key "${k}". allowed: ${[...ALLOWED_KEYS].join(', ')}`);
@@ -180,12 +177,10 @@ export async function sendKey(chat, cfg, k, deps = {}) {
       session: sess(chat, cfg),
       key: k,
     }, cfg, {});
-    if (!res || !res.unsupported) {
-      const r = companionRawResult(res);
-      if (!r.ok) throw new Error((r.stderr || '').trim() || `key failed (exit ${r.code})`);
-      return true;
-    }
-    // {unsupported:true} → stale cached binary. Fall through to runTmux.
+    // Companion-or-fail (WARDEN-1482): a stale binary's too-old envelope throws too.
+    const r = companionRawResult(res);
+    if (!r.ok) throw new Error((r.stderr || '').trim() || `key failed (exit ${r.code})`);
+    return true;
   }
   const run = deps.runTmux ?? runTmux;
   const r = await run(chat, ['send-keys', '-t', sess(chat, cfg), k]);

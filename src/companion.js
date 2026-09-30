@@ -1684,14 +1684,32 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
 // or {host, ok:false, code:-1, stderr} on ANY channel failure — companion-or-fail,
 // NEVER a silent raw-SSH fallback.
 //
-// Stale-binary graceful degradation: a cached binary predating this slice does
-// not advertise `send`/`sendKeys` in its ping methods. That is NOT a failure —
-// it returns {host, unsupported:true} so the caller falls back to runTmux
-// (mirroring subscribePanes' methods check), so rolling this JS out does not
-// require every host re-bootstrapped at once. A DEAD channel (the one case that
-// must NOT silently fall back) fails earlier at getChannel and surfaces a real
-// {ok:false, code:-1, stderr} error — the unsupported sentinel only fires when
-// the channel is alive but its binary is old.
+// Stale-binary contract (WARDEN-1482): a cached binary predating this slice does
+// not advertise `send`/`sendKeys` in its ping methods. Like every other companion
+// op (exec, writeFile/paste, attach) that is a FAILURE, not a degradation: the
+// op returns the actionable too-old error envelope and src/tmux.js throws it —
+// NEVER a silent raw-SSH fallback (roadmap WARDEN-270's totality bar: zero
+// connections outside the channel). This used to return {host, unsupported:true}
+// so the caller degraded to runTmux (the WARDEN-888 rollout-era choice); default-ON
+// (WARDEN-1378/1379) and the bootstrap's re-stream on a manifest bump spent that
+// justification. A DEAD channel fails earlier at getChannel with a real
+// {ok:false, code:-1, stderr}. (subscribePanes' {unsupported:true} sentinel is
+// deliberately different: its consumer falls back to channel-riding polling, not
+// raw SSH.)
+
+// Actionable too-old envelope for send/sendKey — the exec/writeFile wording
+// family (execInContext, writeFileToHost), naming the RPC, the ping methods and
+// the recovery. Not attachUnsupportedMessage (attach-flavored, ConPTY wording).
+function staleBinaryEnvelope(host, rpc, methods, deps) {
+  const ver = deps.manifest?.version ?? loadManifest().version;
+  return {
+    host,
+    ok: false,
+    code: -1,
+    stdout: '',
+    stderr: `companion binary on ${host} is too old: it does not advertise the '${rpc}' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to route just it over the default SSH path.`,
+  };
+}
 
 // send() over the companion channel: runs the WARDEN-254 write sequence
 // (single-line send-keys -l + Enter; multiline set-buffer / paste-buffer -p -d /
@@ -1703,9 +1721,10 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
     run: async (channel) => {
       const methods = await channelMethods(channel, opts);
       if (!methods.includes('send')) {
-        // Stale cached binary (predates WARDEN-888): degrade to runTmux. The channel
-        // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
-        return { host, unsupported: true };
+        // Stale cached binary (predates WARDEN-888): the channel is alive
+        // (getChannel succeeded); only the binary lacks the `send` RPC. Companion-
+        // or-fail (WARDEN-1482) — surface the actionable too-old error, no raw SSH.
+        return staleBinaryEnvelope(host, 'send', methods, deps);
       }
       const target = paneTarget(session, container);
       const result = await channel.call('send', {
@@ -1721,15 +1740,16 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
 
 // sendKey() over the companion channel: runs `send-keys -t <target> <key>` for a
 // key the caller ALREADY validated against ALLOWED_KEYS (the trust boundary stays
-// JS-side, identical to the default sendKey path). Mirrors send's shape + stale-
-// binary degradation.
+// JS-side, identical to the default sendKey path). Mirrors send's shape AND its
+// companion-or-fail stale-binary contract (WARDEN-1482): a binary lacking
+// `sendKeys` yields the too-old envelope, never {unsupported:true}/raw SSH.
 export async function sendKey(host, { container, session, key } = {}, cfg = {}, opts = {}, deps = {}) {
   return companionOp(host, cfg, deps, {
     refuse: () => mapCmdLocalRefusal(host),
     run: async (channel) => {
       const methods = await channelMethods(channel, opts);
       if (!methods.includes('sendKeys')) {
-        return { host, unsupported: true };
+        return staleBinaryEnvelope(host, 'sendKeys', methods, deps);
       }
       const target = paneTarget(session, container);
       const result = await channel.call('sendKeys', {
@@ -1758,7 +1778,8 @@ export async function sendKey(host, { container, session, key } = {}, cfg = {}, 
 // as they read run()'s result today — ZERO parser changes. Companion-or-fail:
 // NEVER falls back to raw SSH (opt out via WARDEN_COMPANION_TRANSPORT).
 //
-// Unlike send/sendKey there is NO stale-binary graceful degradation: the git
+// Like send/sendKey/writeFile (WARDEN-1482) there is NO stale-binary graceful
+// degradation; what makes exec notable on its own terms is that the git
 // surface is a polled FAN (8 probes/agent per Fleet Health view), and a silent
 // per-op fallback would quietly re-pay every handshake this slice removes while
 // the toggle reads "on". A live channel whose binary predates `exec` therefore
@@ -2003,7 +2024,8 @@ export async function deliverRemoteScript(host, fullScript, { innerScript, conta
 // binary surfaces the actionable error; it NEVER silently falls back to raw ssh
 // (that would keep the parallel transport alive on the exact leg this slice
 // exists to remove). There is deliberately NO {unsupported:true} degradation
-// like send/sendKey: a paste has no acceptable second choice, so a binary that
+// (send/sendKey dropped theirs in WARDEN-1482, so all four ops now share this
+// contract): a paste has no acceptable second choice, so a binary that
 // predates writeFile gets execInContext's too-old error (naming the remove-and-
 // retry recovery), not a quiet detour back over ssh.
 //
@@ -2454,8 +2476,9 @@ export function attachSession(host, { script, cols = 100, rows = 30, term } = {}
       // knowledge about the binary: reporting "binary is too old" for a transient
       // network blip right after bootstrap would send the user to delete a
       // perfectly current binary (the channelMethods contract returns [] for
-      // both, which is correct for the degrade-don't-fail sibling ops but wrong
-      // for attach, where the verdict is a hard, actionable error).
+      // both, which is correct for the lenient callers (subscribePanes' poll
+      // fallback, and the companion-or-fail send/sendKey/exec/writeFile ops where
+      // [] yields the too-old envelope) but wrong for attach, where the verdict is a hard, actionable error).
       methods = await channelMethodsStrict(channel, opts);
     } catch (e) {
       throw new Error(`companion attach on ${host} could not verify the binary's capabilities (ping failed: ${e && e.message ? e.message : e}). Retry the pane, set WARDEN_COMPANION_TRANSPORT=0 to attach over the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to attach just it over the default SSH path.`);
@@ -2622,8 +2645,10 @@ function onChannelEvent(channel, name, handler) {
 
 // Resolve the companion's advertised method list, caching it on the channel.
 // Bootstrapping already stashed it from the ping; if it didn't (e.g. an older
-// bootstrap path), fetch it with one ping. Never throws — returns [] on failure
-// so the caller's feature-detect simply degrades to the poll path.
+// bootstrap path), fetch it with one ping. Never throws — returns [] on failure.
+// Callers: subscribePanes (a [] degrades to the channel-riding poll path) and the
+// companion-or-fail ops send/sendKey/exec/writeFile (WARDEN-1482), where a []
+// yields the actionable too-old envelope, never a raw-SSH degrade.
 async function channelMethods(channel, opts = {}) {
   if (Array.isArray(channel._methods)) return channel._methods;
   try {
@@ -2636,7 +2661,8 @@ async function channelMethods(channel, opts = {}) {
 }
 
 // The STRICT sibling, for ops whose missing-method verdict is a hard actionable
-// error (attach) rather than a graceful degrade (subscribePanes/send). Identical
+// error (attach) rather than the lenient variant above (subscribePanes' poll
+// fallback; send/sendKey/exec/writeFile's too-old envelope). Identical
 // except that a ping FAILURE throws instead of collapsing to [] — the caller
 // must be able to tell "the binary answered and lacks the RPC" from "we could
 // not ask". A binary that ANSWERS ping but predates the methods field still
