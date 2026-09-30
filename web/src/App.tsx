@@ -50,6 +50,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence, type AppPersistedSnapshot } from '@/lib/useConfigPersistence';
+import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
@@ -936,6 +937,18 @@ function App() {
     reloadNotificationPrefs,
     refreshConfigPrefs,
   });
+
+  // WARDEN-1477 (client-state slice 17): the Observer's four view prefs are
+  // store facts, but their only disk writer rode ObserverTabs' booted-gated
+  // effect — so a store write made with the panel unmounted (App's own "View
+  // Activity" deep-links render outside the Settings ternary) or mounted-but-
+  // unbooted (the boot create-failure branch never sets `booted`) was lost on
+  // restart. This hook is the always-mounted ObsUi writer: persistence is a
+  // property of the store, exactly as useConfigPersistence made it for the
+  // warden:ui:v3 half in slice 16. It persists the four prefs through
+  // saveObs({ ...loadObs(), … }) — the second namespace, merged over the disk
+  // document so the component half (openIds/activeId) is never clobbered.
+  useObsPersistence();
 
   // Write-through setters for the three main-owned prefs: update the display
   // mirror optimistically, persist to main via IPC, then RECONCILE the mirror

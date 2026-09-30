@@ -40,9 +40,12 @@ import { useUiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } from '@/l
  * subscription (useShallow(selectPersistedStorePrefs)) and merges the two in
  * the effect. The MERGED object is still the full PersistedPrefSnapshot —
  * bidirectionally locked to PERSISTED_PREF_KEYS exactly as before, still the
- * ONE saveUi call site, still no store-owned write-through (uiStore.ts:34-38's
- * single-writer invariant and uiStore.test.mjs's `saveUi(` guard hold
- * unmodified).
+ * ONE saveUi call site, still no store-owned write-through (uiStore.ts's
+ * per-namespace single-writer invariant — the "There is deliberately NO
+ * store-owned write-through persistence here" paragraph of its header — and
+ * uiStore.test.mjs's `saveUi(` guard hold unmodified; WARDEN-1477's slice-17
+ * writer for the SECOND namespace, useObsPersistence, writes warden:observer:v1
+ * and touches neither this snapshot nor saveUi).
  */
 export type PersistedPrefSnapshot = Required<
   Pick<Omit<UiState, 'restoreOnStartup'>, (typeof PERSISTED_PREF_KEYS)[number]>

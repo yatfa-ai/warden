@@ -66,9 +66,9 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
-const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, resetObsPrefDefaults, PERSISTED_PREF_KEYS } =
+const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -102,6 +102,18 @@ const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } =
     ...selectPersistedStorePrefs(s),
   };
   saveUi(persistUiState(snapshot, restoreOnStartup ?? store.getState().restoreOnStartup, loadUi(), startedEmpty));
+};
+
+// The ObsUi persistence hop useObsPersistence performs, called exactly as
+// useObsPersistence.ts calls it (WARDEN-1477, slice 17 — the ObsUi twin of
+// flushSnapshotToDisk above). `store` stands in for the hook's single
+// useShallow(selectPersistedObsPrefs) subscription: reading the store through
+// the PRODUCTION selector is what the hook merges, and the `{...loadObs(), …}`
+// spread is the partial-bag guard itself — the disk document under the store
+// prefs — so this harness cannot drift from the writer the way a hand-copied
+// field list could.
+const flushObsStoreToDisk = (store) => {
+  saveObs({ ...loadObs(), ...selectPersistedObsPrefs(store.getState()) });
 };
 
 console.log('\ncreateUiStore — the seed (storage.ts owns the shape and the defaults)');
@@ -2234,21 +2246,28 @@ test("'loadObs(' is read in exactly ONE component file — ObserverTabs.tsx — 
   );
 });
 
-test("'saveObs(' lives in exactly TWO production call sites — ObserverTabs.tsx (the compile-locked save effect) + App.tsx (the Settings-reset disk write) — plus its storage.ts definition (the ObsUi write-axis twin of the saveUi guard)", () => {
+test("'saveObs(' lives in exactly THREE production call sites — useObsPersistence.ts (the always-mounted store-half writer) + ObserverTabs.tsx (the compile-locked booted-gated bag effect, the component half) + App.tsx (the Settings-reset disk write) — plus its storage.ts definition (the ObsUi write-axis twin of the saveUi guard)", () => {
   // The invariant this guards (WARDEN-832's "one writer per fact", applied to
-  // the SECOND storage namespace; WARDEN-1397 slice 10): ObsUi has exactly two
-  // writers, each with a distinct role — ObserverTabs' booted-gated saveObs
-  // effect, the live-pref writer whose payload is now the `satisfies
-  // Required<ObsUi>` compile-locked bag (so a field can only reach disk through
-  // the bag), and App's reset write — `saveObs(resetObsPrefsPreservingWorkspace(
-  // loadObs()))`, the disk half of Settings → Reset (WARDEN-981), deliberately
-  // separated from the live half (see App's reset comment). Same file-set
-  // convention as the saveUi guard above: storage.ts matches the pattern
-  // because it holds the `export function saveObs(` definition itself, and
-  // tests are excluded (all suites live in web/*.test.mjs, outside src/, but
-  // the exclusion is kept defensive). Mutation-check (verified red): adding a
-  // third saveObs( call site — e.g. a component writing ObsUi directly,
-  // bypassing the bag — turns this leg red.
+  // the SECOND storage namespace; WARDEN-1397 slice 10): ObsUi has exactly
+  // three writers, each with a distinct role — useObsPersistence's
+  // always-mounted effect, the STORE-half writer slice 17 added
+  // (WARDEN-1477: saveObs({ ...loadObs(), ...selectPersistedObsPrefs(...) }),
+  // the four ObsUi view prefs persisted as a property of the store instead of
+  // depending on ObserverTabs being mounted AND booted); ObserverTabs'
+  // booted-gated saveObs effect, the COMPONENT-half writer whose payload is
+  // the `satisfies Required<ObsUi>` compile-locked bag (so a field can only
+  // reach disk through the bag; it also harmlessly re-asserts the four prefs
+  // it already holds live store values for); and App's reset write —
+  // `saveObs(resetObsPrefsPreservingWorkspace(loadObs()))`, the disk half of
+  // Settings → Reset (WARDEN-981), deliberately separated from the live half
+  // (see App's reset comment). Same file-set convention as the saveUi guard
+  // above: storage.ts matches the pattern because it holds the `export
+  // function saveObs(` definition itself, and tests are excluded (all suites
+  // live in web/*.test.mjs, outside src/, but the exclusion is kept
+  // defensive). Guard updated deliberately for slice 17 — TWO became THREE
+  // when the always-mounted store-half writer landed. Mutation-check
+  // (verified red): adding a FOURTH saveObs( call site — e.g. a component
+  // writing ObsUi directly, bypassing the bag — turns this leg red.
   const walk = (dir) => {
     const out = [];
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -2263,9 +2282,169 @@ test("'saveObs(' lives in exactly TWO production call sites — ObserverTabs.tsx
     .filter((p) => readFileSync(p, 'utf8').includes('saveObs('));
   assert.deepEqual(
     files.map((p) => p.slice(__dirname.length + 1)).sort(),
-    ['src/App.tsx', 'src/components/ObserverTabs.tsx', 'src/lib/storage.ts'],
-    "saveObs( must appear in exactly TWO production call sites (ObserverTabs.tsx's compile-locked save effect + App.tsx's Settings-reset disk write) plus its storage.ts definition — a third writer bypasses the Required<ObsUi> save bag",
+    ['src/App.tsx', 'src/components/ObserverTabs.tsx', 'src/lib/storage.ts', 'src/lib/useObsPersistence.ts'],
+    "saveObs( must appear in exactly THREE production call sites (useObsPersistence.ts's always-mounted store-half writer + ObserverTabs.tsx's compile-locked booted-gated bag effect + App.tsx's Settings-reset disk write) plus its storage.ts definition — a fourth writer bypasses the Required<ObsUi> save bag",
   );
+});
+
+console.log('\nObsUi store half (WARDEN-1477, slice 17): the four view prefs persist as a property of the store');
+test('OBS_STORE_KEYS partitions the ObsUi prefs: no duplicates, every key a live store fact, and selectPersistedObsPrefs covers exactly OBS_RESET_KEYS', () => {
+  // The ObsUi twin of the slice-16 STORE_PERSISTED_KEYS partition test. Three
+  // legs:
+  //
+  //   1. NO DUPLICATES / LIVE FACTS — every OBS_STORE_KEYS element is a real,
+  //      non-setter key on createUiStore().getState(), so the hook's selector
+  //      and subscription can never read undefined or a function.
+  //   2. COMPLETENESS + BIJECTION — selectPersistedObsPrefs' output carries
+  //      EXACTLY the OBS_RESET_KEYS pref names (the four ObsUi prefs the
+  //      always-mounted writer owns — no extras, none missing), and each
+  //      output value IS the corresponding store fact, which pins the pairing
+  //      direction (viewMode ↔ observerViewMode, …) at runtime where the
+  //      transpiled module's types are gone.
+  //   3. THE COMPONENT HALF STAYS OFF THE STORE — openIds/activeId are
+  //      ObserverTabs' workspace state (OBS_PRESERVED_KEYS), meaningless
+  //      before boot reconciliation; they must not appear on the store or in
+  //      the selector's output, or the always-mounted writer would start
+  //      persisting un-reconciled workspace facts.
+  const storeKeys = [...OBS_STORE_KEYS];
+  assert.equal(new Set(storeKeys).size, storeKeys.length, `OBS_STORE_KEYS holds a duplicate: ${storeKeys.join(', ')}`);
+  const state = createUiStore().getState();
+  for (const key of storeKeys) {
+    assert.ok(key in state, `OBS_STORE_KEYS member '${key}' does not exist on createUiStore().getState()`);
+    assert.ok(typeof state[key] !== 'function', `OBS_STORE_KEYS member '${key}' resolved to a function on the store state — the tuple must name FACTS (values), not setters`);
+  }
+  reset();
+  const fresh = createUiStore().getState();
+  const selected = selectPersistedObsPrefs(fresh);
+  assert.deepEqual(
+    Object.keys(selected).sort(),
+    [...OBS_RESET_KEYS].sort(),
+    'selectPersistedObsPrefs must cover exactly the OBS_RESET_KEYS prefs — a missing one would not persist (the dropped-key class), an extra one is not an ObsUi pref',
+  );
+  assert.equal(selected.viewMode, fresh.observerViewMode, 'selector pairing broken: viewMode must read observerViewMode');
+  assert.equal(selected.activityFilters, fresh.observerActivityFilters, 'selector pairing broken: activityFilters must read observerActivityFilters');
+  assert.equal(selected.directiveFilters, fresh.observerDirectiveFilters, 'selector pairing broken: directiveFilters must read observerDirectiveFilters');
+  assert.equal(selected.attentionFilters, fresh.observerAttentionFilters, 'selector pairing broken: attentionFilters must read observerAttentionFilters');
+  assert.deepEqual([...OBS_PRESERVED_KEYS].sort(), ['activeId', 'openIds'], 'OBS_PRESERVED_KEYS must stay exactly the two workspace facts — the reset-vs-preserve partition storage.ts owns');
+  for (const workspaceKey of OBS_PRESERVED_KEYS) {
+    assert.ok(!(workspaceKey in state), `workspace fact '${workspaceKey}' must stay component-local (ObserverTabs') — it is not a store fact and the always-mounted writer must never persist it`);
+    assert.ok(!(workspaceKey in selected), `workspace fact '${workspaceKey}' leaked into selectPersistedObsPrefs' output — the store-half writer would clobber boot reconciliation`);
+  }
+});
+
+test('MODE 1 (WARDEN-1477): a store write with NO ObserverTabs mounted survives a restart — the measured defect closes, with the ui:v3 controls on the same store', () => {
+  // The regression test for the probe that measured the defect: App's
+  // "View Activity" deep-link (openActivityTab) writes setObserverViewMode
+  // from App itself — with the Settings ternary's full-page switch having
+  // unmounted ObserverTabs, so NO component-half writer exists. There is no
+  // React runner here, so the hop is driven by its PURE parts, exactly as
+  // this file's header states: the store writes, then the always-mounted
+  // writer's effect hop (flushObsStoreToDisk — the exact calls
+  // useObsPersistence.ts makes), then a FRESH store as the restart.
+  // terminalFontSize/agentSort ride the SAME store through the warden:ui:v3
+  // hop as the CONTROLS: they are store facts written through the identical
+  // gesture in the identical harness, so a passing pair proves the
+  // instrument persists a store write — a failed ObsUi pair is then a
+  // measurement, not a broken probe.
+  reset();
+  const store = createUiStore();
+  // App's own writes — no ObserverTabs anywhere in this story.
+  store.getState().setTerminalFontSize(19);                       // CONTROL 1 (warden:ui:v3)
+  store.getState().setAgentSort('recent');                        // CONTROL 2 (warden:ui:v3)
+  store.getState().setObserverViewMode('activity');               // TARGET 1
+  store.getState().setObserverActivityFilters({ type: 'task', agent: 'claude-1', host: 'h1' }); // TARGET 2
+  flushSnapshotToDisk(store);   // useConfigPersistence's effect hop
+  flushObsStoreToDisk(store);   // useObsPersistence's effect hop (the fix under test)
+  // Restart: a fresh store seeds from loadUi() + loadObs().
+  const restarted = createUiStore();
+  assert.equal(restarted.getState().terminalFontSize, 19, 'CONTROL 1 lost — the probe is broken, not the fix');
+  assert.equal(restarted.getState().agentSort, 'recent', 'CONTROL 2 lost — the probe is broken, not the fix');
+  assert.equal(restarted.getState().observerViewMode, 'activity', 'TARGET 1 lost across restart — the always-mounted ObsUi writer is not persisting the store half');
+  assert.deepEqual(
+    restarted.getState().observerActivityFilters,
+    { type: 'task', agent: 'claude-1', host: 'h1' },
+    'TARGET 2 lost across restart — the always-mounted ObsUi writer is not persisting the store half',
+  );
+});
+
+test('MODE 2 (WARDEN-1477): the write also survives with the panel mounted but UNBOOTED, and the store-half writer writes ONLY the four prefs', () => {
+  // MODE 2's real-world shape: ObserverTabs IS in the tree, but its
+  // booted-gated effect never fires (the boot create-failure branch returns
+  // without setting `booted`). In the harness the component half is simply
+  // ABSENT — no componentHalfWrite is ever performed — which is exactly the
+  // unbooted panel's behaviour. Two assertions beyond MODE 1:
+  //   1. the pref write still survives (the always-mounted writer is the
+  //      only writer and it is enough);
+  //   2. the store-half writer NEVER fabricates workspace state — the disk
+  //      document's openIds/activeId ride through from loadObs() untouched
+  //      (here: the all-defaults document), so a boot-less panel cannot
+  //      leak un-reconciled openIds into storage.
+  reset();
+  const store = createUiStore();
+  store.getState().setObserverViewMode('attention');
+  store.getState().setObserverDirectiveFilters({ agent: 'codex-1', host: 'h2' });
+  flushObsStoreToDisk(store);
+  const onDisk = JSON.parse(localStorage.getItem('warden:observer:v1'));
+  assert.equal(onDisk.viewMode, 'attention');
+  assert.deepEqual(onDisk.directiveFilters, { agent: 'codex-1', host: 'h2' });
+  assert.deepEqual(onDisk.openIds, [], "the store-half writer fabricated openIds — workspace state must stay ObserverTabs's to reconcile at boot");
+  assert.equal(onDisk.activeId, null, "the store-half writer fabricated activeId — workspace state must stay ObserverTabs's to reconcile at boot");
+  // The restart still reads the pref back.
+  assert.equal(createUiStore().getState().observerViewMode, 'attention');
+});
+
+test('the two ObsUi writers interleave without clobbering (WARDEN-1477): the store half preserves the component half and vice versa', () => {
+  // The partial-bag hazard this slice was told not to create, proved from
+  // both directions. saveObs writes the WHOLE warden:observer:v1 document,
+  // so whichever writer runs second must carry the other half's facts:
+  //   - the store half by merging over loadObs() (useObsPersistence.ts);
+  //   - the component half because its `satisfies Required<ObsUi>` bag reads
+  //     all four prefs LIVE from the store on every render (ObserverTabs'
+  //     four useObserver*() subscriptions), so a whole-document write
+  //     re-asserts the current prefs, never stale ones.
+  reset();
+  const store = createUiStore();
+
+  // The component half, simulated exactly as ObserverTabs' booted-gated
+  // effect writes it: workspace facts from its own state, prefs from its
+  // live store subscriptions.
+  const componentHalfWrite = (openIds, activeId) => {
+    saveObs({ openIds, activeId, ...selectPersistedObsPrefs(store.getState()) });
+  };
+  const disk = () => JSON.parse(localStorage.getItem('warden:observer:v1'));
+
+  // 1. A store-half write lands (still no workspace on disk).
+  store.getState().setObserverViewMode('activity');
+  flushObsStoreToDisk(store);
+  assert.equal(disk().viewMode, 'activity');
+
+  // 2. The component half writes (boot reconciliation: two tabs, first
+  //    active). Its whole-document write must not clobber the pref.
+  componentHalfWrite(['s1', 's2'], 's1');
+  assert.deepEqual(disk().openIds, ['s1', 's2']);
+  assert.equal(disk().activeId, 's1');
+  assert.equal(disk().viewMode, 'activity', 'the component-half write clobbered viewMode');
+
+  // 3. A store-half write lands AFTER the component half — the direction
+  //    that motivated the loadObs() merge: the pref change must not clobber
+  //    the reconciled workspace.
+  store.getState().setObserverActivityFilters({ type: 'incident', agent: 'all', host: 'all' });
+  flushObsStoreToDisk(store);
+  assert.deepEqual(
+    disk().activityFilters,
+    { type: 'incident', agent: 'all', host: 'all' },
+    'the store-half write did not land',
+  );
+  assert.deepEqual(disk().openIds, ['s1', 's2'], 'the store-half write clobbered openIds');
+  assert.equal(disk().activeId, 's1', 'the store-half write clobbered activeId');
+  assert.equal(disk().viewMode, 'activity', 'the store-half write clobbered viewMode');
+
+  // 4. The component half writes again (a tab closed) — prefs stay intact.
+  componentHalfWrite(['s2'], 's2');
+  assert.deepEqual(disk().openIds, ['s2']);
+  assert.equal(disk().activeId, 's2');
+  assert.equal(disk().viewMode, 'activity', 'the component-half write clobbered viewMode');
+  assert.deepEqual(disk().activityFilters, { type: 'incident', agent: 'all', host: 'all' }, 'the component-half write clobbered activityFilters');
 });
 
 console.log('\nstructural guard: the store / App ownership partition of PERSISTED_PREF_KEYS (WARDEN-1471, slice 16)');
