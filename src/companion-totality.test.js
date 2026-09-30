@@ -1037,13 +1037,14 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       },
       'tmux.js': {
         // WARDEN-1462. tmux.js is the routing layer BELOW the chat ops: every
-        // wrapper reference sits in the toggle-off/LOCAL else-branch — or the
-        // `{unsupported:true}` stale-cached-binary fall-through — of an
+        // wrapper reference sits in the toggle-off/LOCAL else-branch (WARDEN-1482
+        // removed send/sendKey's `{unsupported:true}` stale-binary fall-through —
+        // a stale binary now throws) of an
         // `chat.host !== '(local)' && isCompanionTransportEnabled() &&
         // !isCompanionExcludedHost(chat.host)` gate, so a raw reach here is a
         // routed op's OFF leg (or its LOCAL arm), never an unguarded path.
-        runTmux: 8,                // read :63, sendViaRunTmux :110 (send's raw arm
-                                   // + send's {unsupported:true} fall-through),
+        runTmux: 8,                // read :63, sendViaRunTmux :110 (send's raw
+                                   // OFF/LOCAL arm),
                                    // sendKey :190, hasSession :240, probeSession :263,
                                    // resize :312, spawn :361, kill :385
         attachTmux: 1,             // :434 attach's OFF/LOCAL else-branch

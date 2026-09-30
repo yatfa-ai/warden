@@ -3704,11 +3704,11 @@ describe('resize() via companion (companion-or-fail, raw result shape)', () => {
 // WARDEN-888 (the final slice): the send / sendKey RPC clients — the user-input
 // WRITE path. Same raw {host, ok, code, stdout, stderr} contract as resize (so
 // the call site is unchanged) and companion-or-fail (never falls back to raw
-// SSH), PLUS stale-binary graceful degradation: a cached binary predating this
-// slice returns {unsupported:true} so the caller falls back to runTmux (rolling
-// this out must not require every host re-bootstrapped at once).
+// SSH). WARDEN-1482: a cached binary predating the RPC is ALSO a failure — the
+// actionable too-old envelope (exec/paste/attach precedent), no {unsupported:true}
+// degradation to runTmux.
 
-describe('send() / sendKey() via companion (companion-or-fail + stale-binary degrade)', () => {
+describe('send() / sendKey() via companion (companion-or-fail, incl. stale binary)', () => {
   beforeEach(() => _resetChannelCacheForTests());
 
   it('send returns the raw {host, ok, code, stdout, stderr} shape on success', async () => {
@@ -3767,7 +3767,7 @@ describe('send() / sendKey() via companion (companion-or-fail + stale-binary deg
     assert.ok(res.stderr.includes("can't find session"), res.stderr);
   });
 
-  it('send degrades on a STALE binary (no send in methods) -> {unsupported:true}, no send RPC issued', async () => {
+  it('send on a STALE binary (no send in methods) -> actionable too-old envelope (companion-or-fail), no send RPC issued', async () => {
     const seen = [];
     const stale = fakeTransport((req) => {
       seen.push(req.method);
@@ -3777,8 +3777,12 @@ describe('send() / sendKey() via companion (companion-or-fail + stale-binary deg
     });
     const { deps } = fakeDeps({ spawnChannel: () => stale });
     const res = await companionSend('prod', { container: 'p-worker', session: 'agent', text: 'x' }, {}, {}, deps);
-    assert.strictEqual(res.unsupported, true, 'stale binary -> unsupported sentinel so the caller falls back to runTmux');
-    assert.ok(!res.ok, 'unsupported is NOT a success');
+    assert.strictEqual(res.unsupported, undefined, 'no {unsupported} sentinel — nothing for a caller to degrade on');
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.match(res.stderr, /companion binary on prod is too old: it does not advertise the 'send' RPC/);
+    assert.ok(res.stderr.includes(`~/.warden/companion-${TEST_VER}`), res.stderr);
+    assert.ok(res.stderr.includes('ping methods: ping, discover, capturePanes, hasSession, resize'), res.stderr);
     assert.ok(!seen.includes('send'), 'never sent send to a stale binary');
   });
 
@@ -3802,14 +3806,18 @@ describe('send() / sendKey() via companion (companion-or-fail + stale-binary deg
     assert.deepStrictEqual(sent, { container: 'p-worker', session: 'agent', key: 'C-c' });
   });
 
-  it('sendKey degrades on a stale binary (no sendKeys in methods) -> {unsupported:true}', async () => {
+  it('sendKey on a stale binary (no sendKeys in methods) -> actionable too-old envelope', async () => {
     const stale = fakeTransport((req) => {
       if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'resize'] } };
       return { id: req.id, ok: true, result: {} };
     });
     const { deps } = fakeDeps({ spawnChannel: () => stale });
     const res = await companionSendKey('prod', { container: 'p-worker', session: 'agent', key: 'Enter' }, {}, {}, deps);
-    assert.strictEqual(res.unsupported, true);
+    assert.strictEqual(res.unsupported, undefined);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.match(res.stderr, /companion binary on prod is too old: it does not advertise the 'sendKeys' RPC/);
+    assert.ok(res.stderr.includes(`~/.warden/companion-${TEST_VER}`), res.stderr);
   });
 });
 
@@ -4026,8 +4034,9 @@ describe('execInContext() via companion (companion-or-fail, raw result shape)', 
 // here alongside the rest of the transport surface. Drives the REAL exported
 // functions through injected companion clients (no real ssh) and asserts the
 // parity contract: under the flag a REMOTE host routes through the companion;
-// LOCAL and the flag-off path keep runTmux byte-for-byte; a stale binary falls
-// back to runTmux; a dead channel throws (companion-or-fail).
+// LOCAL and the flag-off path keep runTmux byte-for-byte; a stale binary THROWS
+// the actionable too-old error (WARDEN-1482 — no runTmux fallback, uniform with
+// exec/paste/attach); a dead channel throws (companion-or-fail).
 
 describe('write-path routing over the companion (WARDEN-888 parity)', () => {
   const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
@@ -4064,19 +4073,38 @@ describe('write-path routing over the companion (WARDEN-888 parity)', () => {
     assert.strictEqual(runTmuxCalls, 0, 'a dead channel does NOT fall back to runTmux');
   });
 
-  it('send falls back to runTmux when the host binary is stale ({unsupported:true})', async () => {
+  it('send THROWS the too-old error on a stale binary and never touches runTmux (WARDEN-1482)', async () => {
     let runTmuxCalls = 0;
     let rpcCalls = 0;
-    const calls = [];
-    const r = await tmuxSend(remoteChat, {}, 'just one line', {
-      runTmux: async (chat, args) => { runTmuxCalls++; calls.push(args); return { ok: true, code: 0, stdout: '', stderr: '' }; },
-      companionSend: async () => { rpcCalls++; return { host: 'prod-1', unsupported: true }; },
-      isCompanionTransportEnabled: () => true,
+    await assert.rejects(
+      () => tmuxSend(remoteChat, {}, 'just one line', {
+        runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+        companionSend: async () => { rpcCalls++; return { host: 'prod-1', ok: false, code: -1, stdout: '', stderr: "companion binary on prod-1 is too old: it does not advertise the 'send' RPC (ping methods: ping)." }; },
+        isCompanionTransportEnabled: () => true,
+      }),
+      /too old: it does not advertise the 'send' RPC/,
+    );
+    assert.strictEqual(rpcCalls, 1, 'the companion was consulted');
+    assert.strictEqual(runTmuxCalls, 0, 'a stale binary does NOT fall back to raw runTmux');
+  });
+
+  it('send: a REAL companion client on a live channel lacking `send` throws too-old and fires runTmux ZERO times (WARDEN-1482 mutation-probe regression)', async () => {
+    _resetChannelCacheForTests();
+    let runTmuxCalls = 0;
+    const stale = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'resize'] } };
+      return { id: req.id, ok: true, result: {} };
     });
-    assert.strictEqual(rpcCalls, 1, 'the companion was consulted first');
-    assert.strictEqual(runTmuxCalls, 2, 'stale binary -> fell back to runTmux (single-line: -l then Enter)');
-    assert.deepStrictEqual(calls[0], ['send-keys', '-t', 'agent', '-l', 'just one line'], 'fallback used the unchanged default argv');
-    assert.strictEqual(r, true);
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    await assert.rejects(
+      () => tmuxSend(remoteChat, {}, 'just one line', {
+        runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+        companionSend: (h, p, c, o) => companionSend(h, p, c, o, deps),
+        isCompanionTransportEnabled: () => true,
+      }),
+      /too old: it does not advertise the 'send' RPC/,
+    );
+    assert.strictEqual(runTmuxCalls, 0, 'zero raw per-op commands');
   });
 
   it('send LOCAL still uses runTmux (never the companion), even under the flag', async () => {
@@ -4113,16 +4141,36 @@ describe('write-path routing over the companion (WARDEN-888 parity)', () => {
     );
   });
 
-  it('sendKey falls back to runTmux when the host binary is stale ({unsupported:true})', async () => {
+  it('sendKey THROWS the too-old error on a stale binary and never touches runTmux (WARDEN-1482)', async () => {
     let runTmuxCalls = 0;
-    let captured = null;
-    await tmuxSendKey(remoteChat, {}, 'Enter', {
-      runTmux: async (chat, args) => { runTmuxCalls++; captured = args; return { ok: true, code: 0, stdout: '', stderr: '' }; },
-      companionSendKey: async () => ({ host: 'prod-1', unsupported: true }),
-      isCompanionTransportEnabled: () => true,
+    await assert.rejects(
+      () => tmuxSendKey(remoteChat, {}, 'Enter', {
+        runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+        companionSendKey: async () => ({ host: 'prod-1', ok: false, code: -1, stdout: '', stderr: "companion binary on prod-1 is too old: it does not advertise the 'sendKeys' RPC (ping methods: ping)." }),
+        isCompanionTransportEnabled: () => true,
+      }),
+      /too old: it does not advertise the 'sendKeys' RPC/,
+    );
+    assert.strictEqual(runTmuxCalls, 0, 'a stale binary does NOT fall back to raw runTmux');
+  });
+
+  it('sendKey: a REAL companion client on a live channel lacking `sendKeys` throws too-old and fires runTmux ZERO times (WARDEN-1482 mutation-probe regression)', async () => {
+    _resetChannelCacheForTests();
+    let runTmuxCalls = 0;
+    const stale = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'resize'] } };
+      return { id: req.id, ok: true, result: {} };
     });
-    assert.strictEqual(runTmuxCalls, 1, 'stale binary -> fell back to runTmux');
-    assert.deepStrictEqual(captured, ['send-keys', '-t', 'agent', 'Enter'], 'fallback used the unchanged default argv');
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    await assert.rejects(
+      () => tmuxSendKey(remoteChat, {}, 'Enter', {
+        runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+        companionSendKey: (h, p, c, o) => companionSendKey(h, p, c, o, deps),
+        isCompanionTransportEnabled: () => true,
+      }),
+      /too old: it does not advertise the 'sendKeys' RPC/,
+    );
+    assert.strictEqual(runTmuxCalls, 0, 'zero raw per-op commands');
   });
 
   it('sendKey LOCAL still uses runTmux (never the companion)', async () => {

@@ -1684,14 +1684,32 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
 // or {host, ok:false, code:-1, stderr} on ANY channel failure — companion-or-fail,
 // NEVER a silent raw-SSH fallback.
 //
-// Stale-binary graceful degradation: a cached binary predating this slice does
-// not advertise `send`/`sendKeys` in its ping methods. That is NOT a failure —
-// it returns {host, unsupported:true} so the caller falls back to runTmux
-// (mirroring subscribePanes' methods check), so rolling this JS out does not
-// require every host re-bootstrapped at once. A DEAD channel (the one case that
-// must NOT silently fall back) fails earlier at getChannel and surfaces a real
-// {ok:false, code:-1, stderr} error — the unsupported sentinel only fires when
-// the channel is alive but its binary is old.
+// Stale-binary contract (WARDEN-1482): a cached binary predating this slice does
+// not advertise `send`/`sendKeys` in its ping methods. Like every other companion
+// op (exec, writeFile/paste, attach) that is a FAILURE, not a degradation: the
+// op returns the actionable too-old error envelope and src/tmux.js throws it —
+// NEVER a silent raw-SSH fallback (roadmap WARDEN-270's totality bar: zero
+// connections outside the channel). This used to return {host, unsupported:true}
+// so the caller degraded to runTmux (the WARDEN-888 rollout-era choice); default-ON
+// (WARDEN-1378/1379) and the bootstrap's re-stream on a manifest bump spent that
+// justification. A DEAD channel fails earlier at getChannel with a real
+// {ok:false, code:-1, stderr}. (subscribePanes' {unsupported:true} sentinel is
+// deliberately different: its consumer falls back to channel-riding polling, not
+// raw SSH.)
+
+// Actionable too-old envelope for send/sendKey — the exec/writeFile wording
+// family (execInContext, writeFileToHost), naming the RPC, the ping methods and
+// the recovery. Not attachUnsupportedMessage (attach-flavored, ConPTY wording).
+function staleBinaryEnvelope(host, rpc, methods, deps) {
+  const ver = deps.manifest?.version ?? loadManifest().version;
+  return {
+    host,
+    ok: false,
+    code: -1,
+    stdout: '',
+    stderr: `companion binary on ${host} is too old: it does not advertise the '${rpc}' RPC (ping methods: ${methods.join(', ') || 'none'}). Remove ~/.warden/companion-${ver} on the host and retry so the bootstrap re-uploads the current binary, set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path, or exclude this host in Settings → Performance ("Companion excluded hosts") to route just it over the default SSH path.`,
+  };
+}
 
 // send() over the companion channel: runs the WARDEN-254 write sequence
 // (single-line send-keys -l + Enter; multiline set-buffer / paste-buffer -p -d /
@@ -1703,9 +1721,10 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
     run: async (channel) => {
       const methods = await channelMethods(channel, opts);
       if (!methods.includes('send')) {
-        // Stale cached binary (predates WARDEN-888): degrade to runTmux. The channel
-        // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
-        return { host, unsupported: true };
+        // Stale cached binary (predates WARDEN-888): the channel is alive
+        // (getChannel succeeded); only the binary lacks the `send` RPC. Companion-
+        // or-fail (WARDEN-1482) — surface the actionable too-old error, no raw SSH.
+        return staleBinaryEnvelope(host, 'send', methods, deps);
       }
       const target = paneTarget(session, container);
       const result = await channel.call('send', {
@@ -1721,15 +1740,16 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
 
 // sendKey() over the companion channel: runs `send-keys -t <target> <key>` for a
 // key the caller ALREADY validated against ALLOWED_KEYS (the trust boundary stays
-// JS-side, identical to the default sendKey path). Mirrors send's shape + stale-
-// binary degradation.
+// JS-side, identical to the default sendKey path). Mirrors send's shape AND its
+// companion-or-fail stale-binary contract (WARDEN-1482): a binary lacking
+// `sendKeys` yields the too-old envelope, never {unsupported:true}/raw SSH.
 export async function sendKey(host, { container, session, key } = {}, cfg = {}, opts = {}, deps = {}) {
   return companionOp(host, cfg, deps, {
     refuse: () => mapCmdLocalRefusal(host),
     run: async (channel) => {
       const methods = await channelMethods(channel, opts);
       if (!methods.includes('sendKeys')) {
-        return { host, unsupported: true };
+        return staleBinaryEnvelope(host, 'sendKeys', methods, deps);
       }
       const target = paneTarget(session, container);
       const result = await channel.call('sendKeys', {
