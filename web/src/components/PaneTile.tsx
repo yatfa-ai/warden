@@ -264,6 +264,10 @@ interface Props {
   onPhaseChange?: (phase: PaneAttachPhase) => void;
 }
 
+// WARDEN-1492 — how long a path whose probe got no verdict is left alone before
+// it may probe again (see existsFailedAtRef).
+const EXISTS_FAILURE_COOLDOWN_MS = 15_000;
+
 export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs, reconnectToken, onPhaseChange }: Props) {
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
@@ -352,6 +356,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // count is piggybacked on the NEXT probe request as `cacheHits` and reset).
   // An aggregate NUMBER only — no path ever travels with it.
   const existsCacheHitsRef = useRef(0);
+  // WARDEN-1492 — paths whose last probe got NO verdict (transport failure /
+  // timeout, server `failed: true`). NOT cached as "absent": a real file must not
+  // lose its link to a hiccup. A short cool-down stops a down host being
+  // re-probed on every hover/scroll; after it the path probes again.
+  const existsFailedAtRef = useRef<Map<string, number>>(new Map());
   const tooltipElRef = useRef<HTMLDivElement | null>(null);
   // The link token currently hovered (a file path OR a URL — WARDEN-1256 made
   // the tooltip guard kind-agnostic). Guards the path side's slow-probe race:
@@ -746,6 +755,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // means a different cwd, so prior results must not carry over.
     existsCacheRef.current.clear();
     existsPendingRef.current.clear();
+    existsFailedAtRef.current.clear();
     // WARDEN-1258 — the hit delta belongs to THIS pane's cache; a new chat
     // means a new cache, so the un-reported delta dies with the old pane.
     existsCacheHitsRef.current = 0;
@@ -763,6 +773,13 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         return Promise.resolve(cache.get(path) === true);
       }
       if (pending.has(path)) return pending.get(path)!;
+      // WARDEN-1492 — inside the failure cool-down: answer "not linkified now"
+      // without probing and without caching, so the path retries afterwards.
+      const failedAt = existsFailedAtRef.current.get(path);
+      if (failedAt !== undefined) {
+        if (Date.now() - failedAt < EXISTS_FAILURE_COOLDOWN_MS) return Promise.resolve(false);
+        existsFailedAtRef.current.delete(path);
+      }
       // WARDEN-1258 — drain the cache-hit delta INTO this request (read-then-
       // reset BEFORE the fetch, so two concurrent misses never double-report).
       const cacheHits = existsCacheHitsRef.current;
@@ -783,11 +800,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           });
           if (!res.ok) { cache.set(path, false); return false; }
           const data = await res.json();
+          // WARDEN-1492: `failed: true` = the probe got no verdict. Not a
+          // conclusive "absent" — leave the cache cold and retry after a cool-down.
+          if (data.failed === true) {
+            existsFailedAtRef.current.set(path, Date.now());
+            return false;
+          }
           const ok = !!data.exists;
           cache.set(path, ok);
           return ok;
         } catch {
-          cache.set(path, false);
+          // A client-side transport/deadline failure is likewise no verdict.
+          existsFailedAtRef.current.set(path, Date.now());
           return false;
         }
       })();

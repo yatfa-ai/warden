@@ -4,6 +4,11 @@
 //
 // WHAT IT MEASURES — exactly the dimensions the ticket's territory names:
 //   • how many probes are issued            → per-operation `count`
+//   • broken vs absent (WARDEN-1492)        → remote probes with NO verdict
+//                                              (transport/timeout/script
+//                                              failure) land in their own
+//                                              operations, never in the
+//                                              exists/absent remote bucket
 //   • what share succeed                    → `okCount` / `failCount`
 //   • the latency split local vs remote     → two operations, each with its own
 //                                              min/avg/max + bucket histogram
@@ -48,6 +53,14 @@ export const FILE_EXISTS_OPS = Object.freeze({
   LOCAL: 'file-exists-local',
   /** REMOTE chat existence probes (buildFileExistsScript over SSH). */
   REMOTE: 'file-exists-remote',
+  /**
+   * REMOTE probes that got NO verdict (WARDEN-1492): transport error, channel
+   * death or script failure. Kept OUT of `file-exists-remote` so that bucket's
+   * okCount/failCount means exists/absent only — absent-vs-broken is measurable.
+   */
+  REMOTE_FAILED: 'file-exists-remote-failed',
+  /** REMOTE probes that hit the probe's hard deadline with no verdict (WARDEN-1492). */
+  REMOTE_TIMEOUT: 'file-exists-remote-timeout',
   /** Cache HITS in the renderer's per-pane cache, reported as deltas. */
   CACHE_HIT: 'file-exists-cache-hit',
 });
@@ -104,6 +117,17 @@ export function createFileExistsTelemetry({
     return aggregator.record(op, durationMs, { ok: ok !== false });
   }
 
+  // WARDEN-1492 — fold ONE remote probe that produced no verdict. `reason` is
+  // 'timeout' | 'error'. Recorded with ok:false in its OWN operation so the
+  // `file-exists-remote` operation only ever holds conclusive answers (exists →
+  // ok, absent → fail). Latency is kept: a timeout's duration shows whether the
+  // boundary is actually enforced.
+  function recordRemoteFailure(reason, durationMs) {
+    if (!isEnabled()) return false;
+    const op = reason === 'timeout' ? FILE_EXISTS_OPS.REMOTE_TIMEOUT : FILE_EXISTS_OPS.REMOTE_FAILED;
+    return aggregator.record(op, durationMs, { ok: false });
+  }
+
   // Fold a renderer-reported cache-hit DELTA (k hits served from the pane's
   // per-path cache since the last probe request). Cache hits have no server
   // duration — they are a COUNTS-only observation riding the same aggregate
@@ -121,5 +145,5 @@ export function createFileExistsTelemetry({
     return folded;
   }
 
-  return { recordProbe, recordCacheHits, flushNow: gated.flushNow, start: gated.start };
+  return { recordProbe, recordRemoteFailure, recordCacheHits, flushNow: gated.flushNow, start: gated.start };
 }
