@@ -92,9 +92,9 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 32 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 33 STORE_PERSISTED_KEYS
   // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
-  // keys (workspaces / activeWorkspaceId / paneHost, the four panel collapses,
+  // keys (workspaces / activeWorkspaceId, the four panel collapses,
   // the two panel widths, watchedChats) plus every DEFAULT_UI field the merged
   // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
   const snapshot = {
@@ -2543,13 +2543,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (32 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (33 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 32);
+  assert.equal(STORE_PERSISTED_KEYS.length, 33);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 32);
+  assert.equal(Object.keys(picked).length, 33);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2572,6 +2572,120 @@ test('the UI-prefs reset PRESERVES the collapse (RESET_PRESERVED_KEYS, storage.t
   s.setTheme(defaults.theme);
   flushSnapshotToDisk(store);
   assert.equal(loadUi().sourceControlCollapsed, false);
+});
+
+// ─── paneHost (WARDEN-1498, roadmap WARDEN-1204 slice 19) ───
+//
+// The pane → host map: App useState + five inline idempotent-merge ternaries +
+// a PaneGrid prop → one store fact with ONE idempotent action. The seed goes
+// THROUGH initialWorkspace so "Start empty" boots with {}.
+console.log('\ncreateUiStore — paneHost: one idempotent writer');
+test('primePaneHost is idempotent: the same pair twice leaves paneHost referentially identical and notifies nobody', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().primePaneHost('p1', 'hostA');
+  const before = store.getState().paneHost;
+  const stateBefore = store.getState();
+  let notifications = 0;
+  const unsubscribe = store.subscribe(() => { notifications++; });
+  store.getState().primePaneHost('p1', 'hostA');
+  unsubscribe();
+  assert.equal(store.getState().paneHost, before, 'same map identity (===)');
+  assert.equal(store.getState(), stateBefore, 'same state object — zustand skips the notification');
+  assert.equal(notifications, 0);
+});
+test('a different host for the same pane id replaces it; other ids survive', () => {
+  reset();
+  const store = createUiStore({ paneHost: { a: 'h1', b: 'h2' } });
+  store.getState().primePaneHost('a', 'h9');
+  assert.deepEqual(store.getState().paneHost, { a: 'h9', b: 'h2' });
+  store.getState().primePaneHost('c', 'h3');
+  assert.deepEqual(store.getState().paneHost, { a: 'h9', b: 'h2', c: 'h3' });
+});
+test('primePaneHost never mutates the previous map in place (new identity on change)', () => {
+  reset();
+  const store = createUiStore({ paneHost: { a: 'h1' } });
+  const prev = store.getState().paneHost;
+  store.getState().primePaneHost('a', 'h2');
+  assert.notEqual(store.getState().paneHost, prev);
+  assert.deepEqual(prev, { a: 'h1' });
+});
+test('the primePaneHost action identity is stable across writes (safe in a React dep array)', () => {
+  reset();
+  const store = createUiStore();
+  const before = store.getState().primePaneHost;
+  before('x', 'h');
+  assert.equal(store.getState().primePaneHost, before);
+});
+test('primePaneHost writes NOTHING to localStorage (the saveUi effect owns the write)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().primePaneHost('x', 'h');
+  assert.equal(mem.get('warden:ui:v3'), undefined);
+});
+
+console.log('\ncreateUiStore — paneHost seeds through initialWorkspace (the "Start empty" trap)');
+test("persisted paneHost seeds under restoreOnStartup 'previous'", () => {
+  reset();
+  saveUi({ ...loadUi(), paneHost: { a: 'h' }, restoreOnStartup: 'previous' });
+  assert.deepEqual(createUiStore().getState().paneHost, { a: 'h' });
+});
+test("persisted paneHost does NOT seed under restoreOnStartup 'empty' (boots with {})", () => {
+  reset();
+  saveUi({ ...loadUi(), paneHost: { a: 'h' }, restoreOnStartup: 'empty' });
+  assert.equal(loadUi().restoreOnStartup, 'empty', 'precondition: the disk pref is empty');
+  assert.deepEqual(createUiStore().getState().paneHost, {});
+});
+test("an explicit restoreOnStartup seed steers the paneHost seed; an explicit paneHost seed wins outright", () => {
+  reset();
+  saveUi({ ...loadUi(), paneHost: { a: 'h' }, restoreOnStartup: 'previous' });
+  assert.deepEqual(createUiStore({ restoreOnStartup: 'empty' }).getState().paneHost, {});
+  assert.deepEqual(createUiStore({ paneHost: { z: 'q' } }).getState().paneHost, { z: 'q' });
+});
+test('a clean install seeds paneHost as {}', () => {
+  reset();
+  assert.deepEqual(createUiStore().getState().paneHost, {});
+});
+
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (33) and rides the selector');
+test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
+  reset();
+  assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
+  assert.equal(STORE_PERSISTED_KEYS.length, 33);
+  const store = createUiStore({ paneHost: { a: 'h' } });
+  const picked = selectPersistedStorePrefs(store.getState());
+  assert.equal(Object.keys(picked).length, 33);
+  assert.deepEqual(picked.paneHost, { a: 'h' });
+});
+
+console.log('\nround trip: primePaneHost → store → snapshot → the saveUi effect → loadUi');
+test('a primed host survives a restart through the production hop', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().primePaneHost('p1', 'hostA');
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().paneHost, { p1: 'hostA' });
+  assert.deepEqual(createUiStore().getState().paneHost, { p1: 'hostA' });
+});
+test("a 'Start empty' launch boots with {} yet persistUiState's startedEmpty freeze keeps the DISK map", () => {
+  reset();
+  saveUi({ ...loadUi(), paneHost: { a: 'h' }, restoreOnStartup: 'empty' });
+  const store = createUiStore();
+  assert.deepEqual(store.getState().paneHost, {});
+  // a pane opened in this empty session primes a host; the freeze must still
+  // leave the on-disk map untouched
+  store.getState().primePaneHost('n', 'newhost');
+  flushSnapshotToDisk(store, { startedEmpty: true });
+  assert.deepEqual(loadUi().paneHost, { a: 'h' });
+});
+test('the UI-prefs reset PRESERVES paneHost (RESET_PRESERVED_KEYS, storage.ts untouched)', () => {
+  reset();
+  const defaults = resetUiPrefDefaults();
+  assert.ok(!('paneHost' in defaults), 'paneHost must stay in RESET_PRESERVED_KEYS');
+  const store = createUiStore({ paneHost: { a: 'h' } });
+  store.getState().setTheme(defaults.theme);
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().paneHost, { a: 'h' });
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -85,7 +85,6 @@ interface Props {
   maximized: string | null;
   newActivity: Set<string>;
   chats: Chat[];
-  paneHost: Record<string, string>;
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
   onToggleMax: (id: string) => void;
@@ -158,12 +157,15 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
   // textually unchanged.
   const paneLayout = usePaneLayout();
+  // WARDEN-1498 (roadmap WARDEN-1204 slice 19): the pane → host map comes from
+  // the same store (App used to thread it as a prop; primePaneHost is its one writer).
+  const paneHost = usePaneHost();
   // WARDEN-1433 (roadmap WARDEN-1204 slice 14): the draggable resize-gutter
   // ratios (WARDEN-660) come from the same store on the same terms — the pair
   // of persisted values AND the pair of commit callbacks, each keeping the
