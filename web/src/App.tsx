@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
+import { useRecordOnExpand } from '@/lib/useRecordOnExpand';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
@@ -298,6 +299,10 @@ function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
+  // WARDEN-1494: count panel expands on the state edge so every path (button,
+  // Alt+S/Alt+O, openActivityTab) records exactly once.
+  useRecordOnExpand(sidebarCollapsed, 'panel-expand-sidebar');
+  useRecordOnExpand(observerCollapsed, 'panel-expand-observer');
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   // WARDEN-431 / WARDEN-1422: the Source Control section collapse migrated onto
   // the shared store (lib/uiStore.ts, roadmap WARDEN-1204 slice 18, WARDEN-1486)
@@ -2272,7 +2277,7 @@ function App() {
       ) : (
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
-        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => { if (sidebarCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-sidebar'); setSidebarCollapsed(!sidebarCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
+        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => { setSidebarCollapsed(!sidebarCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
         <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{openPanes.length} open</span>
         {/* Workspace tab strip (WARDEN-256) — the flexible, bounded middle region.
@@ -2302,7 +2307,7 @@ function App() {
           <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => { if (healthCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-health'); setHealthCollapsed(!healthCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
-          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { if (observerCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-observer'); setObserverCollapsed(!observerCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
+          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { setObserverCollapsed(!observerCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
           <IconTooltip label="settings" side="bottom"><button onClick={() => { getFeatureUsageSampler().sampler.recordFeatureUse('settings'); setSettingsOpen(true); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
         </div>
       </header>
