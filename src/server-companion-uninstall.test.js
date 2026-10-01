@@ -91,16 +91,15 @@ describe('POST /api/companion/uninstall — WARDEN-882 (HTTP guards)', () => {
   // no-bootstrap fact, so the 60s lifecycle tick cannot silently re-install the
   // binary; see src/companion-uninstall-durable.test.js for the mechanism).
   //
-  // ⚠️ THE SUCCESS PATH IS UNREACHABLE FROM THIS SANDBOX, and that is a fact
-  // about the environment, not a coverage choice: the route's FIRST act is
-  // validateHost, which spawns real ssh — absent here — so no request can ever
-  // get past the 400 above to the uninstall, let alone to the save. The
-  // persist's own contract (what is recorded, idempotence, sanitizer refusal,
+  // The success path (and the route's disk write) is pinned in
+  // src/server-companion-uninstall-persist.test.js (WARDEN-1495), which puts a
+  // fake `ssh` on PATH so validateHost and the uninstall succeed. The persist's
+  // own in-memory contract (what is recorded, idempotence, sanitizer refusal,
   // live-apply, restart survival, both directions) is covered at the unit level
-  // in companion-uninstall-durable.test.js, which drives the shipped deps seams.
-  // What IS decidable here is the NEGATIVE, and it is the one that matters for
-  // a config file: a request that never reaches a successful removal must not
-  // write anything.
+  // in companion-uninstall-durable.test.js.
+  // With ssh ABSENT (this file's setup) what IS decidable is the NEGATIVE, and
+  // it is the one that matters for a config file: a request that never reaches
+  // a successful removal must not write anything.
   it('a request that never reaches a successful removal persists NOTHING (no stray config write)', async () => {
     const configPath = path.join(tempHome, '.yatfa-warden', 'config.json');
     const before = fs.readFileSync(configPath, 'utf8');
