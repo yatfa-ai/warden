@@ -269,3 +269,44 @@ describe('percentile()', () => {
     assert.equal(percentile([1, 2, 3, 4], 75), 3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// WARDEN-1491 — the companion attachInput ack leg
+// ---------------------------------------------------------------------------
+
+describe('companion-input-ack (WARDEN-1491)', () => {
+  it('is a closed kebab-case operation literal the wire validator accepts', () => {
+    assert.equal(PANE_INPUT_OPS.INPUT_ACK, 'companion-input-ack');
+    assert.match(PANE_INPUT_OPS.INPUT_ACK, OP_NAME_RE);
+  });
+
+  it('folds ack latency into its own histogram, separate from the round trip', () => {
+    const { tel } = makeHarness();
+    assert.equal(tel.noteInputAck(2.5, true), true);
+    assert.equal(tel.noteInputAck(900, true), true);
+    const snap = tel.flushNow();
+    const ack = snap.operations.find((o) => o.operation === PANE_INPUT_OPS.INPUT_ACK);
+    assert.equal(ack.count, 2);
+    assert.equal(ack.max, 900);
+    assert.equal(snap.operations.find((o) => o.operation === PANE_INPUT_OPS.ROUNDTRIP), undefined,
+      'the ack leg must not leak into the roundtrip histogram');
+  });
+
+  it('a failed ack folds as ok:false so the failure rate rides beside the latency', () => {
+    const { tel } = makeHarness();
+    tel.noteInputAck(15000, false);
+    tel.noteInputAck(3, true);
+    const ack = tel.flushNow().operations.find((o) => o.operation === PANE_INPUT_OPS.INPUT_ACK);
+    assert.equal(ack.failCount, 1);
+    assert.equal(ack.okCount, 1);
+  });
+
+  it('records nothing while consent is off, and rejects non-numeric / negative input', () => {
+    const off = makeHarness({ enabled: false });
+    assert.equal(off.tel.noteInputAck(5, true), false);
+    const on = makeHarness();
+    assert.equal(on.tel.noteInputAck(-1, true), false);
+    assert.equal(on.tel.noteInputAck('x', true), false);
+    assert.equal(on.tel.noteInputAck(NaN, true), false);
+  });
+});

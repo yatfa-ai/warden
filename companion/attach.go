@@ -117,6 +117,11 @@ type attachSession struct {
 	sid      string
 	pty      hostPTY
 	exitOnce sync.Once
+	// inputLane serializes THIS session's keystroke writes (WARDEN-1491). A
+	// pty.Write can block when the child stops reading (a wedged tmux client, a
+	// full line-discipline buffer); it must stall only this pane's keystrokes —
+	// in order — never the dispatch loop that every other pane and RPC rides.
+	inputLane serialLane
 }
 
 var (
@@ -269,36 +274,59 @@ func (s *attachSession) emitExit(writeLine func(any), code int) {
 	})
 }
 
-// attachInput writes decoded input bytes to the session's PTY. An unknown sid is
-// an error (the session already exited, or the client is confused) rather than a
-// silent success, so a wedged pane is diagnosable; warden's wrapper swallows it,
-// matching node-pty's write-after-exit being a no-op.
-func attachInput(params json.RawMessage) error {
+// prepareAttachInput is the NON-BLOCKING half of attachInput, run on the
+// dispatch loop: validate, resolve the session, decode the payload, and stamp
+// the echo-priority clock. The (possibly blocking) PTY write is the other half
+// (writeInput), run on the session's own input lane. An unknown sid is an error
+// (the session already exited, or the client is confused) rather than a silent
+// success, so a wedged pane is diagnosable; warden's wrapper swallows it,
+// matching node-pty's write-after-exit being a no-op. An empty payload returns
+// (nil, nil, nil): a benign no-op the caller acks.
+func prepareAttachInput(params json.RawMessage) (*attachSession, []byte, error) {
 	var p attachInputParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return fmt.Errorf("invalid attachInput params: %s", err)
+			return nil, nil, fmt.Errorf("invalid attachInput params: %s", err)
 		}
 	}
 	s := getAttachSession(p.Sid)
 	if s == nil {
-		return fmt.Errorf("unknown attach session: %s", p.Sid)
+		return nil, nil, fmt.Errorf("unknown attach session: %s", p.Sid)
 	}
 	data, err := base64.StdEncoding.DecodeString(p.Data)
 	if err != nil {
-		return fmt.Errorf("attachInput data is not valid base64: %s", err)
+		return nil, nil, fmt.Errorf("attachInput data is not valid base64: %s", err)
 	}
 	if len(data) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	// WARDEN-1402: stamp the keystroke BEFORE the PTY write so the outbound
 	// queue classifies this pane's next output chunk as the echo (interactive
-	// — it overtakes other panes' bulk) for the echo window that follows.
+	// — it overtakes other panes' bulk) for the echo window that follows. Done
+	// at RECEIPT, not at write time: the echo window must open when the user
+	// typed, whatever the lane's queue looks like.
 	noteAttachInput(p.Sid)
+	return s, data, nil
+}
+
+// writeInput performs the PTY write for one keystroke batch.
+func (s *attachSession) writeInput(data []byte) error {
 	if _, err := s.pty.Write(data); err != nil {
 		return fmt.Errorf("attachInput write failed: %s", err)
 	}
 	return nil
+}
+
+// attachInput is the synchronous composition of the two halves — the shape the
+// original handler had, kept for direct callers (the tests). The production
+// dispatcher (dispatch.go) calls the halves separately so the write never runs
+// on the request loop.
+func attachInput(params json.RawMessage) error {
+	s, data, err := prepareAttachInput(params)
+	if err != nil || s == nil {
+		return err
+	}
+	return s.writeInput(data)
 }
 
 // attachResize sets the terminal winsize, which signals SIGWINCH to the

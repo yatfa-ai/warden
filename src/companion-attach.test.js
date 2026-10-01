@@ -28,6 +28,7 @@ import {
   readPaneDeltas, hasFreshPaneDelta,
   _wirePaneDeltaForTests, _primeChannelForTests,
   _resetChannelCacheForTests, _resetPaneDeltaStateForTests,
+  setInputAckObserver,
 } from './companion.js';
 import { attachStream } from './tmux.js';
 import { buildAttachCommand, buildAttachRemoteScript, shellQuote } from './ssh.js';
@@ -194,6 +195,63 @@ describe('attachStream routing (WARDEN-1295 AC #1/#4)', () => {
 });
 
 // ---------------------------- the IPty wrapper -------------------------------
+
+// WARDEN-1491 — every attachInput RPC reports its request→ack time to the one
+// installed observer, so a tail in the felt path can be split into "the daemon
+// was slow to accept the keystroke" vs "tmux was slow to echo it".
+describe('CompanionAttachSession: attachInput ack-latency observer (WARDEN-1491)', () => {
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => setInputAckObserver(null));
+
+  it('reports a successful ack with its latency', async () => {
+    const seen = [];
+    setInputAckObserver((ms, ok) => seen.push({ ms, ok }));
+    const { channel } = attachChannel();
+    const s = new CompanionAttachSession('prod', Promise.resolve({ channel, sid: 'a1' }));
+    await settle();
+    s.write('x');
+    await settle();
+    await settle();
+    assert.equal(seen.length, 1, 'one keystroke → one ack observation');
+    assert.equal(seen[0].ok, true);
+    assert.equal(typeof seen[0].ms, 'number');
+    assert.ok(seen[0].ms >= 0);
+  });
+
+  it('reports a failed ack as ok:false and still never throws into the caller', async () => {
+    const seen = [];
+    setInputAckObserver((ms, ok) => seen.push({ ms, ok }));
+    const transport = fakeTransport((req) => {
+      if (req.method === 'attachInput') return { id: req.id, ok: false, error: 'unknown attach session: a1' };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const channel = new CompanionChannel('prod', transport);
+    const s = new CompanionAttachSession('prod', Promise.resolve({ channel, sid: 'a1' }));
+    await settle();
+    assert.doesNotThrow(() => s.write('x'));
+    await settle();
+    await settle();
+    assert.deepEqual(seen.map((o) => o.ok), [false]);
+  });
+
+  it('a throwing observer can never break the keystroke path', async () => {
+    setInputAckObserver(() => { throw new Error('observer bug'); });
+    const { channel } = attachChannel();
+    const s = new CompanionAttachSession('prod', Promise.resolve({ channel, sid: 'a1' }));
+    await settle();
+    assert.doesNotThrow(() => s.write('x'));
+    await settle();
+    await settle();
+  });
+
+  it('no observer installed is the inert default', async () => {
+    const { channel } = attachChannel();
+    const s = new CompanionAttachSession('prod', Promise.resolve({ channel, sid: 'a1' }));
+    await settle();
+    assert.doesNotThrow(() => s.write('x'));
+    await settle();
+  });
+});
 
 describe('CompanionAttachSession: the IPty surface server.js consumes', () => {
   beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });

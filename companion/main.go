@@ -163,6 +163,10 @@ func main() {
 	// multi-second tail. Responses (the dispatch loop's writes) NEVER block —
 	// that property is the fix.
 	//
+	// WARDEN-1491 finished the job on the INPUT side: the loop below no longer
+	// RUNS handlers — it decodes and routes (dispatch.go) — so a slow exec /
+	// discover / capture can never hold a keystroke unread in stdin either.
+	//
 	// The interactive classification consults the attach registry: a pane with
 	// a recent keystroke is one whose next output chunk is that keystroke's
 	// echo.
@@ -176,6 +180,7 @@ func main() {
 	write := func(r Response) { writeLine(r) }
 	writeAttachData := func(sid string, b []byte) { out.enqueueAttachData(sid, b) }
 
+	d := newDispatcher(write, writeLine, writeAttachData)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -187,151 +192,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "companion: malformed request line:", err)
 			continue
 		}
-		switch req.Method {
-		case "ping":
-			write(Response{ID: req.ID, OK: true, Result: map[string]any{
-				"version": version,
-				"methods": pingMethods(),
-			}})
-		case "discover":
-			containers, err := discover(req.Params)
-			if err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{
-					"containers": containers,
-				}})
-			}
-		case "capturePanes":
-			panes, err := capturePanes(req.Params)
-			if err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{
-					"panes": panes,
-				}})
-			}
-		case "hasSession":
-			result, err := hasSession(req.Params)
-			if err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: result})
-			}
-		case "spawnSession":
-			if err := spawnSession(req.Params); err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
-			}
-		case "killSession":
-			if err := killSession(req.Params); err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
-			}
-		case "resize":
-			// resize is the interactive-pane control-plane op (WARDEN-409): runs
-			// `set-option -t <target> window-size latest` LOCALLY. It returns the
-			// raw cmdResult (ok/code/stdout/stderr), never an RPC error for a
-			// host-side command failure — same "never fails the RPC" shape as
-			// hasSession, only richer (it carries stdout/stderr/code so the JS side
-			// maps it to the identical runTmux result the default path produces).
-			write(Response{ID: req.ID, OK: true, Result: resize(req.Params)})
-		case "send":
-			// send is the user-input WRITE op (WARDEN-888): runs the WARDEN-254
-			// bracketed-paste sequence host-side in ONE atomic bash -lc script. It
-			// returns the raw cmdResult — never an RPC error for a host-side command
-			// failure (e.g. "can't find session") — same shape as resize, so the JS
-			// side maps it to the identical runTmux result the default path produces.
-			write(Response{ID: req.ID, OK: true, Result: send(req.Params)})
-		case "sendKeys":
-			// sendKeys is the special-key WRITE op (WARDEN-888): runs
-			// `send-keys -t <target> <key>` for a key the JS side ALREADY validated
-			// against its ALLOWED_KEYS trust boundary. Returns the raw cmdResult,
-			// same shape as send/resize.
-			write(Response{ID: req.ID, OK: true, Result: sendKeys(req.Params)})
-		case "exec":
-			// exec is the GENERIC script RPC (WARDEN-1261): runs a script the JS
-			// side ALREADY assembled host-side via `bash -lc`, returning the raw
-			// cmdResult — never an RPC error for a host-side command failure (the
-			// git routes read {ok,code,stdout,stderr} exactly as they read run()'s
-			// result today; a non-zero probe exit is data, not an RPC failure).
-			// The Go side EXECUTES the script, never rebuilds it: quoting,
-			// `2>/dev/null` suffixes, and containment fragments live inside the
-			// script string built in JS and are preserved verbatim. A container
-			// param selects the docker-exec delivery shape (runInContext); its
-			// absence delivers the script straight to `bash -lc` (run()'s shape).
-			// timeoutMs is honored HOST-SIDE via exec.CommandContext so a timed-
-			// out probe dies on the host, not just in the JS caller.
-			write(Response{ID: req.ID, OK: true, Result: execScript(req.Params)})
-		case "writeFile":
-			// writeFile is the BYTE-CARRYING RPC (WARDEN-1350): delivers a payload
-			// the channel could not carry before — base64-decoded host-side and fed
-			// to the JS-assembled receive script on stdin. exec structurally cannot
-			// do this (runScriptCtx assigns no Stdin — it moves a COMMAND, this
-			// moves a PAYLOAD). The receive script is built JS-side (pasteImage.js
-			// buildReceiveScript: mkdir -p, the WARDEN-1320 prune, then `cat >` the
-			// destination) and executed verbatim — the Go side executes, never
-			// rebuilds, exactly the exec contract; a container param selects the
-			// docker-exec delivery shape (byte-identical to the raw-ssh paste leg
-			// it replaces). Returns the raw cmdResult — a non-zero exit (a refused
-			// write) is data, never an RPC error.
-			write(Response{ID: req.ID, OK: true, Result: writeFileRPC(req.Params)})
-		case "subscribePanes":
-			// WARDEN-413: start (or replace) a background watcher that re-captures
-			// the pane set on a short interval and pushes paneDelta events for ONLY
-			// the panes that changed (empty-panes = heartbeat). The ACK returns
-			// immediately; emission happens asynchronously via writeLine. An empty
-			// pane list stops any running watcher (treated as unsubscribe).
-			var p capturePanesParams
-			if len(req.Params) > 0 {
-				_ = json.Unmarshal(req.Params, &p) // bad params -> empty -> stop watcher
-			}
-			startSubscription(p.Panes, writeLine)
-			write(Response{ID: req.ID, OK: true, Result: map[string]any{"subscribed": len(p.Panes)}})
-		case "unsubscribePanes":
-			stopSubscription()
-			write(Response{ID: req.ID, OK: true, Result: map[string]any{"unsubscribed": true}})
-		case "attachStart":
-			// WARDEN-1295: allocate a host-side PTY, run the delivered script
-			// under it, ACK {sid} IMMEDIATELY, and only THEN start the output
-			// pump — the subscribePanes ACK-then-stream contract, tightened so
-			// no attachData can reach the client before it knows the sid.
-			sid, launch, err := startAttach(req.Params, writeLine, writeAttachData)
-			if err != nil {
-				// Platform without a PTY, or a spawn failure. Surfaced as an
-				// ordinary {ok:false} so warden maps it to its existing
-				// attach_error path — never a silent raw-SSH fallback.
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{"sid": sid}})
-				launch()
-			}
-		case "attachInput":
-			if err := attachInput(req.Params); err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
-			}
-		case "attachResize":
-			if err := attachResize(req.Params); err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
-			}
-		case "attachKill":
-			// Idempotent (an already-gone sid is a benign ok), mirroring
-			// killSession — a detach→attach race must never surface a spurious
-			// failure to warden's best-effort kill call site.
-			if err := attachKill(req.Params); err != nil {
-				write(Response{ID: req.ID, OK: false, Error: err.Error()})
-			} else {
-				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
-			}
-		default:
-			write(Response{ID: req.ID, OK: false, Error: "unknown method: " + req.Method})
-		}
+		d.handle(req)
 	}
 	// Stop the watcher if the channel (stdin) closed so a reconnect starts clean,
 	// and kill every live attach so a dead channel can never leave an orphaned
@@ -627,26 +488,68 @@ func parseCaptureSentinels(stdout string) map[string]string {
 // capturePanesList runs the batched capture for an already-parsed pane list and
 // returns the key->content map. Shared by capturePanes (the RPC) and the
 // subscribePanes watcher (which re-captures the same set on each tick to diff).
+// subscribeCaptureBase is a var only so a test can shrink the bound.
+var subscribeCaptureBase = 10 * time.Second
+
+// subscribeCaptureBound is the abandon-deadline for a watcher capture of n panes.
+func subscribeCaptureBound(n int) time.Duration {
+	d := subscribeCaptureBase + time.Duration(n)*subscribeCapturePerPane
+	if d > subscribeCaptureMax {
+		d = subscribeCaptureMax
+	}
+	return d
+}
+
+// captureScriptFor builds the batch capture script. A package var only so the
+// bounded/abandonable-capture tests can substitute a hanging script (a stub on
+// PATH cannot work: `bash -lc` re-derives PATH from the login profile).
+var (
+	captureScriptMu sync.RWMutex
+	captureScriptFn = buildCaptureScript
+)
+
+func captureScriptFor(panes []capturePaneReq) string {
+	captureScriptMu.RLock()
+	fn := captureScriptFn
+	captureScriptMu.RUnlock()
+	return fn(panes)
+}
+
 func capturePanesList(panes []capturePaneReq) (map[string]string, error) {
+	return capturePanesListCtx(context.Background(), panes)
+}
+
+// capturePanesListCtx is capturePanesList under a context: the script runs in
+// its own process group (runScriptCtx) so a cancel or deadline kills the whole
+// docker-exec fan-out instead of orphaning it (WARDEN-1491 — the watcher's
+// capture must be abandonable). A context-less call is the old unbounded shape.
+func capturePanesListCtx(ctx context.Context, panes []capturePaneReq) (map[string]string, error) {
 	if len(panes) == 0 {
 		return map[string]string{}, nil
 	}
-	script := buildCaptureScript(panes)
+	script := captureScriptFor(panes)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	// The RPC path (Background ctx) keeps its pre-1491 behavior exactly; only a
+	// caller that supplied a cancellable ctx (the watcher) gets the bound.
+	if ctx.Done() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, subscribeCaptureBound(len(panes)))
+		defer cancel()
+	}
 	// `bash -lc` mirrors the default runWithPool path (CLAUDE.md: always wrap
 	// remote commands in a login shell) so docker/tmux resolve on PATH exactly as
 	// they do over SSH today.
-	out, err := exec.Command("bash", "-lc", script).Output()
-	if err != nil {
-		stderr := ""
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
-		}
+	res := runScriptCtx(ctx, script)
+	if !res.OK {
+		stderr := strings.TrimSpace(res.Stderr)
 		if stderr == "" {
-			stderr = err.Error()
+			stderr = fmt.Sprintf("exit %d", res.Code)
 		}
 		return nil, fmt.Errorf("capturePanes script failed: %s", stderr)
 	}
-	return parseCaptureSentinels(string(out)), nil
+	return parseCaptureSentinels(res.Stdout), nil
 }
 
 // capturePanes mirrors warden's batched capturePanes (src/chats.js) for ONE host:
@@ -703,22 +606,52 @@ const (
 	// channel traffic is ~0 (one tiny line every few seconds, not a 60-line × N
 	// capture every tick).
 	subscribeHeartbeat = 4 * time.Second
+	// subscribeCaptureBase / subscribeCapturePerPane bound ONE watcher capture
+	// (WARDEN-1491). The capture is a sequential docker-exec-per-pane bash script
+	// with no deadline of its own: one hung `docker exec` (a wedged container, a
+	// loaded daemon) used to park the watcher forever — no pushes AND no
+	// heartbeat — and held every subscription change behind it. A capture that
+	// exceeds its bound is abandoned (process group killed) and retried next
+	// tick. The bound SCALES with the pane count because a healthy capture does
+	// too: warden's fleet sweep subscribes the whole hidden fleet (~200 panes),
+	// where a legitimate pass takes many seconds — a flat bound would kill every
+	// capture and starve the push entirely, a worse failure than the one fixed.
+	subscribeCapturePerPane = 250 * time.Millisecond
+	subscribeCaptureMax     = 60 * time.Second
 )
 
-// paneSubscription is one active watcher. Exactly one is live per process (the
-// companion serves one warden client over its one stdio channel).
+// paneSubscription is the one active watcher. Exactly one is live per process
+// (the companion serves one warden client over its one stdio channel).
 type paneSubscription struct {
 	mu     sync.Mutex
 	panes  []capturePaneReq  // current pane set (the latest subscribePanes)
 	hashes map[string]string // key -> last-emitted content hash
 	stop   chan struct{}
 	done   chan struct{}
+	kick   chan struct{} // an immediate capture (the pane set changed)
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 var (
 	subMu     sync.Mutex
 	activeSub *paneSubscription
+	// emitMu orders a watcher's push against its own retirement: stopLocked
+	// closes `stop` under it, and captureOnce re-checks `stop` under it before
+	// writing, so no push can leave the process after the watcher was stopped.
+	emitMu sync.Mutex
 )
+
+// stopped reports whether this watcher has been retired. A watcher built
+// without a stop channel (tests) is never stopped.
+func (s *paneSubscription) stopped() bool {
+	select {
+	case <-s.stop:
+		return true
+	default:
+		return false
+	}
+}
 
 // hashContent returns a stable hex digest of a pane's captured content. Only used
 // for change detection, so a collision would at worst skip one push (corrected on
@@ -761,9 +694,18 @@ func (s *paneSubscription) captureOnce(writeLine func(any), lastEmit *time.Time,
 	if len(panes) == 0 {
 		return
 	}
-	captured, err := capturePanesList(panes)
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	captured, err := capturePanesListCtx(ctx, panes)
 	if err != nil {
 		return // transient — retry next tick; never wedge the channel.
+	}
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	if s.stopped() {
+		return // retired while capturing: a stale snapshot must not follow the stop
 	}
 	s.mu.Lock()
 	changed := diffPanes(captured, s.hashes)
@@ -778,7 +720,8 @@ func (s *paneSubscription) captureOnce(writeLine func(any), lastEmit *time.Time,
 // loop runs the watcher until stop is closed. An immediate first capture pushes
 // the full initial state (every pane is "changed" against an empty hash map), so
 // warden's cache populates within ~one interval of the ACK rather than waiting a
-// tick.
+// tick. A kick (the pane set changed in place) triggers an immediate re-capture
+// so a newly-added pane seeds without waiting out the tick.
 func (s *paneSubscription) loop(writeLine func(any)) {
 	defer close(s.done)
 	ticker := time.NewTicker(subscribeInterval)
@@ -791,48 +734,108 @@ func (s *paneSubscription) loop(writeLine func(any)) {
 		select {
 		case <-s.stop:
 			return
+		case <-s.kick:
+			s.captureOnce(writeLine, &lastEmit, time.Now())
 		case now := <-ticker.C:
 			s.captureOnce(writeLine, &lastEmit, now)
 		}
 	}
 }
 
-// startSubscription stops any running watcher and starts a new one for panes.
-// Called from the dispatch loop (synchronously handling subscribePanes); it
-// returns once the new watcher goroutine has started (the goroutine runs in the
-// background). An empty pane list stops the watcher without starting a new one
-// (unsubscribe semantics). Blocking on the previous watcher's done channel
-// guarantees a clean handoff: no two watchers ever capture/emit concurrently.
+// samePaneSet reports whether two pane lists are identical (order-insensitive).
+func samePaneSet(a, b []capturePaneReq) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[capturePaneReq]int, len(a))
+	for _, p := range a {
+		seen[p]++
+	}
+	for _, p := range b {
+		if seen[p] == 0 {
+			return false
+		}
+		seen[p]--
+	}
+	return true
+}
+
+// startSubscription makes `panes` the watched set. It NEVER WAITS (WARDEN-1491).
+//
+// It used to stop the running watcher and BLOCK on its `done` channel — i.e. on
+// the watcher's in-flight capture, a sequential docker-exec-per-pane script with
+// no deadline — and it ran on the serial request loop. warden's 30s TTL sweep
+// restarts the subscription once per released pane, so every restart froze the
+// loop (and every keystroke queued behind it) for as long as a capture took:
+// seconds on a loaded host, exactly the periodic multi-second main-process
+// freeze the bimodal /api/agent-states telemetry showed.
+//
+// Now: an identical set is a no-op (the common TTL-sweep case when nothing
+// changed); a different set is swapped IN PLACE under the watcher's own mutex,
+// preserving the hashes of panes that stayed (their content is not re-pushed)
+// and kicking one immediate capture so a new pane seeds at once. A watcher is
+// only created when none runs. An empty list retires it — by closing `stop` and
+// cancelling the in-flight capture (killing its process group), also without
+// waiting.
 func startSubscription(panes []capturePaneReq, writeLine func(any)) {
 	subMu.Lock()
 	defer subMu.Unlock()
-	if activeSub != nil {
-		close(activeSub.stop)
-		<-activeSub.done
-		activeSub = nil
-	}
 	if len(panes) == 0 {
+		stopLocked()
 		return
 	}
+	if activeSub != nil {
+		s := activeSub
+		s.mu.Lock()
+		if samePaneSet(s.panes, panes) {
+			s.mu.Unlock()
+			return
+		}
+		s.panes = panes
+		s.mu.Unlock()
+		select {
+		case s.kick <- struct{}{}:
+		default: // a capture is already pending; it will read the new set
+		}
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &paneSubscription{
 		panes:  panes,
 		hashes: map[string]string{},
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
+		kick:   make(chan struct{}, 1),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	activeSub = s
 	go s.loop(writeLine)
+}
+
+// stopLocked retires the running watcher without waiting for it. Callers hold
+// subMu. `stop` is closed under emitMu so a capture that finishes afterwards
+// cannot push (captureOnce re-checks under the same lock), and the context
+// cancel kills the in-flight capture's process group so it does not linger.
+func stopLocked() {
+	if activeSub == nil {
+		return
+	}
+	s := activeSub
+	activeSub = nil
+	emitMu.Lock()
+	close(s.stop)
+	emitMu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 // stopSubscription stops the running watcher (unsubscribePanes, or stdin close).
 func stopSubscription() {
 	subMu.Lock()
 	defer subMu.Unlock()
-	if activeSub != nil {
-		close(activeSub.stop)
-		<-activeSub.done
-		activeSub = nil
-	}
+	stopLocked()
 }
 
 // ------------------------------- hasSession ---------------------------------

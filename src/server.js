@@ -84,7 +84,7 @@ import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, recordCompanionUninstall, deliverRemoteScript, pingProbe } from './companion.js';
+import { setInputAckObserver, isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, recordCompanionUninstall, deliverRemoteScript, pingProbe } from './companion.js';
 import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 // WARDEN-1381 — the WebSocket layer (observe wss + streamWss + the upgrade router).
@@ -1519,6 +1519,10 @@ const paneInputTelemetry = createPaneInputTelemetry({
   },
 });
 paneInputTelemetry.start();
+// WARDEN-1491: the companion attachInput request→ack leg of the felt path, so a
+// tail in pane-input-roundtrip can be attributed to the channel/daemon (this
+// histogram) or to tmux/the agent (the other one) from production telemetry.
+setInputAckObserver((ms, ok) => paneInputTelemetry.noteInputAck(ms, ok));
 
 // WARDEN-1292 — the request-metrics producer: every /api request's duration +
 // ok/fail verdict, folded into the same operational-metrics channel as the

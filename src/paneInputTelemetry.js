@@ -66,6 +66,17 @@ export const PANE_INPUT_OPS = Object.freeze({
   WRITE: 'pane-input-write',
   /** pty.write() done → next output chunk from that pane's PTY (tmux round trip). */
   ROUNDTRIP: 'pane-input-roundtrip',
+  /**
+   * WARDEN-1491 — companion `attachInput` RPC: request written to the channel →
+   * the daemon's ack came back. Only the companion transport has this leg (the
+   * raw-ssh path has no per-keystroke ack). It splits the roundtrip tail into
+   * "the channel/daemon was slow to ACCEPT the keystroke" (this histogram has
+   * the tail) vs "tmux/the agent was slow to ECHO it" (this histogram is flat
+   * while pane-input-roundtrip has the tail) — the one question the two
+   * existing hops could not separate, and the instrument that convicts or
+   * clears the daemon's request loop in production.
+   */
+  INPUT_ACK: 'companion-input-ack',
 });
 
 // Default flush cadence — the same 5-minute window the file-exists and stall
@@ -130,7 +141,7 @@ export function percentile(values, p) {
  *                unchanged — only the hop DURATIONS come from this clock.
  *   ledgerMaxPanes / ledgerRing — the local ledger's bounds (tests shrink them).
  *
- * Returns { noteInputWritten, notePaneOutput, ledger, flushNow, start }.
+ * Returns { noteInputWritten, noteInputAck, notePaneOutput, ledger, flushNow, start }.
  */
 export function createPaneInputTelemetry({
   consent,
@@ -190,6 +201,18 @@ export function createPaneInputTelemetry({
     const folded = aggregator.record(PANE_INPUT_OPS.WRITE, writeLegMs, { ok: true });
     pending.set(key, { at: now(), stamp: Date.now() });
     return folded;
+  }
+
+  /**
+   * Fold one companion `attachInput` ack latency (WARDEN-1491). Not keyed to a
+   * pane: the histogram is the product (a pane key may never ride telemetry),
+   * and a rejected/failed ack folds as ok:false so the failure rate is visible
+   * beside the latency. Returns false when consent is off or it was rejected.
+   */
+  function noteInputAck(ms, ok = true) {
+    if (!isEnabled()) return false;
+    if (typeof ms !== 'number' || !(ms >= 0)) return false;
+    return aggregator.record(PANE_INPUT_OPS.INPUT_ACK, ms, { ok: ok !== false });
   }
 
   /**
@@ -267,6 +290,7 @@ export function createPaneInputTelemetry({
 
   return {
     noteInputWritten,
+    noteInputAck,
     notePaneOutput,
     dropPending,
     forgetPane,

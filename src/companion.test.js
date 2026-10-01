@@ -977,6 +977,102 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
   });
 });
 
+// ------------------- sync coalescing + batched release (WARDEN-1491) ---------
+// The 30s TTL sweep used to release a fleet's panes ONE KEY AT A TIME, each key a
+// separate subscribePanes RPC (a watcher restart on the companion), chained
+// serially per host. These pin: one RPC per host for a whole released set, and
+// any burst of syncs collapsing into at most one follow-up run whose final state
+// is the true union.
+describe('subscription sync coalescing (WARDEN-1491)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1'; // reconcilePaneSubscriptions self-gates on the flag
+    _resetChannelCacheForTests(); _resetPaneDeltaStateForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    _resetChannelCacheForTests(); _resetPaneDeltaStateForTests();
+  });
+
+  // A transport whose subscribe ACK is DELAYED, so syncs pile up behind it.
+  const slowAckTransport = (log, ackMs = 40) => {
+    const methods = ['ping', 'discover', 'capturePanes', 'hasSession', 'subscribePanes', 'unsubscribePanes'];
+    let lineCB = null;
+    return {
+      write(line) {
+        const req = JSON.parse(line);
+        let resp;
+        if (req.method === 'ping') resp = { id: req.id, ok: true, result: { version: TEST_VER, methods } };
+        else {
+          log.push(req);
+          resp = { id: req.id, ok: true, result: { subscribed: (req.params?.panes || []).length } };
+        }
+        const delay = req.method === 'subscribePanes' || req.method === 'unsubscribePanes' ? ackMs : 0;
+        setTimeout(() => { if (lineCB) lineCB(JSON.stringify(resp)); }, delay);
+      },
+      onLine(cb) { lineCB = cb; },
+      onExit() {},
+      kill() {},
+    };
+  };
+
+  it('a burst of N subscribes behind a slow ACK costs at most 2 RPCs, and the last carries the full union', async () => {
+    const log = [];
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log) });
+    const calls = [];
+    for (let i = 0; i < 12; i++) {
+      calls.push(subscribePanes('prod', [{ key: `k${i}`, container: `k${i}`, session: 'agent' }], {}, {}, deps));
+    }
+    const results = await Promise.all(calls);
+    assert.ok(results.every((r) => r.ok), 'every caller got an answer');
+    const subs = log.filter((r) => r.method === 'subscribePanes');
+    assert.ok(subs.length <= 2, `12 queued syncs must coalesce to <= 2 RPCs, got ${subs.length}`);
+    const last = subs[subs.length - 1];
+    assert.strictEqual(last.params.panes.length, 12, 'the final sync carries the true union of all 12');
+  });
+
+  it('every coalesced caller observes a result produced AFTER its own registration (no stale ack)', async () => {
+    const log = [];
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 30) });
+    const first = subscribePanes('prod', [{ key: 'a', container: 'a', session: 'agent' }], {}, {}, deps);
+    // Arrives while the first RPC is in flight: must be covered by a LATER run.
+    const second = subscribePanes('prod', [{ key: 'b', container: 'b', session: 'agent' }], {}, {}, deps);
+    const [r1, r2] = await Promise.all([first, second]);
+    assert.strictEqual(r1.ok, true);
+    assert.strictEqual(r2.ok, true);
+    assert.strictEqual(r2.count, 2, 'the second caller was answered by a sync that included its own key');
+  });
+
+  it('the TTL sweep releases a whole aged-out set with ONE sync, not one per key', async () => {
+    const log = [];
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 5) });
+    const chats = Array.from({ length: 20 }, (_, i) => ({ host: 'prod', key: `w${i}`, container: `w${i}`, session: 'agent' }));
+    await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
+    log.length = 0;
+    // All 20 age out together (nothing polls them any more).
+    await reconcilePaneSubscriptions([], {}, { now: 42_000 }, deps);
+    const rpcs = log.filter((r) => r.method === 'subscribePanes' || r.method === 'unsubscribePanes');
+    assert.strictEqual(rpcs.length, 1, `releasing 20 panes must be ONE RPC, got ${rpcs.length}: ${rpcs.map((r) => r.method).join(',')}`);
+    assert.strictEqual(rpcs[0].method, 'unsubscribePanes');
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), {}, 'all released');
+  });
+
+  it('a partial release sends ONE subscribePanes carrying exactly the surviving panes', async () => {
+    const log = [];
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 5) });
+    const all = Array.from({ length: 6 }, (_, i) => ({ host: 'prod', key: `w${i}`, container: `w${i}`, session: 'agent' }));
+    await reconcilePaneSubscriptions(all, {}, { now: 1000 }, deps);
+    log.length = 0;
+    // Only w0 and w1 keep being polled; w2..w5 age out.
+    await reconcilePaneSubscriptions(all.slice(0, 2), {}, { now: 40_000 }, deps);
+    const rpcs = log.filter((r) => r.method === 'subscribePanes' || r.method === 'unsubscribePanes');
+    assert.strictEqual(rpcs.length, 1, `one sync for the whole released set, got ${rpcs.length}`);
+    assert.deepStrictEqual(rpcs[0].params.panes.map((p) => p.key).sort(), ['w0', 'w1']);
+  });
+});
+
 // ----------------------- startPaneDeltaSweep (WARDEN-413) ---------------------
 // The background TTL-sweep timer: arms once when the companion flag is on (so the
 // empty-set cleanup path the test above proves actually FIRES in production, even

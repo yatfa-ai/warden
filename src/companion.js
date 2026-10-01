@@ -2171,6 +2171,17 @@ export function attachUnsupportedMessage(host, methods, version) {
 // `_early`, filtering by sid once the ACK lands. Events for a CONCURRENT attach
 // on the same channel are captured too and discarded at drain time (sids are
 // unique per attachStart).
+// WARDEN-1491 — the keystroke-ack latency hook. server.js installs ONE observer
+// (the pane-input telemetry producer); every CompanionAttachSession reports each
+// attachInput RPC's request→ack time through it. Module-level rather than a
+// per-session option because the sessions are constructed deep in attachStream
+// with no telemetry in reach. The observer is called inside try/catch: observing
+// the keystroke path must never be the thing that breaks it.
+let inputAckObserver = null;
+export function setInputAckObserver(fn) {
+  inputAckObserver = typeof fn === 'function' ? fn : null;
+}
+
 export class CompanionAttachSession {
   // `startPromise` is OPTIONAL. Production (attachSession) constructs the handle
   // bare, calls _wire(channel) itself pre-ACK, then _start(promise) — because
@@ -2349,9 +2360,14 @@ export class CompanionAttachSession {
     const payload = encodeAttachInput(data);
     const send = () => {
       if (this._exited || !this._channel) return;
+      const t0 = performance.now();
+      const report = (ok) => {
+        if (!inputAckObserver) return;
+        try { inputAckObserver(performance.now() - t0, ok); } catch { /* observing must never break the path */ }
+      };
       this._channel
         .call('attachInput', { sid: this.sid, data: payload }, { timeout: this._opts.timeout ?? 15000 })
-        .catch(() => { /* a dropped keystroke must never throw into the WS handler */ });
+        .then(() => report(true), () => { report(false); /* a dropped keystroke must never throw into the WS handler */ });
     };
     if (this._channel) send();
     else this._queued.push(send);
@@ -2541,7 +2557,7 @@ const paneSubscriptions = new Map();
 // host -> Promise. Serializes per-host subscribe/unsubscribe syncs so concurrent
 // monitor/unmonitor churn (two tabs, rapid open/close) cannot interleave partial
 // pane sets to the companion; the last sync always reflects the true union.
-const syncInFlight = new Map();
+const syncSlots = new Map(); // host -> { running: Promise|null, queued: {promise,start}|null }
 
 // host -> Map(key -> lastSeenMs). What /api/agent-states is CURRENTLY watching,
 // with a TTL. /api/agent-states is stateless HTTP (no connection identity), so a
@@ -2560,7 +2576,7 @@ let paneDeltaSweepTimer = null;
 export function _resetPaneDeltaStateForTests() {
   paneDeltaCache.clear();
   paneSubscriptions.clear();
-  syncInFlight.clear();
+  syncSlots.clear();
   agentStateWatched.clear();
   if (paneDeltaSweepTimer) { clearInterval(paneDeltaSweepTimer); paneDeltaSweepTimer = null; }
 }
@@ -2760,14 +2776,48 @@ async function syncSubscriptionOnce(host, cfg, opts = {}, deps = {}) {
 // Serialize per-host syncs so concurrent subscribe/unsubscribe churn collapses
 // into an ordered sequence whose final state is the true union. Each call chains
 // after the previous one for the same host; the last call reflects reality.
+//
+// WARDEN-1491: COALESCED, not merely serialized. Every sync reads the union
+// FRESH when it runs, so any number of syncs requested while one is in flight
+// are all satisfied by ONE follow-up run — the pre-fix chain issued one RPC per
+// caller (a TTL sweep releasing N panes was N back-to-back subscribePanes
+// RPCs, each restarting the companion's watcher). The follow-up is shared by
+// every caller that arrives before it starts, and each of them awaits its own
+// result, so the "last sync reflects the true union" contract is unchanged.
 function syncSubscription(host, cfg, opts = {}, deps = {}) {
-  const prev = syncInFlight.get(host) || Promise.resolve();
-  const next = prev.catch(() => {}).then(() => syncSubscriptionOnce(host, cfg, opts, deps));
-  syncInFlight.set(host, next);
-  next.finally(() => {
-    if (syncInFlight.get(host) === next) syncInFlight.delete(host);
-  });
-  return next;
+  let slot = syncSlots.get(host);
+  if (!slot) { slot = { running: null, queued: null }; syncSlots.set(host, slot); }
+  const settle = () => {
+    slot.running = null;
+    if (slot.queued) {
+      const q = slot.queued;
+      slot.queued = null;
+      slot.running = q.start();
+      slot.running.finally(settle).catch(() => {});
+    } else if (syncSlots.get(host) === slot) {
+      syncSlots.delete(host);
+    }
+  };
+  if (!slot.running) {
+    slot.running = syncSubscriptionOnce(host, cfg, opts, deps);
+    slot.running.finally(settle).catch(() => {});
+    return slot.running;
+  }
+  if (!slot.queued) {
+    // Arguments of the FIRST queued caller are used; cfg/deps are per-process
+    // constants in production and the union is read fresh at run time.
+    let resolveFn;
+    const promise = new Promise((resolve) => { resolveFn = resolve; });
+    slot.queued = {
+      promise,
+      start: () => {
+        const p = syncSubscriptionOnce(host, cfg, opts, deps);
+        p.then(resolveFn, resolveFn);
+        return p;
+      },
+    };
+  }
+  return slot.queued.promise;
 }
 
 // subscribePanes adds a chat list's keys to the host's subscription (ref-counted
@@ -2906,9 +2956,13 @@ export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, dep
   for (const [host, watched] of agentStateWatched) {
     const removed = [];
     for (const [k, lastSeen] of watched) if (now - lastSeen > AGENT_STATE_TTL_MS) removed.push(k);
-    for (const k of removed) {
-      watched.delete(k);
-      results.push(unsubscribePanes(host, [k], cfg, opts, deps));
+    // WARDEN-1491: ONE unsubscribe per host for the whole released set. The
+    // per-key call below this replaced issued one subscribePanes RPC (a watcher
+    // restart on the companion) per released pane — a ~200-pane fleet sweep
+    // ageing out was a burst of restarts every 30s.
+    if (removed.length) {
+      for (const k of removed) watched.delete(k);
+      results.push(unsubscribePanes(host, removed, cfg, opts, deps));
     }
     if (watched.size === 0) hostsToDelete.push(host);
   }
