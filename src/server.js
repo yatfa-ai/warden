@@ -2850,11 +2850,67 @@ app.post('/api/read-file', async (req, res) => {
 // shows the collapse. PARITY: buildFileExistsScript still assembles the script
 // (the WARDEN-96 containment guard untouched) and it is delivered byte-for-byte
 // by either transport; the EXISTS-marker check reads the identical
-// {ok, stdout, stderr} shape, so a transport failure still collapses to false.
+// {ok, stdout, stderr} shape. remoteFileExists keeps the boolean contract for
+// callers that only need yes/no; the /api/file-exists route uses probeRemoteFile
+// below so a transport failure is NOT reported as "absent" (WARDEN-1492).
 export async function remoteFileExists(host, cwd, filePath, deps = {}) {
-  const result = await deliverRemoteScript(host, buildFileExistsScript(cwd, filePath), { timeout: 8000 }, {}, deps);
+  return (await probeRemoteFile(host, cwd, filePath, deps)).state === 'exists';
+}
+
+// WARDEN-1492 — the three-state probe behind remoteFileExists. A boolean cannot
+// tell "the file is absent" from "we never got an answer", and that conflation
+// made the WARDEN-1258 telemetry useless (98.6% of remote probes read as
+// "absent" while 13 of them ran 5–10s past the 8s script timeout — transport
+// failures wearing the absence verdict). The states:
+//   exists — the script ran and printed EXISTS.
+//   absent — the script RAN and delivered a definitive verdict: one of
+//            buildFileExistsScript's own `ERROR …` diagnostics on stdout
+//            (missing, outside cwd, directory, not a file). Conclusive: the
+//            linkifier may cache it.
+//   failed — no verdict at all: transport error, channel death, script
+//            failure, or the hard deadline below. NOT conclusive — a real file
+//            must not lose its link over it. `reason` is 'timeout' | 'error'.
+// The ERROR markers are matched on STDOUT only (the script echoes them there),
+// so ssh/profile noise on stderr can never forge an "absent" verdict. The
+// EXISTS check keeps reading stdout+stderr exactly as before (transport parity).
+//
+// The deadline: the transports enforce the script timeout themselves, but the
+// companion exec adds EXEC_CALL_TIMEOUT_MARGIN_MS (5s) of channel slack on top
+// of it, which is how probes ran to ~9.8s against an 8s timeout. A race here
+// makes the configured timeout the boundary for the CALLER regardless of
+// transport; the transport's own call is left to finish and be discarded.
+export const REMOTE_FILE_EXISTS_TIMEOUT_MS = 8000;
+// Slack over the script timeout so a transport that kills at exactly the
+// timeout can still report its own answer before the race fires.
+const REMOTE_FILE_EXISTS_DEADLINE_GRACE_MS = 250;
+const FILE_EXISTS_ABSENT_MARKER =
+  /(^|\n)ERROR (invalid path|file not found|path must be within working directory|path is a directory|not a file)\s*(\n|$)/;
+
+export async function probeRemoteFile(host, cwd, filePath, deps = {}) {
+  const timeoutMs = deps.probeTimeoutMs ?? REMOTE_FILE_EXISTS_TIMEOUT_MS;
+  const graceMs = deps.probeDeadlineGraceMs ?? REMOTE_FILE_EXISTS_DEADLINE_GRACE_MS;
+  const started = Date.now();
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs + graceMs);
+  });
+  let result;
+  try {
+    result = await Promise.race([
+      (async () => deliverRemoteScript(host, buildFileExistsScript(cwd, filePath), { timeout: timeoutMs }, {}, deps))().catch(() => undefined),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!result) return { state: 'failed', reason: 'timeout' };
   const out = `${result.stdout || ''}${result.stderr || ''}`;
-  return result.ok && out.includes('EXISTS');
+  if (result.ok && out.includes('EXISTS')) return { state: 'exists' };
+  if (FILE_EXISTS_ABSENT_MARKER.test(result.stdout || '')) return { state: 'absent' };
+  // No verdict: a transport-killed run (code -1) that consumed the timeout is a
+  // timeout; anything else is a generic transport/script failure.
+  const timedOut = result.code === -1 && Date.now() - started >= timeoutMs - 50;
+  return { state: 'failed', reason: timedOut ? 'timeout' : 'error' };
 }
 
 // POST /api/file-exists — lightweight existence probe for the in-terminal file
@@ -2866,7 +2922,9 @@ export async function remoteFileExists(host, cwd, filePath, deps = {}) {
 // buildFileExistsScript to the host (raw ssh by default, the companion channel
 // under the WARDEN-1284 toggle). Response: { exists: boolean } — any resolution
 // failure (missing, outside cwd, directory, transport error) collapses to
-// exists:false because the linkifier only needs yes/no. Security: never weakens
+// exists:false because the linkifier only needs yes/no — EXCEPT a remote probe
+// that got no verdict at all, which adds `failed: true` (WARDEN-1492) so it is
+// distinguishable from a conclusive absence. Security: never weakens
 // the cwd-containment guard.
 app.post('/api/file-exists', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));
@@ -2899,7 +2957,17 @@ app.post('/api/file-exists', async (req, res) => {
   }
 
   // Remote: run the existence script; success + the EXISTS marker ⇒ real file.
-  const exists = await remoteFileExists(chat.host, cwd, filePath);
+  // WARDEN-1492: three-state — a probe that got NO verdict (transport error,
+  // timeout, script failure) answers `{ exists: false, failed: true }` so the
+  // renderer can tell it from a conclusive absence and not cache it, and the
+  // telemetry files it in a separate failure bucket instead of "absent".
+  const probe = await probeRemoteFile(chat.host, cwd, filePath);
+  const elapsed = Date.now() - probeStart;
+  if (probe.state === 'failed') {
+    fileExistsTelemetry.recordRemoteFailure(probe.reason, elapsed);
+    return res.json({ exists: false, failed: true });
+  }
+  const exists = probe.state === 'exists';
   finishProbe('remote', exists);
   return res.json({ exists });
 });
