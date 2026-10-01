@@ -128,7 +128,7 @@ const {
   remoteReadSessionTranscript, preflightTmux, app,
 } = await import('./server.js');
 
-// The closed channel vocabulary — companion/main.go's dispatch `case` names.
+// The closed channel vocabulary — companion/dispatch.go's router `case` names.
 // The census test below re-enumerates this list against the Go source live; the
 // fake channel answers every one of them, so a FUTURE op whose surface this
 // sweep has not been taught about fails its leg with 'unknown method' instead
@@ -1256,19 +1256,20 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       }
     });
 
-    it('the sweep was taught every method of the closed channel vocabulary (companion/main.go dispatch)', () => {
+    it('the sweep was taught every method of the closed channel vocabulary (companion/dispatch.go router)', () => {
       // Live re-enumeration of the Go RPC vocabulary, so a new case in
-      // companion/main.go forces this file (and CHANNEL_METHODS) to catch up
+      // companion/dispatch.go (WARDEN-1491 moved the router out of main.go's
+      // serial loop) forces this file (and CHANNEL_METHODS) to catch up
       // instead of the fake channel silently answering 'unknown method' only
       // when a leg happens to drive it.
-      const goPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'companion', 'main.go');
+      const goPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'companion', 'dispatch.go');
       let go = '';
-      try { go = fs.readFileSync(goPath, 'utf8'); } catch { assert.ok(false, `companion/main.go not found at ${goPath}`); }
+      try { go = fs.readFileSync(goPath, 'utf8'); } catch { assert.ok(false, `companion/dispatch.go not found at ${goPath}`); }
       const cases = [...go.matchAll(/case "([^"]+)":/g)].map((m) => m[1]);
       assert.ok(cases.length >= CHANNEL_METHODS.length, `the Go vocabulary has ${cases.length} methods; CHANNEL_METHODS carries ${CHANNEL_METHODS.length}`);
       const missing = cases.filter((c) => !CHANNEL_METHODS.includes(c));
       assert.deepStrictEqual(missing, [],
-        `companion/main.go grew RPC(s) not in CHANNEL_METHODS: ${missing.join(', ')} — extend the list and the fake responder, then teach the sweep the op's surface`);
+        `companion/dispatch.go grew RPC(s) not in CHANNEL_METHODS: ${missing.join(', ')} — extend the list and the fake responder, then teach the sweep the op's surface`);
     });
   });
 });
