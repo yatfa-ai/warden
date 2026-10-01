@@ -377,7 +377,7 @@ function App() {
   // App-side reads: this slice-3 comment recorded the two reasons every
   // migrated fact kept an App subscription — the persisted snapshot and the
   // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
-  // 32 store facts: the snapshot's store half is subscribed once inside
+  // 33 store facts: the snapshot's store half is subscribed once inside
   // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
   // only the setters the reset partition needs. The write path is unchanged
   // end to end: store.setX → that subscription re-renders App → the merged

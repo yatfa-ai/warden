@@ -35,7 +35,7 @@ import { useUiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } from '@/l
  * subscriptions ONLY to feed them into this snapshot (so the saveUi effect
  * would re-fire). Persistence is now a property of the store: App assembles
  * and passes only its OWN half (AppPersistedSnapshot — the facts it still owns
- * as useState: the workspace set, panel geometry, watchedChats, paneHost),
+ * as useState: the workspace set, panel geometry, watchedChats),
  * while this hook reads the store half through ONE shallow-compared
  * subscription (useShallow(selectPersistedStorePrefs)) and merges the two in
  * the effect. The MERGED object is still the full PersistedPrefSnapshot —
@@ -56,7 +56,7 @@ export type PersistedPrefSnapshot = Required<
  * does NOT own — the complement of STORE_PERSISTED_KEYS (uiStore.ts) against
  * the same key source, so the partition is compile-derived, never hand-held.
  * These are the facts App still owns as plain useState (workspaces /
- * activeWorkspaceId / paneHost, the four panel collapses, the two panel
+ * activeWorkspaceId, the four panel collapses, the two panel
  * widths, watchedChats), read at App scope and passed in.
  */
 export type AppPersistedSnapshot = Required<
@@ -110,9 +110,9 @@ export function useConfigPersistence({
   refreshConfigPrefs,
 }: UseConfigPersistenceArgs): UseConfigPersistenceResult {
   // The store-owned half of the snapshot, subscribed ONCE (one selector, one
-  // subscription for all 32 store facts). useShallow keeps the returned object
+  // subscription for all 33 store facts). useShallow keeps the returned object
   // referentially stable across renders, so App re-renders only when one of
-  // the 32 values actually changes — the exact re-render semantics the 24
+  // the 33 values actually changes — the exact re-render semantics the 24
   // per-fact `const x = useX()` subscriptions this replaces provided (minus
   // the 24 declarations). This is a READ channel only: nothing here writes
   // through the store, and the effect below remains the ONE saveUi call site.

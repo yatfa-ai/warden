@@ -94,7 +94,7 @@ const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } =
   const s = store.getState();
   // The store-owned half rides the PRODUCTION selector (the 33 STORE_PERSISTED_KEYS
   // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
-  // keys (workspaces / activeWorkspaceId / paneHost, the four panel collapses,
+  // keys (workspaces / activeWorkspaceId, the four panel collapses,
   // the two panel widths, watchedChats) plus every DEFAULT_UI field the merged
   // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
   const snapshot = {

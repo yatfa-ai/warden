@@ -560,7 +560,7 @@ export interface UiStoreState {
  * The compile gate: each element must be BOTH a UiStoreState key AND a
  * PERSISTED_PREF_KEYS member, so
  *   - a key that is not on the store (a typo, or an App-owned useState fact
- *     like workspaces/watchedChats/paneHost) is a compile error, and
+ *     like workspaces/watchedChats) is a compile error, and
  *   - the four ObsUi observer facts (observerViewMode + the three filter
  *     shapes) and restoreOnStartup are excluded AUTOMATICALLY — they are on
  *     UiStoreState but not in PERSISTED_PREF_KEYS (they persist through
