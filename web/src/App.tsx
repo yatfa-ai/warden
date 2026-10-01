@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -130,7 +130,10 @@ function App() {
   // per-workspace recently-closed list.
   const [workspaces, setWorkspaces] = useState<WorkspacePaneSet[]>(() => initWs.workspaces);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => initWs.activeWorkspaceId);
-  const [paneHost, setPaneHost] = useState<Record<string, string>>(() => initWs.paneHost);
+  // WARDEN-1498 (slice 19): paneHost migrated onto the shared store — PaneGrid
+  // subscribes directly and every writer calls the one idempotent primePaneHost
+  // (keyed by PANE id: paneIdOf(chat) — see the action's doc in lib/uiStore.ts).
+  const primePaneHost = usePrimePaneHost();
   // WARDEN-1422: running UNSAVED shells per discovered host — served by
   // /api/discover's `temporaryChats` and used ONLY for counts (the host view's
   // footer line + empty state). Never listed as rows; merged into PaneGrid's
@@ -798,8 +801,8 @@ function App() {
   // saveUi WRITE effect + handleConfigChange (WARDEN-696) and merges it with
   // the store half it reads itself. Typed as AppPersistedSnapshot — since
   // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
-  // as useState (the workspace set, panel geometry, watchedChats, paneHost);
-  // the 32 store-owned facts are NOT re-listed here. The partition is
+  // as useState (the workspace set, panel geometry, watchedChats);
+  // the 33 store-owned facts are NOT re-listed here. The partition is
   // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
   // complement of the store's STORE_PERSISTED_KEYS against
   // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
@@ -808,7 +811,7 @@ function App() {
   const persistedSnapshot: AppPersistedSnapshot = {
     workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
     healthCollapsed, sidebarWidth, observerWidth,
-    watchedChats, paneHost,
+    watchedChats,
   };
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
@@ -1226,7 +1229,7 @@ function App() {
     stampLastSeen(id);
     // remember this pane's host so a restored remote pane knows which host to discover
     const c = chatsRef.current.find((x) => (x.key || x.id) === id);
-    if (c?.host) setPaneHost((p) => (p[id] === c.host ? p : { ...p, [id]: c.host }));
+    if (c?.host) primePaneHost(id, c.host);
     // WARDEN-877: when an attention surface handed an anchor, position the pane's
     // scrollback at the triggering line by reusing the SAME externalSearchQuery→findNext
     // mechanism global search uses (PaneTile's 100ms-settle effect opens the in-pane
@@ -1434,7 +1437,7 @@ function App() {
   // chat — so the user never has to manually navigate to the right host.
   const handleReconnectChat = useCallback((chatKey: string, host?: string | null) => {
     if (host && host !== '(local)') {
-      setPaneHost((p) => (p[chatKey] === host ? p : { ...p, [chatKey]: host }));
+      primePaneHost(chatKey, host);
       void discoverHost(host).catch(() => {});
     }
     openChat(chatKey);
@@ -1491,10 +1494,10 @@ function App() {
     // pane-id key covers both. paneIdOf is the shared seam — the write key
     // and openChat's open id can no longer drift.
     const paneId = paneIdOf(chat);
-    setPaneHost((p) => (p[paneId] === hostOf ? p : { ...p, [paneId]: hostOf }));
+    primePaneHost(paneId, hostOf);
     openChat(paneId);
     return true;
-  }, [defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors, setPaneHost]);
+  }, [defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors, primePaneHost]);
 
   // A split shell is an UNNAMED shell: temporary, never listed (WARDEN-1422).
   const handleSplitShell = useCallback(async (id?: string) => {
@@ -1518,7 +1521,7 @@ function App() {
       // lookup misses and the attach goes out host-less ("Couldn't attach" —
       // WARDEN-1422 QA round 4).
       const hostOf = chat.host || THIS_MACHINE;
-      setPaneHost((p) => (p[paneId] === hostOf ? p : { ...p, [paneId]: hostOf }));
+      primePaneHost(paneId, hostOf);
     } else {
       void refresh();
     }
@@ -1646,13 +1649,13 @@ function App() {
     // close-time snapshot instead (a remote temp must reattach to ITS host).
     // Read from the ref (not the updater — updaters must stay pure).
     const entry = workspacesRef.current.find((w) => w.id === activeWorkspaceIdRef.current)?.recentlyClosed?.find((e) => e.id === id);
-    if (entry?.host) setPaneHost((p) => (p[id] === entry.host ? p : { ...p, [id]: entry.host! }));
+    if (entry?.host) primePaneHost(id, entry.host);
     updateActiveWorkspace((w) => ({
       ...w,
       recentlyClosed: (w.recentlyClosed ?? []).filter((e) => e.id !== id),
     }));
     openChat(id);
-  }, [updateActiveWorkspace, openChat, setPaneHost]);
+  }, [updateActiveWorkspace, openChat, primePaneHost]);
   // WARDEN-1479 — the feature-adoption seed: each maximize/restore toggle is
   // one use of the pane-maximize capability (counts only; the name is a
   // closed-set literal).
@@ -2345,7 +2348,6 @@ function App() {
             maximized={maximized}
             newActivity={newActivity}
             chats={[...chats, ...tempChats]}
-            paneHost={paneHost}
             onFocus={setFocused}
             onClose={closePane}
             onToggleMax={toggleMax}

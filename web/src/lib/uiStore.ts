@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 32 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 33 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -70,6 +70,7 @@ import { createStore, useStore } from 'zustand';
 import {
   loadUi,
   loadObs,
+  initialWorkspace,
   resetObsPrefDefaults,
   DEFAULT_TERMINAL_FONT_FAMILY,
   PERSISTED_PREF_KEYS,
@@ -464,6 +465,33 @@ export interface UiStoreState {
   /** Set the source-control collapse. The persisted write follows via useConfigPersistence's merged snapshot. */
   setSourceControlCollapsed: (collapsed: boolean) => void;
   /**
+   * The pane → host map (roadmap WARDEN-1204 slice 19, WARDEN-1498): which host
+   * each OPEN pane attaches to, keyed by PANE id. PaneGrid is the only reader
+   * (`host={paneHost[t.id]}`) and subscribes here directly; App used to own the
+   * useState and five hand-copied inline `p[id] === host ? p : {...p,[id]:host}`
+   * writers. RESET_PRESERVED_KEYS keeps it across Settings → Reset (storage.ts,
+   * untouched), so there is deliberately NO entry in resetUiPrefDefaults().
+   * Seeded through initialWorkspace() so a "Start empty" launch boots with `{}`
+   * (the disk map is NOT resurrected; persistUiState's startedEmpty freeze keeps
+   * the DISK map on disk).
+   */
+  paneHost: Record<string, string>;
+  /**
+   * Record that pane `paneId` attaches to `host` — the ONE idempotent writer.
+   * Re-priming the same pair returns the SAME state object, so zustand skips
+   * notification and `paneHost` stays referentially identical.
+   *
+   * WARDEN-1422 QA round-4 INVARIANT: key by the id the pane OPENS with —
+   * `paneIdOf(chat)` (= `chat.key || chat.id`, the bare tmux session) — NEVER
+   * the composite `host:session` `chat.id`. Keying by chat.id left the pane's
+   * own paneHost lookup empty, the attach went out host-less, the server
+   * skipped its refreshHost seed, and the just-spawned shell resolved to "no
+   * chat matches" — "Couldn't attach". Named spawns passed only by timing luck
+   * (refresh() usually landing before the attach). paneIdOf is the shared seam:
+   * the write key and openChat's open id can no longer drift.
+   */
+  primePaneHost: (paneId: string, host: string) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -514,7 +542,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 32 persisted facts migrated onto the store by slices 1–15 and 18.
+ * owns — exactly the 33 persisted facts migrated onto the store by slices 1–15, 18 and 19.
  *
  * WHAT IT IS FOR
  * ──────────────
@@ -581,10 +609,11 @@ export const STORE_PERSISTED_KEYS = [
   'paneColRatios',
   'paneRowRatios',
   'sourceControlCollapsed',
+  'paneHost',
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 32
+ * The store half of the persisted snapshot: a pure projection of those 33
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -632,6 +661,7 @@ export function selectPersistedStorePrefs(
     paneColRatios: state.paneColRatios,
     paneRowRatios: state.paneRowRatios,
     sourceControlCollapsed: state.sourceControlCollapsed,
+    paneHost: state.paneHost,
   };
 }
 
@@ -733,6 +763,7 @@ export type UiStoreSeed = Partial<
     | 'paneColRatios'
     | 'paneRowRatios'
     | 'sourceControlCollapsed'
+    | 'paneHost'
     | 'observerViewMode'
     | 'observerActivityFilters'
     | 'observerDirectiveFilters'
@@ -894,6 +925,16 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // own sanitizer already accepts only a stored boolean.
     sourceControlCollapsed: seed.sourceControlCollapsed ?? persisted.sourceControlCollapsed ?? true,
     setSourceControlCollapsed: (sourceControlCollapsed) => set({ sourceControlCollapsed }),
+    // WARDEN-1498 (roadmap WARDEN-1204 slice 19): seeded THROUGH initialWorkspace,
+    // never `persisted.paneHost` directly — App's retired useState was
+    // `initialWorkspace(uiState, restoreOnStartup).paneHost`, which is `{}` on a
+    // "Start empty" launch (the disk map must not be resurrected) and
+    // `disk.paneHost ?? {}` otherwise. The restoreOnStartup fed in is the one
+    // THIS store seeds for itself (same ??-chain as its own fact above).
+    paneHost: seed.paneHost
+      ?? initialWorkspace(persisted, seed.restoreOnStartup ?? persisted.restoreOnStartup ?? 'previous').paneHost,
+    primePaneHost: (paneId, host) =>
+      set((s) => (s.paneHost[paneId] === host ? s : { paneHost: { ...s.paneHost, [paneId]: host } })),
     // WARDEN-1441 (roadmap WARDEN-1204 slice 15): the Observer panel's four
     // view prefs — the first facts seeded from the SECOND storage namespace
     // (ObsUi / warden:observer:v1, `persistedObs` above), ??-only like every
@@ -1512,4 +1553,21 @@ export function useSourceControlCollapsed(): boolean {
  */
 export function useSetSourceControlCollapsed(): (collapsed: boolean) => void {
   return useUiStore((s) => s.setSourceControlCollapsed);
+}
+
+/**
+ * The pane → host map (WARDEN-1498, roadmap WARDEN-1204 slice 19). PaneGrid
+ * subscribes here for `paneHost[t.id]` instead of receiving the map from App.
+ */
+export function usePaneHost(): Record<string, string> {
+  return useUiStore((s) => s.paneHost);
+}
+
+/**
+ * The idempotent pane-host writer (see `primePaneHost` on UiStoreState for the
+ * pane-id keying invariant). Stable across renders, so safe in a dependency
+ * array.
+ */
+export function usePrimePaneHost(): (paneId: string, host: string) => void {
+  return useUiStore((s) => s.primePaneHost);
 }
