@@ -8,7 +8,6 @@ import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThe
 import { applyDensity } from '@/lib/density';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
-import { useWatchState } from '@/lib/useWatchState';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import { useHostStatuses } from '@/lib/useHostStatuses';
@@ -23,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -382,7 +381,7 @@ function App() {
   // App-side reads: this slice-3 comment recorded the two reasons every
   // migrated fact kept an App subscription — the persisted snapshot and the
   // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
-  // 33 store facts: the snapshot's store half is subscribed once inside
+  // 34 store facts: the snapshot's store half is subscribed once inside
   // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
   // only the setters the reset partition needs. The write path is unchanged
   // end to end: store.setX → that subscription re-renders App → the merged
@@ -422,12 +421,10 @@ function App() {
   // passive readout can substantiate remain (stuck / done) — erroring / waiting /
   // blocked were substring guesses and their buckets (and knobs) are gone.
   const setAttentionStates = useSetAttentionStates();
-  // Per-chat watch state + single/bulk toggles + the derived O(1) lookup Set live
-  // in useWatchState (WARDEN-696 slice 2). watchedChats is still persisted by the
-  // saveUi effect below and wired into the attention rollup (composition root).
-  const { watchedChats, clearWatchedChats } = useWatchState({
-    initialWatched: uiState.watchedChats ?? [],
-  });
+  // WARDEN-1506 (slice 20): the per-chat watch set lives on the shared store
+  // (persisted via STORE_PERSISTED_KEYS, read by useAttentionRollup directly).
+  // App keeps only the SETTER, for Settings → Reset.
+  const setWatchedChats = useSetWatchedChats();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
   // rides the hook's store subscription.
@@ -806,8 +803,8 @@ function App() {
   // saveUi WRITE effect + handleConfigChange (WARDEN-696) and merges it with
   // the store half it reads itself. Typed as AppPersistedSnapshot — since
   // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
-  // as useState (the workspace set, panel geometry, watchedChats);
-  // the 33 store-owned facts are NOT re-listed here. The partition is
+  // as useState (the workspace set, panel geometry);
+  // the 34 store-owned facts are NOT re-listed here. The partition is
   // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
   // complement of the store's STORE_PERSISTED_KEYS against
   // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
@@ -816,7 +813,6 @@ function App() {
   const persistedSnapshot: AppPersistedSnapshot = {
     workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
     healthCollapsed, sidebarWidth, observerWidth,
-    watchedChats,
   };
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
@@ -1026,8 +1022,8 @@ function App() {
   //     defaults", consistent with customPresets → [].
   //
   // Identity is stable because every value it closes over is: the useState
-  // setters are stable by React contract, clearWatchedChats is a
-  // useCallback(..., []) (useWatchState.ts), and setSnippets /
+  // setters are stable by React contract, setWatchedChats is a
+  // store setter, and setSnippets /
   // setFileViewerViewMode — plus the six terminal setters this reset covers
   // since WARDEN-1322 (setTerminalFontSize/setTerminalScrollback/
   // setTerminalFontFamily/setTerminalCursorStyle/setCopyOnSelect/
@@ -1089,9 +1085,8 @@ function App() {
       // Attention / desktop alerts
       attentionDesktopAlerts: setAttentionDesktopAlerts,
       attentionStates: setAttentionStates,
-      // watchedChats lives in useWatchState, which exposes a clear() rather than a
-      // raw setter — the reset value is always [] (see resetUiPrefDefaults).
-      watchedChats: () => clearWatchedChats(),
+      // Per-chat watch set (store fact since WARDEN-1506; reset value is [])
+      watchedChats: setWatchedChats,
     };
     const defaults = resetUiPrefDefaults();
     // The per-key types are locked by the two maps above; TS cannot correlate
@@ -1137,7 +1132,7 @@ function App() {
       attentionFilters: () => setObserverAttentionFilters(d.attentionFilters),
     };
     for (const apply of Object.values(obsResetSetters)) apply();
-  }, [clearWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates, setTheme, setDensity, setPaneLayout, setAutoFocusNewPane, setRestoreOnStartup, setTerminalColorScheme]);
+  }, [setWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates, setTheme, setDensity, setPaneLayout, setAutoFocusNewPane, setRestoreOnStartup, setTerminalColorScheme]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1370,10 +1365,10 @@ function App() {
   }, [workspaces, chats]);
   // WARDEN-1408 (slice 11): the persisted prefs the rollup gates on (the
   // desktop-alerts opt-in + per-state filters) are subscribed INSIDE the hook
-  // from the shared store now — the runtime inputs (openPanes, watchedChats,
+  // from the shared store now — the runtime inputs (openPanes,
   // onOpenChat, focusedPaneKey) stay explicit, exactly as they always were.
   const { rollup: attentionRollup, watchedStates: watchedAgentStates } = useAttentionRollup(
-    openPanes, watchedChats, openChat, focusedPaneKey,
+    openPanes, openChat, focusedPaneKey,
   );
   // WARDEN-417: surface the per-chat watch catch-up (unacked away misses, deep-linking
   // to each watched pane via openChat). WARDEN-476: pass the rollup's watched-states
@@ -1947,7 +1942,7 @@ function App() {
   // from the rollup's already-fetched `watchedStates` exposure (the watched subset incl.
   // closed panes, pre-open-filter — useAttentionRollup), so this adds ZERO SSH cost: it
   // rides the same open ∪ watched ~30s poll. keyed by row.key ?? row.id — the same key
-  // space watchedChats/openPanes use. Recomputed each render (mirrors watchedChatSet).
+  // space watchedChats/openPanes use. Recomputed each render.
   // WARDEN-1422: the per-key watched-state map the sidebar rows used to render
   // (indexByWatchKey(watchedAgentStates)) is gone with the row indicators; the
   // rollup itself still feeds the header badge, and useWatchCatchup still reads

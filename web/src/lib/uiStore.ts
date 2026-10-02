@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 33 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 34 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -319,6 +319,20 @@ export interface UiStoreState {
   /** Replace the per-state filter bag. The persisted write follows via useConfigPersistence's merged snapshot. */
   setAttentionStates: (v: { stuck?: boolean; done?: boolean }) => void;
   /**
+   * Per-chat "watch" opt-in (WARDEN-378; roadmap WARDEN-1204 slice 20,
+   * WARDEN-1506): pane keys the human marked "watch this chat" for a targeted,
+   * reason-specific desktop ping when that chat newly needs them. Global (not
+   * per-workspace), a pure client-side pref never sent to the backend. Read by
+   * useAttentionRollup (which unions watched ∪ open into the /api/agent-states
+   * ?panes= poll, gates runWhileHidden on it, and runs the per-chat transition
+   * detector) — it SUBSCRIBES here directly. Since WARDEN-1422 no UI path adds
+   * or removes a watched chat; only Settings → Reset clears it (it is NOT in
+   * RESET_PRESERVED_KEYS).
+   */
+  watchedChats: string[];
+  /** Replace the watched set (App's resetSetters clears it). The persisted write follows via useConfigPersistence's merged snapshot. */
+  setWatchedChats: (v: string[]) => void;
+  /**
    * The six remaining AppearancePrefs pairs (roadmap WARDEN-1204 slice 12,
    * WARDEN-1420) — theme, density, paneLayout, autoFocusNewPane,
    * restoreOnStartup and terminalColorScheme. Slice 3 (WARDEN-1322) took the
@@ -542,7 +556,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 33 persisted facts migrated onto the store by slices 1–15, 18 and 19.
+ * owns — exactly the 34 persisted facts migrated onto the store by slices 1–15 and 18–20.
  *
  * WHAT IT IS FOR
  * ──────────────
@@ -560,7 +574,7 @@ export interface UiStoreState {
  * The compile gate: each element must be BOTH a UiStoreState key AND a
  * PERSISTED_PREF_KEYS member, so
  *   - a key that is not on the store (a typo, or an App-owned useState fact
- *     like workspaces/watchedChats) is a compile error, and
+ *     like workspaces) is a compile error, and
  *   - the four ObsUi observer facts (observerViewMode + the three filter
  *     shapes) and restoreOnStartup are excluded AUTOMATICALLY — they are on
  *     UiStoreState but not in PERSISTED_PREF_KEYS (they persist through
@@ -570,7 +584,7 @@ export interface UiStoreState {
  * COMPLETENESS is deliberately NOT what `satisfies` gives (it only rejects
  * invalid elements) — it is enforced from BOTH sides:
  *   - removing a key here moves it into AppPersistedSnapshot's Exclude
- *     complement, so App's 10-key literal misses a REQUIRED property → tsc;
+ *     complement, so App's literal misses a REQUIRED property → tsc;
  *   - uiStore.test.mjs's partition test rejects duplicates and non-store keys
  *     at runtime.
  * storage.ts stays the owner of shape and defaults; this list only names which
@@ -599,6 +613,7 @@ export const STORE_PERSISTED_KEYS = [
   'defaultShellByHost',
   'attentionDesktopAlerts',
   'attentionStates',
+  'watchedChats',
   'theme',
   'density',
   'paneLayout',
@@ -613,7 +628,7 @@ export const STORE_PERSISTED_KEYS = [
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 33
+ * The store half of the persisted snapshot: a pure projection of those 34
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -651,6 +666,7 @@ export function selectPersistedStorePrefs(
     defaultShellByHost: state.defaultShellByHost,
     attentionDesktopAlerts: state.attentionDesktopAlerts,
     attentionStates: state.attentionStates,
+    watchedChats: state.watchedChats,
     theme: state.theme,
     density: state.density,
     paneLayout: state.paneLayout,
@@ -752,6 +768,7 @@ export type UiStoreSeed = Partial<
     | 'defaultShellByHost'
     | 'attentionDesktopAlerts'
     | 'attentionStates'
+    | 'watchedChats'
     | 'theme'
     | 'density'
     | 'paneLayout'
@@ -874,6 +891,11 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setAttentionDesktopAlerts: (attentionDesktopAlerts) => set({ attentionDesktopAlerts }),
     attentionStates: seed.attentionStates ?? persisted.attentionStates ?? { stuck: true, done: true },
     setAttentionStates: (attentionStates) => set({ attentionStates }),
+    // WARDEN-1506 (roadmap WARDEN-1204 slice 20): ??-only, mirroring App's
+    // retired per-chat watch hook seed (`uiState.watchedChats ?? []`) — [] mirrors
+    // DEFAULT_UI, and loadUi's own sanitizer already drops non-string entries.
+    watchedChats: seed.watchedChats ?? persisted.watchedChats ?? [],
+    setWatchedChats: (watchedChats) => set({ watchedChats }),
     // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the six remaining appearance
     // prefs, ??-only — every literal below mirrors DEFAULT_UI (pinned against
     // it by uiStore.test.mjs), exactly as the App useStates they replaced
@@ -1319,6 +1341,20 @@ export function useAttentionStates(): { stuck?: boolean; done?: boolean } {
 /** The per-state-filter setter (NotificationsSection; also App's resetSetters). Stable across renders. */
 export function useSetAttentionStates(): (v: { stuck?: boolean; done?: boolean }) => void {
   return useUiStore((s) => s.setAttentionStates);
+}
+
+/**
+ * The per-chat "watch" set (WARDEN-378, WARDEN-1506). useAttentionRollup is the
+ * reader: the set is unioned into the ?panes= poll, gates the hidden-tab poll
+ * relaxation and feeds the per-chat transition detector.
+ */
+export function useWatchedChats(): string[] {
+  return useUiStore((s) => s.watchedChats);
+}
+
+/** The watched-set setter (App's resetSetters clears it on Settings → Reset). Stable across renders. */
+export function useSetWatchedChats(): (v: string[]) => void {
+  return useUiStore((s) => s.setWatchedChats);
 }
 
 // ─── the six remaining appearance prefs (WARDEN-1420, roadmap WARDEN-1204 slice 12) ───
