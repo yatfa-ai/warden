@@ -64,6 +64,11 @@ const { buildServerStallEvent } = require('./telemetry-stall-event.cjs');
 const { buildWorkspaceNamesEvent } = require('./telemetry-names-event.cjs');
 const { buildWorkspaceShapeEvent } = require('./telemetry-shape-event.cjs');
 const { buildFeatureUsageEvent } = require('./telemetry-usage-event.cjs');
+// WARDEN-1508 — the process-memory window builders (one per producer path: main's
+// own sampler vs the server child's IPC) + the bounded sampling producer.
+const { buildMainProcessMemoryEvent, buildServerProcessMemoryEvent } = require('./telemetry-process-memory-event.cjs');
+const { createMainSource, createRendererSource } = require('./telemetry-process-memory-sources.cjs');
+const { createProcessMemoryProducer } = require('../src/telemetry-process-memory.cjs');
 // WARDEN-1468 — the ONE consent-gated window receipt (see createWindowReceipt
 // in telemetry-receipt.cjs): the five hand-copied consent-gate → build → record
 // receipts below collapse onto it, and web/telemetry-receipt.test.mjs pins
@@ -464,6 +469,47 @@ function recordWorkspaceShapeWindow(snapshot) {
 function recordFeatureUsageWindow(snapshot) {
   receiveTelemetryWindow('feature-adoption', buildFeatureUsageEvent, snapshot, { runtime: 'renderer' });
 }
+
+// WARDEN-1508 — a process-memory window sampled by MAIN for the `main` or
+// `renderer` runtime (its own process.memoryUsage() / app.getAppMetrics()).
+// Same double gate as the shape window: the producer takes no sample while
+// `operational-metrics` is off, and THIS receipt re-checks the category before
+// anything is built or recorded (the mid-flip gap). The main-path builder
+// REFUSES `server`: a main-sampled window cannot masquerade as the backend.
+// Nothing persists to disk — a memory gauge is not culprit data (embedding the
+// last sample in the crash-sentinel file is a named follow-up).
+function recordMainProcessMemoryWindow(snapshot, runtime) {
+  receiveTelemetryWindow('operational-metrics', buildMainProcessMemoryEvent, snapshot, { runtime });
+}
+
+// WARDEN-1508 — the forked server child's process-memory window (the
+// 'telemetry-process-memory' IPC message). Same gate; the runtime is FIXED to
+// `server` here — a message arriving over the child's channel can never claim
+// another runtime, and the server-path builder refuses anything but `server`.
+function recordServerProcessMemoryWindow(snapshot) {
+  receiveTelemetryWindow('operational-metrics', buildServerProcessMemoryEvent, snapshot, { runtime: 'server' });
+}
+
+// WARDEN-1508 — main's own slow memory sampler (main + renderer vantage). ~30s
+// samples folded into fixed-size accumulators, one window per runtime per 5
+// minutes, unref'd timers: the instrument must not itself lag the app. Consent
+// is resolved LIVE (telemetryPrefs) — while `operational-metrics` is off no
+// sample is even taken. Armed in app.whenReady().
+const processMemoryProducer = createProcessMemoryProducer({
+  sources: [
+    createMainSource({ memoryUsage: () => process.memoryUsage(), uptimeSeconds: () => process.uptime() }),
+    createRendererSource({ getAppMetrics: () => app.getAppMetrics(), now: Date.now }),
+  ],
+  // SAMPLE-time gate (not a receipt): resolved LIVE, so no sample is taken while
+  // the category is off. Bound to a local first so this is not a hand-copied
+  // per-category receipt gate (web/telemetry-receipt.test.mjs pins the count).
+  consent: () => {
+    const categories = resolveTelemetryConsent(telemetryPrefs);
+    return categories['operational-metrics'] === true;
+  },
+  send: (runtime, snapshot) => recordMainProcessMemoryWindow(snapshot, runtime),
+  now: Date.now,
+});
 
 // WARDEN-1385 — crash-sentinel culprit data (userData/pane-latency-last.json).
 // Overwrite-per-write, aggregates only, bounded content (the window the sampler
@@ -1509,6 +1555,10 @@ app.whenReady().then(async () => {
   // swallows its own errors, so this can never block boot.
   installApplicationMenu();
 
+  // WARDEN-1508 — arm main's process-memory sampler (unref'd timers; inert
+  // while operational-metrics consent is off).
+  processMemoryProducer.start();
+
   // Kill any stale server from a previous run
   killStalePort();
 
@@ -1587,6 +1637,12 @@ app.whenReady().then(async () => {
     // string).
     if (msg && msg.type === 'telemetry-names') {
       recordWorkspaceNamesWindow(msg.snapshot);
+    }
+    // WARDEN-1508 — the server child's process-memory window (RSS / heap /
+    // process age, numbers only). Same channel shape and gates as the windows
+    // above; the runtime is fixed to `server` by the receipt.
+    if (msg && msg.type === 'telemetry-process-memory') {
+      recordServerProcessMemoryWindow(msg.snapshot);
     }
     if (msg && msg.type === 'telemetry-config') {
       // The server forwards the already-sanitized per-category consent under

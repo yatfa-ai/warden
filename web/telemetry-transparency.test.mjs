@@ -853,4 +853,26 @@ test('a server-stall is NOT transmitted with incidents off (it rides that catego
   assert.equal(transmitted, false, 'names-only collects nothing, so nothing is sent');
 });
 
+test('process-memory is disclosed field-by-field under operational-metrics — and ONLY there (WARDEN-1508)', () => {
+  const METRICS_ONLY = { 'operational-metrics': true };
+  const m = catOf(METRICS_ONLY, 'operational-metrics');
+  assert.ok(m.eventTypes.some((e) => e.type === 'process-memory'), 'metrics category lists the new type');
+  const fields = m.eventTypes.find((e) => e.type === 'process-memory').fields;
+  for (const f of ['runtime', 'samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes?', 'processAgeMs']) {
+    assert.ok(fields.includes(f), `${f} disclosed`);
+  }
+  assert.match(m.summary, /process-memory/, 'the category summary discloses the new window');
+  for (const other of ['incidents', 'names', 'feature-adoption']) {
+    assert.ok(!catOf({ [other]: true }, other).eventTypes.some((e) => e.type === 'process-memory'), `${other} does NOT carry it`);
+  }
+  // A numbers-only window previews with nothing redacted, and rides only the metrics consent.
+  const ev = { schemaVersion: SCHEMA_VERSION, type: 'process-memory', runtime: 'server', timestamp: 1, windowStartedAt: 1, windowEndedAt: 2, samples: 3, rssMinBytes: 1, rssAvgBytes: 2, rssMaxBytes: 3, processAgeMs: 4 };
+  const on = previewPayload(ev, METRICS_ONLY);
+  assert.equal(on.valid, true);
+  assert.equal(on.transmitted, true);
+  assert.deepEqual(on.changes, []);
+  assert.equal(previewPayload(ev, INCIDENTS_ONLY).transmitted, false, 'not sent without operational-metrics');
+  assert.equal(isValidBaseEvent({ ...ev, name: 'x' }), false, 'an injected key rejects');
+});
+
 console.log(`\n✓ TELEMETRY TRANSPARENCY TESTS PASS (${passed})`);

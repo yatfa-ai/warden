@@ -103,6 +103,13 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   // never content, never a path. Disclosed field-by-field like every other
   // type — the panel's contract is to name exactly what leaves.
   'feature-usage': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'features'],
+  // WARDEN-1508 — one runtime's folded process-memory window. NUMBERS ONLY:
+  // every payload field is a count of bytes / samples / milliseconds (the only
+  // string-typed field is the closed `runtime` enum already in the envelope);
+  // there is no name, path, hostname or free text anywhere in the shape, and
+  // the validator rejects any key outside this list. `heapUsedMaxBytes` is
+  // optional — a runtime that exposes no JS heap omits it.
+  'process-memory': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes?', 'processAgeMs'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the
@@ -301,6 +308,33 @@ function isValidFeatureUsageShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// WARDEN-1508 — the `process-memory` shape check, mirroring the canonical
+// schema's isProcessMemoryShape: a closed key set over numbers-only values.
+// There is no string to run the identifier proof over — the closed-key check
+// IS this type's hard-exclusion proof.
+const PROCESS_MEMORY_KEYS = new Set([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt',
+  'samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes', 'processAgeMs',
+]);
+
+function isValidProcessMemoryShape(e: Record<string, unknown>): boolean {
+  for (const k of Object.keys(e)) {
+    if (!PROCESS_MEMORY_KEYS.has(k)) return false;
+  }
+  const finiteNonNegative = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
+  if (!Number.isInteger(e.samples) || (e.samples as number) <= 0) return false;
+  for (const k of ['rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'processAgeMs'] as const) {
+    if (!Number.isInteger(e[k]) || (e[k] as number) < 0) return false;
+  }
+  if (e.heapUsedMaxBytes !== undefined && (!Number.isInteger(e.heapUsedMaxBytes) || (e.heapUsedMaxBytes as number) < 0)) return false;
+  if ((e.rssMinBytes as number) > (e.rssAvgBytes as number)) return false;
+  if ((e.rssAvgBytes as number) > (e.rssMaxBytes as number)) return false;
+  return true;
+}
+
 /**
  * Base-event schema conformance — a LOCAL copy mirroring the
  * `validateBaseEvent` proof shape from telemetry-source.cjs:212-244. Returns
@@ -372,6 +406,11 @@ export function isValidBaseEvent(event: unknown): boolean {
     for (const f of e.features as unknown[]) {
       if (containsIdentifier(String((f as Record<string, unknown>).name))) return false;
     }
+  } else if (e.type === 'process-memory') {
+    // WARDEN-1508 — one runtime's folded memory window: shape-check only
+    // (closed key set over numbers). No string field exists to run the
+    // identifier proof over — the shape check IS the hard-exclusion proof.
+    if (!isValidProcessMemoryShape(e)) return false;
   }
   // Hard-exclusion proof: the redacted message must be free of any identifier;
   // structured frame fields must be free of paths (a bare filename basename is
