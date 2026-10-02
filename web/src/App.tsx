@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -299,13 +299,22 @@ function App() {
     panePhaseRef.current[id] = phase;
   }, []);
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
-  const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
+  // WARDEN-1510 (roadmap WARDEN-1204 slice 21): the three panel-collapse flags
+  // live on the shared store (lib/uiStore.ts); App still READS them (layout
+  // styles, applyLayoutClamp deps, drag-start captures) but owns no state, and
+  // PaneGrid's Alt+S/Alt+O call the toggle actions directly (no prop callbacks).
+  // Persistence rides useConfigPersistence's store half (37 facts).
+  const sidebarCollapsed = useSidebarCollapsed();
+  const observerCollapsed = useObserverCollapsed();
+  const healthCollapsed = useHealthCollapsed();
+  const setObserverCollapsed = useSetObserverCollapsed();
+  const setHealthCollapsed = useSetHealthCollapsed();
+  const toggleSidebarCollapsed = useToggleSidebarCollapsed();
+  const toggleObserverCollapsed = useToggleObserverCollapsed();
   // WARDEN-1494: count panel expands on the state edge so every path (button,
   // Alt+S/Alt+O, openActivityTab) records exactly once.
   useRecordOnExpand(sidebarCollapsed, 'panel-expand-sidebar');
   useRecordOnExpand(observerCollapsed, 'panel-expand-observer');
-  const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   // WARDEN-431 / WARDEN-1422: the Source Control section collapse migrated onto
   // the shared store (lib/uiStore.ts, roadmap WARDEN-1204 slice 18, WARDEN-1486)
   // — ChatSidebar is its only reader and writer and subscribes directly, so App
@@ -381,7 +390,7 @@ function App() {
   // App-side reads: this slice-3 comment recorded the two reasons every
   // migrated fact kept an App subscription — the persisted snapshot and the
   // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
-  // 34 store facts: the snapshot's store half is subscribed once inside
+  // 37 store facts: the snapshot's store half is subscribed once inside
   // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
   // only the setters the reset partition needs. The write path is unchanged
   // end to end: store.setX → that subscription re-renders App → the merged
@@ -804,15 +813,14 @@ function App() {
   // the store half it reads itself. Typed as AppPersistedSnapshot — since
   // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
   // as useState (the workspace set, panel geometry);
-  // the 34 store-owned facts are NOT re-listed here. The partition is
+  // the 37 store-owned facts are NOT re-listed here. The partition is
   // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
   // complement of the store's STORE_PERSISTED_KEYS against
   // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
   // REQUIRED property and its absence from this literal is a tsc error — the
   // WARDEN-442/468/500 dropped-key class stays closed on both halves.
   const persistedSnapshot: AppPersistedSnapshot = {
-    workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
-    healthCollapsed, sidebarWidth, observerWidth,
+    workspaces, activeWorkspaceId, sidebarWidth, observerWidth,
   };
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
@@ -1663,11 +1671,6 @@ function App() {
     getFeatureUsageSampler().sampler.recordFeatureUse('pane-maximize');
     setMaximized((m) => (m === id ? null : id));
   }, []);
-  // Stable toggles for keyboard shortcuts: useCallback with functional updates gives
-  // them empty deps and a stable identity, so PaneGrid's keydown effect doesn't
-  // tear down/re-subscribe on every App render (matching every other PaneGrid handler).
-  const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
-  const toggleObserver = useCallback(() => setObserverCollapsed((c) => !c), []);
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
 
   // The destructive-action gate BOTH kill machines consult. One predicate, two
@@ -1832,11 +1835,11 @@ function App() {
   // consume callback; a store write needs no such dance — a second write is a
   // fresh transition the subscriber re-renders from, so repeated "View Activity"
   // clicks work and a manual tab switch is never yanked back). The panel-collapse
-  // half stays App-local chrome: observerCollapsed is App's layout state.
+  // half is a store write too (observerCollapsed, WARDEN-1510).
   const openActivityTab = useCallback(() => {
     setObserverCollapsed(false);
     setObserverViewMode('activity');
-  }, [setObserverViewMode]);
+  }, [setObserverCollapsed, setObserverViewMode]);
 
   // Focus a pane from global search / observer — routed through openChat so a
   // pane already open in another workspace switches there instead of duplicating.
@@ -2275,7 +2278,7 @@ function App() {
       ) : (
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
-        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => { setSidebarCollapsed(!sidebarCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
+        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => { toggleSidebarCollapsed(); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
         <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{openPanes.length} open</span>
         {/* Workspace tab strip (WARDEN-256) — the flexible, bounded middle region.
@@ -2305,7 +2308,7 @@ function App() {
           <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => { if (healthCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-health'); setHealthCollapsed(!healthCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
-          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { setObserverCollapsed(!observerCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
+          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { toggleObserverCollapsed(); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
           <IconTooltip label="settings" side="bottom"><button onClick={() => { getFeatureUsageSampler().sampler.recordFeatureUse('settings'); setSettingsOpen(true); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
         </div>
       </header>
@@ -2360,8 +2363,6 @@ function App() {
             // reports — the respawn/resume → open-dead-pane re-attach chain.
             reconnectTokens={reconnectTokens}
             onPanePhaseChange={handlePanePhaseChange}
-            onToggleSidebar={toggleSidebar}
-            onToggleObserver={toggleObserver}
             // WARDEN-1322 (slice 3): the six terminal prefs (fontSize/onFontSize-
             // Change, scrollback, fontFamily, terminalCursorStyle, copyOnSelect,
             // onExitBehavior) no longer ride through PaneGrid — PaneTile
