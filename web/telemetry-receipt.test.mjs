@@ -177,6 +177,12 @@ const RECEIPTS = [
   // a metrics category); the builder is the usage-event module; the extra
   // `runtime: 'renderer'` states the origin runtime beside its sibling
   // renderer receipts (the builder pins the same value).
+  // WARDEN-1508 — the process-memory receipts. Both ride `operational-metrics`
+  // (no new category); the runtime is passed as extra — a `runtime` argument
+  // for the main-sampled path (main/renderer), FIXED `server` for the server
+  // child's IPC path — and each path has its OWN builder that refuses the
+  // other's runtimes.
+  { fn: 'recordServerProcessMemoryWindow', call: "receiveTelemetryWindow('operational-metrics', buildServerProcessMemoryEvent, snapshot, { runtime: 'server' })" },
   { fn: 'recordFeatureUsageWindow', call: "receiveTelemetryWindow('feature-adoption', buildFeatureUsageEvent, snapshot, { runtime: 'renderer' })" },
 ];
 
@@ -266,7 +272,10 @@ test('no hand-copied per-category consent gate remains in main.cjs', () => {
   assert.deepEqual(strays, [], 'a hand-copied consent gate came back in main.cjs — use the shared receiver');
   // The only sanctioned uses are the pipeline's consent resolver, the shared
   // receiver's construction, and applyTelemetryConfig's setConsent. A fourth
-  // needs a recorded reason here and in the PR.
+  // needs a recorded reason here and in the PR. WARDEN-1508's is the fourth: the
+  // process-memory producer's SAMPLE-time gate (no sample is taken while
+  // operational-metrics is off) — a sampler gate, not a window receipt; the
+  // receipts it feeds still gate through the shared receiver.
   const uses = mainSrc.split('resolveTelemetryConsent(telemetryPrefs)').length - 1;
-  assert.equal(uses, 3, `expected exactly 3 resolveTelemetryConsent(telemetryPrefs) uses (pipeline, receiver, applyTelemetryConfig), found ${uses}`);
+  assert.equal(uses, 4, `expected exactly 4 resolveTelemetryConsent(telemetryPrefs) uses (pipeline, receiver, applyTelemetryConfig, process-memory sampler), found ${uses}`);
 });

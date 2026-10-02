@@ -79,15 +79,15 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 9 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 10 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 9);
+  assert.equal(SCHEMA_VERSION, 10);
 });
 
-test('BASE_EVENT_TYPES is exactly the eight anonymous-or-consented base-tier kinds', () => {
+test('BASE_EVENT_TYPES is exactly the nine anonymous-or-consented base-tier kinds', () => {
   // WARDEN-1424 — v8 adds `workspace-shape`, the renderer's counts-only shape
   // snapshot riding the operational-metrics category.
-  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage']);
+  assert.deepEqual([...BASE_EVENT_TYPES], ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory']);
 });
 
 test('RUNTIME is exactly { main, renderer, server }', () => {
@@ -577,7 +577,7 @@ const featureUsageFixture = {
   ],
 };
 
-test('validateBaseEvent accepts the feature-usage fixture (v9 round trip)', () => {
+test('validateBaseEvent accepts the feature-usage fixture (v10 round trip)', () => {
   assert.equal(validateBaseEvent(featureUsageFixture), true, 'feature-usage fixture validates');
   assert.equal(validateEvent(featureUsageFixture), true, 'validateEvent accepts it too');
 });
@@ -672,6 +672,92 @@ test('feature-usage rejects malformed windows / rows', () => {
     mutate(clone);
     assert.equal(validateBaseEvent(clone), false, `mutation must invalidate: ${mutate.toString().slice(0, 60)}`);
   }
+});
+
+
+// ==========================================================================
+// (h) process-memory (WARDEN-1508) — the memory vantage, riding the existing
+//     operational-metrics category; numbers only over a closed key set.
+// ==========================================================================
+
+const processMemoryFixture = {
+  schemaVersion: SCHEMA_VERSION,
+  type: 'process-memory',
+  runtime: 'main',
+  timestamp: 1735689600000,
+  appVersion: '0.1.86',
+  platform: 'linux',
+  windowStartedAt: 1735689300000,
+  windowEndedAt: 1735689600000,
+  samples: 10,
+  rssMinBytes: 200_000_000,
+  rssAvgBytes: 210_000_000,
+  rssMaxBytes: 230_000_000,
+  heapUsedMaxBytes: 90_000_000,
+  processAgeMs: 3_600_000,
+};
+
+test('validateBaseEvent accepts the process-memory fixture for ALL THREE runtimes (v10 round trip)', () => {
+  for (const runtime of ['main', 'renderer', 'server']) {
+    assert.equal(validateBaseEvent({ ...processMemoryFixture, runtime }), true, `${runtime} validates`);
+    assert.equal(validateEvent({ ...processMemoryFixture, runtime }), true, `${runtime} validateEvent`);
+  }
+});
+
+test('process-memory: heapUsedMaxBytes is OPTIONAL (a runtime that exposes no heap omits it)', () => {
+  const { heapUsedMaxBytes: _omit, ...noHeap } = processMemoryFixture;
+  assert.equal(validateBaseEvent({ ...noHeap, runtime: 'renderer' }), true);
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, heapUsedMaxBytes: null }), false, 'null is not an omission');
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, heapUsedMaxBytes: -1 }), false);
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, heapUsedMaxBytes: '90' }), false);
+});
+
+test('process-memory rejects an EXTRA key (closed key set — no identifier can ride it)', () => {
+  for (const extra of [{ name: 'x' }, { path: '/home/u' }, { host: 'a.example.com' }, { chatName: 'c' }, { pid: 123 }]) {
+    assert.equal(validateBaseEvent({ ...processMemoryFixture, ...extra }), false, `${Object.keys(extra)[0]} must reject`);
+  }
+});
+
+test('process-memory rejects STRING-valued fields', () => {
+  for (const k of ['samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes', 'processAgeMs', 'windowStartedAt', 'windowEndedAt']) {
+    assert.equal(validateBaseEvent({ ...processMemoryFixture, [k]: '1' }), false, `string ${k} must reject`);
+  }
+});
+
+test('process-memory rejects negative / non-integer / non-finite byte counts and ages', () => {
+  for (const k of ['rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes', 'processAgeMs']) {
+    for (const bad of [-1, 1.5, NaN, Infinity]) {
+      // keep the min<=avg<=max order satisfiable so the count itself is the cause
+      const ev = { ...processMemoryFixture, [k]: bad };
+      assert.equal(validateBaseEvent(ev), false, `${k}=${bad} must reject`);
+    }
+  }
+  for (const bad of [0, -1, 1.5, NaN]) {
+    assert.equal(validateBaseEvent({ ...processMemoryFixture, samples: bad }), false, `samples=${bad} must reject`);
+  }
+});
+
+test('process-memory honest-order invariant: rssMin > rssAvg or rssMin/rssAvg > rssMax rejects', () => {
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, rssMinBytes: 215_000_000 }), false, 'min > avg');
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, rssMinBytes: 240_000_000, rssAvgBytes: 250_000_000 }), false, 'min > max');
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, rssAvgBytes: 231_000_000 }), false, 'avg > max');
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, rssMinBytes: 5, rssAvgBytes: 5, rssMaxBytes: 5 }), true, 'equal is fine');
+});
+
+test('process-memory rejects a missing field and malformed window stamps', () => {
+  for (const k of ['samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'processAgeMs', 'windowStartedAt', 'windowEndedAt']) {
+    const ev = { ...processMemoryFixture };
+    delete ev[k];
+    assert.equal(validateBaseEvent(ev), false, `missing ${k} must reject`);
+  }
+  assert.equal(validateBaseEvent({ ...processMemoryFixture, windowEndedAt: NaN }), false);
+});
+
+test('process-memory carries NO field beyond the disclosed shape (closed key set census)', () => {
+  assert.deepEqual(
+    Object.keys(processMemoryFixture).sort(),
+    ['appVersion', 'heapUsedMaxBytes', 'platform', 'processAgeMs', 'rssAvgBytes', 'rssMaxBytes', 'rssMinBytes', 'runtime', 'samples', 'schemaVersion', 'timestamp', 'type', 'windowEndedAt', 'windowStartedAt'],
+  );
 });
 
 console.log(`\n✓ TELEMETRY-SCHEMA TESTS PASS (${passed})`);

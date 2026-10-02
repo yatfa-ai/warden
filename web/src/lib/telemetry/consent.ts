@@ -187,8 +187,8 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategoryDescriptor[] = Obje
     role: 'collecting' as const,
     label: 'Operational metrics',
     summary:
-      'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
-    eventTypes: Object.freeze(['operational-metrics', 'workspace-shape']),
+      'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist — and one periodic process-memory window per app process (main, renderer, backend): how much memory the process holds (min / average / max resident size, peak JS heap where available) and how long it has been running (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
+    eventTypes: Object.freeze(['operational-metrics', 'workspace-shape', 'process-memory']),
     gatedFields: Object.freeze([]),
   }),
   // WARDEN-1479 — the design's LAST unbuilt consent category gets its carrying

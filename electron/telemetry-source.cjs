@@ -41,6 +41,10 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
+// v10 (WARDEN-1508): + 'process-memory' — one bounded RSS / heap / process-age
+// window aggregate per runtime (main / renderer / server), numbers only, riding
+// the existing operational-metrics category (see the canonical
+// web/src/lib/telemetry/schema.ts for the full bump note).
 // v9 (WARDEN-1479): + 'feature-usage' — the feature-adoption category's
 // carrying event: one bounded window of CLOSED-SET capability names +
 // per-capability use counts (see the canonical web/src/lib/telemetry/schema.ts
@@ -62,9 +66,9 @@ const {
 // event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
 // note). This inline copy stays byte-aligned with the canonical module; the
 // drift tests pin the pair.
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
-const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage']);
+const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory']);
 
 const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer', SERVER: 'server' });
 
@@ -419,6 +423,11 @@ function validateBaseEvent(event) {
     // positive-count map; the name pattern is the hard-exclusion proof.
     if (event.runtime !== RUNTIME.RENDERER) return false;
     if (!isValidFeatureUsage(event)) return false;
+  } else if (event.type === 'process-memory') {
+    // WARDEN-1508 — one runtime's folded memory window. All three runtimes
+    // emit it (the runtime enum was validated above); the runtime/producer
+    // pairing is enforced by the builders. Numbers-only over a closed key set.
+    if (!isValidProcessMemory(event)) return false;
   }
   // Hard-exclusion proof: the built event must not leak an identifier.
   //   - The free-text MESSAGE is fully redacted at the collection boundary, so
@@ -608,6 +617,32 @@ function isValidFeatureUsage(e) {
     if (seen.has(f.name)) return false; // a folded map: one row per name
     seen.add(f.name);
   }
+  return true;
+}
+
+// WARDEN-1508 — the `process-memory` closed key set + shape check, mirroring
+// the canonical schema's isProcessMemoryShape. NUMBERS ONLY: every payload
+// field is a non-negative integer, and any key outside the allowlist rejects
+// the event (the structural hard-exclusion proof — no string can ride it).
+const PROCESS_MEMORY_KEYS = Object.freeze([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt',
+  'samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes', 'processAgeMs',
+]);
+const PROCESS_MEMORY_KEY_SET = new Set(PROCESS_MEMORY_KEYS);
+
+function isValidProcessMemory(e) {
+  for (const k of Object.keys(e)) {
+    if (!PROCESS_MEMORY_KEY_SET.has(k)) return false;
+  }
+  if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
+  if (!Number.isInteger(e.samples) || e.samples <= 0) return false;
+  for (const k of ['rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'processAgeMs']) {
+    if (!Number.isInteger(e[k]) || e[k] < 0) return false;
+  }
+  if (e.heapUsedMaxBytes !== undefined && (!Number.isInteger(e.heapUsedMaxBytes) || e.heapUsedMaxBytes < 0)) return false;
+  // The honest-order invariant: min <= avg <= max.
+  if (e.rssMinBytes > e.rssAvgBytes || e.rssAvgBytes > e.rssMaxBytes) return false;
   return true;
 }
 

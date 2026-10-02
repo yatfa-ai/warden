@@ -22,6 +22,7 @@ import { resolveConsent } from './telemetry-consent.cjs';
 // WARDEN-1258 — usage-telemetry producer for the linkifier's existence probe
 // (the operational-metrics consent category; see src/fileExistsTelemetry.js).
 import { createFileExistsTelemetry } from './fileExistsTelemetry.js';
+import { createProcessMemoryProducer } from './telemetry-process-memory.cjs';
 import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
 import { createPaneInputTelemetry } from './paneInputTelemetry.js';
 import { createRequestTelemetry } from './requestTelemetry.js';
@@ -1546,6 +1547,30 @@ const requestTelemetry = createRequestTelemetry({
   },
 });
 requestTelemetry.start();
+
+// WARDEN-1508 — the server child's own process-memory producer: samples THIS
+// process (RSS + JS heap + uptime) every ~30s into fixed-size accumulators and
+// forwards ONE folded window per ~5 minutes over the fork's IPC channel as
+// 'telemetry-process-memory' (main builds the `process-memory` event with the
+// runtime FIXED to `server`). It rides the existing `operational-metrics`
+// category, resolved LIVE through the one authority — while off, no sample is
+// taken. Same process.send guard for standalone `node src/server` runs; timers
+// are unref'd so importing server.js in a test never hangs on them.
+const serverProcessMemory = createProcessMemoryProducer({
+  sources: [{
+    runtime: 'server',
+    read: () => {
+      const m = process.memoryUsage();
+      return { rssBytes: m.rss, heapUsedBytes: m.heapUsed, ageMs: Math.round(process.uptime() * 1000) };
+    },
+  }],
+  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
+  send: (_runtime, snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-process-memory', snapshot });
+  },
+});
+serverProcessMemory.start();
 
 // WARDEN-1416 — the workspace-names producer: the `names` consent category's
 // OWN carrying event, and the slice that closes that category's dead switch.

@@ -52,6 +52,28 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v10 (WARDEN-1508): added the `process-memory` event type — the consented
+// stream's process-MEMORY vantage, so memory growth vs session age is
+// measurable in production (WARDEN-1491's "a long session without restart
+// stays fast" bar was unreadable: nothing in the channel sampled memory, and
+// the unexpected-termination crashes carried no resource evidence). ONE
+// bounded aggregate per runtime (main / renderer / server) per 5-minute
+// window: the sample count, the min / avg / max resident-set size over the
+// window, the window's max JS-heap-used (OMITTED where the runtime does not
+// expose it — the renderer's Electron process metrics carry no heap), and the
+// process's age at window close (a restart resets it — which is exactly how
+// growth-vs-age and restart boundaries become readable). NUMBERS ONLY, by
+// construction: the only string-typed field is the closed `runtime` enum; there
+// is no path, hostname, name or free text anywhere in the shape, and the
+// validator enforces a CLOSED KEY SET so no identifier can ride it. It rides
+// the EXISTING `operational-metrics` category (a memory gauge is not
+// identifying data) — no new category, no new checkbox. Unlike the
+// runtime-pinned types above this one is legitimately emitted by all three
+// runtimes; the runtime/producer pairing is enforced by the builders (a
+// `server` window can only arrive over the server child's IPC; main's own
+// sampler can only claim `main`/`renderer`), not by the shape. Client +
+// receiver bump together so the x-telemetry-schema handshake (the receiver's
+// ingest.mjs) does not 415.
 // v9 (WARDEN-1479): added the `feature-usage` event type — the LAST unbuilt
 // consent category's carrying event. The design's 2026-08-19 authorization
 // (WARDEN-443) names feature adoption verbatim as approved scope ("every user
@@ -140,10 +162,10 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
-export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage'] as const);
+export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory'] as const);
 export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
@@ -515,8 +537,54 @@ export interface FeatureUsageEvent {
   features: FeatureUsageFeature[];
 }
 
+// ---------------------------------------------------------------------------
+// Process memory (WARDEN-1508) — the memory vantage of the consented stream.
+//
+// ONE bounded aggregate per runtime per 5-minute window, folded from slow
+// (~30s) samples into fixed-size accumulators (the sample count never grows
+// the footprint): RSS min / avg / max, the window's max JS-heap-used where the
+// runtime exposes one, and the process's age at window close. The renderer's
+// RSS is the sum of its Tab processes' working sets as sampled by MAIN
+// (`app.getAppMetrics()`); the server child samples itself and forwards its
+// folded window over the fork's IPC channel.
+//
+// NUMBERS ONLY: every payload field is a non-negative integer except the
+// closed `runtime` enum (already part of the envelope). There is no string,
+// path, hostname or name anywhere in the shape, and the validator enforces a
+// CLOSED KEY SET so a hostile caller cannot add one. The honest-order
+// invariant (min <= avg <= max) rejects an internally inconsistent window.
+// Rides the EXISTING `operational-metrics` category.
+// ---------------------------------------------------------------------------
+
+/** A window of one runtime's process-memory samples. */
+export interface ProcessMemoryEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: 'process-memory';
+  /** Which process the memory was sampled from (one event per runtime per window). */
+  runtime: Runtime;
+  timestamp: number;
+  appVersion?: string; // non-identifying release label; optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
+  /** When the window opened (epoch-ms, from the producer). */
+  windowStartedAt: number;
+  /** When the window closed (epoch-ms, from the producer). */
+  windowEndedAt: number;
+  /** How many samples folded into the window (positive integer). */
+  samples: number;
+  /** Smallest resident-set size observed in the window, bytes. */
+  rssMinBytes: number;
+  /** Mean resident-set size over the window, bytes (rounded to an integer). */
+  rssAvgBytes: number;
+  /** Largest resident-set size observed in the window, bytes. */
+  rssMaxBytes: number;
+  /** Largest JS heap used in the window, bytes — OMITTED where the runtime exposes none. */
+  heapUsedMaxBytes?: number;
+  /** The process's uptime at window close, ms — a restart resets it. */
+  processAgeMs: number;
+}
+
 /** Any base-tier event, discriminated by `type`. */
-export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent | WorkspaceShapeEvent | FeatureUsageEvent;
+export type BaseEvent = ErrorEvent | CrashEvent | StallEvent | OperationalMetricsEvent | ServerStallEvent | WorkspaceNamesEvent | WorkspaceShapeEvent | FeatureUsageEvent | ProcessMemoryEvent;
 
 // ---------------------------------------------------------------------------
 // Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
@@ -775,6 +843,44 @@ function isWorkspaceShapeShape(e: Record<string, unknown>): boolean {
   return true;
 }
 
+// The process-memory event's closed key set — the type's own fields plus the
+// base-tier envelope. NUMBERS ONLY: the schema itself refuses any other key, so
+// "no identifier can ride the memory channel" is a STRUCTURAL guarantee
+// (WARDEN-1508), exactly like workspace-shape's.
+const PROCESS_MEMORY_KEYS = Object.freeze([
+  'schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion', 'platform',
+  'windowStartedAt', 'windowEndedAt',
+  'samples', 'rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'heapUsedMaxBytes', 'processAgeMs',
+] as const);
+const PROCESS_MEMORY_KEY_SET = new Set<string>(PROCESS_MEMORY_KEYS);
+
+/** True iff `e` is a structurally valid ProcessMemoryEvent. */
+function isProcessMemoryShape(e: Record<string, unknown>): boolean {
+  for (const k of Object.keys(e)) {
+    if (!PROCESS_MEMORY_KEY_SET.has(k)) return false;
+  }
+  if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
+  if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
+  // A window folded at least one sample (an empty window is never sent).
+  if (typeof e.samples !== 'number' || !Number.isInteger(e.samples) || e.samples <= 0) return false;
+  // Every byte / age field is a non-negative integer — a negative, NaN, float
+  // or string where a measurement belongs is not a memory window.
+  for (const k of ['rssMinBytes', 'rssAvgBytes', 'rssMaxBytes', 'processAgeMs'] as const) {
+    const v = e[k];
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) return false;
+  }
+  // heapUsedMaxBytes is OPTIONAL (a runtime that exposes no heap omits it) —
+  // but when present it is a non-negative integer, never null/string.
+  if (e.heapUsedMaxBytes !== undefined) {
+    const h = e.heapUsedMaxBytes;
+    if (typeof h !== 'number' || !Number.isInteger(h) || h < 0) return false;
+  }
+  // The honest-order invariant: min <= avg <= max.
+  if ((e.rssMinBytes as number) > (e.rssAvgBytes as number)) return false;
+  if ((e.rssAvgBytes as number) > (e.rssMaxBytes as number)) return false;
+  return true;
+}
+
 /** True iff `event` has a valid base-tier SHAPE (correct version, a known type,
  *  a valid runtime, a finite timestamp, and the type-specific fields). Does not
  *  inspect field VALUES for identifier leaks (that is redaction's concern). */
@@ -827,6 +933,13 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
       // truthful feature-usage event. The shape is a closed key set over a
       // kebab-name + positive-count map (see isFeatureUsageShape).
       return e.runtime === RUNTIME.RENDERER && isFeatureUsageShape(e);
+    case 'process-memory':
+      // WARDEN-1508 — one runtime's folded memory window. Unlike the
+      // runtime-pinned types above, all three runtimes legitimately emit this
+      // one (`runtime` is already validated as a known Runtime above); the
+      // runtime/producer pairing is enforced by the builders. The shape is
+      // numbers-only over a closed key set (see isProcessMemoryShape).
+      return isProcessMemoryShape(e);
     default:
       return false;
   }

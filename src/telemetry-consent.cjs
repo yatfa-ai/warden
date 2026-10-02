@@ -66,7 +66,8 @@ const TELEMETRY_CATEGORIES = Object.freeze([
   // Mirrors the canonical entry in web/src/lib/telemetry/consent.ts verbatim.
   // WARDEN-1424 — the category now ALSO carries the renderer's periodic
   // workspace-shape COUNT snapshot (one per 5-min window; counts only — never
-  // names). Disclosed in eventTypes + the summary for the same reason the
+  // names). WARDEN-1508 — and now ALSO one periodic process-memory window per
+  // runtime (numbers only: RSS min/avg/max, peak heap, process age). Disclosed in eventTypes + the summary for the same reason the
   // names slice disclosed its own type: a category that starts sending a new
   // event type without saying so is the exact lie of omission the transparency
   // surface exists to prevent.
@@ -77,8 +78,8 @@ const TELEMETRY_CATEGORIES = Object.freeze([
     role: 'collecting',
     label: 'Operational metrics',
     summary:
-      'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
-    eventTypes: Object.freeze(['operational-metrics', 'workspace-shape']),
+      'Aggregate counts, success rates, and latency histograms of app operations (the terminal file-link existence probes, /api request timing, and renderer pane-latency windows), plus one periodic workspace-shape snapshot of counts only — how many workspaces, open panes, and chats exist — and one periodic process-memory window per app process (main, renderer, backend): how much memory the process holds (min / average / max resident size, peak JS heap where available) and how long it has been running (numbers only; never names or titles, no file paths, no hostnames, no chat content, no credentials).',
+    eventTypes: Object.freeze(['operational-metrics', 'workspace-shape', 'process-memory']),
     gatedFields: Object.freeze([]),
   }),
   // WARDEN-1479 — the design's LAST unbuilt consent category gets its carrying
