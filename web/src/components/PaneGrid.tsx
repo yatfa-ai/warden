@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -98,8 +98,6 @@ interface Props {
   onSplitShell?: (id?: string) => void;
   onSpawned: (chat: Chat) => void;
   externalSearchQuery?: { paneId: string; query: string } | null;
-  onToggleSidebar?: () => void;
-  onToggleObserver?: () => void;
   // WARDEN-1322 (roadmap WARDEN-1204 slice 3): this grid used to carry SEVEN
   // terminal-config props it never read — fontSize/onFontSizeChange, scrollback,
   // fontFamily, terminalCursorStyle, copyOnSelect, onExitBehavior — as a pure
@@ -157,7 +155,7 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -166,6 +164,12 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
   // WARDEN-1498 (roadmap WARDEN-1204 slice 19): the pane → host map comes from
   // the same store (App used to thread it as a prop; primePaneHost is its one writer).
   const paneHost = usePaneHost();
+  // WARDEN-1510 (roadmap WARDEN-1204 slice 21): the Alt+S / Alt+O panel toggles
+  // are store actions now (App used to thread them as callback
+  // props). Stable identities, so the keydown effect below
+  // doesn't re-subscribe.
+  const toggleSidebarCollapsed = useToggleSidebarCollapsed();
+  const toggleObserverCollapsed = useToggleObserverCollapsed();
   // WARDEN-1433 (roadmap WARDEN-1204 slice 14): the draggable resize-gutter
   // ratios (WARDEN-660) come from the same store on the same terms — the pair
   // of persisted values AND the pair of commit callbacks, each keeping the
@@ -385,11 +389,11 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
       // panes), and these shortcuts are advertised in PRODUCT.md unconditionally.
       if (e.altKey && e.code === 'KeyS') {
         e.preventDefault();
-        onToggleSidebar?.();
+        toggleSidebarCollapsed();
       }
       if (e.altKey && e.code === 'KeyO') {
         e.preventDefault();
-        onToggleObserver?.();
+        toggleObserverCollapsed();
       }
 
       if (!tiles.length) return;
@@ -443,7 +447,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [tiles, focused, maximized, onFocus, onClose, onToggleMax, onToggleSidebar, onToggleObserver]);
+  }, [tiles, focused, maximized, onFocus, onClose, onToggleMax, toggleSidebarCollapsed, toggleObserverCollapsed]);
 
   // Focus the path input when the entry Dialog opens — React-controlled via ref,
   // not a DOM query (WARDEN-68 Rule 4). Radix's own open-auto-focus is disabled

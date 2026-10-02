@@ -92,10 +92,10 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 34 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 37 STORE_PERSISTED_KEYS
   // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
-  // keys (workspaces / activeWorkspaceId, the four panel collapses,
-  // the two panel widths) plus every DEFAULT_UI field the merged
+  // keys (workspaces / activeWorkspaceId, the two panel widths)
+  // plus every DEFAULT_UI field the merged
   // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
   const snapshot = {
     ...loadUi(),
@@ -2543,13 +2543,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (34 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (37 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 34);
+  assert.equal(STORE_PERSISTED_KEYS.length, 37);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 34);
+  assert.equal(Object.keys(picked).length, 37);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2647,14 +2647,14 @@ test('a clean install seeds paneHost as {}', () => {
   assert.deepEqual(createUiStore().getState().paneHost, {});
 });
 
-console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (34) and rides the selector');
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (37) and rides the selector');
 test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 34);
+  assert.equal(STORE_PERSISTED_KEYS.length, 37);
   const store = createUiStore({ paneHost: { a: 'h' } });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 34);
+  assert.equal(Object.keys(picked).length, 37);
   assert.deepEqual(picked.paneHost, { a: 'h' });
 });
 
@@ -2707,10 +2707,10 @@ test('setWatchedChats replaces the set and keeps a stable identity', () => {
 test('watchedChats is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('watchedChats'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 34);
+  assert.equal(STORE_PERSISTED_KEYS.length, 37);
   const store = createUiStore({ watchedChats: ['w'] });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 34);
+  assert.equal(Object.keys(picked).length, 37);
   assert.deepEqual(picked.watchedChats, ['w']);
 });
 test('a watched set survives a restart through the production hop; [] persists as []', () => {
@@ -2734,6 +2734,89 @@ test('the UI-prefs reset CLEARS watchedChats (not in RESET_PRESERVED_KEYS)', () 
   store.getState().setWatchedChats(defaults.watchedChats);
   flushSnapshotToDisk(store);
   assert.deepEqual(loadUi().watchedChats, []);
+});
+
+console.log('\ncreateUiStore — panel-collapse flags (WARDEN-1510, roadmap WARDEN-1204 slice 21)');
+const COLLAPSE_KEYS = ['sidebarCollapsed', 'observerCollapsed', 'healthCollapsed'];
+test('a fresh store seeds the three flags equal to DEFAULT_UI (health starts collapsed)', () => {
+  reset();
+  const s = createUiStore().getState();
+  for (const k of COLLAPSE_KEYS) assert.equal(s[k], DEFAULT_UI[k], `${k} must mirror DEFAULT_UI`);
+  assert.equal(s.sidebarCollapsed, false);
+  assert.equal(s.observerCollapsed, false);
+  assert.equal(s.healthCollapsed, true);
+});
+test('a persisted payload seeds the flags; healthCollapsed absent -> true; seed wins', () => {
+  reset();
+  saveUi({ ...loadUi(), sidebarCollapsed: true, observerCollapsed: true, healthCollapsed: false });
+  const s = createUiStore().getState();
+  assert.equal(s.sidebarCollapsed, true);
+  assert.equal(s.observerCollapsed, true);
+  assert.equal(s.healthCollapsed, false);
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], sidebarCollapsed: true }));
+  const t = createUiStore().getState();
+  assert.equal(t.sidebarCollapsed, true);
+  assert.equal(t.observerCollapsed, false);
+  assert.equal(t.healthCollapsed, true, 'absent healthCollapsed seeds true');
+  const o = createUiStore({ sidebarCollapsed: false, healthCollapsed: false }).getState();
+  assert.equal(o.sidebarCollapsed, false);
+  assert.equal(o.healthCollapsed, false);
+});
+test('toggleSidebarCollapsed / toggleObserverCollapsed flip atomically; twice -> original', () => {
+  reset();
+  const store = createUiStore();
+  const { toggleSidebarCollapsed, toggleObserverCollapsed } = store.getState();
+  toggleSidebarCollapsed();
+  toggleSidebarCollapsed(); // back-to-back: functional, no stale read
+  assert.equal(store.getState().sidebarCollapsed, false);
+  toggleSidebarCollapsed();
+  assert.equal(store.getState().sidebarCollapsed, true);
+  assert.equal(store.getState().observerCollapsed, false, 'toggling one leaves the other alone');
+  toggleObserverCollapsed();
+  assert.equal(store.getState().observerCollapsed, true);
+  toggleObserverCollapsed();
+  assert.equal(store.getState().observerCollapsed, false);
+  assert.equal(store.getState().toggleSidebarCollapsed, toggleSidebarCollapsed, 'stable identity');
+});
+test('the three flags join STORE_PERSISTED_KEYS (37) and ride selectPersistedStorePrefs', () => {
+  reset();
+  for (const k of COLLAPSE_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
+  assert.equal(STORE_PERSISTED_KEYS.length, 37);
+  const picked = selectPersistedStorePrefs(createUiStore().getState());
+  assert.equal(Object.keys(picked).length, 37);
+});
+test('each flag round-trips store -> snapshot -> saveUi -> loadUi -> a fresh store', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setSidebarCollapsed(true);
+  store.getState().setObserverCollapsed(true);
+  store.getState().setHealthCollapsed(false);
+  flushSnapshotToDisk(store);
+  const disk = loadUi();
+  assert.equal(disk.sidebarCollapsed, true);
+  assert.equal(disk.observerCollapsed, true);
+  assert.equal(disk.healthCollapsed, false);
+  const next = createUiStore().getState();
+  assert.equal(next.sidebarCollapsed, true);
+  assert.equal(next.observerCollapsed, true);
+  assert.equal(next.healthCollapsed, false);
+  // and a toggle (the Alt+S path) persists too
+  store.getState().toggleSidebarCollapsed();
+  flushSnapshotToDisk(store);
+  assert.equal(loadUi().sidebarCollapsed, false);
+});
+test('the UI-prefs reset PRESERVES all three (RESET_PRESERVED_KEYS, storage.ts untouched)', () => {
+  reset();
+  const defaults = resetUiPrefDefaults();
+  for (const k of COLLAPSE_KEYS) assert.ok(!(k in defaults), `${k} must stay in RESET_PRESERVED_KEYS`);
+  const store = createUiStore({ sidebarCollapsed: true, observerCollapsed: true, healthCollapsed: false });
+  store.getState().setTheme(defaults.theme);
+  flushSnapshotToDisk(store);
+  const disk = loadUi();
+  assert.equal(disk.sidebarCollapsed, true);
+  assert.equal(disk.observerCollapsed, true);
+  assert.equal(disk.healthCollapsed, false);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

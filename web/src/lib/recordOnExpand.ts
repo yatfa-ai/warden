@@ -3,7 +3,7 @@
 // WHY THIS EXISTS: the `panel-expand-sidebar` / `panel-expand-observer`
 // feature-usage capabilities were recorded INLINE on the header buttons only,
 // so every other path that expands the same panel (Alt+S / Alt+O via
-// PaneGrid's onToggleSidebar/onToggleObserver, `openActivityTab` from the
+// PaneGrid's store toggle actions, `openActivityTab` from the
 // attention banner/badge) contributed nothing and biased the adoption count.
 // The single seam that every path shares is the STATE TRANSITION itself:
 // collapsed true -> false. This module is the arithmetic over that edge.

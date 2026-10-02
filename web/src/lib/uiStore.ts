@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 34 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 37 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -479,6 +479,28 @@ export interface UiStoreState {
   /** Set the source-control collapse. The persisted write follows via useConfigPersistence's merged snapshot. */
   setSourceControlCollapsed: (collapsed: boolean) => void;
   /**
+   * The three panel-collapse flags (roadmap WARDEN-1204 slice 21, WARDEN-1510):
+   * the sidebar, observer and health panels' collapsed state. App owned them as
+   * plain useStates and threaded two MUTATION callbacks into PaneGrid
+   * (the Alt+S / Alt+O handlers' callback props);
+   * PaneGrid now calls the toggle actions here directly, so the props channel
+   * is gone. All three sit in RESET_PRESERVED_KEYS (storage.ts, untouched —
+   * viewport affordances, not prefs), so there is deliberately NO entry for
+   * them in resetUiPrefDefaults() or App's resetSetters.
+   *
+   * Defaults mirror DEFAULT_UI: sidebar false, observer false, health TRUE
+   * (collapsed until the human opens it).
+   */
+  sidebarCollapsed: boolean;
+  observerCollapsed: boolean;
+  healthCollapsed: boolean;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  setObserverCollapsed: (collapsed: boolean) => void;
+  setHealthCollapsed: (collapsed: boolean) => void;
+  /** Atomic functional flip (`set((s) => !s.x)`) — no stale-closure read, safe from a keydown handler. */
+  toggleSidebarCollapsed: () => void;
+  toggleObserverCollapsed: () => void;
+  /**
    * The pane → host map (roadmap WARDEN-1204 slice 19, WARDEN-1498): which host
    * each OPEN pane attaches to, keyed by PANE id. PaneGrid is the only reader
    * (`host={paneHost[t.id]}`) and subscribes here directly; App used to own the
@@ -556,7 +578,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 34 persisted facts migrated onto the store by slices 1–15 and 18–20.
+ * owns — exactly the 37 persisted facts migrated onto the store by slices 1–15 and 18–21.
  *
  * WHAT IT IS FOR
  * ──────────────
@@ -625,10 +647,13 @@ export const STORE_PERSISTED_KEYS = [
   'paneRowRatios',
   'sourceControlCollapsed',
   'paneHost',
+  'sidebarCollapsed',
+  'observerCollapsed',
+  'healthCollapsed',
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 34
+ * The store half of the persisted snapshot: a pure projection of those 37
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -678,6 +703,9 @@ export function selectPersistedStorePrefs(
     paneRowRatios: state.paneRowRatios,
     sourceControlCollapsed: state.sourceControlCollapsed,
     paneHost: state.paneHost,
+    sidebarCollapsed: state.sidebarCollapsed,
+    observerCollapsed: state.observerCollapsed,
+    healthCollapsed: state.healthCollapsed,
   };
 }
 
@@ -781,6 +809,9 @@ export type UiStoreSeed = Partial<
     | 'paneRowRatios'
     | 'sourceControlCollapsed'
     | 'paneHost'
+    | 'sidebarCollapsed'
+    | 'observerCollapsed'
+    | 'healthCollapsed'
     | 'observerViewMode'
     | 'observerActivityFilters'
     | 'observerDirectiveFilters'
@@ -947,6 +978,20 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // own sanitizer already accepts only a stored boolean.
     sourceControlCollapsed: seed.sourceControlCollapsed ?? persisted.sourceControlCollapsed ?? true,
     setSourceControlCollapsed: (sourceControlCollapsed) => set({ sourceControlCollapsed }),
+    // WARDEN-1510 (roadmap WARDEN-1204 slice 21): ??-only, mirroring App's
+    // retired component-local seeds (`uiState.healthCollapsed ?? true` for the
+    // health panel, plain `uiState.<flag>` for the other two). The literals mirror
+    // DEFAULT_UI (storage.ts: false / false / true — health starts collapsed)
+    // and are pinned against it by uiStore.test.mjs. Toggles are functional
+    // `set((s) => …)` flips, so two rapid toggles never read a stale closure.
+    sidebarCollapsed: seed.sidebarCollapsed ?? persisted.sidebarCollapsed ?? false,
+    observerCollapsed: seed.observerCollapsed ?? persisted.observerCollapsed ?? false,
+    healthCollapsed: seed.healthCollapsed ?? persisted.healthCollapsed ?? true,
+    setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
+    setObserverCollapsed: (observerCollapsed) => set({ observerCollapsed }),
+    setHealthCollapsed: (healthCollapsed) => set({ healthCollapsed }),
+    toggleSidebarCollapsed: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+    toggleObserverCollapsed: () => set((s) => ({ observerCollapsed: !s.observerCollapsed })),
     // WARDEN-1498 (roadmap WARDEN-1204 slice 19): seeded THROUGH initialWorkspace,
     // never `persisted.paneHost` directly — App's retired useState was
     // `initialWorkspace(uiState, restoreOnStartup).paneHost`, which is `{}` on a
@@ -1606,4 +1651,42 @@ export function usePaneHost(): Record<string, string> {
  */
 export function usePrimePaneHost(): (paneId: string, host: string) => void {
   return useUiStore((s) => s.primePaneHost);
+}
+
+/**
+ * The three panel-collapse flags (WARDEN-1510, roadmap WARDEN-1204 slice 21).
+ * App subscribes for layout styles / re-clamp deps; PaneGrid and the header go
+ * through the actions below instead of receiving callbacks as props.
+ */
+export function useSidebarCollapsed(): boolean {
+  return useUiStore((s) => s.sidebarCollapsed);
+}
+
+export function useObserverCollapsed(): boolean {
+  return useUiStore((s) => s.observerCollapsed);
+}
+
+export function useHealthCollapsed(): boolean {
+  return useUiStore((s) => s.healthCollapsed);
+}
+
+/** Setters/toggles are stable across renders (created once with the store) — safe in dependency arrays. */
+export function useSetSidebarCollapsed(): (collapsed: boolean) => void {
+  return useUiStore((s) => s.setSidebarCollapsed);
+}
+
+export function useSetObserverCollapsed(): (collapsed: boolean) => void {
+  return useUiStore((s) => s.setObserverCollapsed);
+}
+
+export function useSetHealthCollapsed(): (collapsed: boolean) => void {
+  return useUiStore((s) => s.setHealthCollapsed);
+}
+
+export function useToggleSidebarCollapsed(): () => void {
+  return useUiStore((s) => s.toggleSidebarCollapsed);
+}
+
+export function useToggleObserverCollapsed(): () => void {
+  return useUiStore((s) => s.toggleObserverCollapsed);
 }
