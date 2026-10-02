@@ -394,7 +394,7 @@ export function currentWatchNeed(row: AgentStateRow): WatchReason | null {
  * `import` — only reads its args), so chatWatch.test.mjs loads it standalone.
  *
  * (The OS notification permission request that a bulk watch-ON implies is a SIDE
- * EFFECT and stays in App's `toggleWatchMany` wrapper — fired ONCE for the whole
+ * EFFECT and stayed in the (since-retired, WARDEN-1506) per-chat watch hook's `toggleWatchMany` wrapper — fired ONCE for the whole
  * batch, not per key — so this helper remains pure and testable.)
  */
 export function toggleWatchManyKeys(

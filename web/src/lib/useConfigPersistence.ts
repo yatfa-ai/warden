@@ -26,7 +26,7 @@ import { useUiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } from '@/l
  * (WARDEN-696, slice 1 of 4: config/persistence orchestration). The snapshot
  * is ASSEMBLED by App.tsx — the composition root — and passed in, because its
  * inputs are the live pref state, much of which will eventually be owned by
- * sibling concern hooks (useWatchState, usePaneManager, …). useConfigPersistence
+ * sibling concern hooks (usePaneManager, …). useConfigPersistence
  * owns only the WRITE path (the saveUi effect) + the post-settings
  * orchestration callback, not the snapshot assembly.
  *
@@ -35,7 +35,7 @@ import { useUiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } from '@/l
  * subscriptions ONLY to feed them into this snapshot (so the saveUi effect
  * would re-fire). Persistence is now a property of the store: App assembles
  * and passes only its OWN half (AppPersistedSnapshot — the facts it still owns
- * as useState: the workspace set, panel geometry, watchedChats),
+ * as useState: the workspace set, panel geometry),
  * while this hook reads the store half through ONE shallow-compared
  * subscription (useShallow(selectPersistedStorePrefs)) and merges the two in
  * the effect. The MERGED object is still the full PersistedPrefSnapshot —
@@ -57,7 +57,7 @@ export type PersistedPrefSnapshot = Required<
  * the same key source, so the partition is compile-derived, never hand-held.
  * These are the facts App still owns as plain useState (workspaces /
  * activeWorkspaceId, the four panel collapses, the two panel
- * widths, watchedChats), read at App scope and passed in.
+ * widths), read at App scope and passed in.
  */
 export type AppPersistedSnapshot = Required<
   Pick<
@@ -110,9 +110,9 @@ export function useConfigPersistence({
   refreshConfigPrefs,
 }: UseConfigPersistenceArgs): UseConfigPersistenceResult {
   // The store-owned half of the snapshot, subscribed ONCE (one selector, one
-  // subscription for all 33 store facts). useShallow keeps the returned object
+  // subscription for all 34 store facts). useShallow keeps the returned object
   // referentially stable across renders, so App re-renders only when one of
-  // the 33 values actually changes — the exact re-render semantics the 24
+  // the 34 values actually changes — the exact re-render semantics the 24
   // per-fact `const x = useX()` subscriptions this replaces provided (minus
   // the 24 declarations). This is a READ channel only: nothing here writes
   // through the store, and the effect below remains the ONE saveUi call site.

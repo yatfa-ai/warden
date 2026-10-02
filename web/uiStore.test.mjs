@@ -92,10 +92,10 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 33 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 34 STORE_PERSISTED_KEYS
   // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
   // keys (workspaces / activeWorkspaceId, the four panel collapses,
-  // the two panel widths, watchedChats) plus every DEFAULT_UI field the merged
+  // the two panel widths) plus every DEFAULT_UI field the merged
   // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
   const snapshot = {
     ...loadUi(),
@@ -2543,13 +2543,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (33 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (34 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 33);
+  assert.equal(STORE_PERSISTED_KEYS.length, 34);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 33);
+  assert.equal(Object.keys(picked).length, 34);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2647,14 +2647,14 @@ test('a clean install seeds paneHost as {}', () => {
   assert.deepEqual(createUiStore().getState().paneHost, {});
 });
 
-console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (33) and rides the selector');
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (34) and rides the selector');
 test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 33);
+  assert.equal(STORE_PERSISTED_KEYS.length, 34);
   const store = createUiStore({ paneHost: { a: 'h' } });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 33);
+  assert.equal(Object.keys(picked).length, 34);
   assert.deepEqual(picked.paneHost, { a: 'h' });
 });
 
@@ -2686,6 +2686,54 @@ test('the UI-prefs reset PRESERVES paneHost (RESET_PRESERVED_KEYS, storage.ts un
   store.getState().setTheme(defaults.theme);
   flushSnapshotToDisk(store);
   assert.deepEqual(loadUi().paneHost, { a: 'h' });
+});
+
+console.log('\ncreateUiStore — watchedChats (WARDEN-1506, roadmap WARDEN-1204 slice 20)');
+test('watchedChats seeds [] on a clean install, from the persisted payload, and seed wins', () => {
+  reset();
+  assert.deepEqual(createUiStore().getState().watchedChats, []);
+  saveUi({ ...loadUi(), watchedChats: ['a', 'b'] });
+  assert.deepEqual(createUiStore().getState().watchedChats, ['a', 'b']);
+  assert.deepEqual(createUiStore({ watchedChats: ['z'] }).getState().watchedChats, ['z']);
+});
+test('setWatchedChats replaces the set and keeps a stable identity', () => {
+  reset();
+  const store = createUiStore();
+  const before = store.getState().setWatchedChats;
+  before(['k1', 'k2']);
+  assert.deepEqual(store.getState().watchedChats, ['k1', 'k2']);
+  assert.equal(store.getState().setWatchedChats, before);
+});
+test('watchedChats is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
+  reset();
+  assert.ok(STORE_PERSISTED_KEYS.includes('watchedChats'));
+  assert.equal(STORE_PERSISTED_KEYS.length, 34);
+  const store = createUiStore({ watchedChats: ['w'] });
+  const picked = selectPersistedStorePrefs(store.getState());
+  assert.equal(Object.keys(picked).length, 34);
+  assert.deepEqual(picked.watchedChats, ['w']);
+});
+test('a watched set survives a restart through the production hop; [] persists as []', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setWatchedChats(['p1', 'p2']);
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().watchedChats, ['p1', 'p2']);
+  assert.deepEqual(createUiStore().getState().watchedChats, ['p1', 'p2']);
+  store.getState().setWatchedChats([]);
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().watchedChats, []);
+  assert.deepEqual(createUiStore().getState().watchedChats, []);
+});
+test('the UI-prefs reset CLEARS watchedChats (not in RESET_PRESERVED_KEYS)', () => {
+  reset();
+  const defaults = resetUiPrefDefaults();
+  assert.ok('watchedChats' in defaults, 'watchedChats must stay resettable');
+  assert.deepEqual(defaults.watchedChats, []);
+  const store = createUiStore({ watchedChats: ['a'] });
+  store.getState().setWatchedChats(defaults.watchedChats);
+  flushSnapshotToDisk(store);
+  assert.deepEqual(loadUi().watchedChats, []);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

@@ -38,7 +38,7 @@ import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadStateEnteredAt, saveStateEnteredAt, computeEnteredAt } from '@/lib/stateDuration';
-import { useAttentionDesktopAlerts, useAttentionStates } from '@/lib/uiStore';
+import { useAttentionDesktopAlerts, useAttentionStates, useWatchedChats } from '@/lib/uiStore';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -165,10 +165,6 @@ function fireWatchInApp(
 
 export function useAttentionRollup(
   openPanes: string[] = [],
-  // WARDEN-378: pane keys the human opted into per-chat "watch" — unioned into the
-  // ?panes= poll so a watched chat is classified even when its pane is NOT open, and
-  // diffed for a targeted ping when it newly needs the human.
-  watchedChats: string[] = [],
   // Deep-link click handler for the watch ping — reuses App's openChat to land on
   // the pane that needs attention. Optional (the ping still fires without it).
   onOpenChat?: (id: string) => void,
@@ -182,11 +178,11 @@ export function useAttentionRollup(
   // + optional so existing call sites stay compatible.
   focusedPaneKey?: string | null,
 ): AttentionRollupState {
-  // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the two PERSISTED prefs this hook
-  // gates on are subscribed from the shared uiStore instead of arriving as
+  // WARDEN-1408 (roadmap WARDEN-1204 slice 11; the watch set joined in WARDEN-1506,
+  // slice 20): the PERSISTED prefs this hook gates on are subscribed from the shared uiStore instead of arriving as
   // parameters — the poller gates and the rollup aggregation re-evaluate through
   // their own subscriptions, exactly as they did through props. The RUNTIME inputs
-  // above (openPanes / watchedChats / onOpenChat / focusedPaneKey) STAY explicit
+  // above (openPanes / onOpenChat / focusedPaneKey) STAY explicit
   // parameters — only persisted prefs moved. The per-fact hooks live in one place
   // (uiStore.ts) so every surface reading these facts subscribes identically.
   //
@@ -199,6 +195,10 @@ export function useAttentionRollup(
   const attentionDesktopAlerts = useAttentionDesktopAlerts();
   // WARDEN-344: which pane states the badge counts (stuck / done since WARDEN-1360).
   const enabledStates = useAttentionStates();
+  // WARDEN-378 / WARDEN-1506: pane keys the human opted into per-chat "watch" —
+  // unioned into the ?panes= poll so a watched chat is classified even when its pane
+  // is NOT open, and diffed for a targeted ping when it newly needs the human.
+  const watchedChats = useWatchedChats();
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [agentStates, setAgentStates] = useState<AgentStateRow[]>([]);
