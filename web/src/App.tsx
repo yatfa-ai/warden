@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, resetObsPrefDefaults, type ResettableKey, type ResetUiDefaults, type ObsResetKey, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
-import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
+import { clampSidebarWidth, clampObserverWidth, HEALTH_WIDTH } from '@/lib/layout';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/theme';
 import { applyDensity } from '@/lib/density';
@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -224,23 +224,6 @@ function App() {
   // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
   // hosts rather than the whole fleet.
   const discoveredHostsRef = useRef<Set<string>>(new Set());
-  // Persisted panel widths are clamped to their usable floors on mount so a
-  // stale value (saved on a wider window, or from before WARDEN-183) can't crush
-  // the middle pane column. Computed once via a lazy initializer, then split
-  // into the two independent states the rest of the component reads.
-  const [initialWidths] = useState(() =>
-    clampLayoutWidths(
-      { sidebar: uiState.sidebarWidth ?? 220, observer: uiState.observerWidth ?? 380 },
-      {
-        windowWidth: window.innerWidth,
-        healthCollapsed: uiState.healthCollapsed ?? true,
-        sidebarCollapsed: uiState.sidebarCollapsed,
-        observerCollapsed: uiState.observerCollapsed,
-      },
-    ),
-  );
-  const [sidebarWidth, setSidebarWidth] = useState(initialWidths.sidebar);
-  const [observerWidth, setObserverWidth] = useState(initialWidths.observer);
   const [maximized, setMaximized] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
@@ -303,8 +286,16 @@ function App() {
   // live on the shared store (lib/uiStore.ts); App still READS them (layout
   // styles, applyLayoutClamp deps, drag-start captures) but owns no state, and
   // PaneGrid's Alt+S/Alt+O call the toggle actions directly (no prop callbacks).
-  // Persistence rides useConfigPersistence's store half (37 facts).
+  // Persistence rides useConfigPersistence's store half (39 facts).
   const sidebarCollapsed = useSidebarCollapsed();
+  // WARDEN-1516 (slice 22): the two panel widths live on the store too (first-
+  // paint clamp runs at store creation; reclampPanelWidths is the one re-clamp
+  // action). App reads the values for layout styles / drag-start captures.
+  const sidebarWidth = useSidebarWidth();
+  const observerWidth = useObserverWidth();
+  const setSidebarWidth = useSetSidebarWidth();
+  const setObserverWidth = useSetObserverWidth();
+  const reclampPanelWidths = useReclampPanelWidths();
   const observerCollapsed = useObserverCollapsed();
   const healthCollapsed = useHealthCollapsed();
   const setObserverCollapsed = useSetObserverCollapsed();
@@ -390,7 +381,7 @@ function App() {
   // App-side reads: this slice-3 comment recorded the two reasons every
   // migrated fact kept an App subscription — the persisted snapshot and the
   // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
-  // 37 store facts: the snapshot's store half is subscribed once inside
+  // 39 store facts: the snapshot's store half is subscribed once inside
   // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
   // only the setters the reset partition needs. The write path is unchanged
   // end to end: store.setX → that subscription re-renders App → the merged
@@ -812,15 +803,16 @@ function App() {
   // saveUi WRITE effect + handleConfigChange (WARDEN-696) and merges it with
   // the store half it reads itself. Typed as AppPersistedSnapshot — since
   // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
-  // as useState (the workspace set, panel geometry);
-  // the 37 store-owned facts are NOT re-listed here. The partition is
+  // as useState (the workspace set — since slice 22, WARDEN-1516, the panel
+  // widths are store-owned too);
+  // the 39 store-owned facts are NOT re-listed here. The partition is
   // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
   // complement of the store's STORE_PERSISTED_KEYS against
   // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
   // REQUIRED property and its absence from this literal is a tsc error — the
   // WARDEN-442/468/500 dropped-key class stays closed on both halves.
   const persistedSnapshot: AppPersistedSnapshot = {
-    workspaces, activeWorkspaceId, sidebarWidth, observerWidth,
+    workspaces, activeWorkspaceId,
   };
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
@@ -2117,30 +2109,19 @@ function App() {
     }
   }, [isResizingSidebar, isResizingObserver]);
 
-  // Live panel widths via ref so the space-change clamp reads fresh values
-  // without re-subscribing its listener on every drag tick. (Mirrors the
-  // focusedRef.current = focused pattern above.)
-  const sidebarWidthRef = useRef(sidebarWidth);
-  sidebarWidthRef.current = sidebarWidth;
-  const observerWidthRef = useRef(observerWidth);
-  observerWidthRef.current = observerWidth;
-
   // Re-clamp both panel widths against the current viewport, health state, AND
   // panel-collapse state so the visible panels together can never starve the
   // middle pane column. This is the single re-clamp entry point for every change
   // in AVAILABLE/VISIBLE LAYOUT SPACE — effect (1) (window resize) and effect
   // (2) (health + sidebar/observer collapse toggles) both call it (WARDEN-183).
-  // Enlarging space (window grows, a panel collapses) is a no-op: in-range widths
-  // clamp back to themselves. The deps are the space-shaping flags only (NOT the
-  // width states), so setting the widths here cannot retrigger this callback.
+  // Since WARDEN-1516 the clamp itself is a store action (reclampPanelWidths)
+  // that reads the widths and collapse flags from the store; the deps below are
+  // the space-shaping flags only, so the effect re-fires on each toggle.
   const applyLayoutClamp = useCallback(() => {
-    const clamped = clampLayoutWidths(
-      { sidebar: sidebarWidthRef.current, observer: observerWidthRef.current },
-      { windowWidth: window.innerWidth, healthCollapsed, sidebarCollapsed, observerCollapsed },
-    );
-    setSidebarWidth(clamped.sidebar);
-    setObserverWidth(clamped.observer);
-  }, [healthCollapsed, sidebarCollapsed, observerCollapsed]);
+    reclampPanelWidths(window.innerWidth);
+    // healthCollapsed/sidebarCollapsed/observerCollapsed are deliberate effect
+    // triggers (the action reads them from the store, not from this closure).
+  }, [reclampPanelWidths, healthCollapsed, sidebarCollapsed, observerCollapsed]);
 
   // (1) Window resize: a smaller viewport shrinks the space the two panels share.
   useEffect(() => {

@@ -20,35 +20,47 @@
 // collapsed panel re-introduces that width with no re-clamp, crushing the middle.
 // Modeled in the "expand re-clamp" section below.
 //
-// This file models that step. `Layout` below is a mini-model of App's space-
-// change handling: it holds the two panel widths and collapse flags, and on any
-// change in available/visible layout space re-clamps them through the REAL
-// clampLayoutWidths — exactly what App's applyLayoutClamp does (App's resize
-// listener AND its space-shape effect — health + sidebar/observer collapse
-// toggles — both call it). Driving a health toggle, and a side-panel expand,
-// through this model at 900px are the scenarios that regressed; the assertions
-// pin the contract that a space change MUST re-invoke the clamp so the middle
-// pane is never crushed.
+// Since WARDEN-1516 (roadmap WARDEN-1204 slice 22) the widths and the re-clamp
+// live on the uiStore (`reclampPanelWidths`, reading the store's own collapse
+// flags), so the scenarios below drive a real `createUiStore()` — there is no
+// hand-mirrored model of App's wiring left to drift from production. A "BUG
+// repro" test simulates the regression by simply NOT calling reclampPanelWidths
+// after changing the space; the FIX tests call it exactly as App's resize
+// listener / space-shape effect do. (That App's effect actually CALLS the action
+// is wiring only review/tsc can see — see the PR note.)
 //
 // Run: node layout.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const layoutPath = resolve(__dirname, 'src/lib/layout.ts');
 
-// --- Load the REAL layout.ts (TS -> ESM via the OXC transform Vite bundles) --
-// layout.ts is pure geometry — no @/lib/themes dependency (unlike storage.ts) —
-// so it transpiles standalone with no bare-specifier rewrite.
-const layoutSrc = readFileSync(layoutPath, 'utf8');
-const { code } = await transformWithOxc(layoutSrc, layoutPath, {});
-const tmpDir = mkdtempSync(join(tmpdir(), 'warden-layout-test-'));
-const tmpFile = join(tmpDir, 'layout.mjs');
-writeFileSync(tmpFile, code);
+// uiStore.ts reads localStorage at creation (loadUi) — polyfill BEFORE loading it.
+const mem = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+  setItem: (k, v) => { mem.set(k, String(v)); },
+  removeItem: (k) => { mem.delete(k); },
+  clear: () => { mem.clear(); },
+};
+
+// --- Load the REAL layout.ts + uiStore.ts (TS -> ESM via the OXC transform) --
+// The temp dir lives INSIDE web/ so uiStore's bare `zustand` import resolves
+// (same harness shape as uiStore.test.mjs).
+const tmpDir = mkdtempSync(join(__dirname, '.layout-test-'));
+const emit = async (relPath, outName, rewrite = (c) => c) => {
+  const abs = resolve(__dirname, relPath);
+  const { code } = await transformWithOxc(readFileSync(abs, 'utf8'), abs, {});
+  writeFileSync(join(tmpDir, outName), rewrite(code));
+};
+await emit('src/lib/layout.ts', 'layout.mjs');
+await emit('src/lib/themes.ts', 'themes.mjs');
+await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
+await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) =>
+  c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs'));
 const {
   clampLayoutWidths,
   clampSidebarWidth,
@@ -59,7 +71,8 @@ const {
   OBSERVER_MAX,
   PANE_MIN,
   HEALTH_WIDTH,
-} = await import(tmpFile);
+} = await import(join(tmpDir, 'layout.mjs'));
+const { createUiStore } = await import(join(tmpDir, 'uiStore.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -73,30 +86,30 @@ const test = (name, fn) => {
 const middle = (ctx, sb, ob) =>
   ctx.windowWidth - sb - ob - (ctx.healthCollapsed ? 0 : HEALTH_WIDTH);
 
-// Mini-model of App's space-change re-clamp. App keeps the two panel widths in
-// state, plus the sidebar/observer collapse flags; on window resize and on any
-// space-shape toggle (health, sidebar, observer) its applyLayoutClamp callback
-// runs clampLayoutWidths over them with the full collapse-aware ctx. `.reclamp()`
-// below IS that callback — it merges `this` collapse state into the ctx.
-// Skipping it (as the WARDEN-183 bug did on health toggle, and again on
-// side-panel EXPAND in round 3) is what the "BUG repro" tests simulate by simply
-// not calling reclamp after changing the space.
-class Layout {
-  constructor(sidebar, observer, { sidebarCollapsed = false, observerCollapsed = false } = {}) {
-    this.sidebar = sidebar;
-    this.observer = observer;
-    this.sidebarCollapsed = sidebarCollapsed;
-    this.observerCollapsed = observerCollapsed;
-  }
-  reclamp(ctx) {
-    const r = clampLayoutWidths(
-      { sidebar: this.sidebar, observer: this.observer },
-      { ...ctx, sidebarCollapsed: this.sidebarCollapsed, observerCollapsed: this.observerCollapsed },
-    );
-    this.sidebar = r.sidebar;
-    this.observer = r.observer;
-    return this;
-  }
+// A real uiStore wrapped in the tiny vocabulary the scenarios read: the widths
+// and collapse flags are the store's own, and `.reclamp(ctx)` fires the
+// production `reclampPanelWidths(windowWidth)` action — the exact call App's
+// resize listener and space-shape effect make. `ctx.healthCollapsed` is applied
+// to the store first (it is store state; the scenarios express it per call).
+function makeLayout(sidebar, observer, { sidebarCollapsed = false, observerCollapsed = false } = {}) {
+  const store = createUiStore({ sidebarWidth: sidebar, observerWidth: observer, sidebarCollapsed, observerCollapsed });
+  const api = {
+    store,
+    get sidebar() { return store.getState().sidebarWidth; },
+    set sidebar(v) { store.getState().setSidebarWidth(v); },
+    get observer() { return store.getState().observerWidth; },
+    set observer(v) { store.getState().setObserverWidth(v); },
+    get sidebarCollapsed() { return store.getState().sidebarCollapsed; },
+    set sidebarCollapsed(v) { store.getState().setSidebarCollapsed(v); },
+    get observerCollapsed() { return store.getState().observerCollapsed; },
+    set observerCollapsed(v) { store.getState().setObserverCollapsed(v); },
+    reclamp(ctx) {
+      store.getState().setHealthCollapsed(ctx.healthCollapsed);
+      store.getState().reclampPanelWidths(ctx.windowWidth);
+      return api;
+    },
+  };
+  return api;
 }
 
 console.log('\nhealth-toggle re-clamp: opening health never crushes the middle pane (WARDEN-183)');
@@ -105,7 +118,7 @@ test('mount clamp at the 900px floor (health collapsed) keeps the middle at PANE
   // Fresh launch, default widths, at the Electron minWidth. This is the starting
   // point of the reviewer's repro.
   const ctx = { windowWidth: 900, healthCollapsed: true };
-  const l = new Layout(220, 380).reclamp(ctx);
+  const l = makeLayout(220, 380).reclamp(ctx);
   assert.equal(l.sidebar, 200, 'sidebar trimmed from 220 -> 200');
   assert.equal(l.observer, 380, 'observer unchanged');
   assert.equal(middle(ctx, l.sidebar, l.observer), PANE_MIN, 'middle exactly at the floor');
@@ -115,7 +128,7 @@ test('BUG repro: opening health at 900px WITHOUT a re-clamp crushes the middle t
   // Same mount as above, then the user toggles health. If App did NOT re-clamp
   // on the toggle (the WARDEN-183 regression), the panel widths stay put and the
   // 320px health panel eats the entire middle pane column.
-  const l = new Layout(220, 380).reclamp({ windowWidth: 900, healthCollapsed: true });
+  const l = makeLayout(220, 380).reclamp({ windowWidth: 900, healthCollapsed: true });
   // NO reclamp on the toggle — the bug:
   assert.equal(
     middle({ windowWidth: 900, healthCollapsed: false }, l.sidebar, l.observer),
@@ -126,7 +139,7 @@ test('BUG repro: opening health at 900px WITHOUT a re-clamp crushes the middle t
 
 test('FIX: opening health at 900px re-clamps so the middle is never crushed to 0', () => {
   // Same mount, then the health-toggle re-clamp fires (App's applyLayoutClamp).
-  const l = new Layout(220, 380).reclamp({ windowWidth: 900, healthCollapsed: true });
+  const l = makeLayout(220, 380).reclamp({ windowWidth: 900, healthCollapsed: true });
   l.reclamp({ windowWidth: 900, healthCollapsed: false });
   // At 900px with health + BOTH side panels there is not room for PANE_MIN
   // (SIDEBAR_MIN + OBSERVER_MIN + PANE_MIN + HEALTH_WIDTH = 1120 > 900), so the
@@ -143,7 +156,7 @@ test('FIX: opening health at 900px re-clamps so the middle is never crushed to 0
 test('on a feasible window, opening health keeps the middle pane >= PANE_MIN', () => {
   // 1200px has room for everything, so after the health-toggle re-clamp the
   // middle pane keeps its full PANE_MIN reserve.
-  const l = new Layout(220, 380).reclamp({ windowWidth: 1200, healthCollapsed: true });
+  const l = makeLayout(220, 380).reclamp({ windowWidth: 1200, healthCollapsed: true });
   l.reclamp({ windowWidth: 1200, healthCollapsed: false });
   assert.ok(
     middle({ windowWidth: 1200, healthCollapsed: false }, l.sidebar, l.observer) >= PANE_MIN,
@@ -157,7 +170,7 @@ test('the health-toggle re-clamp runs on BOTH directions and never crushes the m
   // has no memory of a pre-trim value, so collapsing health does NOT auto-grow a
   // trimmed panel back (the user re-widens via drag). What matters — and what we
   // assert — is that neither direction of the toggle can leave the middle crushed.
-  const l = new Layout(220, 380).reclamp({ windowWidth: 1200, healthCollapsed: true });
+  const l = makeLayout(220, 380).reclamp({ windowWidth: 1200, healthCollapsed: true });
   l.reclamp({ windowWidth: 1200, healthCollapsed: false }); // expand -> trims sidebar to 180
   assert.equal(l.sidebar, 180, 'expanding health trimmed the sidebar toward its floor');
   assert.ok(
@@ -178,7 +191,7 @@ test('the health-toggle re-clamp runs on BOTH directions and never crushes the m
 test('a window resize after the toggle also keeps the middle >= PANE_MIN', () => {
   // The resize listener and the health-toggle effect share the same re-clamp;
   // shrinking the window while health is open must still protect the middle.
-  const l = new Layout(220, 380)
+  const l = makeLayout(220, 380)
     .reclamp({ windowWidth: 1400, healthCollapsed: false })
     .reclamp({ windowWidth: 1000, healthCollapsed: false }); // window shrinks
   assert.ok(
@@ -196,7 +209,7 @@ test('collapse-aware math: a lone visible panel is never trimmed to reserve room
   // lone visible observer keeps its width. The pre-round-3 math subtracted the
   // sidebar's STORED width too and would wrongly shrink the observer to 400.
   const ctx = { windowWidth: 900, healthCollapsed: true };
-  const l = new Layout(200, 580, { sidebarCollapsed: true }).reclamp(ctx);
+  const l = makeLayout(200, 580, { sidebarCollapsed: true }).reclamp(ctx);
   assert.equal(l.observer, 580, 'lone visible observer keeps its wide value');
   assert.equal(l.sidebar, 200, 'hidden sidebar stored width is left untouched');
   // The visible layout (sidebar hidden) has plenty of middle.
@@ -210,7 +223,7 @@ test('BUG repro: expanding a rail WITHOUT a re-clamp crushes the middle below PA
   // on the expand (the round-3 regression), both panels keep their full stored
   // widths and the middle pane column is crushed.
   const ctx = { windowWidth: 900, healthCollapsed: true };
-  const l = new Layout(220, 380).reclamp(ctx); // mount -> sidebar=200, observer=380
+  const l = makeLayout(220, 380).reclamp(ctx); // mount -> sidebar=200, observer=380
   l.sidebarCollapsed = true; // collapse sidebar
   l.observer = clampObserverWidth(580, 0, ctx); // drag observer wide (neighbor=0)
   l.sidebarCollapsed = false; // expand sidebar — NO reclamp (the bug)
@@ -225,7 +238,7 @@ test('FIX: expanding a rail re-clamps so the middle keeps its floor (realistic 3
   // The pair is trimmed (sidebar yields to its floor first) so the middle keeps
   // PANE_MIN instead of being crushed.
   const ctx = { windowWidth: 900, healthCollapsed: true };
-  const l = new Layout(220, 380).reclamp(ctx); // sidebar=200, observer=380
+  const l = makeLayout(220, 380).reclamp(ctx); // sidebar=200, observer=380
   l.sidebarCollapsed = true;
   l.observer = clampObserverWidth(580, 0, ctx); // drag observer to 580
   l.sidebarCollapsed = false; // expand sidebar
@@ -243,7 +256,7 @@ test('FIX: the decisive collapse-dance no longer crushes the middle to 0', () =>
   // at -80 -> crushed to 0. With expand re-clamp + collapse-aware math the final
   // expand trims the pair and the middle keeps its floor.
   const ctx = { windowWidth: 900, healthCollapsed: true };
-  const l = new Layout(220, 380).reclamp(ctx);
+  const l = makeLayout(220, 380).reclamp(ctx);
   l.sidebarCollapsed = true; // collapse sidebar
   l.observer = clampObserverWidth(580, 0, ctx); // widen observer
   l.observerCollapsed = true; // collapse observer

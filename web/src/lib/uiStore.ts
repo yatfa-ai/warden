@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 37 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 39 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -81,6 +81,7 @@ import {
   type ObsResetKey,
   type ObsUiPrefs,
 } from '@/lib/storage';
+import { clampLayoutWidths } from '@/lib/layout';
 import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
@@ -494,6 +495,27 @@ export interface UiStoreState {
   sidebarCollapsed: boolean;
   observerCollapsed: boolean;
   healthCollapsed: boolean;
+  /**
+   * The two user-resizable panel widths (WARDEN-1516, roadmap WARDEN-1204 slice
+   * 22). Both sit in RESET_PRESERVED_KEYS (storage.ts, untouched — Settings →
+   * Reset still preserves them), so there is no resetUiPrefDefaults entry.
+   * Defaults mirror DEFAULT_UI: sidebar 220, observer 380. The setters are
+   * plain writes — callers (the drag handlers) pass an already-clamped value;
+   * `reclampPanelWidths` is the store-owned collapse-aware re-clamp.
+   */
+  sidebarWidth: number;
+  observerWidth: number;
+  setSidebarWidth: (width: number) => void;
+  setObserverWidth: (width: number) => void;
+  /**
+   * Re-clamp BOTH widths together against `windowWidth` and the store's OWN
+   * healthCollapsed/sidebarCollapsed/observerCollapsed (read via get()), through
+   * the pure clampLayoutWidths (layout.ts), in ONE atomic `set`. The single
+   * re-clamp entry point for every change in available/visible layout space
+   * (window resize, health toggle, side-panel collapse/expand — WARDEN-183).
+   * windowWidth is a parameter so the store never touches `window` itself.
+   */
+  reclampPanelWidths: (windowWidth: number) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   setObserverCollapsed: (collapsed: boolean) => void;
   setHealthCollapsed: (collapsed: boolean) => void;
@@ -578,7 +600,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 37 persisted facts migrated onto the store by slices 1–15 and 18–21.
+ * owns — exactly the 39 persisted facts migrated onto the store by slices 1–15 and 18–22.
  *
  * WHAT IT IS FOR
  * ──────────────
@@ -650,10 +672,12 @@ export const STORE_PERSISTED_KEYS = [
   'sidebarCollapsed',
   'observerCollapsed',
   'healthCollapsed',
+  'sidebarWidth',
+  'observerWidth',
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 37
+ * The store half of the persisted snapshot: a pure projection of those 39
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -706,6 +730,8 @@ export function selectPersistedStorePrefs(
     sidebarCollapsed: state.sidebarCollapsed,
     observerCollapsed: state.observerCollapsed,
     healthCollapsed: state.healthCollapsed,
+    sidebarWidth: state.sidebarWidth,
+    observerWidth: state.observerWidth,
   };
 }
 
@@ -812,6 +838,8 @@ export type UiStoreSeed = Partial<
     | 'sidebarCollapsed'
     | 'observerCollapsed'
     | 'healthCollapsed'
+    | 'sidebarWidth'
+    | 'observerWidth'
     | 'observerViewMode'
     | 'observerActivityFilters'
     | 'observerDirectiveFilters'
@@ -839,7 +867,7 @@ export function createUiStore(seed: UiStoreSeed = {}) {
   // nothing, and a store-level `set` replaces objects whole anyway.
   const persistedObs = loadObs();
   const obsDefaults = resetObsPrefDefaults();
-  return createStore<UiStoreState>()((set) => ({
+  return createStore<UiStoreState>()((set, get) => ({
     snippets: seed.snippets ?? persisted.snippets ?? [],
     setSnippets: (snippets) => set({ snippets }),
     fileViewerViewMode: seed.fileViewerViewMode ?? persisted.fileViewerViewMode ?? 'rendered',
@@ -992,6 +1020,30 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setHealthCollapsed: (healthCollapsed) => set({ healthCollapsed }),
     toggleSidebarCollapsed: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
     toggleObserverCollapsed: () => set((s) => ({ observerCollapsed: !s.observerCollapsed })),
+    // WARDEN-1516 (roadmap WARDEN-1204 slice 22): ??-only, mirroring App's
+    // retired `uiState.sidebarWidth ?? 220` / `uiState.observerWidth ?? 380`
+    // seeds (literals mirror DEFAULT_UI, pinned against it by uiStore.test.mjs).
+    // Seeded UNCLAMPED here — the first-paint clamp App used to run in a lazy
+    // useState initializer runs once on the app-level singleton below
+    // (needs window.innerWidth, which a factory must not touch).
+    sidebarWidth: seed.sidebarWidth ?? persisted.sidebarWidth ?? 220,
+    observerWidth: seed.observerWidth ?? persisted.observerWidth ?? 380,
+    setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
+    setObserverWidth: (observerWidth) => set({ observerWidth }),
+    reclampPanelWidths: (windowWidth) => {
+      const s = get();
+      const clamped = clampLayoutWidths(
+        { sidebar: s.sidebarWidth, observer: s.observerWidth },
+        {
+          windowWidth,
+          healthCollapsed: s.healthCollapsed,
+          sidebarCollapsed: s.sidebarCollapsed,
+          observerCollapsed: s.observerCollapsed,
+        },
+      );
+      // ONE set: a subscriber never sees a half-clamped pair.
+      set({ sidebarWidth: clamped.sidebar, observerWidth: clamped.observer });
+    },
     // WARDEN-1498 (roadmap WARDEN-1204 slice 19): seeded THROUGH initialWorkspace,
     // never `persisted.paneHost` directly — App's retired useState was
     // `initialWorkspace(uiState, restoreOnStartup).paneHost`, which is `{}` on a
@@ -1062,6 +1114,12 @@ export type UiStore = ReturnType<typeof createUiStore>;
  * payload, mirroring the single `loadUi()` read App does for its own seeds.
  */
 export const uiStore: UiStore = createUiStore();
+// First-paint parity (WARDEN-1516): persisted widths are clamped to their usable
+// floors BEFORE the first render — a stale value (saved on a wider window, or
+// pre-WARDEN-183) must not crush the middle pane. This is the clamp App's lazy
+// `initialWidths` initializer used to run; `window` is guarded for the node
+// test harness (which has none).
+if (typeof window !== 'undefined') uiStore.getState().reclampPanelWidths(window.innerWidth);
 
 /**
  * Subscribe to a slice of the app-level store.
@@ -1681,6 +1739,27 @@ export function useSetObserverCollapsed(): (collapsed: boolean) => void {
 
 export function useSetHealthCollapsed(): (collapsed: boolean) => void {
   return useUiStore((s) => s.setHealthCollapsed);
+}
+
+/** The two persisted panel widths (WARDEN-1516) — App's layout styles and drag-start captures read them. */
+export function useSidebarWidth(): number {
+  return useUiStore((s) => s.sidebarWidth);
+}
+
+export function useObserverWidth(): number {
+  return useUiStore((s) => s.observerWidth);
+}
+
+export function useSetSidebarWidth(): (width: number) => void {
+  return useUiStore((s) => s.setSidebarWidth);
+}
+
+export function useSetObserverWidth(): (width: number) => void {
+  return useUiStore((s) => s.setObserverWidth);
+}
+
+export function useReclampPanelWidths(): (windowWidth: number) => void {
+  return useUiStore((s) => s.reclampPanelWidths);
 }
 
 export function useToggleSidebarCollapsed(): () => void {

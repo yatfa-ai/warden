@@ -60,7 +60,8 @@ const emit = (relPath, outName, rewrite = (c) => c) => {
 };
 await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
-await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
+await emit('src/lib/layout.ts', 'layout.mjs');
+await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs'));
 // WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
 // erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
@@ -69,6 +70,7 @@ await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
+const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -92,9 +94,9 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 37 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 39 STORE_PERSISTED_KEYS
   // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
-  // keys (workspaces / activeWorkspaceId, the two panel widths)
+  // keys (workspaces / activeWorkspaceId)
   // plus every DEFAULT_UI field the merged
   // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
   const snapshot = {
@@ -2543,13 +2545,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (37 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (39 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 37);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 37);
+  assert.equal(Object.keys(picked).length, 39);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2647,14 +2649,14 @@ test('a clean install seeds paneHost as {}', () => {
   assert.deepEqual(createUiStore().getState().paneHost, {});
 });
 
-console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (37) and rides the selector');
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (39) and rides the selector');
 test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 37);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const store = createUiStore({ paneHost: { a: 'h' } });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 37);
+  assert.equal(Object.keys(picked).length, 39);
   assert.deepEqual(picked.paneHost, { a: 'h' });
 });
 
@@ -2707,10 +2709,10 @@ test('setWatchedChats replaces the set and keeps a stable identity', () => {
 test('watchedChats is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('watchedChats'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 37);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const store = createUiStore({ watchedChats: ['w'] });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 37);
+  assert.equal(Object.keys(picked).length, 39);
   assert.deepEqual(picked.watchedChats, ['w']);
 });
 test('a watched set survives a restart through the production hop; [] persists as []', () => {
@@ -2779,12 +2781,12 @@ test('toggleSidebarCollapsed / toggleObserverCollapsed flip atomically; twice ->
   assert.equal(store.getState().observerCollapsed, false);
   assert.equal(store.getState().toggleSidebarCollapsed, toggleSidebarCollapsed, 'stable identity');
 });
-test('the three flags join STORE_PERSISTED_KEYS (37) and ride selectPersistedStorePrefs', () => {
+test('the three flags join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of COLLAPSE_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 37);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const picked = selectPersistedStorePrefs(createUiStore().getState());
-  assert.equal(Object.keys(picked).length, 37);
+  assert.equal(Object.keys(picked).length, 39);
 });
 test('each flag round-trips store -> snapshot -> saveUi -> loadUi -> a fresh store', () => {
   reset();
@@ -2817,6 +2819,201 @@ test('the UI-prefs reset PRESERVES all three (RESET_PRESERVED_KEYS, storage.ts u
   assert.equal(disk.sidebarCollapsed, true);
   assert.equal(disk.observerCollapsed, true);
   assert.equal(disk.healthCollapsed, false);
+});
+
+// ---------------------------------------------------------------------------
+// WARDEN-1516 (roadmap WARDEN-1204 slice 22): sidebarWidth / observerWidth + the
+// store-owned collapse-aware reclampPanelWidths action. The pure clamp math is
+// layout.test.mjs's; here: seeding/defaults, setters, persistence, the reset
+// preservation, and the ACTION (reads the store's own collapse flags, ONE set).
+// ---------------------------------------------------------------------------
+console.log('\nWARDEN-1516 — panel widths on the store + reclampPanelWidths');
+const WIDTH_KEYS = ['sidebarWidth', 'observerWidth'];
+const midOf = (win, st) =>
+  win - (st.sidebarCollapsed ? 0 : st.sidebarWidth) - (st.observerCollapsed ? 0 : st.observerWidth) - (st.healthCollapsed ? 0 : HEALTH_WIDTH);
+
+test('defaults mirror DEFAULT_UI (220 / 380) on a clean install, pinned against storage.ts', () => {
+  reset();
+  const s = createUiStore().getState();
+  assert.equal(s.sidebarWidth, 220);
+  assert.equal(s.observerWidth, 380);
+  assert.equal(s.sidebarWidth, DEFAULT_UI.sidebarWidth);
+  assert.equal(s.observerWidth, DEFAULT_UI.observerWidth);
+});
+test('seeds from the persisted payload, and an explicit seed wins over it', () => {
+  reset();
+  saveUi({ ...loadUi(), sidebarWidth: 260, observerWidth: 450 });
+  const s = createUiStore().getState();
+  assert.equal(s.sidebarWidth, 260);
+  assert.equal(s.observerWidth, 450);
+  const o = createUiStore({ sidebarWidth: 190, observerWidth: 310 }).getState();
+  assert.equal(o.sidebarWidth, 190);
+  assert.equal(o.observerWidth, 310);
+});
+test('the seed is NOT clamped at creation (the first-paint clamp is an explicit action call)', () => {
+  reset();
+  const s = createUiStore({ sidebarWidth: 400, observerWidth: 600 }).getState();
+  assert.equal(s.sidebarWidth, 400);
+  assert.equal(s.observerWidth, 600);
+});
+test('setters write one width each, with stable identity', () => {
+  reset();
+  const store = createUiStore();
+  const { setSidebarWidth, setObserverWidth } = store.getState();
+  setSidebarWidth(250);
+  assert.equal(store.getState().sidebarWidth, 250);
+  assert.equal(store.getState().observerWidth, 380, 'the other width is untouched');
+  setObserverWidth(500);
+  assert.equal(store.getState().observerWidth, 500);
+  assert.equal(store.getState().setSidebarWidth, setSidebarWidth);
+  assert.equal(store.getState().setObserverWidth, setObserverWidth);
+});
+test('both widths join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
+  reset();
+  for (const k of WIDTH_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  const picked = selectPersistedStorePrefs(createUiStore({ sidebarWidth: 233, observerWidth: 411 }).getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(picked.sidebarWidth, 233);
+  assert.equal(picked.observerWidth, 411);
+});
+test('both widths round-trip store -> production selector -> saveUi -> loadUi -> a fresh store', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setSidebarWidth(275);
+  store.getState().setObserverWidth(520);
+  flushSnapshotToDisk(store);
+  const disk = loadUi();
+  assert.equal(disk.sidebarWidth, 275);
+  assert.equal(disk.observerWidth, 520);
+  const next = createUiStore().getState();
+  assert.equal(next.sidebarWidth, 275);
+  assert.equal(next.observerWidth, 520);
+});
+test('the UI-prefs reset PRESERVES both widths (RESET_PRESERVED_KEYS, storage.ts untouched)', () => {
+  reset();
+  const defaults = resetUiPrefDefaults();
+  for (const k of WIDTH_KEYS) assert.ok(!(k in defaults), `${k} must stay in RESET_PRESERVED_KEYS`);
+  const store = createUiStore({ sidebarWidth: 300, observerWidth: 450 });
+  store.getState().setTheme(defaults.theme);
+  flushSnapshotToDisk(store);
+  assert.equal(loadUi().sidebarWidth, 300);
+  assert.equal(loadUi().observerWidth, 450);
+});
+test('reclampPanelWidths is a no-op when the window has room for everything', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().reclampPanelWidths(1400);
+  assert.equal(store.getState().sidebarWidth, 220);
+  assert.equal(store.getState().observerWidth, 380);
+});
+test('reclampPanelWidths: first-paint clamp trims defaults at the 900px floor (sidebar yields first)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().reclampPanelWidths(900);
+  assert.equal(store.getState().sidebarWidth, 200, 'asymmetric trim: sidebar 220 -> 200');
+  assert.equal(store.getState().observerWidth, 380);
+  assert.equal(midOf(900, store.getState()), PANE_MIN);
+});
+test('reclampPanelWidths: a stale both-max pair is trimmed asymmetrically (sidebar to its floor first)', () => {
+  reset();
+  const store = createUiStore({ sidebarWidth: SIDEBAR_MAX, observerWidth: OBSERVER_MAX });
+  store.getState().reclampPanelWidths(900);
+  const s = store.getState();
+  assert.equal(s.sidebarWidth + s.observerWidth, 580, 'pair sums to the shared space');
+  assert.equal(s.sidebarWidth, SIDEBAR_MIN, 'sidebar yields to its floor first');
+  assert.equal(s.observerWidth, 400);
+});
+test('health toggle re-clamp: opening health at 900px retreats both panels to their floors, middle never 0', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().reclampPanelWidths(900);
+  store.getState().setHealthCollapsed(false);
+  store.getState().reclampPanelWidths(900); // what the space-shape effect fires
+  const s = store.getState();
+  assert.equal(s.sidebarWidth, SIDEBAR_MIN);
+  assert.equal(s.observerWidth, OBSERVER_MIN);
+  assert.ok(midOf(900, s) > 0);
+});
+test('health toggle re-clamp runs both directions and never crushes the middle on a feasible window', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().reclampPanelWidths(1200);
+  store.getState().setHealthCollapsed(false);
+  store.getState().reclampPanelWidths(1200);
+  assert.equal(store.getState().sidebarWidth, 180, 'expanding health trimmed the sidebar toward its floor');
+  assert.ok(midOf(1200, store.getState()) >= PANE_MIN);
+  store.getState().setHealthCollapsed(true);
+  store.getState().reclampPanelWidths(1200);
+  assert.ok(midOf(1200, store.getState()) >= PANE_MIN);
+  assert.equal(store.getState().sidebarWidth, 180, 'no memory of the pre-trim value: collapse does not regrow');
+});
+test('a window shrink re-clamp keeps the middle floor (or both panels at their floors)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().setHealthCollapsed(false);
+  store.getState().reclampPanelWidths(1400);
+  store.getState().reclampPanelWidths(1000);
+  const s = store.getState();
+  assert.ok(midOf(1000, s) >= PANE_MIN || (s.sidebarWidth === SIDEBAR_MIN && s.observerWidth === OBSERVER_MIN));
+});
+test('collapsed neighbour is treated as 0: a lone visible panel keeps its wide value, hidden width untouched', () => {
+  reset();
+  const store = createUiStore({ sidebarWidth: 200, observerWidth: 580, sidebarCollapsed: true });
+  store.getState().reclampPanelWidths(900);
+  assert.equal(store.getState().observerWidth, 580);
+  assert.equal(store.getState().sidebarWidth, 200);
+  assert.ok(midOf(900, store.getState()) >= PANE_MIN);
+});
+test('side-panel EXPAND re-clamp: collapse sidebar, drag observer wide, expand sidebar -> pair trimmed, middle at the floor', () => {
+  reset();
+  const store = createUiStore();
+  const st = () => store.getState();
+  st().reclampPanelWidths(900);
+  st().setSidebarCollapsed(true);
+  // drag observer wide (the drag handler passes the collapsed neighbour as 0)
+  st().setObserverWidth(clampObserverWidth(580, 0, { windowWidth: 900, healthCollapsed: true }));
+  assert.equal(st().observerWidth, 580);
+  st().setSidebarCollapsed(false);
+  // BUG shape: without the re-clamp the middle is crushed
+  assert.ok(midOf(900, st()) < PANE_MIN, 'unclamped expand crushes the middle');
+  st().reclampPanelWidths(900); // the re-clamp the expand must trigger
+  assert.equal(st().sidebarWidth, SIDEBAR_MIN, 'sidebar yields first');
+  assert.equal(st().observerWidth, 400);
+  assert.equal(midOf(900, st()), PANE_MIN);
+});
+test('the decisive collapse dance never crushes the middle to 0', () => {
+  reset();
+  const store = createUiStore();
+  const st = () => store.getState();
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  st().reclampPanelWidths(900);
+  st().setSidebarCollapsed(true);
+  st().setObserverWidth(clampObserverWidth(580, 0, ctx));
+  st().setObserverCollapsed(true);
+  st().setSidebarCollapsed(false);
+  st().reclampPanelWidths(900);
+  st().setSidebarWidth(clampSidebarWidth(400, 0, ctx));
+  st().setObserverCollapsed(false);
+  st().reclampPanelWidths(900);
+  assert.ok(st().sidebarWidth >= SIDEBAR_MIN && st().observerWidth >= OBSERVER_MIN);
+  assert.equal(midOf(900, st()), PANE_MIN);
+});
+test('reclampPanelWidths writes BOTH widths in ONE set (a subscriber never sees a half-clamped pair)', () => {
+  reset();
+  const store = createUiStore({ sidebarWidth: SIDEBAR_MAX, observerWidth: OBSERVER_MAX });
+  const seen = [];
+  store.subscribe((s) => seen.push([s.sidebarWidth, s.observerWidth]));
+  store.getState().reclampPanelWidths(900);
+  assert.equal(seen.length, 1, 'exactly one notification');
+  assert.deepEqual(seen[0], [SIDEBAR_MIN, 400]);
+});
+test('reclampPanelWidths has a stable identity across calls', () => {
+  reset();
+  const store = createUiStore();
+  const before = store.getState().reclampPanelWidths;
+  before(900);
+  assert.equal(store.getState().reclampPanelWidths, before);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

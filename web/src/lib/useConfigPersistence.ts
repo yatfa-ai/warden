@@ -56,8 +56,8 @@ export type PersistedPrefSnapshot = Required<
  * does NOT own — the complement of STORE_PERSISTED_KEYS (uiStore.ts) against
  * the same key source, so the partition is compile-derived, never hand-held.
  * These are the facts App still owns as plain useState (workspaces /
- * activeWorkspaceId, the four panel collapses, the two panel
- * widths), read at App scope and passed in.
+ * activeWorkspaceId — since WARDEN-1516 the panel collapses and widths are
+ * store-owned), read at App scope and passed in.
  */
 export type AppPersistedSnapshot = Required<
   Pick<
@@ -110,7 +110,7 @@ export function useConfigPersistence({
   refreshConfigPrefs,
 }: UseConfigPersistenceArgs): UseConfigPersistenceResult {
   // The store-owned half of the snapshot, subscribed ONCE (one selector, one
-  // subscription for all 37 store facts). useShallow keeps the returned object
+  // subscription for all 39 store facts). useShallow keeps the returned object
   // referentially stable across renders, so App re-renders only when one of
   // the 37 values actually changes — the exact re-render semantics the 24
   // per-fact `const x = useX()` subscriptions this replaces provided (minus
