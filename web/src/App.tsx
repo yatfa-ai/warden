@@ -1482,6 +1482,12 @@ function App() {
       if (prefs.notifyErrors) toast.error(result.error || 'Failed to start shell');
       return false;
     }
+    // WARDEN-1513 — the feature-adoption seed: a SUCCESSFUL shell spawn is one
+    // use of the chat-create capability (counts only; closed-set literal).
+    // Recorded HERE, the seam every shell-creation entry funnels through
+    // (SpawnControl, the empty-host "+ Start a shell" button, split-shell),
+    // and only AFTER the failure return so a failed spawn counts nothing.
+    getFeatureUsageSampler().sampler.recordFeatureUse('chat-create');
     const chat = result.data.chat;
     if (chat.temporary) {
       // Temporaries never ride the catalog list — track it locally so the new

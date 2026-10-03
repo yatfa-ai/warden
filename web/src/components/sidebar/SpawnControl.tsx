@@ -20,7 +20,6 @@ import { hostLabelFor, THIS_MACHINE } from '@/lib/chatDisplay';
 import { useHostLabels, useDefaultNewChatCwd, useDefaultNewChatCwdByHost } from '@/lib/uiStore';
 import { cn } from '@/lib/utils';
 
-import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 
 export interface SpawnControlProps {
   hosts: string[];
@@ -70,9 +69,6 @@ export function SpawnControl({ hosts, host, onSpawn, disabled }: SpawnControlPro
     const n = name.trim();
     const ok = await onSpawn(selectedHost, cwd.trim(), n || undefined);
     setBusy(false);
-    // WARDEN-1479 — the feature-adoption seed: a SUCCESSFUL spawn is one use
-    // of the chat-create capability (counts only; closed-set literal).
-    if (ok) getFeatureUsageSampler().sampler.recordFeatureUse('chat-create');
     // A named shell that spawned is saved and listed; an unnamed one opened as
     // a pane. Either way collapse back to the quiet one-liner.
     if (ok) { setName(''); setExpanded(false); }
