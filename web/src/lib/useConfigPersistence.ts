@@ -35,7 +35,7 @@ import { useUiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS } from '@/l
  * subscriptions ONLY to feed them into this snapshot (so the saveUi effect
  * would re-fire). Persistence is now a property of the store: App assembles
  * and passes only its OWN half (AppPersistedSnapshot — the facts it still owns
- * as useState: the workspace set, panel geometry),
+ * as useState: the workspace set),
  * while this hook reads the store half through ONE shallow-compared
  * subscription (useShallow(selectPersistedStorePrefs)) and merges the two in
  * the effect. The MERGED object is still the full PersistedPrefSnapshot —
@@ -112,7 +112,7 @@ export function useConfigPersistence({
   // The store-owned half of the snapshot, subscribed ONCE (one selector, one
   // subscription for all 39 store facts). useShallow keeps the returned object
   // referentially stable across renders, so App re-renders only when one of
-  // the 37 values actually changes — the exact re-render semantics the 24
+  // the 39 values actually changes — the exact re-render semantics the 24
   // per-fact `const x = useX()` subscriptions this replaces provided (minus
   // the 24 declarations). This is a READ channel only: nothing here writes
   // through the store, and the effect below remains the ONE saveUi call site.
