@@ -104,7 +104,7 @@ function makeSource(overrides = {}) {
 
 test('base-tier contract: shared SCHEMA_VERSION + the event types', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 10, 'the source module stays in lockstep with the canonical v10');
+  assert.equal(SCHEMA_VERSION, 11, 'the source module stays in lockstep with the canonical v11');
   // WARDEN-1424 — v8 adds `workspace-shape`. WARDEN-1479 — v9 adds `feature-usage`.
   assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory']);
   assert.equal(RUNTIME.MAIN, 'main');

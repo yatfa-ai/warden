@@ -875,4 +875,19 @@ test('process-memory is disclosed field-by-field under operational-metrics — a
   assert.equal(isValidBaseEvent({ ...ev, name: 'x' }), false, 'an injected key rejects');
 });
 
+test('operational-metrics discloses rejectedStale?/rejectedInvalid? and the preview keeps them (WARDEN-1528, shared-contract rule)', () => {
+  const METRICS_ONLY = { 'operational-metrics': true };
+  const fields = catOf(METRICS_ONLY, 'operational-metrics').eventTypes.find((e) => e.type === 'operational-metrics').fields;
+  assert.ok(fields.includes('rejectedStale?') && fields.includes('rejectedInvalid?'), 'both optional keys disclosed');
+  const ev = { schemaVersion: SCHEMA_VERSION, type: 'operational-metrics', runtime: 'renderer', timestamp: 3, windowStartedAt: 1, windowEndedAt: 2, boundaries: [50, 100], operations: [], rejected: 7, rejectedStale: 5, rejectedInvalid: 2 };
+  const on = previewPayload(ev, METRICS_ONLY);
+  assert.equal(on.valid, true);
+  assert.deepEqual(on.payload, ev, 'neither split field is dropped by redaction');
+  assert.deepEqual(on.changes, []);
+  assert.equal(isValidBaseEvent({ ...ev, rejectedStale: -1 }), false, 'a negative split value rejects');
+  assert.equal(isValidBaseEvent({ ...ev, rejectedInvalid: 1.5 }), false, 'a fractional split value rejects');
+  const { rejectedStale, rejectedInvalid, ...unsplit } = ev;
+  assert.equal(isValidBaseEvent(unsplit), true, 'the unsplit (v9/v10) shape still validates');
+});
+
 console.log(`\n✓ TELEMETRY TRANSPARENCY TESTS PASS (${passed})`);

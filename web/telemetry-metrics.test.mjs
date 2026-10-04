@@ -339,11 +339,16 @@ test('flush() returns the window and resets every counter', () => {
   assert.equal(first.endedAt, 65_000);
   assert.equal(byName(first, 'a').count, 1);
   assert.equal(first.rejected, 1);
+  // WARDEN-1528 — every main/server reject is validation-class.
+  assert.equal(first.rejectedStale, 0);
+  assert.equal(first.rejectedInvalid, 1);
   assert.equal(first.foldedOperations, 1);
 
   const empty = agg.snapshot();
   assert.deepEqual(empty.operations, []);
   assert.equal(empty.rejected, 0);
+  assert.equal(empty.rejectedStale, 0);
+  assert.equal(empty.rejectedInvalid, 0);
   assert.equal(empty.foldedOperations, 0);
   assert.equal(empty.foldedOperationsExact, true);
   assert.equal(empty.startedAt, 65_000, 'the next window starts where the last one ended');

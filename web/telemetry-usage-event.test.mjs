@@ -3,7 +3,7 @@
 // a `feature-usage` schema event (the telemetry-shape-event.cjs pattern).
 //
 // Pinned here:
-//   • the happy path: a producer window builds a v10-valid event stamped
+//   • the happy path: a producer window builds a v11-valid event stamped
 //     runtime 'renderer', carrying the exact name/count pairs;
 //   • CARRIER HYGIENE (the hostile-snapshot census): uppercase / underscore /
 //     65+-char / path-shaped / host-shaped names, zero / negative /
@@ -31,16 +31,16 @@ const BASE = {
   features: [{ name: 'global-search', count: 2 }, { name: 'settings', count: 1 }],
 };
 
-test('happy path: a producer window builds a v10-valid renderer event with the exact pairs', () => {
+test('happy path: a producer window builds a v11-valid renderer event with the exact pairs', () => {
   const e = buildFeatureUsageEvent({
     snapshot: BASE,
-    schemaVersion: 10,
+    schemaVersion: 11,
     appVersion: '0.1.83',
     platform: 'linux',
     now: () => 5_000,
   });
   assert.ok(e);
-  assert.equal(e.schemaVersion, 10);
+  assert.equal(e.schemaVersion, 11);
   assert.equal(e.type, 'feature-usage');
   assert.equal(e.runtime, 'renderer');
   assert.equal(e.timestamp, 5_000);
@@ -53,11 +53,11 @@ test('happy path: a producer window builds a v10-valid renderer event with the e
 });
 
 test('optional labels: absent appVersion/platform are omitted, garbage labels are omitted', () => {
-  const e = buildFeatureUsageEvent({ snapshot: BASE, schemaVersion: 10, now: () => 1 });
+  const e = buildFeatureUsageEvent({ snapshot: BASE, schemaVersion: 11, now: () => 1 });
   assert.ok(e);
   assert.equal('appVersion' in e, false);
   assert.equal('platform' in e, false);
-  const e2 = buildFeatureUsageEvent({ snapshot: BASE, schemaVersion: 10, appVersion: 42, platform: null, now: () => 1 });
+  const e2 = buildFeatureUsageEvent({ snapshot: BASE, schemaVersion: 11, appVersion: 42, platform: null, now: () => 1 });
   assert.ok(e2);
   assert.equal('appVersion' in e2, false);
   assert.equal('platform' in e2, false);
@@ -66,7 +66,7 @@ test('optional labels: absent appVersion/platform are omitted, garbage labels ar
 test('hostile snapshots are rejected by the builder AND the validators (carrier hygiene)', () => {
   const hostile = (name, patch = {}) => buildFeatureUsageEvent({
     snapshot: { ...BASE, features: [{ name, count: 1 }], ...patch },
-    schemaVersion: 10,
+    schemaVersion: 11,
     now: () => 1,
   });
   const cases = [
@@ -88,24 +88,24 @@ test('hostile snapshots are rejected by the builder AND the validators (carrier 
   for (const count of [0, -1, 1.5, 'two', NaN, null]) {
     const e = buildFeatureUsageEvent({
       snapshot: { ...BASE, features: [{ name: 'global-search', count }] },
-      schemaVersion: 10, now: () => 1,
+      schemaVersion: 11, now: () => 1,
     });
     assert.equal(e, null, `a count of ${JSON.stringify(count)} is rejected by the builder`);
   }
   // Window shapes.
-  assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, features: [] }, schemaVersion: 10, now: () => 1 }), null, 'an empty window is rejected (an idle window never sends)');
+  assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, features: [] }, schemaVersion: 11, now: () => 1 }), null, 'an empty window is rejected (an idle window never sends)');
   assert.equal(
     buildFeatureUsageEvent({
       snapshot: { ...BASE, features: Array.from({ length: 65 }, (_, i) => ({ name: `feat-${i}`, count: 1 })) },
-      schemaVersion: 10, now: () => 1,
+      schemaVersion: 11, now: () => 1,
     }),
     null,
     'a window over the schema ceiling is rejected, never truncated',
   );
-  assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, startedAt: 'soon' }, schemaVersion: 10, now: () => 1 }), null, 'a non-numeric stamp is rejected');
-  assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, endedAt: NaN }, schemaVersion: 10, now: () => 1 }), null, 'a NaN stamp is rejected');
+  assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, startedAt: 'soon' }, schemaVersion: 11, now: () => 1 }), null, 'a non-numeric stamp is rejected');
+  assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, endedAt: NaN }, schemaVersion: 11, now: () => 1 }), null, 'a NaN stamp is rejected');
   assert.equal(
-    buildFeatureUsageEvent({ snapshot: { ...BASE, features: [{ name: 'a', count: 1 }, { name: 'a', count: 2 }] }, schemaVersion: 10, now: () => 1 }),
+    buildFeatureUsageEvent({ snapshot: { ...BASE, features: [{ name: 'a', count: 1 }, { name: 'a', count: 2 }] }, schemaVersion: 11, now: () => 1 }),
     null,
     'a duplicate name (not a folded map) is rejected',
   );
@@ -116,18 +116,18 @@ test('hostile snapshots are rejected by the builder AND the validators (carrier 
     { host: 'deploy@prod.internal' },
     { sessionName: 'claude-7b3a2f1' },
   ]) {
-    assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, ...extra }, schemaVersion: 10, now: () => 1 }), null, `an injected ${Object.keys(extra)[0]} key is rejected`);
+    assert.equal(buildFeatureUsageEvent({ snapshot: { ...BASE, ...extra }, schemaVersion: 11, now: () => 1 }), null, `an injected ${Object.keys(extra)[0]} key is rejected`);
   }
   // Structural garbage.
   for (const snapshot of [null, undefined, 'window', 42, [], { startedAt: 1 }]) {
-    assert.equal(buildFeatureUsageEvent({ snapshot, schemaVersion: 10, now: () => 1 }), null, 'a non-object / non-window snapshot is rejected');
+    assert.equal(buildFeatureUsageEvent({ snapshot, schemaVersion: 11, now: () => 1 }), null, 'a non-object / non-window snapshot is rejected');
   }
 });
 
 test('a hostile ROW cannot smuggle extra keys into the built event', () => {
   const e = buildFeatureUsageEvent({
     snapshot: { ...BASE, features: [{ name: 'global-search', count: 2, chatName: 'Refactor auth' }] },
-    schemaVersion: 10,
+    schemaVersion: 11,
     now: () => 1,
   });
   // The row-level key check rejects the snapshot outright — the builder never
@@ -140,13 +140,13 @@ test('the builder + validator agree on every rejection (validator cross-check on
   // builder is a strict subset of the validator (same closed keys, same name
   // pattern, same count rule) so nothing the builder admits can the
   // validator refuse.
-  const e = buildFeatureUsageEvent({ snapshot: BASE, schemaVersion: 10, now: () => 1 });
+  const e = buildFeatureUsageEvent({ snapshot: BASE, schemaVersion: 11, now: () => 1 });
   assert.ok(e);
   assert.equal(validateBaseEvent(e), true);
   // And the validator independently rejects the builder's headline hostiles —
   // defense in depth if a future builder edit loosens.
   const validatorRejects = (features) => validateBaseEvent({
-    schemaVersion: 10, type: 'feature-usage', runtime: 'renderer', timestamp: 1,
+    schemaVersion: 11, type: 'feature-usage', runtime: 'renderer', timestamp: 1,
     windowStartedAt: 1, windowEndedAt: 2, features,
   });
   assert.equal(validatorRejects([{ name: 'Global-Search', count: 1 }]), false, 'validator rejects uppercase');
@@ -157,7 +157,7 @@ test('the builder + validator agree on every rejection (validator cross-check on
   assert.equal(validatorRejects([{ name: 'global-search', count: 1 }, { name: 'global-search', count: 1 }]), false, 'validator rejects duplicate names');
   assert.equal(validatorRejects([{ name: 'global-search', count: 1, chatName: 'Refactor auth' }]), false, 'validator rejects a row-borne identifier key (closed row set)');
   const shaped = (patch) => ({
-    schemaVersion: 10, type: 'feature-usage', runtime: 'renderer', timestamp: 1,
+    schemaVersion: 11, type: 'feature-usage', runtime: 'renderer', timestamp: 1,
     windowStartedAt: 1, windowEndedAt: 2,
     features: [{ name: 'global-search', count: 1 }], ...patch,
   });

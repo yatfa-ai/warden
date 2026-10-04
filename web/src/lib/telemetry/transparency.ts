@@ -80,7 +80,7 @@ const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
   // WARDEN-1258 — the aggregate usage event. Every field is a number or a
   // constant kebab-case operation literal; there is no free text and no
   // identifier anywhere in the shape (the validator enforces the name pattern).
-  'operational-metrics': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'boundaries', 'operations', 'rejected'],
+  'operational-metrics': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'windowStartedAt', 'windowEndedAt', 'boundaries', 'operations', 'rejected', 'rejectedStale?', 'rejectedInvalid?'],
   // WARDEN-1278 — the backend child's folded stall window. Every field is a
   // number or a closed-set kebab-case culprit key; there is no free text and no
   // identifier anywhere in the shape (the validator enforces the key pattern).
@@ -157,6 +157,9 @@ function isValidOperationalMetricsShape(e: Record<string, unknown>): boolean {
   const finiteNonNegative = (v: unknown): v is number =>
     typeof v === 'number' && Number.isFinite(v) && v >= 0;
   if (!Number.isInteger(e.rejected) || (e.rejected as number) < 0) return false;
+  for (const k of ['rejectedStale', 'rejectedInvalid']) {
+    if (e[k] !== undefined && (!Number.isInteger(e[k]) || (e[k] as number) < 0)) return false;
+  }
   if (!finiteNonNegative(e.windowStartedAt) || !finiteNonNegative(e.windowEndedAt)) return false;
   if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
   for (let i = 0; i < e.boundaries.length; i += 1) {

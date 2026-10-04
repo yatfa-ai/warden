@@ -291,6 +291,8 @@ function createMetricAggregator(options) {
    *   boundaries: number[],        // buckets.length === boundaries.length + 1
    *   operations: Record[],        // sorted by name; overflow always last
    *   rejected,                    // observations refused by validation
+   *   rejectedStale,               // always 0 here: every main/server reject is validation-class
+   *   rejectedInvalid,             // === rejected (WARDEN-1528 split)
    *   foldedOperations,            // distinct names folded into OVERFLOW_OPERATION
    *   foldedOperationsExact,       // false => foldedOperations is a lower bound
    * }
@@ -306,6 +308,8 @@ function createMetricAggregator(options) {
       boundaries: boundaries.slice(),
       operations: list,
       rejected,
+      rejectedStale: 0,
+      rejectedInvalid: rejected,
       foldedOperations: foldedNames.size,
       foldedOperationsExact: foldedNamesExact,
     };

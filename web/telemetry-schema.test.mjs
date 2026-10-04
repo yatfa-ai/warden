@@ -79,9 +79,9 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 10 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 11 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 10);
+  assert.equal(SCHEMA_VERSION, 11);
 });
 
 test('BASE_EVENT_TYPES is exactly the nine anonymous-or-consented base-tier kinds', () => {
@@ -300,6 +300,20 @@ const metricsFixture = {
 test('validateBaseEvent accepts the operational-metrics fixture', () => {
   assert.equal(validateBaseEvent(metricsFixture), true, 'metrics fixture validates');
   assert.equal(validateEvent(metricsFixture), true, 'validateEvent accepts it too');
+});
+
+test('operational-metrics rejectedStale/rejectedInvalid are OPTIONAL non-negative integers (WARDEN-1528)', () => {
+  // Backward-compat gate: the unsplit (v9/v10-shaped) fixture validates UNMODIFIED.
+  assert.equal('rejectedStale' in metricsFixture, false, 'fixture sanity: no split fields');
+  assert.equal(validateBaseEvent(metricsFixture), true, 'absent split fields stay valid');
+  const split = { ...metricsFixture, rejected: 7, rejectedStale: 5, rejectedInvalid: 2 };
+  assert.equal(validateBaseEvent(split), true, 'present split fields validate');
+  assert.equal(validateBaseEvent({ ...split, rejectedStale: 0, rejectedInvalid: 0 }), true, 'zero is valid');
+  for (const k of ['rejectedStale', 'rejectedInvalid']) {
+    for (const bad of [-1, 1.5, '3', null, NaN]) {
+      assert.equal(validateBaseEvent({ ...split, [k]: bad }), false, `${k}=${String(bad)} must be rejected`);
+    }
+  }
 });
 
 test('operational-metrics rejects a non-kebab operation name (hard exclusion is structural)', () => {

@@ -52,6 +52,17 @@
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
+// v11 (WARDEN-1528): `operational-metrics` gains OPTIONAL `rejectedStale` and
+// `rejectedInvalid` — the split of the single `rejected` counter. `rejected`
+// conflated right-censoring (an echo older than the 10 s correlation window —
+// the unusable-tail measurement, "typed and saw nothing for over ten seconds")
+// with malformed input (a caller-contract violation, expected ~zero), so a
+// reader saw a data-quality alarm where the dominant cause was a latency tail.
+// `rejected` stays and equals the sum. The fields are OPTIONAL (non-negative
+// integer WHEN PRESENT) on purpose: the receiver validates prior-version
+// events with this same validator, so a REQUIRED field would 422-strand every
+// v9/v10 client. Client + receiver bump together so the x-telemetry-schema
+// handshake (the receiver's ingest.mjs) does not 415.
 // v10 (WARDEN-1508): added the `process-memory` event type — the consented
 // stream's process-MEMORY vantage, so memory growth vs session age is
 // measurable in production (WARDEN-1491's "a long session without restart
@@ -162,7 +173,7 @@
 // synthetic non-identifying string, so this is a shape relaxation, not new data
 // collection. Client + receiver bump together so the x-telemetry-schema
 // handshake (the receiver's ingest.mjs) does not 415.
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
 export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory'] as const);
@@ -306,6 +317,13 @@ export interface OperationalMetricsEvent {
   operations: OperationalMetricOperation[];
   /** Observations the aggregator REFUSED (invalid input) — a health signal. */
   rejected: number;
+  /** WARDEN-1528 (v11, OPTIONAL) — the refused observations that were STALE
+   *  (echo older than the 10 s correlation window): the right-censored
+   *  unusable-tail count, not a data-quality failure. */
+  rejectedStale?: number;
+  /** WARDEN-1528 (v11, OPTIONAL) — the refused observations that were
+   *  MALFORMED input (caller-contract violation; expected ~zero). */
+  rejectedInvalid?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +684,13 @@ function isOperationalMetricsShape(e: Record<string, unknown>): boolean {
   if (typeof e.windowStartedAt !== 'number' || !Number.isFinite(e.windowStartedAt)) return false;
   if (typeof e.windowEndedAt !== 'number' || !Number.isFinite(e.windowEndedAt)) return false;
   if (typeof e.rejected !== 'number' || !Number.isInteger(e.rejected) || e.rejected < 0) return false;
+  // WARDEN-1528 — OPTIONAL split of `rejected`: non-negative integer WHEN PRESENT.
+  // Optional is load-bearing: the receiver validates v9/v10 events with this
+  // same validator (version stamp normalized), so a required field would 422
+  // every prior-version client.
+  for (const k of ['rejectedStale', 'rejectedInvalid'] as const) {
+    if (e[k] !== undefined && (typeof e[k] !== 'number' || !Number.isInteger(e[k]) || (e[k] as number) < 0)) return false;
+  }
   if (!isAscendingBoundaries(e.boundaries)) return false;
   if (!Array.isArray(e.operations) || e.operations.length > MAX_OPERATIONS_PER_EVENT) return false;
   for (const op of e.operations) {

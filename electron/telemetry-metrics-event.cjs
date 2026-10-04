@@ -33,7 +33,7 @@
 function buildOperationalMetricsEvent({ snapshot, schemaVersion, appVersion, platform, now, runtime }) {
   if (!snapshot || typeof snapshot !== 'object') return null;
   const {
-    startedAt, endedAt, boundaries, operations, rejected,
+    startedAt, endedAt, boundaries, operations, rejected, rejectedStale, rejectedInvalid,
   } = snapshot;
   if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) return null;
   if (typeof endedAt !== 'number' || !Number.isFinite(endedAt)) return null;
@@ -57,6 +57,11 @@ function buildOperationalMetricsEvent({ snapshot, schemaVersion, appVersion, pla
     operations,
     rejected,
   };
+  // WARDEN-1528 — the stale/invalid split of `rejected`. OPTIONAL on the wire:
+  // emitted only when the producer supplied a non-negative integer (an older
+  // aggregator snapshot without the split stays valid and byte-identical).
+  if (Number.isInteger(rejectedStale) && rejectedStale >= 0) event.rejectedStale = rejectedStale;
+  if (Number.isInteger(rejectedInvalid) && rejectedInvalid >= 0) event.rejectedInvalid = rejectedInvalid;
   // The non-identifying volume-attribution labels, attached exactly as the
   // incident builders attach them (optional per the schema; omitted when the
   // caller cannot supply one).
