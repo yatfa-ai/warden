@@ -13,10 +13,9 @@ import { cn } from '@/lib/utils';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import type { WorkspacePaneSet } from '@/lib/storage';
+import { useWorkspaces, useActiveWorkspaceId } from '@/lib/uiStore';
 
 interface Props {
-  workspaces: WorkspacePaneSet[];
-  activeWorkspaceId: string | null;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onRename: (id: string, name: string) => void;
@@ -31,7 +30,11 @@ interface Props {
   className?: string;
 }
 
-export function WorkspaceTabs({ workspaces, activeWorkspaceId, onSelect, onCreate, onRename, onClose, onDropPane, onDropPaneNew, className }: Props) {
+export function WorkspaceTabs({ onSelect, onCreate, onRename, onClose, onDropPane, onDropPaneNew, className }: Props) {
+  // WARDEN-1526 (slice 23): the workspace set lives on the shared store — this
+  // strip subscribes directly instead of receiving it as two props from App.
+  const workspaces = useWorkspaces();
+  const activeWorkspaceId = useActiveWorkspaceId();
   // Inline rename state. `editingId` is the workspace being renamed; `draft` is
   // the in-flight name (committed on Enter/blur, reverted on Escape).
   const [editingId, setEditingId] = useState<string | null>(null);

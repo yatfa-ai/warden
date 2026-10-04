@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 39 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 41 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -80,6 +80,7 @@ import {
   type CustomPreset,
   type ObsResetKey,
   type ObsUiPrefs,
+  type WorkspacePaneSet,
 } from '@/lib/storage';
 import { clampLayoutWidths } from '@/lib/layout';
 import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
@@ -550,6 +551,64 @@ export interface UiStoreState {
    */
   primePaneHost: (paneId: string, host: string) => void;
   /**
+   * The workspace set (WARDEN-1526, roadmap WARDEN-1204 slice 23 — the LAST
+   * App-owned persisted fact): every workspace's pane-set (openPanes / focused /
+   * recentlyClosed) plus which one is active. `openPanes` / `focused` are NOT
+   * stored facts of their own — they are DERIVED from the active workspace
+   * (`selectActiveWorkspace`). Both keys sit in RESET_PRESERVED_KEYS (storage.ts,
+   * untouched — Settings → Reset still preserves them), so there is no
+   * resetUiPrefDefaults entry. Seeded together, from the ONE initialWorkspace()
+   * call the store makes (a "Start empty" launch mints a FRESH workspace id per
+   * call, so a second call would desync activeWorkspaceId from the list);
+   * storage.ts keeps ownership of the shape, the sanitizers and persistUiState's
+   * carry-forward (the 'empty'-mode freeze).
+   */
+  workspaces: WorkspacePaneSet[];
+  activeWorkspaceId: string;
+  /** Switch the active workspace (no validation — callers pass an id from `workspaces`). */
+  selectWorkspace: (id: string) => void;
+  /**
+   * Append a new workspace (name `Workspace ${n}`, n = the new count), optionally
+   * seeded with one pane, and make it active — ONE set. Returns the new id.
+   */
+  createWorkspace: (seedPaneId?: string) => string;
+  /** Trim the name; a blank result keeps the old one. */
+  renameWorkspace: (id: string, name: string) => void;
+  /**
+   * Remove a workspace (its panes leave the grid; chats are untouched). NEVER
+   * drops below one workspace — closing the last one is a no-op. When the active
+   * workspace is the one closed, the active id falls back to the first remaining.
+   */
+  closeWorkspace: (id: string) => void;
+  /**
+   * Move a pane into an existing workspace and switch to it — ONE set. The pane
+   * is removed from every OTHER workspace holding it (dedup); a source workspace
+   * whose focused pane moved falls back to its first remaining pane (or null).
+   * An unknown target leaves the workspace list alone but still switches the
+   * active id (App's retired closure did exactly that).
+   */
+  movePaneToWorkspace: (paneId: string, targetWorkspaceId: string) => void;
+  /** Move a pane into a NEW workspace and switch to it — ONE set, same source-focus fallback. Returns the new id. */
+  movePaneToNewWorkspace: (paneId: string) => string;
+  /**
+   * Apply `fn` to the active workspace's pane-set (the dangling-active →
+   * first-workspace fallback applies). Returning the SAME object is a no-op:
+   * the state — and `workspaces` — stay referentially identical.
+   */
+  updateActiveWorkspace: (fn: (w: WorkspacePaneSet) => WorkspacePaneSet) => void;
+  /** Functional-or-value write of the active workspace's openPanes (identity-preserving). */
+  setOpenPanes: (updater: string[] | ((p: string[]) => string[])) => void;
+  /** Functional-or-value write of the active workspace's focused pane (identity-preserving). */
+  setFocused: (value: string | null | ((f: string | null) => string | null)) => void;
+  /**
+   * Make `workspaceId` active and, when `focus`, focus `paneId` in it (a no-op
+   * for the focus half when it already is) — ONE set. The "this pane is already
+   * open in another workspace" path of openChat.
+   */
+  revealPane: (workspaceId: string, paneId: string, focus: boolean) => void;
+  /** Drop one id from EVERY workspace's recently-closed list (identity-preserving when nothing matched). */
+  dropRecentlyClosed: (id: string) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -600,12 +659,12 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 39 persisted facts migrated onto the store by slices 1–15 and 18–22.
+ * owns — exactly the 41 persisted facts migrated onto the store by slices 1–15 and 18–23 — slice 23 (WARDEN-1526) moved the LAST App-owned one, the workspace set, so the App half is now empty.
  *
  * WHAT IT IS FOR
  * ──────────────
  * Until slice 16, App re-declared this list by hand: it subscribed to every
- * store fact (`const x = useX()`) and listed it in `persistedSnapshot` ONLY so
+ * store fact (`const x = useX()`) and listed it in a hand-assembled snapshot ONLY so
  * useConfigPersistence's single saveUi effect would keep writing it — "the
  * subscription is what re-renders App so the saveUi effect fires". With the
  * pattern proven across 31 facts (the revisit this header's slice-1 note asked
@@ -617,8 +676,8 @@ export interface UiStoreState {
  *
  * The compile gate: each element must be BOTH a UiStoreState key AND a
  * PERSISTED_PREF_KEYS member, so
- *   - a key that is not on the store (a typo, or an App-owned useState fact
- *     like workspaces) is a compile error, and
+ *   - a key that is not on the store (a typo, or a fact that is still an
+ *     App-owned useState) is a compile error, and
  *   - the four ObsUi observer facts (observerViewMode + the three filter
  *     shapes) and restoreOnStartup are excluded AUTOMATICALLY — they are on
  *     UiStoreState but not in PERSISTED_PREF_KEYS (they persist through
@@ -627,8 +686,10 @@ export interface UiStoreState {
  *
  * COMPLETENESS is deliberately NOT what `satisfies` gives (it only rejects
  * invalid elements) — it is enforced from BOTH sides:
- *   - removing a key here moves it into AppPersistedSnapshot's Exclude
- *     complement, so App's literal misses a REQUIRED property → tsc;
+ *   - removing a key here leaves useConfigPersistence's merged snapshot (typed
+ *     PersistedPrefSnapshot — Required<Pick<…PERSISTED_PREF_KEYS>>) missing a
+ *     REQUIRED property → tsc (since slice 23 the store owns EVERY persisted
+ *     fact, so there is no App half left to catch it);
  *   - uiStore.test.mjs's partition test rejects duplicates and non-store keys
  *     at runtime.
  * storage.ts stays the owner of shape and defaults; this list only names which
@@ -674,10 +735,12 @@ export const STORE_PERSISTED_KEYS = [
   'healthCollapsed',
   'sidebarWidth',
   'observerWidth',
+  'workspaces',
+  'activeWorkspaceId',
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 39
+ * The store half of the persisted snapshot: a pure projection of those 41
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -732,6 +795,8 @@ export function selectPersistedStorePrefs(
     healthCollapsed: state.healthCollapsed,
     sidebarWidth: state.sidebarWidth,
     observerWidth: state.observerWidth,
+    workspaces: state.workspaces,
+    activeWorkspaceId: state.activeWorkspaceId,
   };
 }
 
@@ -753,7 +818,7 @@ export function selectPersistedStorePrefs(
  * READ side by selectPersistedObsPrefs' `ObsUiPrefs` return annotation below
  * and re-stated at runtime by uiStore.test.mjs's ObsUi partition test — the
  * same both-sides shape the slice-16 tuple uses (its completeness half lives in
- * AppPersistedSnapshot's Exclude complement).
+ * PersistedPrefSnapshot's Required<Pick<…>> lock on the merged saveUi snapshot).
  */
 export const OBS_STORE_KEYS = [
   'observerViewMode',
@@ -840,12 +905,40 @@ export type UiStoreSeed = Partial<
     | 'healthCollapsed'
     | 'sidebarWidth'
     | 'observerWidth'
+    | 'workspaces'
+    | 'activeWorkspaceId'
     | 'observerViewMode'
     | 'observerActivityFilters'
     | 'observerDirectiveFilters'
     | 'observerAttentionFilters'
   >
 >;
+
+/** A fresh workspace id (same expression storage.ts's genWorkspaceId and App's retired createWorkspace used). */
+function newWorkspaceId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}`;
+}
+
+/** A new pane-set named `Workspace ${n}`, optionally seeded (and focused) with one pane. */
+function newPaneSet(id: string, n: number, seedPaneId?: string): WorkspacePaneSet {
+  return { id, name: `Workspace ${n}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null, recentlyClosed: [] };
+}
+
+/**
+ * `w` without `paneId`: a source workspace whose focused pane moved falls back
+ * to its first remaining pane (not null), so it never shows a visible-but-
+ * unfocused pane. Returns the SAME object when the pane is not in it.
+ */
+function withoutPane(w: WorkspacePaneSet, paneId: string): WorkspacePaneSet {
+  if (!w.openPanes.includes(paneId)) return w;
+  const remaining = w.openPanes.filter((x) => x !== paneId);
+  return { ...w, openPanes: remaining, focused: w.focused === paneId ? (remaining[0] ?? null) : w.focused };
+}
+
+/** The active workspace's pane-set: falls back to the first workspace if activeWorkspaceId ever dangles. */
+export function selectActiveWorkspace(state: Pick<UiStoreState, 'workspaces' | 'activeWorkspaceId'>): WorkspacePaneSet | null {
+  return state.workspaces.find((w) => w.id === state.activeWorkspaceId) ?? state.workspaces[0] ?? null;
+}
 
 /**
  * Build an INDEPENDENT store instance.
@@ -867,6 +960,12 @@ export function createUiStore(seed: UiStoreSeed = {}) {
   // nothing, and a store-level `set` replaces objects whole anyway.
   const persistedObs = loadObs();
   const obsDefaults = resetObsPrefDefaults();
+  // ONE initialWorkspace call per store instance (WARDEN-1526): its 'empty'
+  // branch MINTS A FRESH workspace id per invocation, so workspaces,
+  // activeWorkspaceId and paneHost must all come from this single result — a
+  // second call would desync the active id from the list. The restoreOnStartup
+  // fed in is the one THIS store seeds for itself.
+  const initWs = initialWorkspace(persisted, seed.restoreOnStartup ?? persisted.restoreOnStartup ?? 'previous');
   return createStore<UiStoreState>()((set, get) => ({
     snippets: seed.snippets ?? persisted.snippets ?? [],
     setSnippets: (snippets) => set({ snippets }),
@@ -1049,11 +1148,107 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // `initialWorkspace(uiState, restoreOnStartup).paneHost`, which is `{}` on a
     // "Start empty" launch (the disk map must not be resurrected) and
     // `disk.paneHost ?? {}` otherwise. The restoreOnStartup fed in is the one
-    // THIS store seeds for itself (same ??-chain as its own fact above).
-    paneHost: seed.paneHost
-      ?? initialWorkspace(persisted, seed.restoreOnStartup ?? persisted.restoreOnStartup ?? 'previous').paneHost,
+    // THIS store seeds for itself (same ??-chain as its own fact above). Since
+    // WARDEN-1526 (slice 23) `initWs` is the ONE initialWorkspace call per store
+    // instance, shared with the workspace set below.
+    paneHost: seed.paneHost ?? initWs.paneHost,
     primePaneHost: (paneId, host) =>
       set((s) => (s.paneHost[paneId] === host ? s : { paneHost: { ...s.paneHost, [paneId]: host } })),
+    // WARDEN-1526 (roadmap WARDEN-1204 slice 23): the workspace set — seeded
+    // from the single initWs above (a seeded `workspaces` without an explicit
+    // active id falls back to ITS first workspace, never initWs's).
+    workspaces: seed.workspaces ?? initWs.workspaces,
+    activeWorkspaceId:
+      seed.activeWorkspaceId ??
+      (seed.workspaces ? (seed.workspaces[0]?.id ?? '') : initWs.activeWorkspaceId),
+    selectWorkspace: (activeWorkspaceId) => set({ activeWorkspaceId }),
+    createWorkspace: (seedPaneId) => {
+      const id = newWorkspaceId();
+      set((s) => ({
+        workspaces: [...s.workspaces, newPaneSet(id, s.workspaces.length + 1, seedPaneId)],
+        activeWorkspaceId: id,
+      }));
+      return id;
+    },
+    renameWorkspace: (id, name) => {
+      const trimmed = name.trim();
+      set((s) => ({ workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, name: trimmed || w.name } : w)) }));
+    },
+    closeWorkspace: (id) =>
+      set((s) => {
+        const remaining = s.workspaces.filter((w) => w.id !== id);
+        if (!remaining.length) return s; // never drop below one workspace
+        if (remaining.length === s.workspaces.length) return s; // unknown id
+        return {
+          workspaces: remaining,
+          activeWorkspaceId: s.activeWorkspaceId === id ? remaining[0].id : s.activeWorkspaceId,
+        };
+      }),
+    movePaneToWorkspace: (paneId, targetWorkspaceId) =>
+      set((s) => {
+        // Unknown target: the workspace list is left alone but the active id
+        // still switches — transcribed from App's retired closure (the target
+        // is always a real tab id in practice).
+        if (!s.workspaces.some((w) => w.id === targetWorkspaceId)) return { activeWorkspaceId: targetWorkspaceId };
+        return {
+          workspaces: s.workspaces.map((w) => {
+            if (w.id === targetWorkspaceId) {
+              if (w.openPanes.includes(paneId)) return w; // already there
+              return { ...w, openPanes: [...w.openPanes, paneId], focused: paneId };
+            }
+            return withoutPane(w, paneId);
+          }),
+          activeWorkspaceId: targetWorkspaceId,
+        };
+      }),
+    movePaneToNewWorkspace: (paneId) => {
+      const id = newWorkspaceId();
+      set((s) => ({
+        workspaces: [...s.workspaces.map((w) => withoutPane(w, paneId)), newPaneSet(id, s.workspaces.length + 1, paneId)],
+        activeWorkspaceId: id,
+      }));
+      return id;
+    },
+    updateActiveWorkspace: (fn) =>
+      set((s) => {
+        if (s.workspaces.length === 0) return s;
+        const idx = s.workspaces.findIndex((w) => w.id === s.activeWorkspaceId);
+        const target = idx >= 0 ? idx : 0;
+        const updated = fn(s.workspaces[target]);
+        if (updated === s.workspaces[target]) return s;
+        const copy = [...s.workspaces];
+        copy[target] = updated;
+        return { workspaces: copy };
+      }),
+    setOpenPanes: (updater) =>
+      get().updateActiveWorkspace((w) => {
+        const next = typeof updater === 'function' ? updater(w.openPanes) : updater;
+        return next === w.openPanes ? w : { ...w, openPanes: next };
+      }),
+    setFocused: (value) =>
+      get().updateActiveWorkspace((w) => {
+        const next = typeof value === 'function' ? value(w.focused) : value;
+        return next === w.focused ? w : { ...w, focused: next };
+      }),
+    revealPane: (workspaceId, paneId, focus) =>
+      set((s) => {
+        const needsFocus = focus && s.workspaces.some((w) => w.id === workspaceId && w.focused !== paneId);
+        const sameActive = s.activeWorkspaceId === workspaceId;
+        if (!needsFocus && sameActive) return s;
+        return {
+          activeWorkspaceId: workspaceId,
+          ...(needsFocus
+            ? { workspaces: s.workspaces.map((w) => (w.id === workspaceId && w.focused !== paneId ? { ...w, focused: paneId } : w)) }
+            : {}),
+        };
+      }),
+    dropRecentlyClosed: (id) =>
+      set((s) => {
+        if (!s.workspaces.some((w) => (w.recentlyClosed ?? []).some((e) => e.id === id))) return s;
+        return {
+          workspaces: s.workspaces.map((w) => ({ ...w, recentlyClosed: (w.recentlyClosed ?? []).filter((e) => e.id !== id) })),
+        };
+      }),
     // WARDEN-1441 (roadmap WARDEN-1204 slice 15): the Observer panel's four
     // view prefs — the first facts seeded from the SECOND storage namespace
     // (ObsUi / warden:observer:v1, `persistedObs` above), ??-only like every
@@ -1768,4 +1963,62 @@ export function useToggleSidebarCollapsed(): () => void {
 
 export function useToggleObserverCollapsed(): () => void {
   return useUiStore((s) => s.toggleObserverCollapsed);
+}
+
+/**
+ * The workspace set (WARDEN-1526, slice 23). `useWorkspaces` / `useActiveWorkspaceId`
+ * are the two subscribable facts; openPanes/focused stay derived from them
+ * (selectActiveWorkspace). The actions are stable across renders — safe in
+ * dependency arrays.
+ */
+export function useWorkspaces(): WorkspacePaneSet[] {
+  return useUiStore((s) => s.workspaces);
+}
+
+export function useActiveWorkspaceId(): string {
+  return useUiStore((s) => s.activeWorkspaceId);
+}
+
+export function useSelectWorkspace(): (id: string) => void {
+  return useUiStore((s) => s.selectWorkspace);
+}
+
+export function useRenameWorkspace(): (id: string, name: string) => void {
+  return useUiStore((s) => s.renameWorkspace);
+}
+
+export function useCloseWorkspace(): (id: string) => void {
+  return useUiStore((s) => s.closeWorkspace);
+}
+
+export function useCreateWorkspace(): (seedPaneId?: string) => string {
+  return useUiStore((s) => s.createWorkspace);
+}
+
+export function useMovePaneToWorkspace(): (paneId: string, targetWorkspaceId: string) => void {
+  return useUiStore((s) => s.movePaneToWorkspace);
+}
+
+export function useMovePaneToNewWorkspace(): (paneId: string) => string {
+  return useUiStore((s) => s.movePaneToNewWorkspace);
+}
+
+export function useUpdateActiveWorkspace(): (fn: (w: WorkspacePaneSet) => WorkspacePaneSet) => void {
+  return useUiStore((s) => s.updateActiveWorkspace);
+}
+
+export function useSetOpenPanes(): (updater: string[] | ((p: string[]) => string[])) => void {
+  return useUiStore((s) => s.setOpenPanes);
+}
+
+export function useSetFocused(): (value: string | null | ((f: string | null) => string | null)) => void {
+  return useUiStore((s) => s.setFocused);
+}
+
+export function useRevealPane(): (workspaceId: string, paneId: string, focus: boolean) => void {
+  return useUiStore((s) => s.revealPane);
+}
+
+export function useDropRecentlyClosed(): (id: string) => void {
+  return useUiStore((s) => s.dropRecentlyClosed);
 }

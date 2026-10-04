@@ -69,7 +69,7 @@ await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectActiveWorkspace, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
@@ -94,11 +94,10 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 39 STORE_PERSISTED_KEYS
-  // facts); the `{...loadUi(), …}` open stands in for App's half — App-owned
-  // keys (workspaces / activeWorkspaceId)
-  // plus every DEFAULT_UI field the merged
-  // snapshot always carried — exactly as App passes its AppPersistedSnapshot.
+  // The store-owned half rides the PRODUCTION selector (the 41 STORE_PERSISTED_KEYS
+  // facts, workspaces / activeWorkspaceId included since WARDEN-1526); the
+  // `{...loadUi(), …}` open stands in for every DEFAULT_UI field the snapshot
+  // always carried.
   const snapshot = {
     ...loadUi(),
     ...selectPersistedStorePrefs(s),
@@ -2470,8 +2469,10 @@ test('STORE_PERSISTED_KEYS partitions PERSISTED_PREF_KEYS: no duplicates, every 
   //      select a key the store does not carry.
   //
   // A key REMOVED from STORE_PERSISTED_KEYS is caught on the other side, by
-  // tsc: it then falls into AppPersistedSnapshot's Exclude complement, and
-  // App's 10-key literal misses a REQUIRED property (verified this slice).
+  // tsc: useConfigPersistence's snapshot (typed PersistedPrefSnapshot =
+  // Required<Pick<…PERSISTED_PREF_KEYS>>) then misses a REQUIRED property —
+  // since slice 23 (WARDEN-1526) the store owns EVERY persisted fact, so there
+  // is no App-owned half left.
   // What this test adds is the runtime half of the same fence — the harness
   // here has no typechecker to lean on.
   const persistedKeys = new Set(PERSISTED_PREF_KEYS);
@@ -2545,13 +2546,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (39 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (41 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 41);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2649,14 +2650,14 @@ test('a clean install seeds paneHost as {}', () => {
   assert.deepEqual(createUiStore().getState().paneHost, {});
 });
 
-console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (39) and rides the selector');
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (41) and rides the selector');
 test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
   const store = createUiStore({ paneHost: { a: 'h' } });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 41);
   assert.deepEqual(picked.paneHost, { a: 'h' });
 });
 
@@ -2709,10 +2710,10 @@ test('setWatchedChats replaces the set and keeps a stable identity', () => {
 test('watchedChats is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('watchedChats'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
   const store = createUiStore({ watchedChats: ['w'] });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 41);
   assert.deepEqual(picked.watchedChats, ['w']);
 });
 test('a watched set survives a restart through the production hop; [] persists as []', () => {
@@ -2781,12 +2782,12 @@ test('toggleSidebarCollapsed / toggleObserverCollapsed flip atomically; twice ->
   assert.equal(store.getState().observerCollapsed, false);
   assert.equal(store.getState().toggleSidebarCollapsed, toggleSidebarCollapsed, 'stable identity');
 });
-test('the three flags join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
+test('the three flags join STORE_PERSISTED_KEYS (41) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of COLLAPSE_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
   const picked = selectPersistedStorePrefs(createUiStore().getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 41);
 });
 test('each flag round-trips store -> snapshot -> saveUi -> loadUi -> a fresh store', () => {
   reset();
@@ -2868,12 +2869,12 @@ test('setters write one width each, with stable identity', () => {
   assert.equal(store.getState().setSidebarWidth, setSidebarWidth);
   assert.equal(store.getState().setObserverWidth, setObserverWidth);
 });
-test('both widths join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
+test('both widths join STORE_PERSISTED_KEYS (41) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of WIDTH_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
   const picked = selectPersistedStorePrefs(createUiStore({ sidebarWidth: 233, observerWidth: 411 }).getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 41);
   assert.equal(picked.sidebarWidth, 233);
   assert.equal(picked.observerWidth, 411);
 });
@@ -3014,6 +3015,210 @@ test('reclampPanelWidths has a stable identity across calls', () => {
   const before = store.getState().reclampPanelWidths;
   before(900);
   assert.equal(store.getState().reclampPanelWidths, before);
+});
+
+// ─── WARDEN-1526 (slice 23): the workspace set + its actions ─────────────────
+console.log('\ncreateUiStore — workspaces + activeWorkspaceId (slice 23)');
+const ws = (id, openPanes = [], focused = null, name = id) => ({ id, name, openPanes, focused, recentlyClosed: [] });
+const seeded = (workspaces, activeWorkspaceId = workspaces[0].id) => createUiStore({ workspaces, activeWorkspaceId });
+test('workspaces + activeWorkspaceId join STORE_PERSISTED_KEYS (41) and ride selectPersistedStorePrefs', () => {
+  reset();
+  assert.ok(STORE_PERSISTED_KEYS.includes('workspaces'));
+  assert.ok(STORE_PERSISTED_KEYS.includes('activeWorkspaceId'));
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  const s = seeded([ws('a'), ws('b')], 'b');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(picked.workspaces, s.getState().workspaces);
+  assert.equal(picked.activeWorkspaceId, 'b');
+});
+test("a fresh store seeds the workspace set from the PERSISTED payload ('previous')", () => {
+  reset();
+  saveUi({ ...loadUi(), workspaces: [ws('a', ['p1'], 'p1'), ws('b')], activeWorkspaceId: 'b' });
+  const s = createUiStore().getState();
+  assert.deepEqual(s.workspaces.map((w) => w.id), ['a', 'b']);
+  assert.equal(s.activeWorkspaceId, 'b');
+});
+test("'empty' seed boots ONE workspace whose id MATCHES activeWorkspaceId (one initialWorkspace call) and paneHost is {}", () => {
+  reset();
+  saveUi({ ...loadUi(), workspaces: [ws('a', ['p1'])], activeWorkspaceId: 'a', paneHost: { p1: 'h' } });
+  for (let i = 0; i < 5; i++) {
+    const s = createUiStore({ restoreOnStartup: 'empty' }).getState();
+    assert.equal(s.workspaces.length, 1);
+    assert.equal(s.workspaces[0].id, s.activeWorkspaceId, 'a second initialWorkspace call would mint a fresh id and desync these');
+    assert.notEqual(s.activeWorkspaceId, 'a', 'the disk workspace is not resurrected');
+    assert.deepEqual(s.workspaces[0].openPanes, []);
+    assert.deepEqual(s.paneHost, {});
+  }
+  assert.deepEqual(loadUi().workspaces.map((w) => w.id), ['a'], 'seeding never touches the disk');
+});
+test('the workspace set round-trips store -> production selector -> saveUi -> loadUi -> a fresh store', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().createWorkspace('p9');
+  flushSnapshotToDisk(s);
+  const next = createUiStore().getState();
+  assert.deepEqual(next.workspaces, s.getState().workspaces);
+  assert.equal(next.activeWorkspaceId, s.getState().activeWorkspaceId);
+});
+test('"Start empty" does NOT overwrite the disk workspace (persistUiState carry-forward) and Settings→Reset preserves the set', () => {
+  reset();
+  saveUi({ ...loadUi(), workspaces: [ws('a', ['p1'], 'p1')], activeWorkspaceId: 'a' });
+  const s = createUiStore({ restoreOnStartup: 'empty' });
+  flushSnapshotToDisk(s, { startedEmpty: true });
+  assert.deepEqual(loadUi().workspaces.map((w) => w.id), ['a']);
+  assert.equal(loadUi().activeWorkspaceId, 'a');
+  assert.ok(!('workspaces' in resetUiPrefDefaults()) && !('activeWorkspaceId' in resetUiPrefDefaults()));
+});
+test('selectWorkspace switches the active id', () => {
+  reset();
+  const s = seeded([ws('a'), ws('b')]);
+  s.getState().selectWorkspace('b');
+  assert.equal(s.getState().activeWorkspaceId, 'b');
+});
+test('createWorkspace appends "Workspace N" (count-based), activates it in ONE set, and returns the id', () => {
+  reset();
+  const s = seeded([ws('a'), ws('b')]);
+  let notes = 0;
+  s.subscribe(() => { notes += 1; });
+  const id = s.getState().createWorkspace('p1');
+  assert.equal(notes, 1);
+  const st = s.getState();
+  assert.equal(st.workspaces.length, 3);
+  assert.equal(st.activeWorkspaceId, id);
+  assert.deepEqual(st.workspaces[2], { id, name: 'Workspace 3', openPanes: ['p1'], focused: 'p1', recentlyClosed: [] });
+  const blank = st.createWorkspace();
+  assert.deepEqual(s.getState().workspaces[3], { id: blank, name: 'Workspace 4', openPanes: [], focused: null, recentlyClosed: [] });
+});
+test('renameWorkspace trims; a blank name keeps the old one', () => {
+  reset();
+  const s = seeded([ws('a', [], null, 'Old'), ws('b')]);
+  s.getState().renameWorkspace('a', '  New  ');
+  assert.equal(s.getState().workspaces[0].name, 'New');
+  s.getState().renameWorkspace('a', '   ');
+  assert.equal(s.getState().workspaces[0].name, 'New', 'blank keeps the old name');
+  assert.equal(s.getState().workspaces[1].name, 'b', 'other workspaces untouched');
+});
+test('closeWorkspace at ONE workspace is a no-op (never below one)', () => {
+  reset();
+  const s = seeded([ws('a', ['p1'])]);
+  const before = s.getState();
+  s.getState().closeWorkspace('a');
+  assert.equal(s.getState(), before, 'same state object');
+  assert.equal(s.getState().workspaces.length, 1);
+});
+test('closeWorkspace: closing the ACTIVE one falls back to remaining[0]; closing another keeps the active id', () => {
+  reset();
+  const s = seeded([ws('a'), ws('b'), ws('c')], 'b');
+  s.getState().closeWorkspace('b');
+  assert.deepEqual(s.getState().workspaces.map((w) => w.id), ['a', 'c']);
+  assert.equal(s.getState().activeWorkspaceId, 'a');
+  s.getState().selectWorkspace('c');
+  s.getState().closeWorkspace('a');
+  assert.deepEqual(s.getState().workspaces.map((w) => w.id), ['c']);
+  assert.equal(s.getState().activeWorkspaceId, 'c');
+});
+test('movePaneToWorkspace: dedups, source-focus falls back to remaining[0] ?? null, switches to the target', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1'), ws('b', ['p3'], 'p3'), ws('c', ['p4'], 'p4')], 'a');
+  const cBefore = s.getState().workspaces[2];
+  s.getState().movePaneToWorkspace('p1', 'b');
+  let st = s.getState();
+  assert.deepEqual(st.workspaces[0].openPanes, ['p2']);
+  assert.equal(st.workspaces[0].focused, 'p2', 'source focus falls back to the first remaining pane');
+  assert.deepEqual(st.workspaces[1].openPanes, ['p3', 'p1']);
+  assert.equal(st.workspaces[1].focused, 'p1');
+  assert.equal(st.activeWorkspaceId, 'b');
+  assert.equal(st.workspaces[2], cBefore, 'untouched workspace keeps identity');
+  // moving the only pane leaves the source focused:null
+  s.getState().movePaneToWorkspace('p4', 'a');
+  st = s.getState();
+  assert.deepEqual(st.workspaces[2].openPanes, []);
+  assert.equal(st.workspaces[2].focused, null);
+  // a non-focused source pane keeps the source focus
+  s.getState().movePaneToWorkspace('p2', 'c');
+  assert.equal(s.getState().workspaces[0].focused, 'p4');
+});
+test('movePaneToWorkspace into the workspace that already holds the pane is a list no-op; an unknown target leaves the list alone', () => {
+  reset();
+  const s = seeded([ws('a', ['p1'], 'p1'), ws('b')], 'b');
+  const list = s.getState().workspaces;
+  s.getState().movePaneToWorkspace('p1', 'a');
+  assert.equal(s.getState().workspaces[0].openPanes.length, 1);
+  assert.equal(s.getState().activeWorkspaceId, 'a');
+  s.getState().movePaneToWorkspace('p1', 'nope');
+  assert.deepEqual(s.getState().workspaces.map((w) => w.openPanes), list.map((w) => w.openPanes));
+});
+test('movePaneToNewWorkspace: new workspace holds the pane, source-focus fallback, ONE set', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1')]);
+  let notes = 0;
+  s.subscribe(() => { notes += 1; });
+  const id = s.getState().movePaneToNewWorkspace('p1');
+  assert.equal(notes, 1);
+  const st = s.getState();
+  assert.deepEqual(st.workspaces[0].openPanes, ['p2']);
+  assert.equal(st.workspaces[0].focused, 'p2');
+  assert.deepEqual(st.workspaces[1], { id, name: 'Workspace 2', openPanes: ['p1'], focused: 'p1', recentlyClosed: [] });
+  assert.equal(st.activeWorkspaceId, id);
+});
+test('updateActiveWorkspace: applies to the active workspace; the SAME object returned is an identity no-op', () => {
+  reset();
+  const s = seeded([ws('a'), ws('b', ['p1'])], 'b');
+  const before = s.getState();
+  s.getState().updateActiveWorkspace((w) => w);
+  assert.equal(s.getState(), before, 'same state object');
+  assert.equal(s.getState().workspaces, before.workspaces, 'same array reference');
+  s.getState().updateActiveWorkspace((w) => ({ ...w, name: 'X' }));
+  assert.equal(s.getState().workspaces[1].name, 'X');
+  assert.equal(s.getState().workspaces[0], before.workspaces[0]);
+});
+test('updateActiveWorkspace: a dangling activeWorkspaceId falls back to the FIRST workspace', () => {
+  reset();
+  const s = createUiStore({ workspaces: [ws('a'), ws('b')], activeWorkspaceId: 'gone' });
+  s.getState().updateActiveWorkspace((w) => ({ ...w, name: 'first' }));
+  assert.equal(s.getState().workspaces[0].name, 'first');
+  assert.equal(s.getState().workspaces[1].name, 'b');
+  assert.equal(selectActiveWorkspace(s.getState()).id, 'a');
+});
+test('setOpenPanes / setFocused: value or functional form, identity-preserving on no-op', () => {
+  reset();
+  const s = seeded([ws('a', ['p1'], 'p1')]);
+  const before = s.getState();
+  s.getState().setOpenPanes((p) => p);
+  s.getState().setFocused((f) => f);
+  s.getState().setFocused('p1');
+  assert.equal(s.getState(), before);
+  s.getState().setOpenPanes((p) => [...p, 'p2']);
+  s.getState().setFocused('p2');
+  assert.deepEqual(s.getState().workspaces[0].openPanes, ['p1', 'p2']);
+  assert.equal(s.getState().workspaces[0].focused, 'p2');
+  s.getState().setOpenPanes(['z']);
+  assert.deepEqual(s.getState().workspaces[0].openPanes, ['z']);
+});
+test('revealPane switches workspace and focuses the pane in ONE set (focus optional); a repeat is a no-op', () => {
+  reset();
+  const s = seeded([ws('a'), ws('b', ['p1', 'p2'], 'p2')], 'a');
+  let notes = 0;
+  s.subscribe(() => { notes += 1; });
+  s.getState().revealPane('b', 'p1', false);
+  assert.equal(s.getState().activeWorkspaceId, 'b');
+  assert.equal(s.getState().workspaces[1].focused, 'p2', 'focus untouched when not asked');
+  s.getState().revealPane('b', 'p1', true);
+  assert.equal(s.getState().workspaces[1].focused, 'p1');
+  const n = notes;
+  s.getState().revealPane('b', 'p1', true);
+  assert.equal(notes, n, 'nothing changed -> no notification');
+});
+test('dropRecentlyClosed removes the id from EVERY workspace; no match is an identity no-op', () => {
+  reset();
+  const e = (id) => ({ id, name: id, host: '', cwd: '', closedAt: 1 });
+  const s = seeded([{ ...ws('a'), recentlyClosed: [e('x'), e('y')] }, { ...ws('b'), recentlyClosed: [e('x')] }]);
+  s.getState().dropRecentlyClosed('x');
+  assert.deepEqual(s.getState().workspaces.map((w) => w.recentlyClosed.map((r) => r.id)), [['y'], []]);
+  const before = s.getState();
+  s.getState().dropRecentlyClosed('nope');
+  assert.equal(s.getState(), before);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

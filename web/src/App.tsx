@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, initialWorkspace, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, resetObsPrefDefaults, type ResettableKey, type ResetUiDefaults, type ObsResetKey, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, resetObsPrefDefaults, type ResettableKey, type ResetUiDefaults, type ObsResetKey, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, HEALTH_WIDTH } from '@/lib/layout';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/theme';
@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -49,7 +49,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { useConfigPersistence, type AppPersistedSnapshot } from '@/lib/useConfigPersistence';
+import { useConfigPersistence } from '@/lib/useConfigPersistence';
 import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
@@ -116,20 +116,22 @@ function App() {
   // them as leftovers is the trap: both are BOOT facts about what this launch
   // started as, which the live pref stops being the moment the user flips it.
   // `startedEmpty` must stay pinned to the at-launch value for the whole
-  // session (that is the comment above), and `initialWorkspace` resolves the
-  // opening workspace from the DISK payload before React renders anything.
+  // session (that is the comment above), and the store's `initialWorkspace` call
+  // resolves the opening workspace from the DISK payload before React renders anything.
   // Where the LIVE pref lives is independent of both.
   const restoreOnStartup = useRestoreOnStartup();
   const setRestoreOnStartup = useSetRestoreOnStartup();
-  const initWs = initialWorkspace(uiState, uiState.restoreOnStartup ?? 'previous');
-  // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed now live INSIDE
+  // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed live INSIDE
   // per-workspace pane-sets. The active workspace's panes are what render in the
   // grid; switching activeWorkspaceId swaps the grid instantly. paneHost stays
   // global (keyed by pane id). WARDEN-372 abolished the flat activeTabs/hiddenTabs
   // working set — the sidebar root is now the active workspace's openPanes + a
-  // per-workspace recently-closed list.
-  const [workspaces, setWorkspaces] = useState<WorkspacePaneSet[]>(() => initWs.workspaces);
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => initWs.activeWorkspaceId);
+  // per-workspace recently-closed list. WARDEN-1526 (slice 23): the workspace
+  // set — the LAST App-owned persisted fact — lives on the shared store with its
+  // actions (lib/uiStore.ts); App subscribes for the render-time reads and calls
+  // the store actions; read-inside-callback sites use uiStore.getState().
+  const workspaces = useWorkspaces();
+  const activeWorkspaceId = useActiveWorkspaceId();
   // WARDEN-1498 (slice 19): paneHost migrated onto the shared store — PaneGrid
   // subscribes directly and every writer calls the one idempotent primePaneHost
   // (keyed by PANE id: paneIdOf(chat) — see the action's doc in lib/uiStore.ts).
@@ -160,56 +162,23 @@ function App() {
   // The active workspace's pane-set, derived every render. Falls back to the
   // first workspace if activeWorkspaceId ever dangles (defensive — loadUi/init
   // keep it valid, but a corrupt mid-session state must still render something).
-  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0] ?? null;
+  const activeWorkspace = selectActiveWorkspace({ workspaces, activeWorkspaceId });
   const openPanes: string[] = activeWorkspace?.openPanes ?? [];
   const focused: string | null = activeWorkspace?.focused ?? null;
   // Mirrors read synchronously inside stable callbacks (performKill's rollback,
   // openChat's cross-workspace dedup) without widening their dependency arrays.
   const openPanesRef = useRef(openPanes); openPanesRef.current = openPanes;
   const focusedRef = useRef(focused); focusedRef.current = focused;
-  const workspacesRef = useRef(workspaces); workspacesRef.current = workspaces;
-  const activeWorkspaceIdRef = useRef(activeWorkspaceId); activeWorkspaceIdRef.current = activeWorkspaceId;
 
-  // openPanes/focused now live inside the active workspace. These stable shims
-  // keep every existing call site working (functional updates for openPanes,
-  // value-or-fn for focused) while routing each change through the active
-  // workspace. They read activeWorkspaceId via the ref (not a dep), so their
-  // identity is stable ([] deps) — consumers like closePane that list no deps
-  // still target the CURRENTLY active workspace, not the one at first render.
-  const updateActiveWorkspace = useCallback(
-    (fn: (w: WorkspacePaneSet) => WorkspacePaneSet) => {
-      const aid = activeWorkspaceIdRef.current;
-      setWorkspaces((prev) => {
-        if (prev.length === 0) return prev;
-        const idx = prev.findIndex((w) => w.id === aid);
-        const target = idx >= 0 ? idx : 0;
-        const updated = fn(prev[target]);
-        if (updated === prev[target]) return prev;
-        const copy = [...prev];
-        copy[target] = updated;
-        return copy;
-      });
-    },
-    [],
-  );
-  const setOpenPanes = useCallback(
-    (updater: string[] | ((p: string[]) => string[])) => {
-      updateActiveWorkspace((w) => {
-        const next = typeof updater === 'function' ? updater(w.openPanes) : updater;
-        return next === w.openPanes ? w : { ...w, openPanes: next };
-      });
-    },
-    [updateActiveWorkspace],
-  );
-  const setFocused = useCallback(
-    (value: string | null | ((f: string | null) => string | null)) => {
-      updateActiveWorkspace((w) => {
-        const next = typeof value === 'function' ? value(w.focused) : value;
-        return next === w.focused ? w : { ...w, focused: next };
-      });
-    },
-    [updateActiveWorkspace],
-  );
+  // openPanes/focused live inside the active workspace. The store owns the
+  // functional-update writers (identity-preserving, ONE set each — see
+  // lib/uiStore.ts); the hooks return stable action references, so consumers
+  // like closePane that list them still target the CURRENTLY active workspace.
+  const updateActiveWorkspace = useUpdateActiveWorkspace();
+  const setOpenPanes = useSetOpenPanes();
+  const setFocused = useSetFocused();
+  const revealPane = useRevealPane();
+  const dropRecentlyClosed = useDropRecentlyClosed();
   // In-flight optimistic mutations. The catalog merge in applyCatalog() would
   // otherwise re-introduce a just-killed chat or revert a just-renamed name from
   // the on-disk catalog while that op's server round-trip is still pending (the
@@ -286,7 +255,7 @@ function App() {
   // live on the shared store (lib/uiStore.ts); App still READS them (layout
   // styles, applyLayoutClamp deps, drag-start captures) but owns no state, and
   // PaneGrid's Alt+S/Alt+O call the toggle actions directly (no prop callbacks).
-  // Persistence rides useConfigPersistence's store half (39 facts).
+  // Persistence rides useConfigPersistence's snapshot (all 41 store facts).
   const sidebarCollapsed = useSidebarCollapsed();
   // WARDEN-1516 (slice 22): the two panel widths live on the store too (first-
   // paint clamp runs at store creation; reclampPanelWidths is the one re-clamp
@@ -381,7 +350,7 @@ function App() {
   // App-side reads: this slice-3 comment recorded the two reasons every
   // migrated fact kept an App subscription — the persisted snapshot and the
   // reset partition. WARDEN-1471 (slice 16) retired the FIRST reason for all
-  // 39 store facts: the snapshot's store half is subscribed once inside
+  // 41 store facts: the snapshot is subscribed once inside
   // useConfigPersistence (useShallow(selectPersistedStorePrefs)), so App keeps
   // only the setters the reset partition needs. The write path is unchanged
   // end to end: store.setX → that subscription re-renders App → the merged
@@ -798,23 +767,6 @@ function App() {
     applyDensity(density);
   }, [density]);
 
-  // App's half of the persisted-pref snapshot, assembled here (App is the
-  // composition root) and passed to useConfigPersistence, which owns the
-  // saveUi WRITE effect + handleConfigChange (WARDEN-696) and merges it with
-  // the store half it reads itself. Typed as AppPersistedSnapshot — since
-  // slice 16 (WARDEN-1471) this literal carries ONLY the facts App still owns
-  // as useState (the workspace set — since slice 22, WARDEN-1516, the panel
-  // widths are store-owned too);
-  // the 39 store-owned facts are NOT re-listed here. The partition is
-  // compile-derived, never hand-held: AppPersistedSnapshot is the Exclude
-  // complement of the store's STORE_PERSISTED_KEYS against
-  // PERSISTED_PREF_KEYS, so a key moved OFF the store's list lands here as a
-  // REQUIRED property and its absence from this literal is a tsc error — the
-  // WARDEN-442/468/500 dropped-key class stays closed on both halves.
-  const persistedSnapshot: AppPersistedSnapshot = {
-    workspaces, activeWorkspaceId,
-  };
-
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
   useEffect(() => { setMaximized(null); }, [activeWorkspaceId]);
@@ -926,13 +878,12 @@ function App() {
   // that reloads chats/ssh-hosts, re-broadcasts notification prefs, and refreshes
   // backend config prefs so toggles take effect without a page reload. The saveUi
   // WRITE effect + this callback live in useConfigPersistence (WARDEN-696);
-  // App's snapshot half is assembled here (composition root) and passed in —
-  // since WARDEN-1471 (slice 16) the hook itself reads the store half, so App
-  // no longer carries a subscription per store fact. This call sits AFTER
+  // since WARDEN-1471 (slice 16) the hook reads the store facts itself and, since
+  // WARDEN-1526 (slice 23) moved the last App-owned fact (the workspace set), the
+  // WHOLE persisted snapshot — App assembles and passes none of it. This call sits AFTER
   // refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so the deps
   // are initialized (no TDZ).
   const { handleConfigChange } = useConfigPersistence({
-    persistedSnapshot,
     restoreOnStartup,
     startedEmpty,
     refresh,
@@ -1242,10 +1193,9 @@ function App() {
     if (anchor) setExternalSearchQuery({ paneId: id, query: anchor });
     // Search EVERY workspace for an existing pane with this id. If it's already
     // open elsewhere, switch to that workspace + focus it (no duplicate pane).
-    const owner = workspacesRef.current.find((w) => w.openPanes.includes(id));
+    const owner = uiStore.getState().workspaces.find((w) => w.openPanes.includes(id));
     if (owner) {
-      if (owner.id !== activeWorkspaceIdRef.current) setActiveWorkspaceId(owner.id);
-      if (autoFocusNewPane) setWorkspaces((prev) => prev.map((w) => (w.id === owner.id && w.focused !== id ? { ...w, focused: id } : w)));
+      revealPane(owner.id, id, autoFocusNewPane);
       // WARDEN-1422 (QA round 5): resume = "click reconnects to the live tmux
       // session". When the click hits a pane OPEN but stuck in session_dead
       // (e.g. the session was respawned from the sidebar after the pane died,
@@ -1262,7 +1212,7 @@ function App() {
     // Otherwise add to the active workspace + focus it.
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     if (autoFocusNewPane) setFocused(id);
-  }, [autoFocusNewPane, setOpenPanes, setFocused]);
+  }, [autoFocusNewPane, setOpenPanes, setFocused, revealPane]);
 
   // WARDEN-417 / WARDEN-476: in-app catch-up for per-chat watch pings that fired while
   // the human was away (the OS notification was unsupported / denied / cleared / lost).
@@ -1317,9 +1267,9 @@ function App() {
   useEffect(() => {
     getWorkspaceShapeSampler({
       read: () => {
-        const ws = workspacesRef.current;
-        const activeId = activeWorkspaceIdRef.current;
-        const active = ws.find((w) => w.id === activeId) ?? ws[0] ?? null;
+        const state = uiStore.getState();
+        const ws = state.workspaces;
+        const active = selectActiveWorkspace(state);
         return {
           workspaces: ws.length,
           panesOpen: ws.reduce((n, w) => n + (Array.isArray(w.openPanes) ? w.openPanes.length : 0), 0),
@@ -1571,12 +1521,12 @@ function App() {
     // It is saved now — drop it from the temp tracking and from every workspace's
     // recently-closed list, then refresh so the host view shows it.
     setTempChats((prev) => prev.filter((c) => c.id !== id));
-    setWorkspaces((prev) => prev.map((w) => ({ ...w, recentlyClosed: (w.recentlyClosed ?? []).filter((e) => e.id !== id) })));
+    dropRecentlyClosed(id);
     markRecentlySaved(chat.key || chat.id);
     void refresh();
     if (host) void discoverHost(host).catch(() => {});
     if (prefs.notifyChatOps) toast.success(`Saved — it is listed under ${host || 'its host'}`);
-  }, [discoverHost, markRecentlySaved, refresh, prefs.notifyErrors, prefs.notifyChatOps]);
+  }, [discoverHost, markRecentlySaved, refresh, dropRecentlyClosed, prefs.notifyErrors, prefs.notifyChatOps]);
 
   // WARDEN-372: record a closing pane in the active workspace's recently-closed
   // recovery list. Snapshots the chat's display name/host/cwd at close time so the
@@ -1654,7 +1604,7 @@ function App() {
     // openChat's chatsRef lookup cannot learn its host — restore it from the
     // close-time snapshot instead (a remote temp must reattach to ITS host).
     // Read from the ref (not the updater — updaters must stay pure).
-    const entry = workspacesRef.current.find((w) => w.id === activeWorkspaceIdRef.current)?.recentlyClosed?.find((e) => e.id === id);
+    const entry = selectActiveWorkspace(uiStore.getState())?.recentlyClosed?.find((e) => e.id === id);
     if (entry?.host) primePaneHost(id, entry.host);
     updateActiveWorkspace((w) => ({
       ...w,
@@ -1855,73 +1805,33 @@ function App() {
   // lives inside each workspace). Each op keeps ≥1 workspace and dedups pane ids
   // across workspaces. Underlying chats/tmux sessions are never affected by a
   // move — only which workspace's grid the pane renders in.
+  // WARDEN-1526 (slice 23): the transitions are STORE actions (lib/uiStore.ts —
+  // unit-tested via createUiStore); the feature-usage telemetry stays HERE at
+  // the call site, because it is a side effect, not state, and keeps the
+  // actions pure.
+  const selectWorkspaceAction = useSelectWorkspace();
+  const createWorkspaceAction = useCreateWorkspace();
+  const renameWorkspace = useRenameWorkspace();
+  const movePaneToWorkspace = useMovePaneToWorkspace();
+  const movePaneToNewWorkspaceAction = useMovePaneToNewWorkspace();
+  const closeWorkspace = useCloseWorkspace();
   const selectWorkspace = useCallback((id: string) => {
     // WARDEN-1479 — the feature-adoption seed: a workspace switch is one use.
     getFeatureUsageSampler().sampler.recordFeatureUse('workspace-switch');
-    setActiveWorkspaceId(id);
-  }, []);
-
-  // Create a new workspace, optionally seeded with a moved pane. Default name
-  // "Workspace N" where N is the new count; renameable via the tab strip.
+    selectWorkspaceAction(id);
+  }, [selectWorkspaceAction]);
+  // Create a new workspace (default name "Workspace N"; renameable via the tab strip).
   const createWorkspace = useCallback((seedPaneId?: string) => {
-    const id = globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}`;
-    setWorkspaces((prev) => [...prev, { id, name: `Workspace ${prev.length + 1}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null, recentlyClosed: [] }]);
     // WARDEN-1479 — the feature-adoption seed: a workspace create is one use.
     getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
-    setActiveWorkspaceId(id);
-    return id;
-  }, []);
-
-  const renameWorkspace = useCallback((id: string, name: string) => {
-    const trimmed = name.trim();
-    setWorkspaces((prev) => prev.map((w) => (w.id === id ? { ...w, name: trimmed || w.name } : w)));
-  }, []);
-
-  // Move a pane to an existing workspace (drag a pane tile onto a workspace tab):
-  // remove from its current workspace, add to the target, switch to the target.
-  const movePaneToWorkspace = useCallback((paneId: string, targetWorkspaceId: string) => {
-    setWorkspaces((prev) => {
-      const target = prev.find((w) => w.id === targetWorkspaceId);
-      if (!target) return prev;
-      return prev.map((w) => {
-        if (w.id === targetWorkspaceId) {
-          if (w.openPanes.includes(paneId)) return w; // already there
-          return { ...w, openPanes: [...w.openPanes, paneId], focused: paneId };
-        }
-        if (w.openPanes.includes(paneId)) {
-          const remaining = w.openPanes.filter((x) => x !== paneId);
-          return { ...w, openPanes: remaining, focused: w.focused === paneId ? (remaining[0] ?? null) : w.focused };
-        }
-        return w;
-      });
-    });
-    setActiveWorkspaceId(targetWorkspaceId);
-  }, []);
-
-  // Drop a pane on the ＋ button → new workspace containing it, then switch.
-  // Mirrors movePaneToWorkspace's source-focus handling: when the dragged pane
-  // was the focused one, fall back to the source workspace's first remaining
-  // pane (not null) so that workspace never shows a visible-but-unfocused pane.
+    return createWorkspaceAction(seedPaneId);
+  }, [createWorkspaceAction]);
+  // Drop a pane on the ＋ button → new workspace containing it, then switch (a
+  // create, so it records the same feature use createWorkspace always did).
   const movePaneToNewWorkspace = useCallback((paneId: string) => {
-    setWorkspaces((prev) => prev.map((w) => {
-      if (!w.openPanes.includes(paneId)) return w;
-      const remaining = w.openPanes.filter((x) => x !== paneId);
-      return { ...w, openPanes: remaining, focused: w.focused === paneId ? (remaining[0] ?? null) : w.focused };
-    }));
-    createWorkspace(paneId);
-  }, [createWorkspace]);
-
-  // Close a workspace: removes its panes from the grid only; the chats stay in
-  // the sidebar catalog and can be reopened. At least one workspace always
-  // remains. Gated by a confirm dialog (requestCloseWorkspace opens it). The
-  // active-id switch is computed from the ref OUTSIDE the workspaces updater so
-  // that updater stays pure (no setState-in-updater side effect).
-  const closeWorkspace = useCallback((id: string) => {
-    const remaining = workspacesRef.current.filter((w) => w.id !== id);
-    if (!remaining.length) return; // never drop below one workspace
-    setWorkspaces(remaining);
-    if (activeWorkspaceIdRef.current === id) setActiveWorkspaceId(remaining[0].id);
-  }, []);
+    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
+    movePaneToNewWorkspaceAction(paneId);
+  }, [movePaneToNewWorkspaceAction]);
 
   // Pending-target confirm machine for the close above. NOTE: no gate predicate
   // is passed — unlike the two kill machines, closing a workspace is NOT
@@ -2273,8 +2183,6 @@ function App() {
             tabs internally so it can never push the right-side control cluster
             (below) off-screen at the default width. */}
         <WorkspaceTabs
-          workspaces={workspaces}
-          activeWorkspaceId={activeWorkspaceId}
           onSelect={selectWorkspace}
           onCreate={() => createWorkspace()}
           onRename={renameWorkspace}
