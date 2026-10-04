@@ -69,6 +69,29 @@ test('a real aggregator window builds into a schema-valid event', () => {
   assert.equal(validateEvent(event), true, 'the built event passes the canonical wire validator');
 });
 
+test('the stale/invalid split rides the built event when supplied; absent otherwise (WARDEN-1528)', () => {
+  const snap = { ...realSnapshot(), rejected: 7, rejectedStale: 5, rejectedInvalid: 2 };
+  const event = buildOperationalMetricsEvent({ snapshot: snap, schemaVersion: SCHEMA_VERSION, runtime: 'renderer', now: () => TS });
+  assert.equal(event.rejected, 7);
+  assert.equal(event.rejectedStale, 5);
+  assert.equal(event.rejectedInvalid, 2);
+  assert.equal(validateEvent(event), true);
+  // A real main/server aggregator window carries the split (stale 0).
+  const real = buildOperationalMetricsEvent({ snapshot: realSnapshot(), schemaVersion: SCHEMA_VERSION, now: () => TS });
+  assert.equal(real.rejectedStale, 0);
+  assert.equal(real.rejectedInvalid, real.rejected);
+  // A snapshot without the split (older shape) omits the fields entirely.
+  const { rejectedStale, rejectedInvalid, ...legacy } = realSnapshot();
+  const e2 = buildOperationalMetricsEvent({ snapshot: legacy, schemaVersion: SCHEMA_VERSION, now: () => TS });
+  assert.equal('rejectedStale' in e2, false);
+  assert.equal('rejectedInvalid' in e2, false);
+  assert.equal(validateEvent(e2), true);
+  // Garbage split values are not forwarded.
+  const e3 = buildOperationalMetricsEvent({ snapshot: { ...legacy, rejectedStale: -1, rejectedInvalid: 'x' }, schemaVersion: SCHEMA_VERSION, now: () => TS });
+  assert.equal('rejectedStale' in e3, false);
+  assert.equal('rejectedInvalid' in e3, false);
+});
+
 test('labels are omitted when not supplied (they are optional per the schema)', () => {
   const event = buildOperationalMetricsEvent({
     snapshot: realSnapshot(),

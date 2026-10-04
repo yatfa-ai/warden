@@ -100,6 +100,31 @@ test('stale pending input is dropped, NOT folded as a monster sample', () => {
   const e2e = opOf(s.snapshot(), PANE_LATENCY_OPS.E2E);
   assert.equal(e2e.count, 0);
   assert.equal(s.snapshot().rejected, 1, 'the drop is disclosed as rejected');
+  // WARDEN-1528 — a >10 s echo is STALE (right-censored tail), never invalid.
+  assert.equal(s.snapshot().rejectedStale, 1);
+  assert.equal(s.snapshot().rejectedInvalid, 0);
+});
+
+test('malformed input is classed INVALID, never stale; rejected is their sum (WARDEN-1528)', () => {
+  const clock = makeClock();
+  const s = createPaneLatencySampler({ now: clock.now });
+  s.noteInput('');            // empty pane id
+  s.noteInput(42);            // non-string pane id
+  s.noteLongTask(-3);         // negative duration
+  s.noteLongTask('x');        // non-number duration
+  s.noteInput('p1');
+  clock.advance(PENDING_INPUT_MAX_AGE_MS + 1);
+  s.frame('p1');              // one stale
+  const snap = s.snapshot();
+  assert.equal(snap.rejectedInvalid, 4);
+  assert.equal(snap.rejectedStale, 1);
+  assert.equal(snap.rejected, 5);
+  const flushed = s.flush();
+  assert.equal(flushed.rejectedStale, 1);
+  const after = s.snapshot();
+  assert.equal(after.rejectedStale, 0, 'flush resets the stale counter');
+  assert.equal(after.rejectedInvalid, 0, 'flush resets the invalid counter');
+  assert.equal(after.rejected, 0);
 });
 
 test('frames with no pending input cost one probe and fold nothing', () => {

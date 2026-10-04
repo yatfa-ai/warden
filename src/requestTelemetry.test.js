@@ -276,7 +276,7 @@ describe('the wire shape (aggregates only, closed set)', () => {
     const snap = tel.flushNow();
     assert.deepEqual(
       Object.keys(snap).sort(),
-      ['boundaries', 'endedAt', 'foldedOperations', 'foldedOperationsExact', 'operations', 'rejected', 'startedAt'],
+      ['boundaries', 'endedAt', 'foldedOperations', 'foldedOperationsExact', 'operations', 'rejected', 'rejectedInvalid', 'rejectedStale', 'startedAt'],
     );
     assert.deepEqual(Object.keys(snap.operations[0]).sort(),
       ['avg', 'buckets', 'count', 'failCount', 'max', 'min', 'okCount', 'operation']);

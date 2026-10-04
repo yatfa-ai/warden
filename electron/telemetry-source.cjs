@@ -41,6 +41,9 @@ const {
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
+// v11 (WARDEN-1528): operational-metrics gains OPTIONAL `rejectedStale` /
+// `rejectedInvalid` (the split of `rejected`; see the canonical
+// web/src/lib/telemetry/schema.ts for the full bump note).
 // v10 (WARDEN-1508): + 'process-memory' — one bounded RSS / heap / process-age
 // window aggregate per runtime (main / renderer / server), numbers only, riding
 // the existing operational-metrics category (see the canonical
@@ -66,7 +69,7 @@ const {
 // event (see the canonical web/src/lib/telemetry/schema.ts for the full bump
 // note). This inline copy stays byte-aligned with the canonical module; the
 // drift tests pin the pair.
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory']);
 
@@ -475,6 +478,10 @@ function isValidMetricOperation(op) {
 
 function isValidOperationalMetrics(e) {
   if (!Number.isInteger(e.rejected) || e.rejected < 0) return false;
+  // WARDEN-1528 — OPTIONAL split of `rejected`: non-negative integer WHEN PRESENT.
+  for (const k of ['rejectedStale', 'rejectedInvalid']) {
+    if (e[k] !== undefined && (!Number.isInteger(e[k]) || e[k] < 0)) return false;
+  }
   if (!isFiniteNonNegative(e.windowStartedAt) || !isFiniteNonNegative(e.windowEndedAt)) return false;
   if (!Array.isArray(e.boundaries) || e.boundaries.length === 0) return false;
   for (let i = 0; i < e.boundaries.length; i += 1) {

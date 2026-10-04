@@ -85,7 +85,14 @@ export interface PaneLatencyWindow {
   endedAt: number;
   boundaries: number[];
   operations: PaneLatencyOperation[];
+  /** Total refused observations — always `rejectedStale + rejectedInvalid`. */
   rejected: number;
+  /** Refused because the echo/duration exceeded the correlation window
+   *  (> PENDING_INPUT_MAX_AGE_MS): the right-censored unusable-tail count. */
+  rejectedStale: number;
+  /** Refused as malformed input (bad id, bad/negative duration, unknown op):
+   *  a caller-contract violation, expected ~zero. */
+  rejectedInvalid: number;
 }
 
 /** The transport: main's receipt handler (fire-and-forget). */
@@ -154,12 +161,14 @@ export function createPaneLatencySampler({
     [PANE_LATENCY_OPS.PAINT, emptyAccumulator()],
     [PANE_LATENCY_OPS.LONG_TASK, emptyAccumulator()],
   ]);
-  let rejected = 0;
+  let rejectedStale = 0;
+  let rejectedInvalid = 0;
   let startedAt = Date.now();
 
   function recordIfRoom(op: string, ms: number): boolean {
     const acc = accs.get(op);
-    if (!acc || !(ms >= 0) || ms > pendingMaxAgeMs) { rejected += 1; return false; }
+    if (!acc || !(ms >= 0)) { rejectedInvalid += 1; return false; }
+    if (ms > pendingMaxAgeMs) { rejectedStale += 1; return false; }
     if (acc.count >= maxPerWindow) return false; // bounded fold: drop, never grow
     fold(acc, ms);
     return true;
@@ -170,7 +179,7 @@ export function createPaneLatencySampler({
    * stream send). Coalesces: the latest keystroke per pane is the one timed.
    */
   function noteInput(id: string): void {
-    if (typeof id !== 'string' || id.length === 0) { rejected += 1; return; }
+    if (typeof id !== 'string' || id.length === 0) { rejectedInvalid += 1; return; }
     pending.set(id, { at: now(), stamp: Date.now() });
   }
 
@@ -189,7 +198,8 @@ export function createPaneLatencySampler({
     pending.delete(id);
     const at = now();
     const e2eMs = at - entry.at;
-    if (!(e2eMs >= 0) || e2eMs > pendingMaxAgeMs) { rejected += 1; return null; }
+    if (!(e2eMs >= 0)) { rejectedInvalid += 1; return null; }
+    if (e2eMs > pendingMaxAgeMs) { rejectedStale += 1; return null; }
     if (!recordIfRoom(PANE_LATENCY_OPS.E2E, e2eMs)) return null;
     const t0 = at;
     return {
@@ -203,7 +213,7 @@ export function createPaneLatencySampler({
 
   /** One main-thread long task (call from a 'longtask' PerformanceObserver). */
   function noteLongTask(durationMs: number): void {
-    if (typeof durationMs !== 'number' || !(durationMs >= 0)) { rejected += 1; return; }
+    if (typeof durationMs !== 'number' || !(durationMs >= 0)) { rejectedInvalid += 1; return; }
     recordIfRoom(PANE_LATENCY_OPS.LONG_TASK, durationMs);
   }
 
@@ -228,7 +238,9 @@ export function createPaneLatencySampler({
       endedAt: Date.now(),
       boundaries: [...PANE_LATENCY_BOUNDARIES_MS],
       operations: [...accs.keys()].map(project),
-      rejected,
+      rejected: rejectedStale + rejectedInvalid,
+      rejectedStale,
+      rejectedInvalid,
     };
   }
 
@@ -236,7 +248,8 @@ export function createPaneLatencySampler({
   function flush(): PaneLatencyWindow {
     const out = snapshot();
     for (const [name] of accs) accs.set(name, emptyAccumulator());
-    rejected = 0;
+    rejectedStale = 0;
+    rejectedInvalid = 0;
     startedAt = out.endedAt;
     return out;
   }

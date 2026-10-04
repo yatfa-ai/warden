@@ -187,7 +187,7 @@ test('an unconfigured pipeline has NOTHING enabled and sends nothing', () => {
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 10);
+  assert.equal(SCHEMA_VERSION, 11);
   // WARDEN-1424 — v8 adds `workspace-shape`. WARDEN-1479 — v9 adds `feature-usage`.
   assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall', 'operational-metrics', 'server-stall', 'workspace-names', 'workspace-shape', 'feature-usage', 'process-memory']);
 });
