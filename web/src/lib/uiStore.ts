@@ -2073,6 +2073,16 @@ export function useSetFocused(): (value: string | null | ((f: string | null) => 
   return useUiStore((s) => s.setFocused);
 }
 
+/**
+ * WARDEN-1534 (roadmap WARDEN-1204 slice 25): the focused pane id of the active
+ * workspace. A primitive selector (string | null) so subscribers re-render only
+ * on a real change. Delegates to `selectActiveWorkspace` so the dangled-id
+ * fallback (workspaces[0]) matches every other reader.
+ */
+export function useFocused(): string | null {
+  return useUiStore((s) => selectActiveWorkspace(s)?.focused ?? null);
+}
+
 export function useRevealPane(): (workspaceId: string, paneId: string, focus: boolean) => void {
   return useUiStore((s) => s.revealPane);
 }

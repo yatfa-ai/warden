@@ -2234,7 +2234,6 @@ function App() {
         <section className="flex-1 min-h-0 min-w-0">
           <PaneGrid
             tiles={tiles}
-            focused={focused}
             newActivity={newActivity}
             chats={[...chats, ...tempChats]}
             onFocus={setFocused}
