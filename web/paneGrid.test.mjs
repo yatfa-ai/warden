@@ -15,8 +15,9 @@
 // the user saw "click a chat to open a live pane" with their other panes gone.
 //
 // The fix has two halves, both exercised here:
-//   1. App drops the maximized id at every pane-removal site (closePane /
-//      removeActive) — modeled below as a mini-model of those handlers.
+//   1. The uiStore's setOpenPanes shim drops a removed pane's maximized id
+//      (WARDEN-1530 moved this out of App's closePane / removeActive) — driven
+//      below through the REAL createUiStore().
 //   2. resolveVisibleTiles guards the derivation: a maximized id whose tile is
 //      no longer in the grid behaves as "not maximized" (falls back to every
 //      open tile), so the grid can never blank — defense-in-depth that covers
@@ -42,6 +43,31 @@ writeFileSync(tmpFile, code);
 const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, resolveJunctionAxis, gutterCenters, resolveTrackWidths, swapPanes, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
+// --- Load the REAL uiStore.ts (WARDEN-1530: the store now owns the WARDEN-521 clear) --
+// The temp dir lives INSIDE web/ because uiStore.ts imports `zustand`, a real
+// package that Node resolves by walking up from the importing file (same
+// harness as uiStore.test.mjs). localStorage is polyfilled first since the
+// module seeds from loadUi() at load time.
+const lsMem = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (lsMem.has(k) ? lsMem.get(k) : null),
+  setItem: (k, v) => { lsMem.set(k, String(v)); },
+  removeItem: (k) => { lsMem.delete(k); },
+  clear: () => { lsMem.clear(); },
+};
+const storeTmpDir = mkdtempSync(join(__dirname, '.panegrid-store-test-'));
+const emitStoreModule = async (relPath, outName, rewrite = (c) => c) => {
+  const absPath = resolve(__dirname, relPath);
+  const { code: out } = await transformWithOxc(readFileSync(absPath, 'utf8'), absPath, {});
+  writeFileSync(join(storeTmpDir, outName), rewrite(out));
+};
+await emitStoreModule('src/lib/themes.ts', 'themes.mjs');
+await emitStoreModule('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
+await emitStoreModule('src/lib/layout.ts', 'layout.mjs');
+await emitStoreModule('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs'));
+const { createUiStore } = await import(join(storeTmpDir, 'uiStore.mjs'));
+rmSync(storeTmpDir, { recursive: true, force: true });
+
 let passed = 0;
 const test = (name, fn) => {
   fn();
@@ -57,37 +83,19 @@ const tiles = (ids) => ids.map(tile);
 const oldVisible = (maximized, arr) =>
   maximized ? arr.filter((t) => t.id === maximized) : arr;
 
-// Mini-model of App's pane-removal handlers. Mirrors the WARDEN-521 fix: each
-// removal site conditionally clears the maximized id ONLY when the maximized
-// pane itself is the one leaving the grid (a non-maximized pane closing while
-// another is maximized leaves the id intact). Holds the same three pieces of
-// state App does for a single workspace: openPanes, focused, maximized.
-class Workspace {
-  constructor(paneIds, maximized = null, focused = null) {
-    this.openPanes = paneIds.slice();
-    this.maximized = maximized;
-    this.focused = focused ?? paneIds[0] ?? null;
-  }
-  toggleMax(id) {
-    this.maximized = this.maximized === id ? null : id;
-    return this;
-  }
-  // closePane (×): drop pane, clear focus, record recovery (elided), and clear
-  // maximized only if THIS pane was the maximized one.
-  closePane(id) {
-    this.openPanes = this.openPanes.filter((x) => x !== id);
-    if (this.focused === id) this.focused = null;
-    if (this.maximized === id) this.maximized = null;
-    return this;
-  }
-  // removeActive (kill flow): same removal, no recovery entry.
-  removeActive(id) {
-    this.openPanes = this.openPanes.filter((x) => x !== id);
-    if (this.focused === id) this.focused = null;
-    if (this.maximized === id) this.maximized = null;
-    return this;
-  }
-}
+// A real store seeded with ONE workspace holding `paneIds`, `maximizedId` maximized.
+// The removal paths below drive the store's own setOpenPanes shim — the same call
+// App's closePane / removeActive make — so the WARDEN-521 clear is exercised for
+// real, not through a hand-copied model.
+const storeWith = (paneIds, maximizedId = null) => {
+  const store = createUiStore({
+    workspaces: [{ id: 'w', name: 'w', openPanes: paneIds.slice(), focused: paneIds[0] ?? null, recentlyClosed: [] }],
+    activeWorkspaceId: 'w',
+  });
+  if (maximizedId !== null) store.getState().setMaximized(maximizedId);
+  return store;
+};
+const openPanesOf = (store) => store.getState().workspaces[0].openPanes;
 
 console.log('\nstale-maximized guard: a maximized id whose tile is gone never blanks the grid (WARDEN-521)');
 
@@ -129,34 +137,31 @@ test('effectiveMax null on a stale id means the grid template is NOT pinned to 1
   assert.equal(cols, 2, 'two remaining panes reflow to a 2-column grid, not a stale 1-column');
 });
 
-console.log('\nwiring: App drops the maximized id at every pane-removal site (WARDEN-521)');
+console.log('\nwiring: the uiStore drops a removed pane\'s maximized id (WARDEN-521)');
 
 test('closing the maximized pane clears the id so the grid restores immediately', () => {
-  const ws = new Workspace(['A', 'B', 'C']);
-  ws.toggleMax('A'); // maximize A
-  assert.equal(ws.maximized, 'A');
-  ws.closePane('A'); // close the maximized pane
-  assert.equal(ws.maximized, null, 'maximized id was cleared at the close site');
-  const { visible } = resolveVisibleTiles(ws.maximized, tiles(ws.openPanes));
+  const store = storeWith(['A', 'B', 'C'], 'A');
+  assert.equal(store.getState().maximized, 'A');
+  store.getState().setOpenPanes((p) => p.filter((x) => x !== 'A')); // closePane / removeActive shape
+  assert.equal(store.getState().maximized, null, 'maximized id was cleared by the store');
+  const { visible } = resolveVisibleTiles(store.getState().maximized, tiles(openPanesOf(store)));
   assert.deepEqual(visible.map((t) => t.id), ['B', 'C'], 'remaining panes are visible, grid is not blank');
 });
 
-test('killing the maximized pane clears the id (removeActive mirrors closePane)', () => {
-  const ws = new Workspace(['A', 'B', 'C']);
-  ws.toggleMax('A');
-  ws.removeActive('A'); // force-kill the maximized pane
-  assert.equal(ws.maximized, null, 'maximized id was cleared at the kill site');
-  const { visible } = resolveVisibleTiles(ws.maximized, tiles(ws.openPanes));
+test('killing the maximized pane clears the id (value-form removal clears too)', () => {
+  const store = storeWith(['A', 'B', 'C'], 'A');
+  store.getState().setOpenPanes(['B', 'C']); // value form dropping the maximized id
+  assert.equal(store.getState().maximized, null, 'maximized id was cleared by the store');
+  const { visible } = resolveVisibleTiles(store.getState().maximized, tiles(openPanesOf(store)));
   assert.deepEqual(visible.map((t) => t.id), ['B', 'C'], 'remaining panes are visible after a kill');
 });
 
 test('closing a NON-maximized pane while another is maximized keeps that pane maximized', () => {
-  // The guard is conditional: only the maximized pane's own removal clears state.
-  const ws = new Workspace(['A', 'B', 'C']);
-  ws.toggleMax('A'); // maximize A
-  ws.closePane('B'); // close a different pane
-  assert.equal(ws.maximized, 'A', 'A stays maximized when an unrelated pane closes');
-  const { effectiveMax, visible } = resolveVisibleTiles(ws.maximized, tiles(ws.openPanes));
+  // The clear is conditional: only the maximized pane's own removal clears state.
+  const store = storeWith(['A', 'B', 'C'], 'A');
+  store.getState().setOpenPanes((p) => p.filter((x) => x !== 'B'));
+  assert.equal(store.getState().maximized, 'A', 'A stays maximized when an unrelated pane closes');
+  const { effectiveMax, visible } = resolveVisibleTiles(store.getState().maximized, tiles(openPanesOf(store)));
   assert.equal(effectiveMax, 'A', 'A is still the effective maximized pane');
   assert.deepEqual(visible.map((t) => t.id), ['A'], 'only the maximized pane is shown');
 });
@@ -164,12 +169,10 @@ test('closing a NON-maximized pane while another is maximized keeps that pane ma
 test('even if a removal path forgets to clear the id, the guard still prevents a blank grid', () => {
   // Defense-in-depth: simulate a path that drops the pane but leaves maximized
   // stale (the original bug). The guard must keep the grid populated regardless.
-  const ws = new Workspace(['A', 'B', 'C']);
-  ws.toggleMax('A');
   // A path that forgets the WARDEN-521 clear — pane gone, maximized still 'A':
-  ws.openPanes = ws.openPanes.filter((x) => x !== 'A');
-  // ws.maximized is intentionally left stale here.
-  const { effectiveMax, visible } = resolveVisibleTiles(ws.maximized, tiles(ws.openPanes));
+  const openPanes = ['B', 'C'];
+  const staleMaximized = 'A'; // intentionally left stale here.
+  const { effectiveMax, visible } = resolveVisibleTiles(staleMaximized, tiles(openPanes));
   assert.equal(effectiveMax, null, 'guard treats the stale id as not-maximized');
   assert.deepEqual(visible.map((t) => t.id), ['B', 'C'], 'grid still shows the remaining panes — no blank');
 });
@@ -177,10 +180,9 @@ test('even if a removal path forgets to clear the id, the guard still prevents a
 console.log('\nedge cases');
 
 test('closing the last pane leaves an empty grid (visible empty, not an error)', () => {
-  const ws = new Workspace(['A']);
-  ws.toggleMax('A');
-  ws.closePane('A');
-  const { effectiveMax, visible } = resolveVisibleTiles(ws.maximized, tiles(ws.openPanes));
+  const store = storeWith(['A'], 'A');
+  store.getState().setOpenPanes((p) => p.filter((x) => x !== 'A'));
+  const { effectiveMax, visible } = resolveVisibleTiles(store.getState().maximized, tiles(openPanesOf(store)));
   assert.equal(effectiveMax, null);
   assert.deepEqual(visible, [], 'no tiles — PaneGrid renders its empty-state message');
 });

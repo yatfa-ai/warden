@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -82,7 +82,6 @@ const JUNCTION_THRESH_PX = 3;
 interface Props {
   tiles: OpenTile[];
   focused: string | null;
-  maximized: string | null;
   newActivity: Set<string>;
   chats: Chat[];
   onFocus: (id: string) => void;
@@ -155,12 +154,17 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, focused, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
   // textually unchanged.
   const paneLayout = usePaneLayout();
+  // WARDEN-1530 (roadmap WARDEN-1204 slice 24): the maximized pane id is a
+  // shared, NOT-persisted store fact (App used to thread it as a prop). The
+  // store clears it on workspace switch / pane removal; resolveVisibleTiles
+  // below stays as the render-side backstop.
+  const maximized = useMaximized();
   // WARDEN-1498 (roadmap WARDEN-1204 slice 19): the pane → host map comes from
   // the same store (App used to thread it as a prop; primePaneHost is its one writer).
   const paneHost = usePaneHost();

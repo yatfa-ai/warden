@@ -3221,4 +3221,104 @@ test('dropRecentlyClosed removes the id from EVERY workspace; no match is an ide
   assert.equal(s.getState(), before);
 });
 
+// ─── maximized pane id (WARDEN-1530, roadmap WARDEN-1204 slice 24): first NON-persisted shared fact ───
+console.log('\ncreateUiStore — maximized (not persisted; folds WARDEN-256 + WARDEN-521)');
+const maxSeeded = (maxId = 'p1') => {
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1'), ws('b', ['p3'], 'p3')], 'a');
+  s.getState().setMaximized(maxId);
+  return s;
+};
+test('maximized starts null; setMaximized takes value and functional forms and is identity-preserving on an identical value', () => {
+  reset();
+  const s = seeded([ws('a', ['p1'], 'p1')]);
+  assert.equal(s.getState().maximized, null);
+  const before = s.getState();
+  s.getState().setMaximized(null);
+  s.getState().setMaximized((m) => m);
+  assert.equal(s.getState(), before, 'no-op writes keep the state referentially identical');
+  s.getState().setMaximized('p1');
+  assert.equal(s.getState().maximized, 'p1');
+  s.getState().setMaximized((m) => (m === 'p1' ? null : 'p1'));
+  assert.equal(s.getState().maximized, null);
+  s.getState().setMaximized('p1');
+  const same = s.getState();
+  s.getState().setMaximized('p1');
+  assert.equal(s.getState(), same);
+});
+test('maximized is NOT persisted: STORE_PERSISTED_KEYS stays 41 and excludes it; the selector never carries it', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('maximized'));
+  const s = maxSeeded();
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 41);
+  assert.ok(!('maximized' in picked));
+  assert.equal(createUiStore().getState().maximized, null, 'never seeded');
+});
+test('WARDEN-256: each of the six actions that move the active workspace clears maximized in the SAME set', () => {
+  reset();
+  const check = (name, act) => {
+    const s = maxSeeded();
+    let notes = 0;
+    s.subscribe(() => { notes += 1; });
+    act(s.getState());
+    assert.equal(s.getState().maximized, null, `${name} clears maximized`);
+    assert.equal(notes, 1, `${name} lands in ONE update`);
+  };
+  check('selectWorkspace', (st) => st.selectWorkspace('b'));
+  check('createWorkspace', (st) => st.createWorkspace());
+  check('closeWorkspace (active)', (st) => st.closeWorkspace('a'));
+  check('movePaneToWorkspace', (st) => st.movePaneToWorkspace('p1', 'b'));
+  check('movePaneToWorkspace (unknown target)', (st) => st.movePaneToWorkspace('p1', 'nope'));
+  check('movePaneToNewWorkspace', (st) => st.movePaneToNewWorkspace('p2'));
+  check('revealPane', (st) => st.revealPane('b', 'p3', true));
+  check('revealPane (no focus)', (st) => st.revealPane('b', 'p3', false));
+});
+test('same-value switches do NOT clear maximized (the retired effect fired on id VALUE change only)', () => {
+  reset();
+  const s = maxSeeded();
+  s.getState().selectWorkspace('a');
+  assert.equal(s.getState().maximized, 'p1', 'selectWorkspace(current)');
+  s.getState().movePaneToWorkspace('p2', 'a');
+  assert.equal(s.getState().maximized, 'p1', 'movePaneToWorkspace into the active workspace');
+  s.getState().revealPane('a', 'p1', false);
+  assert.equal(s.getState().maximized, 'p1', 'revealPane already-active, no focus (early return)');
+  s.getState().revealPane('a', 'p2', true);
+  assert.equal(s.getState().workspaces[0].focused, 'p2', 'the needsFocus path did proceed');
+  assert.equal(s.getState().maximized, 'p1', 'revealPane already-active needing focus');
+});
+test('closeWorkspace of a NON-active workspace leaves maximized alone', () => {
+  reset();
+  const s = maxSeeded();
+  s.getState().closeWorkspace('b');
+  assert.equal(s.getState().activeWorkspaceId, 'a');
+  assert.equal(s.getState().maximized, 'p1');
+});
+test('WARDEN-521: setOpenPanes clears maximized iff the next list drops it (remove / replace); add, reorder and no-op keep it', () => {
+  reset();
+  let s = maxSeeded();
+  let notes = 0;
+  s.subscribe(() => { notes += 1; });
+  s.getState().setOpenPanes((p) => p.filter((x) => x !== 'p2'));
+  assert.equal(s.getState().maximized, 'p1', 'removing a DIFFERENT pane keeps it');
+  s.getState().setOpenPanes((p) => (p.includes('p9') ? p : [...p, 'p9']));
+  assert.equal(s.getState().maximized, 'p1', 'add keeps it');
+  s.getState().setOpenPanes((p) => [...p].reverse());
+  assert.equal(s.getState().maximized, 'p1', 'reorder keeps it');
+  const before = s.getState();
+  s.getState().setOpenPanes((p) => p);
+  assert.equal(s.getState(), before, 'no-op updater is referentially identical');
+  notes = 0;
+  s.getState().setOpenPanes((p) => p.filter((x) => x !== 'p1'));
+  assert.equal(notes, 1, 'removal + clear land in ONE update');
+  assert.deepEqual(s.getState().workspaces[0].openPanes, ['p9']);
+  assert.equal(s.getState().maximized, null, 'removing the maximized pane clears it');
+  s = maxSeeded();
+  s.getState().setOpenPanes(['z']);
+  assert.equal(s.getState().maximized, null, 'value form dropping it clears too');
+  s = seeded([ws('a', ['p1'], 'p1')]);
+  s.getState().setOpenPanes((p) => p.filter((x) => x !== 'p1'));
+  assert.equal(s.getState().maximized, null, 'nothing maximized stays null');
+});
+
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
