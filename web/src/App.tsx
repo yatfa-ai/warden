@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -177,6 +177,7 @@ function App() {
   const updateActiveWorkspace = useUpdateActiveWorkspace();
   const setOpenPanes = useSetOpenPanes();
   const setFocused = useSetFocused();
+  const setMaximized = useSetMaximized();
   const revealPane = useRevealPane();
   const dropRecentlyClosed = useDropRecentlyClosed();
   // In-flight optimistic mutations. The catalog merge in applyCatalog() would
@@ -193,7 +194,6 @@ function App() {
   // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
   // hosts rather than the whole fleet.
   const discoveredHostsRef = useRef<Set<string>>(new Set());
-  const [maximized, setMaximized] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
   const [activitySinceClose, setActivitySinceClose] = useState<any>(null);
@@ -766,10 +766,6 @@ function App() {
   useEffect(() => {
     applyDensity(density);
   }, [density]);
-
-  // Reset maximized when switching workspaces: a maximized pane belongs to its
-  // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
-  useEffect(() => { setMaximized(null); }, [activeWorkspaceId]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -1566,19 +1562,15 @@ function App() {
     pushRecentlyClosed(id);
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
-    // WARDEN-521: drop the maximized id when the maximized pane itself leaves the
-    // grid, else it goes stale and the grid blanks until a workspace switch. A
-    // NON-maximized pane closing while another is maximized leaves the id intact.
-    setMaximized((m) => (m === id ? null : m));
+    // The maximized id (WARDEN-521) is dropped by the store's setOpenPanes shim.
   }, [setOpenPanes, setFocused, pushRecentlyClosed]);
   // remove the pane only (no recently-closed entry) — used by the KILL flow, since
   // a killed chat's tmux session is destroyed and is not safely reopenable.
   const removeActive = useCallback((id: string) => {
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
-    // WARDEN-521: same stale-maximized guard as closePane — killing the maximized
-    // pane must restore the grid, not blank it.
-    setMaximized((m) => (m === id ? null : m));
+    // Killing the maximized pane restores the grid: the store's setOpenPanes shim
+    // clears the maximized id (WARDEN-521).
   }, [setOpenPanes, setFocused]);
   // WARDEN-909: drag a pane onto another pane tile → swap their positions in the
   // active workspace's openPanes. Routed through the setOpenPanes shim with a
@@ -1618,7 +1610,7 @@ function App() {
   const toggleMax = useCallback((id: string) => {
     getFeatureUsageSampler().sampler.recordFeatureUse('pane-maximize');
     setMaximized((m) => (m === id ? null : id));
-  }, []);
+  }, [setMaximized]);
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
 
   // The destructive-action gate BOTH kill machines consult. One predicate, two
@@ -2243,7 +2235,6 @@ function App() {
           <PaneGrid
             tiles={tiles}
             focused={focused}
-            maximized={maximized}
             newActivity={newActivity}
             chats={[...chats, ...tempChats]}
             onFocus={setFocused}

@@ -9,7 +9,8 @@
 // list but (pre-WARDEN-521) did NOT clear the maximized id. The id then pointed
 // at a tile no longer in the grid, `tiles.filter(t => t.id === maximized)`
 // produced an empty array, and the whole grid went blank until a workspace
-// switch reset the id. App now clears the id at every removal site, but this
+// switch reset the id. The uiStore now enforces the clear (setOpenPanes drops a
+// removed pane's id; every workspace switch resets it), but this
 // guard makes the grid robust to any path that leaves a stale id behind: a
 // maximized id whose tile is gone behaves as "not maximized", so the grid can
 // never blank — it falls back to the normal multi-tile view.

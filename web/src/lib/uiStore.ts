@@ -609,6 +609,24 @@ export interface UiStoreState {
   /** Drop one id from EVERY workspace's recently-closed list (identity-preserving when nothing matched). */
   dropRecentlyClosed: (id: string) => void;
   /**
+   * The maximized pane's id (WARDEN-1530, roadmap WARDEN-1204 slice 24) — the
+   * store's first NON-persisted shared session fact: it is deliberately NOT a
+   * STORE_PERSISTED_KEYS member (no seed-from-disk, no persistence wiring; a
+   * relaunch starts un-maximized, exactly as App's retired useState did). It
+   * folds two invariants App used to remember in four places:
+   *  - WARDEN-256: every action that actually MOVES `activeWorkspaceId`
+   *    (selectWorkspace, createWorkspace, closeWorkspace of the active one,
+   *    movePaneToWorkspace, movePaneToNewWorkspace, revealPane) clears it in the
+   *    SAME set. A same-value switch is a full no-op and keeps it (the retired
+   *    effect fired on id VALUE change only).
+   *  - WARDEN-521: `setOpenPanes` clears it iff the next pane list drops the
+   *    maximized id, in the same set as the removal.
+   * `null` = nothing maximized.
+   */
+  maximized: string | null;
+  /** Value-or-functional write of `maximized` (identity-preserving on an identical value). Writes state only. */
+  setMaximized: (value: string | null | ((m: string | null) => string | null)) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -919,6 +937,15 @@ function newWorkspaceId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}`;
 }
 
+/**
+ * WARDEN-256: the `maximized` clear for an action that sets the active id to
+ * `nextId` — a patch fragment, empty when the id does not actually move (the
+ * retired App effect fired on id VALUE change, so a same-value switch kept it).
+ */
+function clearMaximizedOnMove(s: Pick<UiStoreState, 'activeWorkspaceId'>, nextId: string): { maximized?: null } {
+  return s.activeWorkspaceId === nextId ? {} : { maximized: null };
+}
+
 /** A new pane-set named `Workspace ${n}`, optionally seeded (and focused) with one pane. */
 function newPaneSet(id: string, n: number, seedPaneId?: string): WorkspacePaneSet {
   return { id, name: `Workspace ${n}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null, recentlyClosed: [] };
@@ -1161,12 +1188,24 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     activeWorkspaceId:
       seed.activeWorkspaceId ??
       (seed.workspaces ? (seed.workspaces[0]?.id ?? '') : initWs.activeWorkspaceId),
-    selectWorkspace: (activeWorkspaceId) => set({ activeWorkspaceId }),
+    // WARDEN-1530 (slice 24): the not-persisted maximized pane id. Initial null —
+    // never seeded (a relaunch starts un-maximized).
+    maximized: null,
+    setMaximized: (value) =>
+      set((s) => {
+        const next = typeof value === 'function' ? value(s.maximized) : value;
+        return next === s.maximized ? s : { maximized: next };
+      }),
+    // WARDEN-256 (folded, slice 24): every action below that changes the active
+    // id clears `maximized` in the SAME set — guarded on an actual id MOVE.
+    selectWorkspace: (activeWorkspaceId) =>
+      set((s) => ({ activeWorkspaceId, ...clearMaximizedOnMove(s, activeWorkspaceId) })),
     createWorkspace: (seedPaneId) => {
       const id = newWorkspaceId();
       set((s) => ({
         workspaces: [...s.workspaces, newPaneSet(id, s.workspaces.length + 1, seedPaneId)],
         activeWorkspaceId: id,
+        maximized: null,
       }));
       return id;
     },
@@ -1182,6 +1221,8 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         return {
           workspaces: remaining,
           activeWorkspaceId: s.activeWorkspaceId === id ? remaining[0].id : s.activeWorkspaceId,
+          // Only closing the ACTIVE workspace changes the grid on screen.
+          ...(s.activeWorkspaceId === id ? { maximized: null } : {}),
         };
       }),
     movePaneToWorkspace: (paneId, targetWorkspaceId) =>
@@ -1189,8 +1230,9 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         // Unknown target: the workspace list is left alone but the active id
         // still switches — transcribed from App's retired closure (the target
         // is always a real tab id in practice).
-        if (!s.workspaces.some((w) => w.id === targetWorkspaceId)) return { activeWorkspaceId: targetWorkspaceId };
+        if (!s.workspaces.some((w) => w.id === targetWorkspaceId)) return { activeWorkspaceId: targetWorkspaceId, ...clearMaximizedOnMove(s, targetWorkspaceId) };
         return {
+          ...clearMaximizedOnMove(s, targetWorkspaceId),
           workspaces: s.workspaces.map((w) => {
             if (w.id === targetWorkspaceId) {
               if (w.openPanes.includes(paneId)) return w; // already there
@@ -1206,6 +1248,7 @@ export function createUiStore(seed: UiStoreSeed = {}) {
       set((s) => ({
         workspaces: [...s.workspaces.map((w) => withoutPane(w, paneId)), newPaneSet(id, s.workspaces.length + 1, paneId)],
         activeWorkspaceId: id,
+        maximized: null,
       }));
       return id;
     },
@@ -1220,10 +1263,24 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         copy[target] = updated;
         return { workspaces: copy };
       }),
+    // WARDEN-521 (folded, slice 24): the openPanes write is where a pane can
+    // leave the grid, so the maximized-id clear lives HERE (not in the generic
+    // updateActiveWorkspace, which rename etc. share) and lands in the same set
+    // as the removal. No-op / add / reorder paths leave `maximized` alone.
     setOpenPanes: (updater) =>
-      get().updateActiveWorkspace((w) => {
+      set((s) => {
+        if (s.workspaces.length === 0) return s;
+        const idx = s.workspaces.findIndex((w) => w.id === s.activeWorkspaceId);
+        const target = idx >= 0 ? idx : 0;
+        const w = s.workspaces[target];
         const next = typeof updater === 'function' ? updater(w.openPanes) : updater;
-        return next === w.openPanes ? w : { ...w, openPanes: next };
+        if (next === w.openPanes) return s;
+        const copy = [...s.workspaces];
+        copy[target] = { ...w, openPanes: next };
+        return {
+          workspaces: copy,
+          ...(s.maximized !== null && !next.includes(s.maximized) ? { maximized: null } : {}),
+        };
       }),
     setFocused: (value) =>
       get().updateActiveWorkspace((w) => {
@@ -1237,6 +1294,7 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         if (!needsFocus && sameActive) return s;
         return {
           activeWorkspaceId: workspaceId,
+          ...clearMaximizedOnMove(s, workspaceId),
           ...(needsFocus
             ? { workspaces: s.workspaces.map((w) => (w.id === workspaceId && w.focused !== paneId ? { ...w, focused: paneId } : w)) }
             : {}),
@@ -2017,6 +2075,18 @@ export function useSetFocused(): (value: string | null | ((f: string | null) => 
 
 export function useRevealPane(): (workspaceId: string, paneId: string, focus: boolean) => void {
   return useUiStore((s) => s.revealPane);
+}
+
+/**
+ * The maximized pane id (WARDEN-1530, slice 24) — NOT persisted. Primitive
+ * selector, so subscribers re-render only on a real change.
+ */
+export function useMaximized(): string | null {
+  return useUiStore((s) => s.maximized);
+}
+
+export function useSetMaximized(): (value: string | null | ((m: string | null) => string | null)) => void {
+  return useUiStore((s) => s.setMaximized);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
