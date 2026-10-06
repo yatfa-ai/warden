@@ -21,7 +21,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useDefaultShell, useDefaultShellByHost, useTheme, useDensity, useAutoFocusNewPane, useRestoreOnStartup, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
+import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -108,18 +108,14 @@ function App() {
   // persist — so for the whole session persistUiState carries the on-disk workspace
   // forward (even after flipping back to "Reopen previous"), never the live arrays.
   const startedEmpty = uiState.restoreOnStartup === 'empty';
-  // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the LIVE "restore on startup"
-  // pref migrated onto the shared store (see the appearance family below) —
-  // AppearanceSection subscribes; App subscribes to keep the persistence
-  // argument + reset partition whole. The two `uiState.restoreOnStartup` reads
-  // that BRACKET this pair are deliberately NOT migrated with it, and reading
-  // them as leftovers is the trap: both are BOOT facts about what this launch
-  // started as, which the live pref stops being the moment the user flips it.
-  // `startedEmpty` must stay pinned to the at-launch value for the whole
-  // session (that is the comment above), and the store's `initialWorkspace` call
-  // resolves the opening workspace from the DISK payload before React renders anything.
-  // Where the LIVE pref lives is independent of both.
-  const restoreOnStartup = useRestoreOnStartup();
+  // WARDEN-1420 (roadmap WARDEN-1204 slice 12) / WARDEN-1600 (slice 35): the
+  // LIVE "restore on startup" pref lives on the shared store; AppearanceSection
+  // and useConfigPersistence subscribe, App does NOT. The `uiState.restoreOnStartup`
+  // read above is deliberately NOT migrated with it: it is a BOOT fact about what
+  // this launch started as, which the live pref stops being the moment the user
+  // flips it. `startedEmpty` must stay pinned to the at-launch value for the whole
+  // session, and the store's `initialWorkspace` call resolves the opening workspace
+  // from the DISK payload before React renders anything.
   // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed live INSIDE
   // per-workspace pane-sets. The active workspace's panes are what render in the
   // grid; switching activeWorkspaceId swaps the grid instantly. paneHost stays
@@ -348,8 +344,8 @@ function App() {
   // to the backend. Gates the setFocused call in openChat below. See WARDEN-274.
   //
   // WARDEN-1420 (slice 12): migrated onto the shared store with the rest of the
-  // appearance family (see theme above).
-  const autoFocusNewPane = useAutoFocusNewPane();
+  // appearance family (see theme above). WARDEN-1600 (slice 35): App no longer
+  // subscribes — openChat reads it at call time via uiStore.getState().
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above) — PaneTile and AppearanceSection subscribe. Since WARDEN-1471
   // (slice 16) App keeps only the SETTER (the reset partition); the value
@@ -527,13 +523,14 @@ function App() {
   // launches its own login shell. Pure client-side pref (like the new-chat prefs
   // above): persisted by the saveUi effect below, never sent to the backend.
   // Store-backed since WARDEN-1383 (slice 8) like the rest of the spawn family.
-  const defaultShell = useDefaultShell();
+  // WARDEN-1600 (slice 35): App does not subscribe — spawnShell reads it at call
+  // time via uiStore.getState(), so a Settings toggle never re-renders App.
   // Per-host default-shell overrides (WARDEN-429 — mirrors the cwd/preset maps
   // above). Keys are host strings ('(local)' / SSH host name); a host with no
   // entry (or an empty value, dropped on load) falls through to defaultShell,
   // then blank (host login shell). Pure client-side pref like defaultShell
   // above: persisted by the saveUi effect below, never sent to the backend.
-  const defaultShellByHost = useDefaultShellByHost();
+  // (call-time read in spawnShell too, WARDEN-1600.)
   // "Remember window position and size" is an Electron-main-owned pref, NOT a
   // renderer localStorage pref like the ones above: the OS window bounds must be
   // readable at createWindow() time (before this renderer loads), so the flag +
@@ -812,7 +809,6 @@ function App() {
   // refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so the deps
   // are initialized (no TDZ).
   const { handleConfigChange } = useConfigPersistence({
-    restoreOnStartup,
     startedEmpty,
     refresh,
     reloadNotificationPrefs,
@@ -1010,9 +1006,10 @@ function App() {
   // pane in some workspace we switch there + focus it instead of duplicating it
   // in the active workspace. The focus calls are gated behind autoFocusNewPane
   // (WARDEN-274): when OFF, the pane still opens but the currently focused pane is
-  // preserved (click-to-focus still works via xterm's native focus). Adding
-  // autoFocusNewPane to the deps rebuilds this callback (and its callers) when
-  // the pref toggles — a rare, deliberate action.
+  // preserved (click-to-focus still works via xterm's native focus).
+  // autoFocusNewPane is a CALL-TIME read (uiStore.getState(), WARDEN-1600 slice
+  // 35): App never subscribes, so toggling it neither re-renders App nor rebuilds
+  // this callback — the next open simply honors the current value.
   //
   // WARDEN-417: openChat is the single chokepoint every "open a chat" path funnels
   // through (sidebar, OS-watch-toast click, search, observer suggestion, catch-up
@@ -1043,7 +1040,8 @@ function App() {
     if (anchor) setExternalSearchQuery({ paneId: id, query: anchor });
     // Search EVERY workspace for an existing pane with this id. If it's already
     // open elsewhere, switch to that workspace + focus it (no duplicate pane).
-    const owner = uiStore.getState().workspaces.find((w) => w.openPanes.includes(id));
+    const { workspaces: allWorkspaces, autoFocusNewPane } = uiStore.getState();
+    const owner = allWorkspaces.find((w) => w.openPanes.includes(id));
     if (owner) {
       revealPane(owner.id, id, autoFocusNewPane);
       // WARDEN-1422 (QA round 5): resume = "click reconnects to the live tmux
@@ -1062,7 +1060,7 @@ function App() {
     // Otherwise add to the active workspace + focus it.
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     if (autoFocusNewPane) setFocused(id);
-  }, [autoFocusNewPane, setOpenPanes, setFocused, revealPane, bumpReconnectToken, setExternalSearchQuery]);
+  }, [setOpenPanes, setFocused, revealPane, bumpReconnectToken, setExternalSearchQuery]);
 
   // WARDEN-417 / WARDEN-476: in-app catch-up for per-chat watch pings that fired while
   // the human was away (the OS notification was unsupported / denied / cleared / lost).
@@ -1269,6 +1267,7 @@ function App() {
   // The user's per-host default-shell preference still decides WHICH shell when
   // set; blank = the host's own login shell (the WARDEN-223 semantics).
   const spawnShell = useCallback(async (host: string, cwd: string, name?: string) => {
+    const { defaultShell, defaultShellByHost } = uiStore.getState();
     const cmd = (defaultShellByHost[host] ?? defaultShell ?? '').trim();
     // The name rides as `name` ONLY: the server derives the tmux session id
     // from it (the raw text may carry spaces — "release train 0.1.75") and
@@ -1309,7 +1308,7 @@ function App() {
     primePaneHost(paneId, hostOf);
     openChat(paneId);
     return true;
-  }, [defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors, primePaneHost]);
+  }, [refresh, openChat, prefs.notifyErrors, primePaneHost]);
 
   // A split shell is an UNNAMED shell: temporary, never listed (WARDEN-1422).
   const handleSplitShell = useCallback(async (id?: string) => {
