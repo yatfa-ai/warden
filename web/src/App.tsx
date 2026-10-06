@@ -2164,8 +2164,6 @@ function App() {
               chats={chats}
               tempChats={tempChats}
               hosts={hosts}
-              recentlyClosed={activeWorkspace?.recentlyClosed ?? []}
-              focused={focused}
               onOpenChat={openChat}
               onSpawnShell={spawnShell}
               onSaveSession={saveClosedSession}

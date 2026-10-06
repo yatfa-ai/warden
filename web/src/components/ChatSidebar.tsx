@@ -30,9 +30,8 @@ import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import type { RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds } from '@/lib/uiStore';
+import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed } from '@/lib/uiStore';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
 import type { Chat, Collection } from '@/lib/types';
@@ -102,10 +101,6 @@ export interface ChatSidebarProps {
   tempChats: Chat[];
   /** Full host list: [THIS_MACHINE, ...sshHosts]. */
   hosts: string[];
-  /** The active workspace's just-closed pane snapshots (accident-insurance flyout). */
-  recentlyClosed: RecentlyClosedEntry[];
-  /** The focused pane id — the Source Control panel re-points to this pane's repo. */
-  focused?: string | null;
   onOpenChat: (id: string) => void;
   /** Start a shell: (host, cwd, name?) — name absent = temporary (never listed). */
   onSpawnShell: (host: string, cwd: string, name?: string) => Promise<boolean>;
@@ -132,12 +127,16 @@ export interface ChatSidebarProps {
 type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection };
 
 export function ChatSidebar({
-  chats, tempChats, hosts, recentlyClosed, focused, onOpenChat, onSpawnShell, onSaveSession,
+  chats, tempChats, hosts, onOpenChat, onSpawnShell, onSaveSession,
   onReopenClosed, onRespawn, onKill, onRename, onRefresh, onDiscoverHost, loading,
   hostStatuses, discoverErrors, pollIntervalMs,
 }: ChatSidebarProps) {
   // ids just saved from the closed-temp flyout — the one-shot "saved" pill (store-owned, WARDEN-1552).
   const recentlySavedIds = useRecentlySavedIds();
+  // Store-owned (WARDEN-1580): the focused pane id (Source Control panel re-points to its repo) and the
+  // active workspace's just-closed pane snapshots (accident-insurance flyout).
+  const focused = useFocused();
+  const recentlyClosed = useRecentlyClosed();
   const [view, setView] = useState<SidebarView>({ kind: 'root' });
   const [flyoutOpen, setFlyoutOpen] = useState(false);
   // ONE live search per the design: the header field IS the filter, on every
