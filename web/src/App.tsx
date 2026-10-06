@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -178,6 +178,8 @@ function App() {
   const setOpenPanes = useSetOpenPanes();
   const setFocused = useSetFocused();
   const setMaximized = useSetMaximized();
+  const markPaneActivity = useMarkPaneActivity();
+  const clearPaneActivity = useClearPaneActivity();
   const revealPane = useRevealPane();
   const dropRecentlyClosed = useDropRecentlyClosed();
   // In-flight optimistic mutations. The catalog merge in applyCatalog() would
@@ -194,7 +196,6 @@ function App() {
   // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
   // hosts rather than the whole fleet.
   const discoveredHostsRef = useRef<Set<string>>(new Set());
-  const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
   const [activitySinceClose, setActivitySinceClose] = useState<any>(null);
   // WARDEN-436: the return banner now surfaces the ranked "you're needed HERE"
@@ -638,7 +639,7 @@ function App() {
     streamApi.onClose = () => setStreamConn(false);
     streamApi.onAnyMessage = (m) => {
       if (m.type === 'pty' && m.id !== focusedRef.current) {
-        setNewActivity((prev) => { if (prev.has(m.id)) return prev; const n = new Set(prev); n.add(m.id); return n; });
+        markPaneActivity(m.id);
       }
     };
     streamApi.connect();
@@ -709,7 +710,7 @@ function App() {
 
   // clear "new" badge when a pane becomes focused
   useEffect(() => {
-    if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
+    if (focused) clearPaneActivity(focused);
   }, [focused]);
 
   // Per-agent "lastSeen" stamp (WARDEN-356): the moment a pane is focused is the
@@ -1596,7 +1597,6 @@ function App() {
     getFeatureUsageSampler().sampler.recordFeatureUse('pane-maximize');
     setMaximized((m) => (m === id ? null : id));
   }, [setMaximized]);
-  const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
 
   // The destructive-action gate BOTH kill machines consult. One predicate, two
   // useConfirmTarget call sites below — the close-workspace machine deliberately
@@ -2219,12 +2219,10 @@ function App() {
         <section className="flex-1 min-h-0 min-w-0">
           <PaneGrid
             tiles={tiles}
-            newActivity={newActivity}
             chats={[...chats, ...tempChats]}
             onFocus={setFocused}
             onClose={closePane}
             onToggleMax={toggleMax}
-            onClearNew={clearNew}
             onForceKill={forceKill}
             onSplitShell={handleSplitShell}
             onSpawned={handlePaneSpawned}

@@ -600,6 +600,22 @@ export interface UiStoreState {
   /** Value-or-functional write of `maximized` (identity-preserving on an identical value). Writes state only. */
   setMaximized: (value: string | null | ((m: string | null) => string | null)) => void;
   /**
+   * Panes (by id) that received PTY output while NOT focused (WARDEN-1547,
+   * roadmap WARDEN-1204 slice 27) — the cyan "new" pill. The second NON-persisted
+   * session fact (like `maximized`): NOT a STORE_PERSISTED_KEYS member, never
+   * seeded from disk; a relaunch starts with no badges. Treated as immutable —
+   * every change copies the Set, and a no-op write keeps the identical Set.
+   */
+  newActivity: ReadonlySet<string>;
+  /**
+   * Flag `id` as having new output. A full no-op (returns the SAME state object)
+   * when `id` is the ACTIVE workspace's focused pane (the focused pane never
+   * gets the badge) or is already flagged.
+   */
+  markPaneActivity: (id: string) => void;
+  /** Clear `id`'s flag. A full no-op (same state object) when it is not flagged. */
+  clearPaneActivity: (id: string) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -1153,6 +1169,24 @@ export function createUiStore(seed: UiStoreSeed = {}) {
       set((s) => {
         const next = typeof value === 'function' ? value(s.maximized) : value;
         return next === s.maximized ? s : { maximized: next };
+      }),
+    // WARDEN-1547 (slice 27): the not-persisted unfocused-output badge set.
+    // Initial empty — never seeded (a relaunch starts with no badges).
+    newActivity: new Set<string>(),
+    markPaneActivity: (id) =>
+      set((s) => {
+        if (s.newActivity.has(id)) return s;
+        if (selectActiveWorkspace(s)?.focused === id) return s;
+        const n = new Set(s.newActivity);
+        n.add(id);
+        return { newActivity: n };
+      }),
+    clearPaneActivity: (id) =>
+      set((s) => {
+        if (!s.newActivity.has(id)) return s;
+        const n = new Set(s.newActivity);
+        n.delete(id);
+        return { newActivity: n };
       }),
     // WARDEN-256 (folded, slice 24): every action below that changes the active
     // id clears `maximized` in the SAME set — guarded on an actual id MOVE.
@@ -2016,6 +2050,22 @@ export function useMaximized(): string | null {
 
 export function useSetMaximized(): (value: string | null | ((m: string | null) => string | null)) => void {
   return useUiStore((s) => s.setMaximized);
+}
+
+/**
+ * The unfocused-output badge set (WARDEN-1547, slice 27) — NOT persisted. The
+ * Set reference only changes on a real add/remove, so subscribers re-render only then.
+ */
+export function usePaneActivity(): ReadonlySet<string> {
+  return useUiStore((s) => s.newActivity);
+}
+
+export function useMarkPaneActivity(): (id: string) => void {
+  return useUiStore((s) => s.markPaneActivity);
+}
+
+export function useClearPaneActivity(): (id: string) => void {
+  return useUiStore((s) => s.clearPaneActivity);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
