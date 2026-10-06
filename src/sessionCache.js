@@ -52,7 +52,7 @@
 // ever had to express: a slot that has not been filled. On THIS path that state
 // is dangerous, because an empty session list is rendered by the client as the
 // confident sentence "Nothing runnable on the selected hosts yet"
-// (web/src/lib/allSessionsApi.ts). Serving a cold slot as `sessions: []` would
+// (the since-removed web/src/lib/allSessionsApi.ts). Serving a cold slot as `sessions: []` would
 // re-create the exact WARDEN-89 / WARDEN-1200 false-empty defect that two
 // finished tickets just removed — a factual claim about the user's machines,
 // made because we had not looked yet.

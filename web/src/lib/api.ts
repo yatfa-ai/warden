@@ -404,7 +404,7 @@ export interface ResponseRead {
  *   `[]` unconditionally and got DISCARDED; `field: 'diff'` was passed only so the
  *   reader's signature was honoured. A parameter that exists to be ignored is the
  *   clearest sign the abstraction was missing.
- * - `allSessionsApi.ts` (WARDEN-1188) — a real list PLUS `hasMore`, so the reader
+ * - `allSessionsApi.ts` (WARDEN-1188; module since removed) — a real list PLUS `hasMore`, so the reader
  *   served half the payload and the scalar was re-read off the body by hand. Its
  *   own comment cites WARDEN-1187 by name.
  *
