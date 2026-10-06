@@ -589,3 +589,64 @@ describe('renameSession — a $-bearing name is written literally, not as a repl
     assert.strictEqual(fs.readFileSync(mdPath('p7'), 'utf8'), `# plain rename\n${BODY}`);
   });
 });
+
+// WARDEN-1577: session ids reach this module from client-controlled input
+// (PATCH/DELETE /api/sessions/:id, /api/observe?sid=). jsonPath/mdPath are the
+// single choke point; an id outside [A-Za-z0-9_-]{1,64} must never reach the FS.
+describe('invalid session ids are rejected at the path choke point (WARDEN-1577)', () => {
+  const BAD_IDS = ['../config', 'a/b', '..', 'a.b', '', 'x'.repeat(65)];
+  let parent; // the directory ABOVE sessions/ — where traversal would land
+  const SENTINEL_BODY = '{"webhook":"secret-token"}\n';
+  const sentinelPath = (name) => path.join(parent, name);
+  const snapshotParent = () => fs.readdirSync(parent).sort().map((f) => {
+    const p = path.join(parent, f);
+    return [f, fs.statSync(p).isFile() ? fs.readFileSync(p, 'utf8') : '<dir>'];
+  });
+
+  beforeEach(() => {
+    parent = path.dirname(sessionsDir);
+    fs.writeFileSync(sentinelPath('config.json'), SENTINEL_BODY);
+    fs.writeFileSync(sentinelPath('b.json'), SENTINEL_BODY);
+    fs.writeFileSync(sentinelPath('b.md'), SENTINEL_BODY);
+  });
+
+  it('isValidSessionId accepts server-minted and test ids, rejects the rest', () => {
+    for (const ok of ['a1b2c3d4e5f6', 'torn-a', 'r1', 'a_b-C', 'x'.repeat(64)]) {
+      assert.strictEqual(mod.isValidSessionId(ok), true, ok);
+    }
+    for (const bad of [...BAD_IDS, null, undefined, 5, {}, ['a']]) {
+      assert.strictEqual(mod.isValidSessionId(bad), false, String(bad));
+    }
+  });
+
+  it('every export refuses a bad id and leaves the parent dir byte-identical', async () => {
+    const before = snapshotParent();
+    const sessionsBefore = fs.readdirSync(sessionsDir);
+    for (const id of BAD_IDS) {
+      assert.strictEqual(mod.getSession(id), null, `getSession(${id})`);
+      assert.strictEqual(await mod.getSessionAsync(id), null, `getSessionAsync(${id})`);
+      assert.strictEqual(await mod.renameSession(id, 'pwn'), null, `renameSession(${id})`);
+      await mod.deleteSession(id); // no-op, must not throw
+      await assert.rejects(() => mod.saveMessages(id, [{ role: 'user', content: 'x' }]), /invalid session id/, `saveMessages(${id})`);
+      await assert.rejects(() => mod.appendTranscript(id, 'user', 'x'), /invalid session id/, `appendTranscript(${id})`);
+    }
+    assert.deepStrictEqual(snapshotParent(), before, 'nothing outside sessions/ was created, modified or removed');
+    assert.deepStrictEqual(fs.readdirSync(sessionsDir), sessionsBefore, 'nothing was created inside sessions/ either');
+    assert.strictEqual(fs.readFileSync(sentinelPath('config.json'), 'utf8'), SENTINEL_BODY);
+  });
+
+  it('a traversal id that names an existing sibling file cannot rename or delete it', async () => {
+    await mod.deleteSession('../b');
+    await mod.renameSession('../b', 'pwn');
+    assert.strictEqual(fs.readFileSync(sentinelPath('b.json'), 'utf8'), SENTINEL_BODY);
+    assert.strictEqual(fs.readFileSync(sentinelPath('b.md'), 'utf8'), SENTINEL_BODY);
+  });
+
+  it('valid ids still round-trip', async () => {
+    const s = await mod.createSession('ok');
+    assert.match(s.id, /^[0-9a-f]{12}$/);
+    assert.strictEqual((await mod.renameSession(s.id, 'renamed')).name, 'renamed');
+    await mod.deleteSession(s.id);
+    assert.strictEqual(mod.getSession(s.id), null);
+  });
+});

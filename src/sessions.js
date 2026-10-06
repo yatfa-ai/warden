@@ -9,8 +9,20 @@ import {
 } from './persist.js';
 
 const DIR = path.join(os.homedir(), '.yatfa-warden', 'sessions');
-const jsonPath = (id) => path.join(DIR, `${id}.json`);
-const mdPath = (id) => path.join(DIR, `${id}.md`);
+// Session ids reach this module from client-controlled input (PATCH/DELETE
+// /api/sessions/:id — Express decodes %2F — and the /api/observe?sid= WebSocket),
+// so an unvalidated id could path.join its way out of DIR (WARDEN-1577). Server-
+// minted ids are 12 hex chars; the allow-list admits no `.` or `/`.
+export function isValidSessionId(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+}
+// The SINGLE choke point: every FS sink in this module builds its path through
+// jsonPath/mdPath, so an invalid id can never reach the filesystem.
+function assertSessionId(id) {
+  if (!isValidSessionId(id)) throw new Error('invalid session id');
+}
+const jsonPath = (id) => { assertSessionId(id); return path.join(DIR, `${id}.json`); };
+const mdPath = (id) => { assertSessionId(id); return path.join(DIR, `${id}.md`); };
 const ensureDir = () => fs.promises.mkdir(DIR, { recursive: true });
 
 // Async + durable (WARDEN-831): JSON files are written atomically (temp + fsync +
@@ -58,6 +70,7 @@ export async function listSessions() {
 // is backed up rather than silently swallowed. Runtime/request paths use the async
 // twin below (WARDEN-1218) — do not widen this one onto them.
 export function getSession(id) {
+  if (!isValidSessionId(id)) return null;
   return readJsonDefensiveSync(jsonPath(id), { fallback: null });
 }
 
@@ -68,6 +81,7 @@ export function getSession(id) {
 // no longer grows with conversation length on the per-turn save. getSession stays
 // sync for the Observer constructor's start-up read, which cannot await.
 export async function getSessionAsync(id) {
+  if (!isValidSessionId(id)) return null;
   return readJsonDefensive(jsonPath(id), { fallback: null });
 }
 
@@ -89,6 +103,7 @@ export async function createSession(name, { host, container, project, role, chat
 }
 
 export async function renameSession(id, name) {
+  if (!isValidSessionId(id)) return null;
   const s = await getSessionAsync(id);
   if (!s) return null;
   s.name = name;
@@ -109,6 +124,7 @@ export async function renameSession(id, name) {
 }
 
 export async function deleteSession(id) {
+  if (!isValidSessionId(id)) return;
   await removeFile(jsonPath(id));
   await removeFile(mdPath(id));
 }
