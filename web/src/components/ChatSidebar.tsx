@@ -35,7 +35,6 @@ import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds } from '@/lib/uiStore';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
-import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { Chat, Collection } from '@/lib/types';
 import type { GitCommit } from './sidebar/types';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
@@ -46,6 +45,9 @@ import { SpawnControl } from './sidebar/SpawnControl';
 import { HostsSection } from './sidebar/HostsSection';
 import { RecentlyClosedFlyout } from './sidebar/RecentlyClosedFlyout';
 import { SavedSessionRow, SavedRowSkeleton, splitSaved, byRecencyDesc } from './sidebar/SavedSessionRows';
+
+// Default commit window for /api/git-log fetches; matches the server-side cap (50).
+const GIT_LOG_FETCH_LIMIT = 50;
 
 // Query-string builders (module-level so the fetchers' useCallback deps stay stable).
 // incoming/outgoing ignore the limit arg — their limit is hardcoded at 50.
@@ -69,7 +71,7 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
   label: string;
   buildParams: (limit: number) => string;
 }) {
-  return useCallback(async (chatId: string, limit: number = WHATS_NEW_FETCH_LIMIT) => {
+  return useCallback(async (chatId: string, limit: number = GIT_LOG_FETCH_LIMIT) => {
     setLoading((p) => ({ ...p, [chatId]: true }));
     setError((p) => ({ ...p, [chatId]: null }));
     try {

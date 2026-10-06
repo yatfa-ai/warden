@@ -16,8 +16,7 @@
 // Changes.
 //
 // Pure (no React, no @/ alias, zero imports) so it is unit-testable via
-// node --test + transformWithOxc, mirroring whatsNew.test.mjs /
-// gitStateSummary.test.mjs. TypeScript's structural typing makes a real
+// node --test + transformWithOxc, mirroring gitStateSummary.test.mjs. TypeScript's structural typing makes a real
 // GitFile[] (from @/components/sidebar/types) a valid GroupableFile[] at the
 // call site without this module importing that type.
 

@@ -1,7 +1,7 @@
 // Tests for stateDuration.ts — the pure "how long in current state" logic behind the
 // Attention badge's live duration suffix (WARDEN-587).
 //
-// No front-end test runner in this repo, so (like snooze.test.mjs / whatsNew.test.mjs)
+// No front-end test runner in this repo, so (like snooze.test.mjs)
 // this loads the REAL src/lib/stateDuration.ts (transpiled TS -> ESM via Vite's OXC
 // transform) and exercises it with plain values. The file has zero runtime imports, so
 // the emitted module loads standalone.
@@ -276,7 +276,7 @@ test('empty + single-row arrays are returned as-is', () => {
 });
 
 // ---------------------------------------------------------------------------
-// loadStateEnteredAt / saveStateEnteredAt — persistence (mirrors whatsNew)
+// loadStateEnteredAt / saveStateEnteredAt — persistence (mirrors the lastClose stamp discipline)
 // ---------------------------------------------------------------------------
 console.log('\nload/saveStateEnteredAt: round-trip + defensive handling');
 // A tiny localStorage mock so the I/O helpers can be exercised in Node.

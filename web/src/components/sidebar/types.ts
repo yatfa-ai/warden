@@ -2,8 +2,8 @@
 // (WARDEN-315). Pure structural move — no behavior change.
 
 // One row from /api/git-log (a parsed %h|%s|%an|%ar|%ct git log line). `epoch`
-// is git's %ct (committer date, UNIX seconds) — the exact timestamp the per-agent
-// "What's new since" since-filter compares against lastSeen (WARDEN-356).
+// is git's %ct (committer date, UNIX seconds) — an exact timestamp, unlike the coarse
+// relative `date`. (The per-agent "What's new since" filter that used it was removed.)
 // Optional so a stale pre-%ct cache entry degrades safely.
 export type GitCommit = { hash: string; subject: string; author: string; date: string; epoch?: number };
 

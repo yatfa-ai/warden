@@ -63,7 +63,7 @@ export interface WatchCatchupState {
  * even though the recovery resolved a moment after the synchronous visibility re-read
  * (WARDEN-476).
  *
- * Ack mirrors whatsNew's lastSeen-stamp-on-visit so an acknowledged alert never
+ * Ack-on-visit (the pattern the removed whatsNew lastSeen stamp used) means an acknowledged alert never
  * recurs as stale noise. There are THREE ack paths, all funneling through one
  * per-key clear (ackKey): (1) opening a watched chat via ANY path drops just that
  * chat's misses — ackKey is wired at App's openChat chokepoint, so the sidebar, the
