@@ -32,7 +32,7 @@ import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import type { RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed } from '@/lib/uiStore';
+import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds } from '@/lib/uiStore';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
 import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
@@ -123,8 +123,6 @@ export interface ChatSidebarProps {
   hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
   /** Per-host discovery failure reason (the unreachable state's "⟨reason⟩"). */
   discoverErrors: Record<string, string>;
-  /** ids just saved from the closed-temp flyout — the one-shot "saved" pill. */
-  recentlySavedIds: Set<string>;
   /** Forward poll cadence to the FileViewer (unchanged from the pre-rebuild sidebar). */
   pollIntervalMs: number;
 }
@@ -134,8 +132,10 @@ type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: '
 export function ChatSidebar({
   chats, tempChats, hosts, recentlyClosed, focused, onOpenChat, onSpawnShell, onSaveSession,
   onReopenClosed, onRespawn, onKill, onRename, onRefresh, onDiscoverHost, loading,
-  hostStatuses, discoverErrors, recentlySavedIds, pollIntervalMs,
+  hostStatuses, discoverErrors, pollIntervalMs,
 }: ChatSidebarProps) {
+  // ids just saved from the closed-temp flyout — the one-shot "saved" pill (store-owned, WARDEN-1552).
+  const recentlySavedIds = useRecentlySavedIds();
   const [view, setView] = useState<SidebarView>({ kind: 'root' });
   const [flyoutOpen, setFlyoutOpen] = useState(false);
   // ONE live search per the design: the header field IS the filter, on every
