@@ -965,6 +965,9 @@ export function selectActiveWorkspace(state: Pick<UiStoreState, 'workspaces' | '
   return state.workspaces.find((w) => w.id === state.activeWorkspaceId) ?? state.workspaces[0] ?? null;
 }
 
+/** Lifetime of a "just saved" sidebar pill marker (WARDEN-1552). */
+export const RECENTLY_SAVED_TTL_MS = 30_000;
+
 /**
  * Build an INDEPENDENT store instance.
  *
@@ -972,9 +975,6 @@ export function selectActiveWorkspace(state: Pick<UiStoreState, 'workspaces' | '
  * clean slice — that isolation is the whole reason this is a factory rather
  * than a bare module-level `create()`.
  */
-/** Lifetime of a "just saved" sidebar pill marker (WARDEN-1552). */
-export const RECENTLY_SAVED_TTL_MS = 30_000;
-
 export function createUiStore(seed: UiStoreSeed = {}) {
   // ONE persisted read per store instance, shared by every seeded fact — the
   // same single `loadUi()` App does for its own lazy initializers.
