@@ -27,9 +27,10 @@ import {
   useTerminalCursorStyle,
   useCopyOnSelect,
   useOnExitBehavior,
+  useTerminalThemeId,
 } from '@/lib/uiStore';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
-import { getThemeById, type ThemeId } from '@/lib/themes';
+import { getThemeById } from '@/lib/themes';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
@@ -219,16 +220,10 @@ interface Props {
   // PaneTile is both a reader (xterm options, effects, the dim overlay) and a
   // WRITER (the A−/A+ toolbar buttons + context-menu entries) of these facts;
   // persistence is unchanged (App's compile-locked saveUi effect via its
-  // snapshot subscription). `terminalThemeId` STAYS a prop: it is DERIVED per
-  // render (App resolves terminalColorScheme + the active theme) so an OS
-  // theme flip can re-theme open panes live — exactly the shape a store field
-  // must not duplicate.
-  //
-  // Resolved terminal theme id (App resolves the terminalColorScheme pref + the
-  // active theme down to a concrete named-theme id here). Drives the xterm
-  // `theme` option (looked up from the registry) + the container background, and
-  // re-themes already-open panes live via the [terminalThemeId] effect below.
-  terminalThemeId: ThemeId;
+  // snapshot subscription). WARDEN-1574 (slice 31): the resolved terminal
+  // theme id stopped being a prop too — it is the store's derived
+  // `useTerminalThemeId()` (terminalColorScheme folded over the NON-persisted
+  // OS-resolved theme id), subscribed to directly below.
   // Show the host tag in the pane header (WARDEN-290). Mirrors the sidebar's
   // showHostTags preference (WARDEN-37) onto the pane surface so a cross-host
   // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
@@ -268,7 +263,7 @@ interface Props {
 // it may probe again (see existsFailedAtRef).
 const EXISTS_FAILURE_COOLDOWN_MS = 15_000;
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs, reconnectToken, onPhaseChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs, reconnectToken, onPhaseChange }: Props) {
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
   // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
@@ -531,6 +526,10 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const notifyErrorsRef = useRef(prefs.notifyErrors);
   notifyErrorsRef.current = prefs.notifyErrors;
 
+  // The concrete terminal theme id (WARDEN-1574, slice 31): the store's derived
+  // selector — the terminalColorScheme pref folded over the OS-resolved app
+  // theme. A string, so this pane re-renders only when the id actually changes.
+  const terminalThemeId = useTerminalThemeId();
   // The xterm palette + container background for this pane's resolved terminal
   // theme, looked up from the named-theme registry (one palette per theme). The
   // fallback to the GitHub Dark palette only fires for an unknown id (a programming
@@ -1175,13 +1174,13 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // to one fit per frame and one PTY resize once it settles.
   useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; termRef.current.options.fontFamily = safeFontFamily; fitSchedulerRef.current?.request(); } }, [safeFontSize, safeScrollback, safeFontFamily]);
 
-  // terminal theme (App-resolved terminalColorScheme + active theme) — re-theme
+  // terminal theme (store-derived terminalColorScheme + active theme) — re-theme
   // already-open panes live without a reopen, mirroring the font-size/scrollback
   // live effect. Fires on mount (initial paint already happened via the ctor, but
   // this also covers the first render) and whenever the resolved theme id changes
   // — including a manual theme pick, the Terminal color scheme pref, or an OS
-  // theme flip while the app theme = "System" (App tracks a resolvedThemeId
-  // React state so the prop actually changes here).
+  // theme flip while the app theme = "System" (App writes the store's
+  // resolvedThemeId, so the useTerminalThemeId() value changes here).
   useEffect(() => { if (termRef.current) { termRef.current.options.theme = terminalPalette; fitSchedulerRef.current?.request(); } }, [terminalPalette]);
 
   // cursor style + blink — live-update already-open panes so a `steady-*`

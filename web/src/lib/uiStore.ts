@@ -88,6 +88,7 @@ import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
 import type { Theme, TerminalColorScheme } from '@/lib/theme';
+import { resolveSystemThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/themes';
 import type { Density } from '@/lib/density';
 
 /**
@@ -321,7 +322,8 @@ export interface UiStoreState {
    * component — was its only runtime reader. That is SUPERSEDED, not
    * contradicted: once the family moves, a UiState pref still riding a props
    * bag IS the second sharing channel this direction exists to end, and App
-   * keeps reading it here (via the hook) to derive `terminalThemeId`.
+   * AppearanceSection is its writer; the derived terminal theme id is the
+   * `selectTerminalThemeId` store selector (WARDEN-1574).
    *
    * Every one of the six is pure client localStorage — shared + persisted
    * client state, WARDEN-832 row 2 — and persistence is unchanged: App keeps
@@ -373,10 +375,11 @@ export interface UiStoreState {
   setRestoreOnStartup: (v: RestoreOnStartup) => void;
   /**
    * Terminal color scheme — 'auto' (follow the effective app theme) |
-   * 'dark' | 'light'. Read by App, which resolves it together with
-   * `resolvedThemeId` into the concrete `terminalThemeId` PaneTile repaints
-   * from (that derivation stays an App-computed prop so an OS theme flip
-   * re-themes open panes live); AppearanceSection is its only writer.
+   * 'dark' | 'light'. Folded together with `resolvedThemeId` by the
+   * `selectTerminalThemeId` selector into the concrete terminal theme id
+   * PaneTile repaints from (WARDEN-1574, slice 31 — PaneTile subscribes
+   * directly, so an OS theme flip re-themes open panes live);
+   * AppearanceSection is its only writer.
    */
   terminalColorScheme: TerminalColorScheme;
   /** Set the terminal color scheme. The persisted write follows via useConfigPersistence's merged snapshot. */
@@ -652,6 +655,22 @@ export interface UiStoreState {
    */
   externalSearchQuery: Readonly<{ paneId: string; query: string }> | null;
   setExternalSearchQuery: (v: { paneId: string; query: string } | null) => void;
+  /**
+   * The concrete theme id the app theme currently resolves to (roadmap
+   * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
+   * now, or the chosen theme id itself. The sixth NON-persisted session fact:
+   * NOT a STORE_PERSISTED_KEYS member (it is derivable from `theme` + the OS),
+   * not in loadUi/DEFAULT_UI/the reset partition, never seeded from disk. The
+   * store factory is DOM-free: the initial value is a PURE mapping of the
+   * seeded `theme` pref (a concrete id passes through; 'system' takes the dark
+   * placeholder `resolveSystemThemeId(true)`), and App's [theme] effect — the
+   * only writer — overwrites it with the real OS-resolved id on mount and on
+   * every OS appearance flip. Read through `selectTerminalThemeId` /
+   * `useTerminalThemeId` (which fold in `terminalColorScheme`).
+   */
+  resolvedThemeId: ThemeId;
+  /** Set the OS-resolved concrete theme id (App's [theme] effect is the only writer). */
+  setResolvedThemeId: (v: ThemeId) => void;
   /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
@@ -1015,6 +1034,8 @@ export function createUiStore(seed: UiStoreSeed = {}) {
   // activeWorkspaceId and paneHost must all come from this single result — a
   // second call would desync the active id from the list. The restoreOnStartup
   // fed in is the one THIS store seeds for itself.
+  const seededTheme: Theme = seed.theme ?? persisted.theme ?? 'system';
+  const seededResolvedThemeId: ThemeId = seededTheme === 'system' ? resolveSystemThemeId(true) : seededTheme;
   const initWs = initialWorkspace(persisted, seed.restoreOnStartup ?? persisted.restoreOnStartup ?? 'previous');
   return createStore<UiStoreState>()((set, get) => ({
     snippets: seed.snippets ?? persisted.snippets ?? [],
@@ -1102,7 +1123,7 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // `?? true`, `?? 'previous'`, `?? 'auto'`). loadUi's own sanitizers already
     // normalize a persisted payload, so there is no terminalFontFamily-style
     // truthiness exception here either.
-    theme: seed.theme ?? persisted.theme ?? 'system',
+    theme: seededTheme,
     setTheme: (theme) => set({ theme }),
     density: seed.density ?? persisted.density ?? 'comfortable',
     setDensity: (density) => set({ density }),
@@ -1256,6 +1277,11 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // null — never seeded; the setter stores the passed object as-is.
     externalSearchQuery: null,
     setExternalSearchQuery: (externalSearchQuery) => set({ externalSearchQuery }),
+    // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
+    // seed — a pure mapping of the theme pref ('system' → dark placeholder that
+    // App's [theme] effect overwrites on mount); never read from disk itself.
+    resolvedThemeId: seededResolvedThemeId,
+    setResolvedThemeId: (resolvedThemeId) => set({ resolvedThemeId }),
     // WARDEN-256 (folded, slice 24): every action below that changes the active
     // id clears `maximized` in the SAME set — guarded on an actual id MOVE.
     selectWorkspace: (activeWorkspaceId) =>
@@ -1741,7 +1767,7 @@ export function useSetWatchedChats(): (v: string[]) => void {
 // `paneLayout` instead of taking it as a prop from App — so the bag shrinks to
 // the three electron pairs and the App→PaneGrid pass site is gone. App
 // subscribes too (keep-local-names) for its [theme]/[density] effects, the
-// openChat focus gate, the terminalThemeId derivation, the persisted snapshot
+// openChat focus gate, the persisted snapshot
 // and resetSetters, as with every migrated fact. All six setters are stable
 // across renders (zustand actions are created once with the store), so they are
 // safe in React dependency arrays.
@@ -1749,7 +1775,7 @@ export function useSetWatchedChats(): (v: string[]) => void {
 /**
  * The app-wide theme pref (WARDEN-1420). App's [theme] effect keys on THIS
  * VALUE (not on the setter's identity), so the OS-flip repaint chain —
- * listenSystemThemeChange → setResolvedThemeId → terminalThemeId → PaneTile —
+ * listenSystemThemeChange → setResolvedThemeId → useTerminalThemeId → PaneTile —
  * is untouched by the migration.
  */
 export function useTheme(): Theme {
@@ -1809,9 +1835,8 @@ export function useSetRestoreOnStartup(): (v: RestoreOnStartup) => void {
 }
 
 /**
- * The terminal color scheme (WARDEN-1420). App reads it to derive
- * `terminalThemeId` (still a computed prop to PaneGrid → PaneTile, so an OS
- * theme flip re-themes open panes live).
+ * The terminal color scheme (WARDEN-1420). The derived terminal theme id is
+ * `useTerminalThemeId` below (WARDEN-1574) — PaneTile reads it from the store, not from a prop.
  */
 export function useTerminalColorScheme(): TerminalColorScheme {
   return useUiStore((s) => s.terminalColorScheme);
@@ -2164,6 +2189,27 @@ export function useBumpReconnectToken(): (id: string) => void {
 /** The pending search-jump command (WARDEN-1568, slice 30) — NOT persisted. */
 export function useExternalSearchQuery(): Readonly<{ paneId: string; query: string }> | null {
   return useUiStore((s) => s.externalSearchQuery);
+}
+
+/**
+ * The concrete terminal theme id (WARDEN-1574, slice 31): the terminal color
+ * scheme override folded over the OS-resolved app theme. A PRIMITIVE string
+ * selector, so a subscriber re-renders exactly when the id changes (the same
+ * granularity as the App → PaneGrid → PaneTile prop it replaces). PaneTile
+ * subscribes directly; an OS theme flip under 'auto' re-themes open panes live.
+ */
+export function selectTerminalThemeId(s: Pick<UiStoreState, 'terminalColorScheme' | 'resolvedThemeId'>): ThemeId {
+  return resolveTerminalThemeId(s.terminalColorScheme, s.resolvedThemeId);
+}
+
+/** The derived terminal theme id (WARDEN-1574) — NOT persisted. */
+export function useTerminalThemeId(): ThemeId {
+  return useUiStore(selectTerminalThemeId);
+}
+
+/** Stable-identity action: record the OS-resolved theme id (App's [theme] effect). */
+export function useSetResolvedThemeId(): (v: ThemeId) => void {
+  return useUiStore((s) => s.setResolvedThemeId);
 }
 
 /** Stable-identity action: raise (or clear with null) the search-jump command. */

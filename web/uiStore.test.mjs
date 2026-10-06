@@ -62,7 +62,7 @@ await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emit('src/lib/layout.ts', 'layout.mjs');
 await emit('src/lib/paneAttach.ts', 'paneAttach.mjs');
-await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs'));
+await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/themes', './themes.mjs'));
 // WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
 // erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
@@ -70,7 +70,7 @@ await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore, selectActiveWorkspace, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
@@ -3445,6 +3445,59 @@ test('externalSearchQuery is NOT persisted: STORE_PERSISTED_KEYS stays 39 and ex
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('externalSearchQuery' in loadUi()));
   assert.equal(createUiStore().getState().externalSearchQuery, null, 'never seeded');
+});
+
+// ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
+console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
+test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {
+  reset();
+  const s = createUiStore({ theme: 'dracula' });
+  s.getState().setResolvedThemeId('dracula');
+  s.getState().setTerminalColorScheme('dark');
+  assert.equal(selectTerminalThemeId(s.getState()), 'github-dark');
+  s.getState().setTerminalColorScheme('light');
+  assert.equal(selectTerminalThemeId(s.getState()), 'github-light');
+  s.getState().setTerminalColorScheme('auto');
+  assert.equal(selectTerminalThemeId(s.getState()), 'dracula');
+});
+test('setResolvedThemeId changes the selector under auto but not under a forced scheme', () => {
+  reset();
+  const s = createUiStore({ terminalColorScheme: 'auto' });
+  s.getState().setResolvedThemeId('github-light');
+  assert.equal(selectTerminalThemeId(s.getState()), 'github-light');
+  s.getState().setResolvedThemeId('dracula');
+  assert.equal(selectTerminalThemeId(s.getState()), 'dracula', 'OS flip under auto re-themes');
+  s.getState().setTerminalColorScheme('dark');
+  s.getState().setResolvedThemeId('github-light');
+  assert.equal(selectTerminalThemeId(s.getState()), 'github-dark', 'forced scheme ignores the flip');
+  assert.equal(s.getState().resolvedThemeId, 'github-light', 'the fact itself still moved');
+});
+test('resolvedThemeId is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded from disk or a previous store; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('resolvedThemeId'));
+  const s = createUiStore({ theme: 'system' });
+  s.getState().setResolvedThemeId('dracula');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('resolvedThemeId' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('resolvedThemeId' in loadUi()));
+  assert.equal(createUiStore({ theme: 'system' }).getState().resolvedThemeId, 'github-dark', 'never seeded from the previous store');
+});
+test('seeding is a pure mapping of the theme pref: concrete id passes through; system -> dark placeholder', () => {
+  reset();
+  assert.equal(createUiStore({ theme: 'dracula' }).getState().resolvedThemeId, 'dracula');
+  assert.equal(createUiStore({ theme: 'github-light' }).getState().resolvedThemeId, 'github-light');
+  assert.equal(createUiStore({ theme: 'system' }).getState().resolvedThemeId, 'github-dark');
+});
+test('resolvedThemeId is factory-isolated: one store\'s write never reaches another', () => {
+  reset();
+  const a = createUiStore({ theme: 'system' });
+  const b = createUiStore({ theme: 'system' });
+  a.getState().setResolvedThemeId('github-light');
+  assert.equal(b.getState().resolvedThemeId, 'github-dark');
+  assert.equal(selectTerminalThemeId(b.getState()), 'github-dark');
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

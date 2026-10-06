@@ -25,8 +25,9 @@
 // channel. Slice 3's note kept `terminalColorScheme` here because App (not a
 // component) was its only runtime reader; that is superseded rather than
 // contradicted — once the family moves, a UiState pref still riding a props bag
-// IS the second sharing channel this direction exists to end, and App still
-// reads the fact (via the store hook) to derive terminalThemeId.
+// IS the second sharing channel this direction exists to end. (Since WARDEN-1574
+// the derived terminal theme id is the store's useTerminalThemeId() selector,
+// which PaneTile subscribes to — App no longer reads the scheme at all.)
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
