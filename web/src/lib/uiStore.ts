@@ -2151,6 +2151,29 @@ export function useRecentlyClosed(): readonly RecentlyClosedEntry[] {
   return useUiStore(selectRecentlyClosed);
 }
 
+/**
+ * WARDEN-1591 (roadmap WARDEN-1204 slice 33): the single shared empty result for
+ * `selectOpenPanes`. MUST be a module-level constant — an inline `?? []` returns a
+ * fresh array on every read, a changed snapshot under zustand v5
+ * (useSyncExternalStore) that loops the re-render forever. Frozen so a consumer
+ * cannot mutate the shared value.
+ */
+const EMPTY_OPEN_PANES: readonly string[] = Object.freeze([]);
+
+/**
+ * The active workspace's open pane ids. Returns the real array reference when
+ * present (store actions replace it immutably, so identity changes only on a real
+ * change) and the frozen `EMPTY_OPEN_PANES` otherwise. Delegates to
+ * `selectActiveWorkspace` (dangling-id fallback to workspaces[0]).
+ */
+export function selectOpenPanes(state: Pick<UiStoreState, 'workspaces' | 'activeWorkspaceId'>): readonly string[] {
+  return selectActiveWorkspace(state)?.openPanes ?? EMPTY_OPEN_PANES;
+}
+
+export function useOpenPanes(): readonly string[] {
+  return useUiStore(selectOpenPanes);
+}
+
 export function useRevealPane(): (workspaceId: string, paneId: string, focus: boolean) => void {
   return useUiStore((s) => s.revealPane);
 }

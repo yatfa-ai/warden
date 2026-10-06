@@ -22,7 +22,7 @@ import { copyWithToast } from '@/lib/clipboardToast';
 import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
 import { fetchBounded, readErrorBody } from '@/lib/api';
 import { formatTimestamp } from '@/lib/formatTimestamp';
-import { useTimestampFormat } from '@/lib/uiStore';
+import { useOpenPanes, useTimestampFormat } from '@/lib/uiStore';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
@@ -56,7 +56,6 @@ interface SessionSearchResult {
 interface Props {
   open: boolean;
   onClose: () => void;
-  openPanes: string[];
   onFocusPane: (id: string) => void;
   onJumpToMatch: (id: string, query: string) => void;
   // Open a past-conversation's read-only transcript (WARDEN-719). App lifts the
@@ -161,7 +160,8 @@ function GlobalSearchSessionRow({ result, onOpen }: { result: SessionSearchResul
 //
 // `onClose` (the existing prop wired at App.tsx) is mapped to the shadcn Dialog's
 // `onOpenChange` internally so App.tsx needs no change.
-export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJumpToMatch, onOpenSession }: Props) {
+export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, onOpenSession }: Props) {
+  const openPanes = useOpenPanes();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PaneSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
