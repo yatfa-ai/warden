@@ -54,6 +54,7 @@ import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
+import { telemetryChatName } from '@/lib/telemetryChatName';
 import { reconcileMainOwnedPref } from '@/lib/mainOwnedPref';
 import { toast } from 'sonner';
 
@@ -1224,9 +1225,15 @@ function App() {
   // distinct Claude session name (the summary is folded into `.name` on resume),
   // per the WARDEN-538 planner decision. Fire-and-forget; a clean no-op outside
   // the Electron app (browser/dev/smoke have no telemetry source).
+  //
+  // WARDEN-1553/1554 — a chat spawned by POST /api/resume carries the owner's
+  // FIRST PROMPT as `.name`; telemetryChatName() swaps it for the constant
+  // 'resumed-session' (same provenance rule as buildNamesSnapshot, WARDEN-1550)
+  // so prompt text never rides an incident event.
+  const telemetryName = telemetryChatName(focusedChat);
   useEffect(() => {
-    setTelemetryContext({ chatName: focusedChat?.name });
-  }, [focusedChat?.name]);
+    setTelemetryContext({ chatName: telemetryName });
+  }, [telemetryName]);
   // WARDEN-1424 — the workspace-shape COUNT snapshot: ONE bounded
   // `workspace-shape` event per 5-minute window, read from THIS component's own
   // refs (nothing new fetched, polled, or retained — the sampler holds six
