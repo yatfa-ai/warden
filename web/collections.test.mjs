@@ -1,8 +1,7 @@
 // Tests for the Collections criteria helpers (WARDEN-553), extracted into
 // src/lib/collections.ts so the matcher + the new custom-criteria parser are
 // unit-testable without a React runner. The extracted functions are PURE (no
-// React, no imports beyond types), so (like agentFilter.test.mjs and
-// diff.test.mjs) this loads the REAL src/lib/collections.ts (transpiled TS -> ESM
+// React, no imports beyond types), so (like diff.test.mjs) this loads the REAL src/lib/collections.ts (transpiled TS -> ESM
 // via Vite's OXC transform) and exercises it directly with plain objects.
 //
 // Coverage focus:

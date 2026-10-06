@@ -1,13 +1,13 @@
 // Tests for the chat display-label helpers in src/lib/chatDisplay.ts (WARDEN-216).
-// These were originally covered by agentFilter.test.mjs while the helpers lived in
-// the agentFilter extraction (WARDEN-249); WARDEN-216 moved the DISPLAY helpers
+// These were originally covered by the (since retired, WARDEN-1539) agentFilter
+// test while the helpers lived in the agentFilter extraction (WARDEN-249); WARDEN-216 moved the DISPLAY helpers
 // (basename, chatType, processCwdLabel, displayName, ago, hostTagOf) into their own
 // chatDisplay module, so the coverage moved with them to their canonical home.
 //
 // chatDisplay.ts carries an `import type { Chat }` — that is a TYPE-ONLY import,
 // which Vite's OXC transform erases entirely (it never reaches the emitted JS), so
 // the same transpile-to-temp-`.mjs` + dynamic-`import()` harness used by
-// diff.test.mjs / gitStateSummary.test.mjs / agentFilter.test.mjs works here too.
+// diff.test.mjs / gitStateSummary.test.mjs works here too.
 //
 // Coverage focus: chatType's claude-vs-resume + empty-cmd-is-shell (WARDEN-223)
 // classification, processCwdLabel's "proc · dir" fallback, displayName's WARDEN-163

@@ -571,86 +571,26 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().autoFocusNewPane, false);
 });
 
-console.log('\nagentFilter + agentSort (sidebar fleet filter/sort) round-trip through loadUi/saveUi — WARDEN-442');
-// WARDEN-442: the sidebar's agent Filter (all/yatfa/claude/manual) and Sort
-// (manual/name/host/status/activity), shipped in WARDEN-91, silently reset to
-// defaults on reload. Root cause: the keys were ChatSidebar-local useState whose
-// own save effect App's central saveUi spread (which enumerated every other
-// pref but omitted these two) then clobbered, wiping them from disk. The fix
-// makes them App-owned and adds them to the saveUi spread. These tests pin the
-// storage half of that contract — when the keys ARE in the live spread,
-// persistUiState carries them and loadUi returns them — which is the regression
-// guard the ticket asks for (a storage-level round-trip assertion).
-test('defaults to "all"/"manual" when nothing is stored (the controls never start non-default)', () => {
+console.log('\nWARDEN-1539 — retired agentFilter/agentSort keys in a legacy payload are ignored and dropped on next save');
+test('a legacy payload carrying agentFilter/agentSort loads without those keys and saveUi drops them', () => {
   reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], agentFilter: 'yatfa', agentSort: 'name', copyOnSelect: true }));
   const ui = loadUi();
-  assert.equal(ui.agentFilter, 'all');
-  assert.equal(ui.agentSort, 'manual');
-});
-test('every filter value (all/yatfa/claude/manual) round-trips', () => {
-  for (const v of ['all', 'yatfa', 'claude', 'manual']) {
-    reset();
-    saveUi({ ...loadUi(), agentFilter: v });
-    assert.equal(loadUi().agentFilter, v, `${v} should round-trip`);
-  }
-});
-test('every sort value (manual/name/host/status/activity) round-trips', () => {
-  for (const v of ['manual', 'name', 'host', 'status', 'activity']) {
-    reset();
-    saveUi({ ...loadUi(), agentSort: v });
-    assert.equal(loadUi().agentSort, v, `${v} should round-trip`);
-  }
-});
-test('an out-of-allow-set filter coerces back to "all" on load (defensive)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], agentFilter: 'bogus' }));
-  assert.equal(loadUi().agentFilter, 'all');
-});
-test('a missing/null sort coerces back to "manual" on load', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], agentSort: null }));
-  assert.equal(loadUi().agentSort, 'manual');
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
-  assert.equal(loadUi().agentSort, 'manual');
-});
-test('missing fields load as the defaults', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
-  const ui = loadUi();
-  assert.equal(ui.agentFilter, 'all');
-  assert.equal(ui.agentSort, 'manual');
-});
-test('the prefs survive App\'s persistUiState write path (the WARDEN-442 regression guard)', () => {
-  // THE bug: App's saveUi spread OMITTED these keys, so persistUiState received a
-  // `live` object lacking them, the written JSON lacked them, and reload reset to
-  // defaults. This asserts the contract the fix relies on — when the keys ARE in
-  // the live spread (as App now includes them), persistUiState carries them and
-  // loadUi returns them. It exercises the exact write path App's saveUi effect
-  // uses, not just a direct saveUi.
-  reset();
-  const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, agentFilter: 'yatfa', agentSort: 'host' }, 'previous', d0, false));
-  const after = loadUi();
-  assert.equal(after.agentFilter, 'yatfa');
-  assert.equal(after.agentSort, 'host');
-});
-test('the prefs survive an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
-  // agentFilter/agentSort are NOT workspace fields, so persistUiState spreads them
-  // from `live`. Confirm an empty-launch still round-trips freshly set values —
-  // the freeze must not drop them alongside the workspace.
-  reset();
-  const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, agentFilter: 'claude', agentSort: 'activity' }, 'empty', d0, true));
-  const after = loadUi();
-  assert.equal(after.agentFilter, 'claude');
-  assert.equal(after.agentSort, 'activity');
+  assert.equal('agentFilter' in ui, false);
+  assert.equal('agentSort' in ui, false);
+  assert.equal(ui.copyOnSelect, true, 'neighbouring prefs still load');
+  saveUi(ui);
+  const raw = JSON.parse(mem.get('warden:ui:v3'));
+  assert.equal('agentFilter' in raw, false);
+  assert.equal('agentSort' in raw, false);
+  assert.equal(raw.copyOnSelect, true);
 });
 
 console.log('\nhealthGroupBy (Health dashboard Group-by Health|Host toggle) round-trips through loadUi/saveUi — WARDEN-468');
 // WARDEN-468: the HealthDashboard "Group agents by: Health | Host" toggle
 // (WARDEN-237) silently reset to 'health' on every Warden restart because
 // groupBy was a component-local useState with no persistence. The fix lifts it
-// to App (mirroring agentFilter/agentSort in WARDEN-442) and adds it to App's
+// to App (mirroring the WARDEN-442 pattern) and adds it to App's
 // saveUi spread + the loadUi normalizer. These tests pin the storage half of
 // that contract — when the key IS in the live spread, persistUiState carries
 // it and loadUi returns it — guarding the persistence-boundary trap (a field
@@ -714,7 +654,7 @@ console.log('\nfileViewerViewMode (File Viewer rendered⇄source) round-trips th
 // WARDEN-480: the File Viewer's markdown Rendered⇄Source toggle was a
 // FileViewer-local useState that reset to 'rendered' on every open, so a human
 // who prefers source had to re-toggle on every file. The fix makes it an
-// App-owned persisted pref (mirroring timestampFormat/agentFilter). These tests
+// App-owned persisted pref (mirroring timestampFormat). These tests
 // pin the storage half of that contract — when the key IS in the live spread,
 // persistUiState carries it and loadUi returns it; a bogus/null persisted value
 // coerces back to the conservative 'rendered' default.
@@ -2186,8 +2126,6 @@ const overTunedLive = () => {
     snippets: [{ name: 'custom-snippet', text: 'do the thing' }],
     defaultShell: 'zsh',
     defaultShellByHost: { 'host-a': 'fish' },
-    agentFilter: 'filtering',
-    agentSort: 'recent',
     healthGroupBy: 'host',
     fileViewerViewMode: 'source',
     healthCollapsedHosts: { 'host-a': true },
@@ -2263,9 +2201,7 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(r.defaultNewChatPresetByHost, {});
   assert.deepEqual(r.defaultNewChatCwdByHost, {});
   assert.deepEqual(r.snippets, STARTER_SNIPPETS);
-  // agentFilter/agentSort/healthGroupBy/fileViewerViewMode are in DEFAULT_UI; the helper resets them too.
-  assert.equal(r.agentFilter, 'all');
-  assert.equal(r.agentSort, 'manual');
+  // healthGroupBy/fileViewerViewMode are in DEFAULT_UI; the helper resets them too.
   // healthGroupBy is in DEFAULT_UI (WARDEN-468); the helper resets it too.
   assert.equal(r.healthGroupBy, 'health');
   assert.equal(r.fileViewerViewMode, 'rendered');

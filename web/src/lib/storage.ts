@@ -1,4 +1,3 @@
-import type { AgentFilter, AgentSort } from './agentFilter';
 import type { TimestampFormat } from './formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
 
@@ -662,8 +661,6 @@ export interface UiState {
   snippets?: Snippet[];
   // pane id (chat key) -> host, so restored remote panes know which host to discover.
   paneHost?: Record<string, string>;
-  agentFilter?: AgentFilter;
-  agentSort?: AgentSort;
   // WARDEN-468: HealthDashboard "Group agents by: Health | Host" toggle
   // (WARDEN-237). Was a HealthDashboard-local useState that reset to 'health' on
   // every Warden restart; now App-owned + persisted so a cross-host human's Host
@@ -1054,7 +1051,7 @@ export const DEFAULT_UI: UiState = {
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultShell: '', defaultShellByHost: {},
-  paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health', healthCollapsedHosts: {}, hostLabels: {},
+  paneHost: {}, healthGroupBy: 'health', healthCollapsedHosts: {}, hostLabels: {},
 };
 
 // The single type-checked source for the set of UiState prefs App's saveUi effect
@@ -1083,7 +1080,7 @@ export const PERSISTED_PREF_KEYS = [
   'defaultNewChatPreset', 'defaultNewChatPresetByHost', 'defaultNewChatHost',
   'defaultNewChatCwd', 'defaultNewChatCwdByHost', 'customPresets', 'snippets',
   'defaultShell', 'defaultShellByHost',
-  'paneHost', 'agentFilter', 'agentSort', 'healthGroupBy', 'healthCollapsedHosts', 'hostLabels',
+  'paneHost', 'healthGroupBy', 'healthCollapsedHosts', 'hostLabels',
 ] as const satisfies readonly (keyof Omit<UiState, 'restoreOnStartup'>)[];
 
 // The WORKSPACE + LAYOUT set that Settings → Reset → "Reset appearance & UI
@@ -1158,10 +1155,8 @@ export function resetUiPrefDefaults(): ResetUiDefaults {
     copyOnSelect: false,
     timestampFormat: 'relative',
     fileViewerViewMode: 'rendered',
-    // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
-    // per-host collapse (WARDEN-500), per-host labels (WARDEN-490).
-    agentFilter: 'all',
-    agentSort: 'manual',
+    // Health grouping (WARDEN-468), per-host collapse (WARDEN-500),
+    // per-host labels (WARDEN-490).
     healthGroupBy: 'health',
     healthCollapsedHosts: {},
     hostLabels: {},
@@ -1327,15 +1322,14 @@ export function loadUi(): UiState {
         // parseSnippets (which returns [] defensively) rather than re-seeding.
         snippets: v.snippets == null ? STARTER_SNIPPETS : parseSnippets(v.snippets),
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
-        // WARDEN-372: 'active'/'hidden' filter cases are abolished — a stored
-        // value naming either coerces back to 'all' (defensive, like every other
-        // enum-ish pref) so a legacy payload never selects a dead filter.
-        agentFilter: ['all', 'yatfa', 'claude', 'manual'].includes(v.agentFilter) ? v.agentFilter : 'all',
-        agentSort: v.agentSort ?? 'manual',
+        // WARDEN-1539: the sidebar fleet filter/sort pair (the persisted fleet-filter/sort keys,
+        // WARDEN-442) is retired — legacy payloads that still carry those keys
+        // are silently ignored by this allow-list and dropped on the next save
+        // (same one-way cleanup as WARDEN-1274's removed alert prefs).
         // WARDEN-468: defensive allow-list — a legacy/corrupt value never selects
-        // a dead group mode (mirrors the agentFilter enum normalizer above).
+        // a dead group mode.
         // WARDEN-741: widened from a 2-way `=== 'host'` check to a 3-way
-        // `.includes()` membership check (the same idiom as agentFilter above)
+        // `.includes()` membership check
         // — the prior check collapsed ANY non-'host' value to 'health', so a
         // persisted 'project' preference silently fell back to 'health' on every
         // reload. The allow-list is the make-or-break serialization boundary for
@@ -1452,10 +1446,8 @@ export function persistUiState(
 // observerWidth. (WARDEN-372 folded the former flat activeTabs/hiddenTabs/
 // openPanes/focused working set into `workspaces`/`activeWorkspaceId`; paneHost
 // stayed global.) Everything else in DEFAULT_UI is a PREF and gets the default —
-// including agentFilter/agentSort (WARDEN-442 made these App-owned and added them
-// to App's saveUi spread, so they now persist like every other pref; previously
-// they were ChatSidebar-local and the spread omitted them, so they reset on
-// reload).
+// including healthGroupBy and healthCollapsedHosts (App-owned view prefs that
+// persist like every other pref).
 //
 // NOTE on terminalFontFamily: DEFAULT_UI.terminalFontFamily is '' (the "blank
 // means default stack" sentinel), so this helper returns '' for it — correct
@@ -1529,7 +1521,7 @@ export function saveObs(s: ObsUi) {
 // for Settings → Reset → "Reset appearance & UI preferences". That reset's key
 // source is derived ENTIRELY from UiState (ResettableKey = PERSISTED_PREF_KEYS ∪
 // restoreOnStartup − RESET_PRESERVED_KEYS), which is why it resets every UiState
-// view pref (agentFilter/agentSort, healthGroupBy, healthCollapsedHosts,
+// view pref (healthGroupBy, healthCollapsedHosts,
 // fileViewerViewMode) yet was structurally blind to this SECOND storage
 // namespace: ObsUi is a separate interface behind its own loadObs/saveObs, so
 // the compile error that protects every UiState pref can never fire for it.

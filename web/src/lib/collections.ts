@@ -11,7 +11,7 @@
 // agent list agree.
 //
 // These functions are PURE (no React, no I/O) so they transpile + run under Node
-// for unit tests — see web/collections.test.mjs (same harness as agentFilter /
+// for unit tests — see web/collections.test.mjs (same harness as
 // diff / gitStateSummary).
 
 import type { Chat, Collection } from '@/lib/types';

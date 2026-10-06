@@ -28,7 +28,7 @@
 //
 //     store.setSnippets(next)
 //       → useConfigPersistence's store-half subscription re-renders App
-//         (slice 16: ONE shallow-compared subscription for all 41 store facts,
+//         (slice 16: ONE shallow-compared subscription for all 39 store facts,
 //         via selectPersistedStorePrefs below — App itself no longer carries a
 //         per-fact subscription just to feed the snapshot)
 //       → the `snippets` field of the merged PersistedPrefSnapshot changes
@@ -86,7 +86,6 @@ import { clampLayoutWidths } from '@/lib/layout';
 import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
-import type { AgentFilter, AgentSort } from '@/lib/agentFilter';
 import type { Theme, TerminalColorScheme } from '@/lib/theme';
 import type { Density } from '@/lib/density';
 
@@ -216,32 +215,6 @@ export interface UiStoreState {
   hostLabels: HostLabels;
   /** Replace the label map. The persisted write follows via useConfigPersistence's merged snapshot. */
   setHostLabels: (labels: HostLabels) => void;
-  /**
-   * The sidebar fleet Filter (all/yatfa/claude/manual — WARDEN-442's pair,
-   * controls shipped in WARDEN-91), migrated onto the store (roadmap
-   * WARDEN-1204 slice 7), which retires the LAST large prop-drilled persisted
-   * pair: App owned both in a useState and threaded them read-only into
-   * ChatSidebar, which passed all four down to each of its three
-   * AgentFilterSortControls mounts. ChatSidebar (which APPLIES the pair —
-   * matchesAgentFilter + sortChats on the collection and host lists) and the
-   * popover (which WRITES it) now subscribe here directly, and the 16 JSX
-   * pass sites are gone. Persistence is unchanged: App keeps its snapshot
-   * field + resetSetters entry, so the ONE compile-locked saveUi effect
-   * remains the single writer. Default 'all'.
-   */
-  agentFilter: AgentFilter;
-  /** Set the sidebar fleet filter. The persisted write follows via useConfigPersistence's merged snapshot. */
-  setAgentFilter: (filter: AgentFilter) => void;
-  /**
-   * The sidebar fleet Sort (manual/name/host/status/activity — the other half
-   * of WARDEN-442's pair), same migration as agentFilter above. Read by
-   * sortChats on the collection and host lists; the ROOT list deliberately
-   * never sorts (WARDEN-949), and its header hides the sort Select so a
-   * non-manual value can never tint an inactive control. Default 'manual'.
-   */
-  agentSort: AgentSort;
-  /** Set the sidebar fleet sort. The persisted write follows via useConfigPersistence's merged snapshot. */
-  setAgentSort: (sort: AgentSort) => void;
   /**
    * The new-chats spawn family (roadmap WARDEN-1204 slice 8, WARDEN-1383) —
    * the default agent type / host / cwd / shell pre-filled in the ＋ new chat
@@ -677,7 +650,7 @@ export interface UiStoreState {
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
  * WARDEN-1471): the members of PERSISTED_PREF_KEYS whose live value this store
- * owns — exactly the 41 persisted facts migrated onto the store by slices 1–15 and 18–23 — slice 23 (WARDEN-1526) moved the LAST App-owned one, the workspace set, so the App half is now empty.
+ * owns — exactly the 39 persisted facts migrated onto the store by slices 1–15 and 18–23 (slice 7's sidebar fleet filter/sort pair was retired in WARDEN-1539 — slice 26 — after WARDEN-1422 deleted its only surface) — slice 23 (WARDEN-1526) moved the LAST App-owned one, the workspace set, so the App half is now empty.
  *
  * WHAT IT IS FOR
  * ──────────────
@@ -724,8 +697,6 @@ export const STORE_PERSISTED_KEYS = [
   'onExitBehavior',
   'timestampFormat',
   'hostLabels',
-  'agentFilter',
-  'agentSort',
   'defaultNewChatPreset',
   'defaultNewChatPresetByHost',
   'defaultNewChatHost',
@@ -758,7 +729,7 @@ export const STORE_PERSISTED_KEYS = [
 ] as const satisfies readonly (keyof UiStoreState & (typeof PERSISTED_PREF_KEYS)[number])[];
 
 /**
- * The store half of the persisted snapshot: a pure projection of those 41
+ * The store half of the persisted snapshot: a pure projection of those 39
  * facts off a UiStoreState. ONE place knows the list — this selector and
  * STORE_PERSISTED_KEYS above are derived from the same tuple, so the
  * persistence read can never drift from the declaration.
@@ -784,8 +755,6 @@ export function selectPersistedStorePrefs(
     onExitBehavior: state.onExitBehavior,
     timestampFormat: state.timestampFormat,
     hostLabels: state.hostLabels,
-    agentFilter: state.agentFilter,
-    agentSort: state.agentSort,
     defaultNewChatPreset: state.defaultNewChatPreset,
     defaultNewChatPresetByHost: state.defaultNewChatPresetByHost,
     defaultNewChatHost: state.defaultNewChatHost,
@@ -893,8 +862,6 @@ export type UiStoreSeed = Partial<
     | 'onExitBehavior'
     | 'timestampFormat'
     | 'hostLabels'
-    | 'agentFilter'
-    | 'agentSort'
     | 'defaultNewChatPreset'
     | 'defaultNewChatPresetByHost'
     | 'defaultNewChatHost'
@@ -1033,15 +1000,6 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // as "no labels", so nothing renders differently.
     hostLabels: seed.hostLabels ?? persisted.hostLabels ?? {},
     setHostLabels: (hostLabels) => set({ hostLabels }),
-    // WARDEN-1204 slice 7: ??-only shape, mirroring App's retired
-    // `useState(() => uiState.agentFilter ?? 'all')` / `?? 'manual'`
-    // initializers — both literals mirror DEFAULT_UI (pinned against it by
-    // uiStore.test.mjs), and loadUi()'s own sanitizers already normalize a
-    // persisted payload (agentFilter by enum membership, agentSort by ??).
-    agentFilter: seed.agentFilter ?? persisted.agentFilter ?? 'all',
-    setAgentFilter: (agentFilter) => set({ agentFilter }),
-    agentSort: seed.agentSort ?? persisted.agentSort ?? 'manual',
-    setAgentSort: (agentSort) => set({ agentSort }),
     // WARDEN-1383 (roadmap WARDEN-1204 slice 8): the new-chats spawn family,
     // ??-only — every literal below mirrors DEFAULT_UI (pinned against it by
     // uiStore.test.mjs), exactly as the App useStates they replaced seeded
@@ -1529,45 +1487,6 @@ export function useHostLabels(): HostLabels {
  */
 export function useSetHostLabels(): (labels: HostLabels) => void {
   return useUiStore((s) => s.setHostLabels);
-}
-
-/**
- * The sidebar fleet Filter (WARDEN-442, roadmap WARDEN-1204 slice 7). The
- * three sidebar views' filter applications and their shared
- * AgentFilterSortControls popover subscribe here instead of receiving the
- * pair through App's 16 JSX pass sites — the last large prop-drilled
- * persisted pair is retired.
- */
-export function useAgentFilter(): AgentFilter {
-  return useUiStore((s) => s.agentFilter);
-}
-
-/**
- * The filter setter (the popover's filter Select is the only writer, and
- * App's "Reset appearance & UI preferences" calls it through the same
- * resetSetters entry). Stable across renders (zustand actions are created
- * once with the store), so it is safe in a dependency array.
- */
-export function useSetAgentFilter(): (filter: AgentFilter) => void {
-  return useUiStore((s) => s.setAgentFilter);
-}
-
-/**
- * The sidebar fleet Sort (WARDEN-442, roadmap WARDEN-1204 slice 7). Read by
- * sortChats on the collection and host lists (the root list deliberately
- * never sorts — WARDEN-949); the popover's sort Select subscribes to the
- * setter.
- */
-export function useAgentSort(): AgentSort {
-  return useUiStore((s) => s.agentSort);
-}
-
-/**
- * The sort setter (the popover's sort Select, plus the same reset path as
- * the filter). Stable across renders, so it is safe in a dependency array.
- */
-export function useSetAgentSort(): (sort: AgentSort) => void {
-  return useUiStore((s) => s.setAgentSort);
 }
 
 // ─── The new-chats spawn family (WARDEN-1383, roadmap WARDEN-1204 slice 8) ───
