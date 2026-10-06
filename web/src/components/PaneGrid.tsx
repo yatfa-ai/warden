@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -81,12 +81,10 @@ const JUNCTION_THRESH_PX = 3;
 
 interface Props {
   tiles: OpenTile[];
-  newActivity: Set<string>;
   chats: Chat[];
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
   onToggleMax: (id: string) => void;
-  onClearNew: (id: string) => void;
   onForceKill: (id: string) => void;
   // ＋ split (WARDEN-223 → WARDEN-543): spawn a host shell pane derived from a
   // source pane (same host + cwd). WARDEN-543 moved this off the grid-toolbar
@@ -153,7 +151,7 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -164,6 +162,10 @@ export function PaneGrid({ tiles, newActivity, chats, onFocus, onClose, onToggle
   // store clears it on workspace switch / pane removal; resolveVisibleTiles
   // below stays as the render-side backstop.
   const maximized = useMaximized();
+  // WARDEN-1547 (slice 27): the unfocused-output badge set is a shared,
+  // NOT-persisted store fact too — read here, cleared via the store action.
+  const newActivity = usePaneActivity();
+  const clearPaneActivity = useClearPaneActivity();
   // WARDEN-1534 (slice 25): focused pane id read straight from the store.
   const focused = useFocused();
   // WARDEN-1498 (roadmap WARDEN-1204 slice 19): the pane → host map comes from
@@ -825,7 +827,7 @@ export function PaneGrid({ tiles, newActivity, chats, onFocus, onClose, onToggle
                   onDrop={(e) => onTileDrop(e, t.id)}
                   className={`min-h-0 min-w-0 rounded-lg ${isDropTarget ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''}`}>
                   <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={effectiveMax === t.id}
-                    hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
+                    hasNew={newActivity.has(t.id)} onClearNew={() => clearPaneActivity(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
                     onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} onBrowseFiles={() => openBrowseFor(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}

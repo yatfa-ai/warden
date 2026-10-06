@@ -3206,4 +3206,68 @@ test('WARDEN-521: setOpenPanes clears maximized iff the next list drops it (remo
   assert.equal(s.getState().maximized, null, 'nothing maximized stays null');
 });
 
+// ─── newActivity (WARDEN-1547, roadmap WARDEN-1204 slice 27): second NON-persisted shared fact ───
+console.log('\ncreateUiStore — newActivity (not persisted; unfocused-pane output badge)');
+test('newActivity starts empty; markPaneActivity adds an unfocused pane', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1')]);
+  assert.equal(s.getState().newActivity.size, 0);
+  s.getState().markPaneActivity('p2');
+  assert.deepEqual([...s.getState().newActivity], ['p2']);
+});
+test('markPaneActivity on the ACTIVE workspace\'s focused pane is a no-op returning the identical state object', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1'), ws('b', ['p3'], 'p3')], 'a');
+  const before = s.getState();
+  s.getState().markPaneActivity('p1');
+  assert.equal(s.getState(), before);
+  assert.equal(s.getState().newActivity.size, 0);
+  // a focused pane of a NON-active workspace is NOT guarded (App compared against the active focus only)
+  s.getState().markPaneActivity('p3');
+  assert.ok(s.getState().newActivity.has('p3'));
+});
+test('markPaneActivity twice keeps Set (and state) identity', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1')]);
+  s.getState().markPaneActivity('p2');
+  const set = s.getState().newActivity;
+  const st = s.getState();
+  s.getState().markPaneActivity('p2');
+  assert.equal(s.getState().newActivity, set);
+  assert.equal(s.getState(), st);
+});
+test('markPaneActivity copies on write (the previous Set is never mutated)', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2', 'p3'], 'p1')]);
+  s.getState().markPaneActivity('p2');
+  const prev = s.getState().newActivity;
+  s.getState().markPaneActivity('p3');
+  assert.notEqual(s.getState().newActivity, prev);
+  assert.deepEqual([...prev], ['p2']);
+});
+test('clearPaneActivity removes the id; a no-op (identical state object) when absent', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2', 'p3'], 'p1')]);
+  s.getState().markPaneActivity('p2');
+  s.getState().markPaneActivity('p3');
+  const prev = s.getState().newActivity;
+  s.getState().clearPaneActivity('p2');
+  assert.deepEqual([...s.getState().newActivity], ['p3']);
+  assert.deepEqual([...prev].sort(), ['p2', 'p3'], 'previous Set untouched');
+  const before = s.getState();
+  s.getState().clearPaneActivity('nope');
+  assert.equal(s.getState(), before);
+});
+test('newActivity is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('newActivity'));
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1')]);
+  s.getState().markPaneActivity('p2');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('newActivity' in picked));
+  assert.equal(createUiStore().getState().newActivity.size, 0, 'never seeded');
+});
+
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
