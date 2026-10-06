@@ -174,6 +174,63 @@ describe('updateCollection — identity preservation + uniqueness', () => {
   });
 });
 
+describe('updateCollection — enforces createCollection invariants (WARDEN-1584)', () => {
+  const rejectsAndLeavesFileUntouched = async (updates, label) => {
+    seed([{ id: 'coll-1', name: 'alpha', criteria: {}, metadata: {}, createdAt: 1000, updatedAt: 1000 }]);
+    const before = fs.readFileSync(collectionsPath, 'utf8');
+    await assert.rejects(() => mod.updateCollection('coll-1', updates), (err) => {
+      assert.ok(!/not found/i.test(err.message), `${label}: validation error must not read as 404`);
+      return true;
+    }, label);
+    assert.strictEqual(fs.readFileSync(collectionsPath, 'utf8'), before, `${label}: file byte-identical`);
+  };
+
+  it("rejects name: '' and leaves the file untouched", () => rejectsAndLeavesFileUntouched({ name: '' }, "name ''"));
+  it("rejects name: '   ' and leaves the file untouched", () => rejectsAndLeavesFileUntouched({ name: '   ' }, 'whitespace name'));
+  it('rejects name: {a:1} and leaves the file untouched', () => rejectsAndLeavesFileUntouched({ name: { a: 1 } }, 'object name'));
+  it('rejects name: null and leaves the file untouched', () => rejectsAndLeavesFileUntouched({ name: null }, 'null name'));
+  it("rejects criteria: 'str' and leaves the file untouched", () => rejectsAndLeavesFileUntouched({ criteria: 'str' }, 'string criteria'));
+  it('rejects criteria: null and leaves the file untouched', () => rejectsAndLeavesFileUntouched({ criteria: null }, 'null criteria'));
+  it('rejects array criteria and non-object metadata', async () => {
+    await rejectsAndLeavesFileUntouched({ criteria: [] }, 'array criteria');
+    await rejectsAndLeavesFileUntouched({ metadata: 'x' }, 'string metadata');
+    await rejectsAndLeavesFileUntouched({ metadata: null }, 'null metadata');
+  });
+
+  it("stores a trimmed name ('  Gamma  ' → 'Gamma')", async () => {
+    seed([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { name: '  Gamma  ' });
+    assert.strictEqual(updated.name, 'Gamma');
+    assert.strictEqual((await mod.loadCollections())[0].name, 'Gamma');
+  });
+
+  it('caps a 200-char name at exactly 60 chars', async () => {
+    seed([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { name: 'x'.repeat(200) });
+    assert.strictEqual(updated.name.length, 60);
+    assert.strictEqual((await mod.loadCollections())[0].name.length, 60);
+  });
+
+  it('does not persist unknown keys, while a valid name in the same body still applies', async () => {
+    seed([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { evil: 1, id: 'hijack', name: 'beta2' });
+    assert.strictEqual(updated.name, 'beta2');
+    assert.strictEqual(updated.id, 'coll-1');
+    const persisted = (await mod.loadCollections())[0];
+    assert.strictEqual(persisted.name, 'beta2');
+    assert.ok(!('evil' in persisted), 'evil key not persisted');
+  });
+
+  it('accepts valid criteria + metadata objects and tolerates a null body', async () => {
+    seed([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { name: 'alpha', criteria: { role: 'worker' }, metadata: { color: 'red' } });
+    assert.deepStrictEqual(updated.criteria, { role: 'worker' });
+    assert.deepStrictEqual(updated.metadata, { color: 'red' });
+    const same = await mod.updateCollection('coll-1', null);
+    assert.strictEqual(same.name, 'alpha');
+  });
+});
+
 // ----------------------------- deleteCollection ------------------------------
 describe('deleteCollection — not-found vs removed', () => {
   it('returns false and writes nothing when the id is not found', async () => {
