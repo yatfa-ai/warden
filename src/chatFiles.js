@@ -155,6 +155,7 @@ export function resolveLocalFile(cwd, filePath) {
   try {
     const stats = fs.statSync(resolvedPath);
     if (stats.isDirectory()) return { ok: false, status: 400, error: 'path is a directory' };
+    if (!stats.isFile()) return { ok: false, status: 400, error: 'not a file' };
   } catch (e) {
     if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
     return { ok: false, status: 500, error: 'read failed' };

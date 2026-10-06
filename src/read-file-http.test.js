@@ -124,6 +124,19 @@ describe('/api/read-file (real Express app, LOCAL chat)', () => {
     assert.strictEqual(body.error, 'path is a directory');
   });
 
+  it('returns 400 "not a file" for a unix socket (WARDEN-1573; the FIFO case hangs unfixed code so it is pinned in a child process in file-exists.test.js)', { skip: process.platform === 'win32' }, async () => {
+    const { default: net } = await import('node:net');
+    const srv = net.createServer();
+    await new Promise((res, rej) => { srv.once('error', rej); srv.listen(path.join(cwdDir, 'sock'), res); });
+    try {
+      const { status, body } = await read({ id: 'warden-rf', path: 'sock' });
+      assert.strictEqual(status, 400);
+      assert.strictEqual(body.error, 'not a file');
+    } finally {
+      await new Promise((res) => srv.close(res));
+    }
+  });
+
   it('returns 403 "path must be within working directory" for traversal', async () => {
     const { status, body } = await read({ id: 'warden-rf', path: '../../etc/passwd' });
     assert.strictEqual(status, 403);

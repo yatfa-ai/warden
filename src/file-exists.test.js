@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -262,6 +263,59 @@ describe('resolveLocalFile (shared local resolution)', () => {
     assert.equal(r.ok, false);
     assert.equal(r.status, 400);
     assert.match(r.error, /directory/);
+  });
+
+  // WARDEN-1573: the local twin of the remote `[ -f ]` → 'not a file' guard.
+  // Without it a FIFO resolves ok and readChatFile's readFileSync blocks the
+  // whole server process forever.
+  const posix = process.platform === 'win32' ? { skip: 'mkfifo is POSIX-only' } : {};
+
+  it('rejects a FIFO with 400 "not a file" (WARDEN-1573)', posix, () => {
+    const mk = spawnSync('mkfifo', [path.join(tmp, 'pipe')]);
+    assert.equal(mk.status, 0, 'mkfifo must succeed');
+    const r = resolveLocalFile(tmp, 'pipe');
+    assert.deepEqual(r, { ok: false, status: 400, error: 'not a file' });
+  });
+
+  it('rejects a unix socket with 400 "not a file" (WARDEN-1573)', posix, async () => {
+    // Keep the socket path short (sun_path limit): bind in a fresh short temp dir.
+    const sockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfe-'));
+    const srv = net.createServer();
+    await new Promise((res, rej) => { srv.once('error', rej); srv.listen(path.join(sockDir, 's'), res); });
+    try {
+      const r = resolveLocalFile(sockDir, 's');
+      assert.deepEqual(r, { ok: false, status: 400, error: 'not a file' });
+    } finally {
+      await new Promise((res) => srv.close(res));
+      fs.rmSync(sockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still resolves a regular file and a symlink to one (positive controls)', () => {
+    fs.symlinkSync(path.join(tmp, 'real.txt'), path.join(tmp, 'link.txt'));
+    assert.equal(resolveLocalFile(tmp, 'real.txt').ok, true);
+    const r = resolveLocalFile(tmp, 'link.txt');
+    assert.equal(r.ok, true);
+    assert.equal(r.resolvedPath, fs.realpathSync.native(path.join(tmp, 'real.txt')));
+  });
+
+  it('readChatFile on a FIFO returns 400 "not a file" promptly instead of hanging (WARDEN-1573)', posix, () => {
+    assert.equal(spawnSync('mkfifo', [path.join(tmp, 'pipe2')]).status, 0);
+    // The unfixed code blocks in a SYNCHRONOUS readFileSync, which no in-process
+    // Promise.race can interrupt — so run it in a child with a hard timeout. A
+    // regression then fails this assertion (status null / ETIMEDOUT) rather than
+    // hanging the suite.
+    const script = `
+      import { readChatFile } from ${JSON.stringify(new URL('./chatFiles.js', import.meta.url).href)};
+      const r = await readChatFile({ host: '(local)', cwd: ${JSON.stringify(tmp)} }, 'pipe2');
+      console.log(JSON.stringify(r));
+      process.exit(0);
+    `;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script],
+      { timeout: 10000, encoding: 'utf8', killSignal: 'SIGKILL', env: { ...process.env, HOME: tmp } });
+    assert.equal(child.error, undefined, `readChatFile hung on a FIFO: ${child.error}`);
+    assert.deepEqual(JSON.parse(child.stdout.trim().split('\n').pop()),
+      { ok: false, status: 400, error: 'not a file' });
   });
 
   it('follows symlinks and rejects one that escapes cwd', () => {

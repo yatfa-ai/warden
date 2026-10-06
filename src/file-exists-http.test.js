@@ -106,6 +106,13 @@ describe('/api/file-exists (real Express app, LOCAL chat)', () => {
     assert.strictEqual(body.exists, false);
   });
 
+  it('reports exists:false for a FIFO (WARDEN-1573 — not a regular file)', { skip: process.platform === 'win32' }, async () => {
+    const { spawnSync } = await import('node:child_process');
+    assert.strictEqual(spawnSync('mkfifo', [path.join(cwdDir, 'pipe')]).status, 0);
+    const { body } = await probe({ id: 'warden-files', path: 'pipe' });
+    assert.strictEqual(body.exists, false);
+  });
+
   it('reports exists:true for a binary-by-extension file (existence ≠ readable)', async () => {
     // The linkifier offers any real file; whether read-file later refuses to cat
     // a binary is a separate concern. pic.png IS a real file → exists:true.
