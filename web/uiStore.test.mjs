@@ -68,7 +68,7 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
-const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
+const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectRecentlyClosed, selectOpenPanes, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
@@ -3577,6 +3577,77 @@ test('resolvedThemeId is factory-isolated: one store\'s write never reaches anot
   a.getState().setResolvedThemeId('github-light');
   assert.equal(b.getState().resolvedThemeId, 'github-dark');
   assert.equal(selectTerminalThemeId(b.getState()), 'github-dark');
+});
+
+console.log('\nresetUiPrefs — the store-owned reset action (WARDEN-1596, slice 34)');
+// A value guaranteed to differ from `v` by type, so the test needs no per-key
+// hand-written list that could drift from ResettableKey.
+const perturb = (v) => {
+  if (typeof v === 'boolean') return !v;
+  if (typeof v === 'number') return v + 7;
+  if (typeof v === 'string') return `${v}-MUTATED`;
+  if (Array.isArray(v)) return [...v, 'MUTATED'];
+  return { ...v, MUTATED: true };
+};
+const OBS_FACT = { viewMode: 'observerViewMode', activityFilters: 'observerActivityFilters', directiveFilters: 'observerDirectiveFilters', attentionFilters: 'observerAttentionFilters' };
+test('resetUiPrefs() snaps EVERY ResettableKey + the four observer facts to defaults and moves NO RESET_PRESERVED_KEY', () => {
+  reset();
+  const store = createUiStore();
+  const defaults = resetUiPrefDefaults();
+  const obsDefaults = resetObsPrefDefaults();
+  const dirty = {};
+  for (const k of Object.keys(defaults)) dirty[k] = perturb(defaults[k]);
+  for (const k of OBS_RESET_KEYS) dirty[OBS_FACT[k]] = perturb(obsDefaults[k]);
+  const before = store.getState();
+  const preserved = {};
+  for (const k of RESET_PRESERVED_KEYS) { preserved[k] = perturb(before[k]); dirty[k] = preserved[k]; }
+  store.setState(dirty);
+  // Sanity: the dirtying took, so the assertions below are not vacuous.
+  for (const k of Object.keys(defaults)) assert.notDeepEqual(store.getState()[k], defaults[k], `${k} was dirtied`);
+
+  store.getState().resetUiPrefs();
+
+  const after = store.getState();
+  for (const k of Object.keys(defaults)) assert.deepEqual(after[k], defaults[k], `ResettableKey ${k} reset`);
+  for (const k of OBS_RESET_KEYS) assert.deepEqual(after[OBS_FACT[k]], obsDefaults[k], `observer fact ${OBS_FACT[k]} reset`);
+  for (const k of RESET_PRESERVED_KEYS) assert.equal(after[k], preserved[k], `preserved key ${k} untouched (===)`);
+  assert.equal(after.terminalFontFamily, DEFAULT_TERMINAL_FONT_FAMILY);
+});
+test('resetUiPrefs() is atomic: ONE store notification per call', () => {
+  reset();
+  const store = createUiStore();
+  let notifications = 0;
+  store.subscribe(() => { notifications += 1; });
+  store.getState().resetUiPrefs();
+  assert.equal(notifications, 1);
+});
+test('resetUiPrefs() aliases no module default: object/array values are fresh per call and per store', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().resetUiPrefs();
+  const first = a.getState();
+  const objectKeys = [...Object.keys(resetUiPrefDefaults()), ...Object.values(OBS_FACT)].filter((k) => first[k] !== null && typeof first[k] === 'object');
+  assert.ok(objectKeys.length >= 5, 'the aliasing check covers real object/array facts');
+  a.getState().resetUiPrefs(); // second call on the same store
+  b.getState().resetUiPrefs(); // and on another store
+  for (const k of objectKeys) {
+    assert.notEqual(a.getState()[k], first[k], `${k}: second reset hands the store a fresh object`);
+    assert.notEqual(a.getState()[k], b.getState()[k], `${k}: not shared across stores`);
+  }
+  // In-place mutation of a reset value must not leak into the next reset.
+  a.getState().resetUiPrefs();
+  a.getState().snippets.push({ name: 'leak', text: 'leak' });
+  a.getState().observerActivityFilters.type = 'LEAK';
+  a.getState().resetUiPrefs();
+  assert.deepEqual(a.getState().snippets, resetUiPrefDefaults().snippets);
+  assert.equal(a.getState().observerActivityFilters.type, 'all');
+});
+test('resetUiPrefs() writes state only: no localStorage write (the disk half stays at App\'s saveObs site)', () => {
+  reset();
+  const store = createUiStore();
+  store.getState().resetUiPrefs();
+  assert.equal(mem.size, 0);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

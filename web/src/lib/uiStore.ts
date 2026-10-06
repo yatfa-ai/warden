@@ -72,6 +72,7 @@ import {
   loadObs,
   initialWorkspace,
   resetObsPrefDefaults,
+  resetUiPrefDefaults,
   DEFAULT_TERMINAL_FONT_FAMILY,
   PERSISTED_PREF_KEYS,
   type Snippet,
@@ -80,6 +81,8 @@ import {
   type CustomPreset,
   type ObsResetKey,
   type ObsUiPrefs,
+  type ResettableKey,
+  type ResetUiDefaults,
   type WorkspacePaneSet,
 } from '@/lib/storage';
 import { clampLayoutWidths } from '@/lib/layout';
@@ -717,7 +720,36 @@ export interface UiStoreState {
   observerAttentionFilters: NonNullable<ObsUi['attentionFilters']>;
   /** Replace the Attention filter shape (the tab's two Selects; App's reset). Whole-shape OR functional — see ValueOrUpdater. */
   setObserverAttentionFilters: (v: ValueOrUpdater<NonNullable<ObsUi['attentionFilters']>>) => void;
+  /**
+   * Settings → "Reset appearance & UI preferences" (roadmap WARDEN-1204 slice
+   * 34, WARDEN-1596): the ONE home of the reset's store half. One atomic `set`
+   * snaps every ResettableKey (storage.ts: PERSISTED_PREF_KEYS ∪
+   * restoreOnStartup − RESET_PRESERVED_KEYS) to `resetUiPrefDefaults()` and the
+   * four observer facts to `resetObsPrefDefaults()` — both FACTORIES called
+   * inside the action, so every reset hands the store fresh objects (nothing
+   * aliases a module-level default, WARDEN-896). RESET_PRESERVED_KEYS
+   * (workspaces, activeWorkspaceId, paneHost, collapsed flags, widths, pane
+   * ratios) are never in the patch, so they cannot move. The DISK half
+   * (the ObsUi payload rewrite) deliberately stays
+   * at App's call site — the uiStore.test.mjs saveObs guard pins exactly three
+   * production sites.
+   */
+  resetUiPrefs: () => void;
 }
+
+/**
+ * Compile-time type lock for `resetUiPrefs` (slice 34): every ResettableKey
+ * must be a real store fact with the very type resetUiPrefDefaults() produces.
+ * A key added to PERSISTED_PREF_KEYS (and so to ResettableKey / ResetUiDefaults)
+ * without a matching UiStoreState field makes this assignability fail — a BUILD
+ * ERROR rather than a Reset that silently skips the pref. The reverse arm pins
+ * the field types the other way, the bidirectional style STORE_PERSISTED_KEYS
+ * uses. (Exported so noUnusedLocals leaves the guard alone.)
+ */
+export type ResetKeysAreStoreFacts = [
+  ResetUiDefaults extends Pick<UiStoreState, ResettableKey> ? true : never,
+  Pick<UiStoreState, ResettableKey> extends ResetUiDefaults ? true : never,
+];
 
 /**
  * The store-owned half of the persisted snapshot (roadmap WARDEN-1204 slice 16,
@@ -1442,6 +1474,19 @@ export function createUiStore(seed: UiStoreSeed = {}) {
             ? observerAttentionFilters(s.observerAttentionFilters)
             : observerAttentionFilters,
       })),
+    // Slice 34 (WARDEN-1596): see the interface doc. The observer half is built
+    // as an ObsResetKey-keyed record, so a new OBS_RESET_KEYS member without a
+    // store fact mapping here is a missing-property compile error.
+    resetUiPrefs: () => {
+      const d = resetObsPrefDefaults();
+      const obs: { [K in ObsResetKey as `observer${Capitalize<K>}`]: ObsUiPrefs[K] } = {
+        observerViewMode: d.viewMode,
+        observerActivityFilters: d.activityFilters,
+        observerDirectiveFilters: d.directiveFilters,
+        observerAttentionFilters: d.attentionFilters,
+      };
+      set({ ...resetUiPrefDefaults(), ...obs });
+    },
   }));
 }
 
