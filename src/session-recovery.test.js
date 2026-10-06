@@ -109,8 +109,23 @@ describe('probeSession (real local tmux)', { skip: !tmuxPresent && 'tmux not ins
 
   after(async () => { try { await runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ } });
 
+  // runLocalTmux resolves {ok:false} (never throws) on failure, and `node --test
+  // src` runs many tmux-spawning files concurrently against one default tmux
+  // socket — concurrent `new-session` calls can race on server startup and one
+  // silently fails (WARDEN-1592 CI flake). Retry until the session is really
+  // there so the test asserts probeSession, not tmux's startup race.
+  async function startSession() {
+    for (let i = 0; i < 10; i++) {
+      await runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
+      const r = await runLocalTmux(['has-session', '-t', session]);
+      if (r.ok) return;
+      await new Promise((res) => setTimeout(res, 100 * (i + 1)));
+    }
+    throw new Error(`could not start tmux session ${session}`);
+  }
+
   it('an existing session probes ok → classifyProbe null (alive)', async () => {
-    await runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
+    await startSession();
     const probe = await probeSession(chat, {});
     assert.strictEqual(probe.ok, true);
     assert.strictEqual(classifyProbe(probe), null);
@@ -124,7 +139,7 @@ describe('probeSession (real local tmux)', { skip: !tmuxPresent && 'tmux not ins
   });
 
   it('honors a bounded timeout option without breaking a fast probe', async () => {
-    await runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
+    await startSession();
     const probe = await probeSession(chat, {}, { timeout: 5000 });
     assert.strictEqual(probe.ok, true);
     await runLocalTmux(['kill-session', '-t', session]);
