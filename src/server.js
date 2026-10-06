@@ -2086,9 +2086,9 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   // a healthy response is byte-identical to before this change.
   //
   // Deliberately NOT a top-level `error` key, even though the sibling single-host
-  // route uses one. The client seam throws on a 2xx carrying `error`
-  // (web/src/lib/allSessionsApi.ts) and OpenChatBrowserPage's catch never seats a
-  // list — so on a first load with one host down, an `error` here would render
+  // route uses one. The client seam (web/src/lib/allSessionsApi.ts and
+  // OpenChatBrowserPage, since removed) threw on a 2xx carrying `error` and its
+  // catch never seated a list — so on a first load with one host down, an `error` here would render
   // "Could not load sessions" INSTEAD of the rows the reachable hosts did return.
   // That is the WARDEN-1196 criterion-4 over-correction: replacing a false-empty
   // with a false-total-failure. `error` is a whole-read-failed channel; a partial

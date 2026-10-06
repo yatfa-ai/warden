@@ -8,7 +8,7 @@
 //   - gitDiffApi.ts   (WARDEN-1187) — payload key is a STRING. `items` was `[]`
 //                     unconditionally and got discarded; `field: 'diff'` was passed
 //                     only so the reader's signature was honoured.
-//   - allSessionsApi.ts (WARDEN-1188) — a real list PLUS `hasMore`, so the scalar
+//   - allSessionsApi.ts (WARDEN-1188; module since removed) — a real list PLUS `hasMore`, so the scalar
 //                     was re-read off the body by hand. Its own source comment
 //                     cites WARDEN-1187 by name.
 //
@@ -18,7 +18,7 @@
 // WHAT IS AND IS NOT PINNED HERE. This file pins the NEW sibling's own contract.
 // `readListResponse`'s contract is pinned by list-response.test.mjs and is left
 // byte-for-byte unmodified by this ticket; the ADOPTIONS are pinned by
-// gitDiffRead.test.mjs (17) and allSessionsRead.test.mjs (23), also unmodified.
+// gitDiffRead.test.mjs (17), also unmodified (allSessionsRead.test.mjs was removed with its module).
 //
 // THE LEG THAT MATTERS MOST is LEG 1 with a PARSEABLE body. It is not a hypothetical:
 // `readListBody`'s `!ok` leg is `res.json().catch(() => undefined)`, so a non-2xx
@@ -128,7 +128,7 @@ test('LEG 3 — a genuinely empty scalar is success, not a failure', () => {
 });
 
 test('LEG 3 — a mixed list+scalar 2xx body is handed back whole', () => {
-  // The allSessionsApi shape: the list rides `readListResponse`, the scalar rides
+  // The (since-removed) allSessionsApi shape: the list rides `readListResponse`, the scalar rides
   // this reader, and BOTH read the same body.
   const body = { sessions: [{ id: 'a' }], hasMore: true, totals: { x: 1 } };
   const r = readResponse(res(200), body, 'sessions');
