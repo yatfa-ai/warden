@@ -6,7 +6,6 @@ import { clampSidebarWidth, clampObserverWidth, HEALTH_WIDTH } from '@/lib/layou
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/theme';
 import { applyDensity } from '@/lib/density';
-import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
@@ -706,19 +705,6 @@ function App() {
     if (focused) clearPaneActivity(focused);
   }, [focused]);
 
-  // Per-agent "lastSeen" stamp (WARDEN-356): the moment a pane is focused is the
-  // moment the human is looking at THAT agent — so it's the natural point to
-  // reset its per-agent catch-up clock. Mirrors the fleet-wide warden:lastClose
-  // stamp (written on close, read on the "While you were away" banner): same
-  // String(Date.now()) shape, but keyed per chatId so the "What's new since"
-  // marker + view answer "what did THIS agent change since I was last here?"
-  // rather than "since the whole app closed." Opening the pane (openChat below)
-  // stamps too, so a visit counts even when autoFocusNewPane is OFF (open without
-  // focus). localStorage-only — never sent to the backend, matching lastClose.
-  useEffect(() => {
-    if (focused) stampLastSeen(focused);
-  }, [focused]);
-
   // apply theme on mount and when theme changes (theme itself persists via the
   // single compile-locked saveUi effect in useConfigPersistence)
   useEffect(() => {
@@ -1145,14 +1131,6 @@ function App() {
     // which open path they used. No-op when there is nothing to ack (ackKey short-
     // circuits), so non-watched chats pay only a cheap log scan.
     ackWatchMissRef.current(id);
-    // WARDEN-356: opening the pane counts as a visit to THIS agent — reset its
-    // per-agent lastSeen so the "What's new since" marker reflects work landed
-    // after THIS open. Stamped before the workspace search below so a visit
-    // counts whether the pane is newly opened OR switched-to from another
-    // workspace. When autoFocusNewPane is ON the focus effect also stamps
-    // (idempotent — both write Date.now()); this line guarantees the stamp
-    // happens even when opening doesn't steal focus (autoFocusNewPane OFF).
-    stampLastSeen(id);
     // remember this pane's host so a restored remote pane knows which host to discover
     const c = chatsRef.current.find((x) => (x.key || x.id) === id);
     if (c?.host) primePaneHost(id, c.host);

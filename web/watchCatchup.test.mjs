@@ -4,7 +4,7 @@
 // the miss half for WARDEN-378's single-channel OS ping.
 //
 // No front-end test runner in this repo, so (like chatWatch.test.mjs /
-// desktopAlerts.test.mjs / whatsNew.test.mjs) this loads the REAL
+// desktopAlerts.test.mjs) this loads the REAL
 // src/lib/watchCatchup.ts (transpiled TS -> ESM via Vite's OXC transform) and
 // exercises the PURE helpers with plain objects. `import type` is erased at
 // transpile, so the emitted module is import-free and loads standalone.

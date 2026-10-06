@@ -14,15 +14,15 @@
 // state). This module only formats + classifies the per-key enteredAt timestamp that
 // loop now stamps; it adds zero SSH, zero backend, zero new polling.
 //
-// Extracted as PURE functions on purpose (mirrors whatsNew.ts + their
+// Extracted as PURE functions on purpose (mirrors the sibling lib helpers + their
 // web/*.test.mjs): the duration + languishing math is testable without jsdom,
 // and AttentionBadge (the suffix) + useAttentionRollup (the stamp) stay thin call
 // sites. Every pure function takes `now` (ms-since-epoch) as an explicit parameter so
 // tests are deterministic and the call sites read the clock once per cadence.
 //
 // The localStorage I/O for the persisted {key → enteredAt} map lives here too,
-// mirroring the whatsNew.ts per-chat lastSeen pattern (getLastSeen / stampLastSeen) so
-// a human who restarts Warden after lunch still reads "stuck 3h", not "stuck 0s".
+// mirroring the fleet `warden:lastClose` stamp pattern (the removed whatsNew.ts per-chat
+// lastSeen pattern was the other model) so a human who restarts Warden after lunch still reads "stuck 3h", not "stuck 0s".
 
 // ─── Languishing tone thresholds ────────────────────────────────────────────
 //
@@ -40,10 +40,10 @@ export const LANGUISHING_AMBER_MS = 15 * 60 * 1000;
 export const LANGUISHING_RED_MS = 60 * 60 * 1000;
 
 // localStorage key for the persisted {agentKey → enteredAt(ms)} map. A SINGLE JSON
-// map (not per-key, unlike whatsNew's per-chat `warden:lastSeen:<chatId>`) because
+// map (not per-key, unlike the removed whatsNew per-chat `warden:lastSeen:<chatId>` keys) because
 // the badge needs the WHOLE map hydrated at once on mount — one read + JSON.parse
 // beats enumerating N per-key entries. The values are the same epoch-ms shape
-// `warden:lastClose` / `stampLastSeen` write, and the I/O helpers below share their
+// `warden:lastClose` writes, and the I/O helpers below share their
 // console.warn-on-failure discipline (a quota/serialize blip never crashes the badge).
 export const STATE_ENTERED_AT_KEY = 'warden:stateEnteredAt';
 
@@ -186,7 +186,7 @@ export function sortOldestEnteredAtFirst<T extends { enteredAt?: number }>(rows:
   });
 }
 
-// ─── Persistence (mirrors whatsNew.ts getLastSeen / stampLastSeen) ──────────
+// ─── Persistence (mirrors the `warden:lastClose` stamp discipline) ──────────
 
 /**
  * Read the persisted {agentKey → enteredAt(ms)} map from localStorage. Returns a fresh
@@ -218,7 +218,7 @@ export function loadStateEnteredAt(): Record<string, number> {
  * Persist the {agentKey → enteredAt(ms)} map to localStorage as one JSON blob. Called
  * by useAttentionRollup whenever the stamp map changes (a transition or a prune), so a
  * restart hydrates the same durations. Never throws — a quota/serialize failure is
- * console.warn'd (matching `stampLastSeen` / `saveUi`), so a full localStorage never
+ * console.warn'd (matching `saveUi`), so a full localStorage never
  * crashes the badge; the worst case is durations reset on next restart.
  */
 export function saveStateEnteredAt(map: Record<string, number>): void {

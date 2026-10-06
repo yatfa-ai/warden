@@ -1,7 +1,7 @@
 // Pure tests for the Source Control panel's file grouping (WARDEN-431).
 //
 // The grouping core lives in src/lib/sourceControl.ts so it is unit-testable
-// without a React runner (mirroring whatsNew.test.mjs / gitStateSummary.test.mjs):
+// without a React runner (mirroring gitStateSummary.test.mjs):
 // groupGitFiles turns a focused repo's working-tree files (the porcelain-slot
 // GitFile shape /api/git-status already returns) into VS Code-style Merge /
 // Staged / Changes buckets.

@@ -24,19 +24,17 @@
 // to a PRESENT human is never recorded (shouldRecordMiss), so it can never re-surface
 // as stale noise.
 //
-// Discipline (mirrors chatWatch.ts / desktopAlerts.ts / whatsNew.ts): pure +
+// Discipline (mirrors chatWatch.ts / desktopAlerts.ts): pure +
 // dependency-free (only `import type`, erased at transpile) so the unit test loads
 // it standalone via Vite's OXC transform. The only I/O is the localStorage
-// getters/setters, which mirror whatsNew.ts's LAST_SEEN_PREFIX discipline and the
-// fleet `warden:lastClose` stamp — console.warn on quota, never throws.
+// getters/setters, which mirror the fleet `warden:lastClose` stamp — console.warn on quota, never throws.
 
 import type { WatchReason } from '@/lib/chatWatch';
 import type { AgentStateRow } from '@/lib/types';
 
 // localStorage keys. LOG holds the bounded ring buffer of fired-while-away watch
 // alerts; SEEN is the epoch-ms "last acknowledged" boundary (the catch-up's "since"
-// cutoff). Mirrors whatsNew.ts's `warden:lastSeen:` prefix discipline (whatsNew.ts)
-// and the fleet-wide `warden:lastClose` stamp (App.tsx): same String(epoch-ms)
+// cutoff). Mirrors the fleet-wide `warden:lastClose` stamp (App.tsx): same String(epoch-ms)
 // shape for SEEN, JSON array for LOG.
 export const WATCH_MISS_LOG_KEY = 'warden:watchMissedLog';
 export const WATCH_MISS_SEEN_KEY = 'warden:watchMissedSeen';
@@ -321,7 +319,7 @@ export function formatCatchupSummary(misses: WatchMiss[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// localStorage I/O — mirrors whatsNew.ts's getLastSeen/stampLastSeen discipline:
+// localStorage I/O — mirrors the fleet `warden:lastClose` stamp discipline:
 // absent/corrupt → a safe default, never throws; quota failure → console.warn.
 // ---------------------------------------------------------------------------
 
@@ -344,7 +342,7 @@ export function loadWatchMissLog(): WatchMiss[] {
 
 /**
  * Persist the miss log (JSON). Never throws — a quota/serialize failure is
- * console.warn'd, matching whatsNew.stampLastSeen / saveUi. The in-memory append
+ * console.warn'd, matching saveUi. The in-memory append
  * already produced the new array (the caller holds it), so a persist failure only
  * means the catch-up won't survive a reload; the current session still surfaces it.
  */
@@ -358,7 +356,7 @@ export function saveWatchMissLog(log: WatchMiss[]): void {
 
 /**
  * Read the ack boundary (epoch-ms). 0 when never acknowledged → every recorded miss
- * is in the away window and surfaces. Mirrors whatsNew.getLastSeen's
+ * is in the away window and surfaces. Uses a
  * parseInt-with-guard. Never throws.
  */
 export function getWatchSeen(): number {
