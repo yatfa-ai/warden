@@ -47,6 +47,7 @@ const {
   PANE_LATENCY_BOUNDARIES_MS,
   PENDING_INPUT_MAX_AGE_MS,
   MAX_PER_WINDOW,
+  registerLongAnimationFrameObserver,
 } = mod;
 
 // Controllable fake clock.
@@ -234,7 +235,8 @@ test('wire shape: M1 window, schema-valid kebab operation literals, no pane keys
   assert.ok(Array.isArray(snap.boundaries));
   assert.ok(snap.boundaries[0] <= 50, 'resolves down to the ~50ms jank users feel');
   assert.deepEqual(snap.operations.map((o) => o.operation).sort(),
-    ['pane-echo-e2e', 'pane-echo-paint', 'renderer-long-task'].sort());
+    ['pane-echo-e2e', 'pane-echo-paint', 'renderer-long-task'].sort(),
+    'without LoAF entries the window carries exactly the original three ops (LoAF ops are lazy — WARDEN-1570)');
   for (const op of snap.operations) {
     assert.match(op.operation, OP_NAME_RE);
     for (const key of ['count', 'okCount', 'failCount', 'min', 'avg', 'max', 'buckets']) {
@@ -271,4 +273,96 @@ test('per-pane independence', () => {
   assert.equal(e2e.count, 2);
   assert.equal(e2e.min, 100);
   assert.equal(e2e.max, 103);
+});
+
+// ---- Long Animation Frame (WARDEN-1570) ----------------------------------
+
+test('LoAF: script/render/blocking fold per frame; invoker op folds per script', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now });
+  s.noteLongAnimationFrame({
+    duration: 200, startTime: 1000, renderStart: 1150, blockingDuration: 120,
+    scripts: [
+      { duration: 60, invokerType: 'event-listener' },
+      { duration: 40, invokerType: 'event-listener' },
+      { duration: 10, invokerType: 'resolve-promise' },
+    ],
+  });
+  const snap = s.snapshot();
+  const o = (n) => opOf(snap, n);
+  assert.equal(o(PANE_LATENCY_OPS.FRAME_SCRIPT).count, 1);
+  assert.equal(o(PANE_LATENCY_OPS.FRAME_SCRIPT).max, 110);
+  assert.equal(o(PANE_LATENCY_OPS.FRAME_RENDER).max, 50);
+  assert.equal(o(PANE_LATENCY_OPS.FRAME_BLOCKING).max, 120);
+  assert.equal(o(PANE_LATENCY_OPS.FRAME_SCRIPT_EVENT_LISTENER).count, 2);
+  assert.equal(o(PANE_LATENCY_OPS.FRAME_SCRIPT_RESOLVE_PROMISE).count, 1);
+  assert.equal(snap.operations.some((x) => x.operation === PANE_LATENCY_OPS.FRAME_SCRIPT_USER_CALLBACK), false,
+    'untouched invoker ops are not emitted');
+  for (const op of snap.operations) assert.match(op.operation, OP_NAME_RE);
+});
+
+test('LoAF: unrecognized / hostile invokerType lands in -other; bad renderStart skips render', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now });
+  s.noteLongAnimationFrame({
+    duration: 90, startTime: 10, renderStart: 0, blockingDuration: 5,
+    scripts: [
+      { duration: 7, invokerType: 'something-new' },
+      { duration: 8, invokerType: 'constructor' },
+      { duration: 9 },
+    ],
+  });
+  const snap = s.snapshot();
+  assert.equal(opOf(snap, PANE_LATENCY_OPS.FRAME_SCRIPT_OTHER).count, 3);
+  assert.equal(snap.operations.some((x) => x.operation === PANE_LATENCY_OPS.FRAME_RENDER), false);
+});
+
+test('LoAF: sourceURL / sourceFunctionName / invoker strings never reach the snapshot', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now });
+  s.noteLongAnimationFrame({
+    duration: 100, startTime: 0, renderStart: 60, blockingDuration: 50,
+    scripts: [{
+      duration: 40, invokerType: 'event-listener',
+      sourceURL: 'file:///home/x/secret.js',
+      sourceFunctionName: 'leakyFunctionName',
+      invoker: 'DIV#secret-selector.onclick',
+    }],
+  });
+  const json = JSON.stringify(s.snapshot()) + JSON.stringify(s.flush());
+  for (const needle of ['secret.js', 'file://', 'leakyFunctionName', 'secret-selector', 'onclick']) {
+    assert.equal(json.includes(needle), false, needle);
+  }
+});
+
+test('LoAF: window resets lazily; original three ops are the whole set without LoAF', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now });
+  assert.deepEqual(s.snapshot().operations.map((o) => o.operation).sort(),
+    ['pane-echo-e2e', 'pane-echo-paint', 'renderer-long-task']);
+  s.noteLongAnimationFrame({ duration: 80, startTime: 0, renderStart: 40, blockingDuration: 30, scripts: [] });
+  assert.ok(s.flush().operations.length > 3);
+  assert.equal(s.snapshot().operations.length, 3, 'LoAF ops gone after flush until observed again');
+});
+
+test('LoAF: per-window cap applies to the new ops', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now, maxPerWindow: 5 });
+  for (let i = 0; i < 20; i += 1) s.noteLongAnimationFrame({ duration: 60, startTime: 0, renderStart: 30, blockingDuration: 10, scripts: [] });
+  assert.equal(opOf(s.snapshot(), PANE_LATENCY_OPS.FRAME_BLOCKING).count, 5);
+});
+
+test('LoAF observer registration: feature-detect, no throw, original ops unchanged', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now });
+  assert.equal(registerLongAnimationFrameObserver(s, undefined), false, 'no PerformanceObserver');
+  function NoLoaf() {}
+  NoLoaf.supportedEntryTypes = ['longtask'];
+  assert.equal(registerLongAnimationFrameObserver(s, NoLoaf), false, 'type unsupported');
+  function Throws() { throw new Error('boom'); }
+  Throws.supportedEntryTypes = ['long-animation-frame'];
+  assert.equal(registerLongAnimationFrameObserver(s, Throws), false, 'constructor throws');
+  assert.equal(s.snapshot().operations.length, 3);
+
+  let observed = null; let cb = null;
+  function Fake(c) { cb = c; this.observe = (o) => { observed = o; }; }
+  Fake.supportedEntryTypes = ['long-animation-frame'];
+  assert.equal(registerLongAnimationFrameObserver(s, Fake), true);
+  assert.deepEqual(observed, { type: 'long-animation-frame', buffered: false });
+  cb({ getEntries: () => [{ duration: 70, startTime: 0, renderStart: 40, blockingDuration: 20, scripts: [{ duration: 30, invokerType: 'user-callback' }] }] });
+  assert.equal(opOf(s.snapshot(), PANE_LATENCY_OPS.FRAME_SCRIPT_USER_CALLBACK).count, 1);
 });

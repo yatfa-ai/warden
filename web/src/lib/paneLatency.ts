@@ -18,6 +18,26 @@
 //     main thread is the convict; if it is empty while echo-e2e is fat, the
 //     lag lives before the renderer (server legs, transport) or on delivery.
 //
+// LONG ANIMATION FRAMES (WARDEN-1570) — `renderer-long-task` proves a tail
+// exists but not WHAT blocked it. A SECOND, separately guarded observer
+// ('long-animation-frame', Chromium) folds into the SAME window as more
+// closed-set operations. Granularity is stated per op:
+//   PER FRAME (one observation per LoAF entry):
+//   • `renderer-frame-script`   — sum of that frame's scripts[].duration.
+//   • `renderer-frame-render`   — frame end − renderStart (style/layout/paint
+//     share); skipped when renderStart is absent/<=0/non-finite.
+//   • `renderer-frame-blocking` — the entry's blockingDuration.
+//   PER SCRIPT (one observation per scripts[] element, its own duration,
+//   bucketed by the spec invokerType): `renderer-frame-script-user-callback`,
+//   `-event-listener`, `-resolve-promise`, `-reject-promise`, `-classic-script`,
+//   `-module-script`, and `-other` for any unrecognized value.
+// These ops are created LAZILY — they appear in a window only once something
+// folded into them — so an engine without LoAF ships exactly the original three.
+// HARD EXCLUSION (WARDEN-443): scripts[].sourceURL, sourceFunctionName and
+// invoker (file paths / function names / selectors) are NEVER read, stored or
+// forwarded. The only string consulted is `invokerType`, matched against the
+// closed enum above; anything else collapses to `-other`.
+//
 // BOUNDARIES start at 25ms and reach 5s: the existing stall telemetry's 1s
 // floor demonstrably misses the 50–500ms jank a typist feels, so the range
 // must resolve what users feel (down to ~50ms) without clipping the "unusable"
@@ -55,7 +75,50 @@ export const PANE_LATENCY_OPS = Object.freeze({
   E2E: 'pane-echo-e2e',
   PAINT: 'pane-echo-paint',
   LONG_TASK: 'renderer-long-task',
+  // Long Animation Frame ops (WARDEN-1570) — lazily created, see header.
+  FRAME_SCRIPT: 'renderer-frame-script',
+  FRAME_RENDER: 'renderer-frame-render',
+  FRAME_BLOCKING: 'renderer-frame-blocking',
+  FRAME_SCRIPT_USER_CALLBACK: 'renderer-frame-script-user-callback',
+  FRAME_SCRIPT_EVENT_LISTENER: 'renderer-frame-script-event-listener',
+  FRAME_SCRIPT_RESOLVE_PROMISE: 'renderer-frame-script-resolve-promise',
+  FRAME_SCRIPT_REJECT_PROMISE: 'renderer-frame-script-reject-promise',
+  FRAME_SCRIPT_CLASSIC_SCRIPT: 'renderer-frame-script-classic-script',
+  FRAME_SCRIPT_MODULE_SCRIPT: 'renderer-frame-script-module-script',
+  FRAME_SCRIPT_OTHER: 'renderer-frame-script-other',
 });
+
+// Closed enum: spec invokerType → op. A null-prototype map, so hostile keys
+// like "constructor"/"__proto__" can never resolve to anything.
+const INVOKER_TYPE_OPS: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, {
+    'user-callback': PANE_LATENCY_OPS.FRAME_SCRIPT_USER_CALLBACK,
+    'event-listener': PANE_LATENCY_OPS.FRAME_SCRIPT_EVENT_LISTENER,
+    'resolve-promise': PANE_LATENCY_OPS.FRAME_SCRIPT_RESOLVE_PROMISE,
+    'reject-promise': PANE_LATENCY_OPS.FRAME_SCRIPT_REJECT_PROMISE,
+    'classic-script': PANE_LATENCY_OPS.FRAME_SCRIPT_CLASSIC_SCRIPT,
+    'module-script': PANE_LATENCY_OPS.FRAME_SCRIPT_MODULE_SCRIPT,
+  }),
+);
+
+/** Ops that exist in a window only once observed (the LoAF family). */
+const LAZY_OPS: ReadonlySet<string> = new Set<string>([
+  PANE_LATENCY_OPS.FRAME_SCRIPT,
+  PANE_LATENCY_OPS.FRAME_RENDER,
+  PANE_LATENCY_OPS.FRAME_BLOCKING,
+  PANE_LATENCY_OPS.FRAME_SCRIPT_OTHER,
+  ...Object.values(INVOKER_TYPE_OPS),
+]);
+
+/** The minimal structural shape of a LoAF entry the sampler reads. Only the
+ *  numeric fields and `scripts[].invokerType` are ever consulted. */
+export interface LongAnimationFrameLike {
+  duration?: number;
+  startTime?: number;
+  renderStart?: number;
+  blockingDuration?: number;
+  scripts?: ReadonlyArray<{ duration?: number; invokerType?: string }>;
+}
 
 /** One folded per-operation accumulator — mirrors the wire's
  *  OperationalMetricOperation (web/src/lib/telemetry/schema.ts). */
@@ -166,8 +229,9 @@ export function createPaneLatencySampler({
   let startedAt = Date.now();
 
   function recordIfRoom(op: string, ms: number): boolean {
-    const acc = accs.get(op);
-    if (!acc || !(ms >= 0)) { rejectedInvalid += 1; return false; }
+    let acc = accs.get(op);
+    if (!acc && LAZY_OPS.has(op)) { acc = emptyAccumulator(); accs.set(op, acc); }
+    if (!acc || typeof ms !== 'number' || !(ms >= 0) || !Number.isFinite(ms)) { rejectedInvalid += 1; return false; }
     if (ms > pendingMaxAgeMs) { rejectedStale += 1; return false; }
     if (acc.count >= maxPerWindow) return false; // bounded fold: drop, never grow
     fold(acc, ms);
@@ -218,6 +282,37 @@ export function createPaneLatencySampler({
     recordIfRoom(PANE_LATENCY_OPS.LONG_TASK, durationMs);
   }
 
+  /**
+   * One Long Animation Frame entry (call from a 'long-animation-frame'
+   * PerformanceObserver). Reads ONLY numeric timing fields and the closed-enum
+   * `invokerType` — sourceURL / sourceFunctionName / invoker are never touched.
+   */
+  function noteLongAnimationFrame(entry: LongAnimationFrameLike): void {
+    if (!entry || typeof entry !== 'object') { rejectedInvalid += 1; return; }
+    const scripts = Array.isArray(entry.scripts) ? entry.scripts : [];
+    let scriptSum = 0;
+    for (const sc of scripts) {
+      if (!sc || typeof sc !== 'object') { rejectedInvalid += 1; continue; }
+      const d = sc.duration;
+      const t = sc.invokerType;
+      const op = (typeof t === 'string' ? INVOKER_TYPE_OPS[t] : undefined)
+        ?? PANE_LATENCY_OPS.FRAME_SCRIPT_OTHER;
+      if (typeof d === 'number' && Number.isFinite(d) && d >= 0) scriptSum += d;
+      recordIfRoom(op, d as number);
+    }
+    recordIfRoom(PANE_LATENCY_OPS.FRAME_SCRIPT, scriptSum);
+    const { duration, startTime, renderStart, blockingDuration } = entry;
+    if (
+      typeof renderStart === 'number' && Number.isFinite(renderStart) && renderStart > 0
+      && typeof startTime === 'number' && Number.isFinite(startTime)
+      && typeof duration === 'number' && Number.isFinite(duration)
+    ) {
+      const renderMs = startTime + duration - renderStart;
+      if (renderMs >= 0) recordIfRoom(PANE_LATENCY_OPS.FRAME_RENDER, renderMs);
+    }
+    if (typeof blockingDuration === 'number') recordIfRoom(PANE_LATENCY_OPS.FRAME_BLOCKING, blockingDuration);
+  }
+
   function project(name: string): PaneLatencyOperation {
     const acc = accs.get(name)!;
     return {
@@ -248,14 +343,44 @@ export function createPaneLatencySampler({
   /** Close the window: return AND reset, so two windows never double-count. */
   function flush(): PaneLatencyWindow {
     const out = snapshot();
-    for (const [name] of accs) accs.set(name, emptyAccumulator());
+    for (const name of [...accs.keys()]) {
+      if (LAZY_OPS.has(name)) accs.delete(name); // LoAF ops reappear only once observed again
+      else accs.set(name, emptyAccumulator());
+    }
     rejectedStale = 0;
     rejectedInvalid = 0;
     startedAt = out.endedAt;
     return out;
   }
 
-  return { noteInput, frame, noteLongTask, snapshot, flush };
+  return { noteInput, frame, noteLongTask, noteLongAnimationFrame, snapshot, flush };
+}
+
+/**
+ * Register the Long Animation Frame observer (WARDEN-1570). Separately guarded
+ * from the longtask observer: absent PerformanceObserver, an engine whose
+ * `supportedEntryTypes` lacks 'long-animation-frame', or a throwing
+ * constructor/observe all fall through silently and return false — the three
+ * original ops are untouched. `PO` is injectable for tests.
+ */
+export function registerLongAnimationFrameObserver(
+  sampler: { noteLongAnimationFrame: (e: LongAnimationFrameLike) => void },
+  PO: any = (globalThis as any).PerformanceObserver,
+): boolean {
+  try {
+    if (typeof PO !== 'function') return false;
+    const supported = PO.supportedEntryTypes;
+    if (!Array.isArray(supported) || !supported.includes('long-animation-frame')) return false;
+    const po = new PO((list: { getEntries(): LongAnimationFrameLike[] }) => {
+      for (const e of list.getEntries()) {
+        try { sampler.noteLongAnimationFrame(e); } catch { /* never break the observer */ }
+      }
+    });
+    po.observe({ type: 'long-animation-frame', buffered: false });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +431,7 @@ export function getPaneLatencySampler(sendWindow?: PaneLatencySend): PaneLatency
       });
       po.observe({ type: 'longtask', buffered: false });
     } catch { /* no longtask support (Safari, old engines) — the other legs stand */ }
+    registerLongAnimationFrameObserver(sampler);
   }
   return singleton;
 }
