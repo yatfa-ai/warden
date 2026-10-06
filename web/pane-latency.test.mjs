@@ -149,6 +149,50 @@ test('paint leg folds through the write callback (xterm async)', () => {
   assert.ok(Math.abs(paint.avg - 12) < 1e-9);
 });
 
+test('paint arriving > max age after the frame is disclosed as rejectedStale, not dropped silently', () => {
+  const clock = makeClock();
+  const s = createPaneLatencySampler({ now: clock.now });
+  s.noteInput('p1');
+  clock.advance(50);
+  const f = s.frame('p1');
+  clock.advance(PENDING_INPUT_MAX_AGE_MS + 1);
+  f.painted();
+  const snap = s.snapshot();
+  assert.equal(snap.rejectedStale, 1);
+  assert.equal(snap.rejectedInvalid, 0);
+  assert.equal(snap.rejected, 1);
+  assert.equal(opOf(snap, PANE_LATENCY_OPS.PAINT).count, 0);
+});
+
+test('paint at exactly PENDING_INPUT_MAX_AGE_MS still folds (boundary is inclusive)', () => {
+  const clock = makeClock();
+  const s = createPaneLatencySampler({ now: clock.now });
+  s.noteInput('p1');
+  clock.advance(50);
+  const f = s.frame('p1');
+  clock.advance(PENDING_INPUT_MAX_AGE_MS);
+  f.painted();
+  const snap = s.snapshot();
+  assert.equal(opOf(snap, PANE_LATENCY_OPS.PAINT).count, 1);
+  assert.equal(snap.rejectedStale, 0);
+  assert.equal(snap.rejected, 0);
+});
+
+test('clock moving backwards between frame and painted is disclosed as rejectedInvalid', () => {
+  const clock = makeClock();
+  const s = createPaneLatencySampler({ now: clock.now });
+  s.noteInput('p1');
+  clock.advance(50);
+  const f = s.frame('p1');
+  clock.advance(-5); // non-monotonic clock
+  f.painted();
+  const snap = s.snapshot();
+  assert.equal(snap.rejectedInvalid, 1);
+  assert.equal(snap.rejectedStale, 0);
+  assert.equal(snap.rejected, 1);
+  assert.equal(opOf(snap, PANE_LATENCY_OPS.PAINT).count, 0);
+});
+
 test('long tasks fold into their own operation', () => {
   const clock = makeClock();
   const s = createPaneLatencySampler({ now: clock.now });

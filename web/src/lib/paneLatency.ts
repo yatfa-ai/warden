@@ -205,8 +205,9 @@ export function createPaneLatencySampler({
     return {
       /** The xterm write callback: folds the renderer's own paint cost. */
       painted() {
-        const ms = now() - t0;
-        if (ms >= 0 && ms <= pendingMaxAgeMs) recordIfRoom(PANE_LATENCY_OPS.PAINT, ms);
+        // No pre-filter: recordIfRoom classifies >max → rejectedStale and
+        // <0 / NaN → rejectedInvalid, so a refused paint is disclosed.
+        recordIfRoom(PANE_LATENCY_OPS.PAINT, now() - t0);
       },
     };
   }
