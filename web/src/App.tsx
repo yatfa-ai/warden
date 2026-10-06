@@ -19,9 +19,9 @@ import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { useRecordOnExpand } from '@/lib/useRecordOnExpand';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
-import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
+import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -174,6 +174,7 @@ function App() {
   const revealPane = useRevealPane();
   const dropRecentlyClosed = useDropRecentlyClosed();
   const markRecentlySaved = useMarkRecentlySaved();
+  const bumpReconnectToken = useBumpReconnectToken();
   // In-flight optimistic mutations. The catalog merge in applyCatalog() would
   // otherwise re-introduce a just-killed chat or revert a just-renamed name from
   // the on-disk catalog while that op's server round-trip is still pending (the
@@ -234,7 +235,6 @@ function App() {
   // live tmux session", so a dead recovery panel on screen must re-attach, not
   // just focus). PaneTile folds a CHANGE of its token into its retryNonce, so
   // the external value never widens the attach effect's deps.
-  const [reconnectTokens, setReconnectTokens] = useState<ReconnectTokens>({});
   // The attach phase each open pane last reported (PaneTile's onPhaseChange).
   // A ref, not state: openChat must read it without depending on pane state,
   // and a phase change never re-renders the app — it only keeps this map
@@ -1158,14 +1158,14 @@ function App() {
       // connected, host_unreachable, error) is never disturbed: those have
       // their own recovery affordances and a live pane must not flicker.
       if (resumeShouldReattach(panePhaseRef.current[id])) {
-        setReconnectTokens((prev) => bumpReconnectToken(prev, id));
+        bumpReconnectToken(id);
       }
       return;
     }
     // Otherwise add to the active workspace + focus it.
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     if (autoFocusNewPane) setFocused(id);
-  }, [autoFocusNewPane, setOpenPanes, setFocused, revealPane]);
+  }, [autoFocusNewPane, setOpenPanes, setFocused, revealPane, bumpReconnectToken]);
 
   // WARDEN-417 / WARDEN-476: in-app catch-up for per-chat watch pings that fired while
   // the human was away (the OS notification was unsupported / denied / cleared / lost).
@@ -1462,9 +1462,9 @@ function App() {
     // folds the change into its retryNonce and re-runs the attach effect —
     // the same sequence the in-pane Re-spawn button drives. A pane that is
     // not open costs nothing (the token entry waits unused).
-    setReconnectTokens((prev) => bumpReconnectToken(prev, id));
+    bumpReconnectToken(id);
     if (prefs.notifyChatOps) toast.success('Session respawned — a fresh process under the same name');
-  }, [discoverHost, prefs.notifyErrors, prefs.notifyChatOps]);
+  }, [discoverHost, prefs.notifyErrors, prefs.notifyChatOps, bumpReconnectToken]);
 
   // Save a closed TEMPORARY session from the recently-closed flyout (WARDEN-1422):
   // promote it to persistent — it moves into its host's saved list, and its
@@ -2205,7 +2205,6 @@ function App() {
             externalSearchQuery={externalSearchQuery}
             // WARDEN-1422 (QA round 5): per-pane reconnect tokens + phase
             // reports — the respawn/resume → open-dead-pane re-attach chain.
-            reconnectTokens={reconnectTokens}
             onPanePhaseChange={handlePanePhaseChange}
             // WARDEN-1322 (slice 3): the six terminal prefs (fontSize/onFontSize-
             // Change, scrollback, fontFamily, terminalCursorStyle, copyOnSelect,

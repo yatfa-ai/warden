@@ -83,6 +83,7 @@ import {
   type WorkspacePaneSet,
 } from '@/lib/storage';
 import { clampLayoutWidths } from '@/lib/layout';
+import { bumpReconnectToken as bumpReconnectTokenIn } from '@/lib/paneAttach';
 import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
@@ -630,6 +631,17 @@ export interface UiStoreState {
   markRecentlySaved: (id: string) => void;
   /** Drop `id`. A full no-op (same state object) when it is not marked. */
   expireRecentlySaved: (id: string) => void;
+  /**
+   * Per-pane reconnect tokens (pane id → bump count; WARDEN-1558, roadmap
+   * WARDEN-1204 slice 29) — tells a stuck open pane to re-attach. The fourth
+   * NON-persisted session fact (after `maximized`, `newActivity`,
+   * `recentlySavedIds`): NOT a STORE_PERSISTED_KEYS member, initial `{}`, never
+   * seeded from disk. Treated as immutable — every bump copies the map. A bump
+   * for a pane that is not open is harmless (the entry waits unused).
+   */
+  reconnectTokens: Readonly<Record<string, number>>;
+  /** Bump `id`'s token by one (absent → 1); other panes' entries are untouched. */
+  bumpReconnectToken: (id: string) => void;
   /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
@@ -1225,6 +1237,11 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         n.delete(id);
         return { recentlySavedIds: n };
       }),
+    // WARDEN-1558 (slice 29): the not-persisted per-pane reconnect tokens.
+    // Initial empty — never seeded. The pure bump lives in paneAttach.ts.
+    reconnectTokens: {},
+    bumpReconnectToken: (id) =>
+      set((s) => ({ reconnectTokens: bumpReconnectTokenIn(s.reconnectTokens, id) })),
     // WARDEN-256 (folded, slice 24): every action below that changes the active
     // id clears `maximized` in the SAME set — guarded on an actual id MOVE.
     selectWorkspace: (activeWorkspaceId) =>
@@ -2115,6 +2132,19 @@ export function useRecentlySavedIds(): ReadonlySet<string> {
 
 export function useMarkRecentlySaved(): (id: string) => void {
   return useUiStore((s) => s.markRecentlySaved);
+}
+
+/**
+ * Per-pane reconnect tokens (WARDEN-1558, slice 29) — NOT persisted. The map
+ * reference only changes on a real bump; PaneGrid reads `[tile.id]` from it.
+ */
+export function useReconnectTokens(): Readonly<Record<string, number>> {
+  return useUiStore((s) => s.reconnectTokens);
+}
+
+/** Stable-identity action: bump a pane's reconnect token so it re-attaches. */
+export function useBumpReconnectToken(): (id: string) => void {
+  return useUiStore((s) => s.bumpReconnectToken);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {

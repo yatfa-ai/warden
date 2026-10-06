@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity, useReconnectTokens } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -138,12 +138,6 @@ interface Props {
   // two pane IDS — never a visible index, which can be a subset (WARDEN-108).
   // Must be a stable useCallback in App (handler-identity discipline).
   onReorderPanes: (dragId: string, targetId: string) => void;
-  // WARDEN-1422 (QA round 5): per-pane reconnect tokens. App bumps a pane's
-  // token when that pane must re-attach NOW — a sidebar respawn of its chat
-  // succeeded, or a resume click hit the pane while it sat in session_dead.
-  // Pure pass-through to PaneTile (read per tile as reconnectTokens?.[t.id]);
-  // the fold into the attach trigger lives inside PaneTile.
-  reconnectTokens?: Record<string, number>;
   // WARDEN-1422 (QA round 5): attach-phase reports from each tile, bound
   // per-pane (the onSplitShell/onSearchWorkspace binding pattern) so App's
   // handler receives the pane id. Pure pass-through; App's handler writes a
@@ -151,12 +145,18 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, reconnectTokens, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
   // textually unchanged.
   const paneLayout = usePaneLayout();
+  // WARDEN-1558 (roadmap WARDEN-1204 slice 29): per-pane reconnect tokens live
+  // on the store (non-persisted); App bumps them via the store action when a
+  // pane must re-attach NOW (sidebar respawn / resume click on a session_dead
+  // pane). Read per tile as reconnectTokens[t.id]; the fold into the attach
+  // trigger lives inside PaneTile.
+  const reconnectTokens = useReconnectTokens();
   // WARDEN-1530 (roadmap WARDEN-1204 slice 24): the maximized pane id is a
   // shared, NOT-persisted store fact (App used to thread it as a prop). The
   // store clears it on workspace switch / pane removal; resolveVisibleTiles
@@ -837,7 +837,7 @@ export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceK
                     issueLinkTrackers={issueLinkTrackers}
                     onSpawned={onSpawned}
                     pollIntervalMs={pollIntervalMs}
-                    reconnectToken={reconnectTokens?.[t.id]}
+                    reconnectToken={reconnectTokens[t.id]}
                     onPhaseChange={onPanePhaseChange ? (phase) => onPanePhaseChange(t.id, phase) : undefined}
                   />
                 </div>
