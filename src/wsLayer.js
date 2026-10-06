@@ -33,7 +33,7 @@ import { WebSocketServer } from 'ws';
 import { performance } from 'node:perf_hooks';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
-import { createSession } from './sessions.js';
+import { createSession, isValidSessionId } from './sessions.js';
 import { appendEvent } from './activity.js';
 import { capturePanes } from './chats.js';
 import { resize, attachStream, probeSession } from './tmux.js';
@@ -73,6 +73,12 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     const chatProject = u.searchParams.get('project') || null;
     const chatRole = u.searchParams.get('role') || null;
     const chatKey = u.searchParams.get('chatKey') || null;
+    // A client-supplied sid names a file under sessions/ — reject anything outside
+    // the id allow-list before an Observer can persist to it (WARDEN-1577).
+    if (sid && !isValidSessionId(sid)) {
+      ws.send(JSON.stringify({ type: 'error', error: 'invalid session id' }));
+      return;
+    }
     if (!sid) {
       const s = await createSession(null, { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey });
       sid = s.id;

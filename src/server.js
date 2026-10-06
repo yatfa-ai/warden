@@ -71,7 +71,7 @@ import {
 import { deliverPastedImage } from './pasteImage.js';
 import { readDirectives, rotateDirectives } from './observer.js';
 import { resolveModel } from './llm.js';
-import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
+import { listSessions, createSession, renameSession, deleteSession, isValidSessionId } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince, getStateSeriesSince, NON_ACTIVITY_TYPES } from './activity.js';
 import { computeBudgetState, shouldFireBudgetAlert, resolveBudgetConfig, BUDGET_INTERVAL_MS } from './budget.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
@@ -1145,10 +1145,15 @@ app.post('/api/sessions', async (req, res) => {
   res.json(await createSession(name, { host, container, project, role, chatKey }));
 });
 app.patch('/api/sessions/:id', async (req, res) => {
+  if (!isValidSessionId(String(req.params.id))) return res.status(400).json({ error: 'invalid session id' });
   const s = await renameSession(String(req.params.id), String(req.body?.name || ''));
   return s ? res.json(s) : res.status(404).json({ error: 'not found' });
 });
-app.delete('/api/sessions/:id', async (req, res) => { await deleteSession(String(req.params.id)); res.json({ ok: true }); });
+app.delete('/api/sessions/:id', async (req, res) => {
+  if (!isValidSessionId(String(req.params.id))) return res.status(400).json({ error: 'invalid session id' });
+  await deleteSession(String(req.params.id));
+  res.json({ ok: true });
+});
 
 // Activity timeline endpoints
 app.get('/api/activity', async (req, res) => {
