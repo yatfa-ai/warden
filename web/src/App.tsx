@@ -22,7 +22,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, bumpReconnectToken, resumeShouldReattach, type PaneAttachPhase, type ReconnectTokens } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetAgentFilter, useSetAgentSort, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -445,24 +445,11 @@ function App() {
   // pattern). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
   // rides the hook's store subscription.
   const setTimestampFormat = useSetTimestampFormat();
-  // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped
-  // in WARDEN-91. These were ChatSidebar-local useState with their own save
-  // effect, which App's saveUi spread (which omits both keys) then clobbered on
-  // every unrelated state change — wiping them from disk so the controls reset
-  // to 'all'/'manual' on reload. WARDEN-1204 slice 7: the pair lives on the
-  // shared client-state store (lib/uiStore.ts) — ChatSidebar + its three
-  // AgentFilterSortControls mounts subscribe directly, so the four JSX pass
-  // sites into ChatSidebar are gone. WARDEN-1471 (slice 16): App keeps only the
-  // SETTERS (the reset partition); the values ride the hook's store
-  // subscription. Pure client-side pref; the store seeds itself from loadUi()
-  // with the same 'all'/'manual' defaults DEFAULT_UI has.
-  const setAgentFilter = useSetAgentFilter();
-  const setAgentSort = useSetAgentSort();
   // WARDEN-468: HealthDashboard "Group agents by: Health | Host | Project" toggle
   // (WARDEN-237; Project added in WARDEN-741). Was a HealthDashboard-local
   // useState that silently reset to 'health' on every Warden restart. Lifted to
   // App + persisted by the saveUi effect (the single writer), like
-  // agentFilter/agentSort above — so a cross-host human's Host grouping
+  // the other persisted prefs — so a cross-host human's Host grouping
   // survives reload. Pure client-side pref.
   //
   // WARDEN-1426 (roadmap WARDEN-1204 slice 13) — migrated onto the shared
@@ -526,7 +513,7 @@ function App() {
   //
   // WARDEN-1383 (roadmap WARDEN-1204 slice 8) — the LAST facts migrated off
   // App-owned useState + a second read channel onto the shared client-state
-  // store (lib/uiStore.ts), following `snippets` through `agentSort`: the
+  // store (lib/uiStore.ts), following `snippets` through `hostLabels`: the
   // eight new-chats spawn facts (preset + per-host map, host, cwd + per-host
   // map, customPresets, shell + per-host map). NewChatForm (the reader) used
   // to do a PRIVATE `useState(() => loadUi())` here while NewChatsSection
@@ -1006,10 +993,8 @@ function App() {
       timestampFormat: setTimestampFormat,
       // File Viewer markdown view mode (WARDEN-480) — the WARDEN-934 omission.
       fileViewerViewMode: setFileViewerViewMode,
-      // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
-      // per-host collapse (WARDEN-500), per-host display labels (WARDEN-490).
-      agentFilter: setAgentFilter,
-      agentSort: setAgentSort,
+      // Health grouping (WARDEN-468), per-host collapse (WARDEN-500),
+      // per-host display labels (WARDEN-490).
       healthGroupBy: setHealthGroupBy,
       healthCollapsedHosts: setHealthCollapsedHosts,
       hostLabels: setHostLabels,

@@ -1,6 +1,6 @@
 // Persistence for the Open Chat browser's host multiselect (the user's browsing
 // scope). Extracted from OpenChatBrowserPage.tsx so it is unit-testable without
-// a React environment — the same move as @/lib/chatDisplay and @/lib/agentFilter.
+// a React environment — the same move as @/lib/chatDisplay.
 //
 // Stored under its own localStorage key so it can't race with App's centralized
 // UiState save. (WARDEN-109 Facet B: keep on `warden:discover-hosts:v1`.)

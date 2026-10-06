@@ -15,8 +15,7 @@
 //           sites (saveUi / saveObs / stampLastSeen / saveWatchMissLog / …).
 //
 // The functions live in src/lib/discoverHosts.ts (extracted from
-// OpenChatBrowserPage.tsx — the same unit-testability move as @/lib/chatDisplay
-// and @/lib/agentFilter) and are loaded REAL (transpiled TS -> ESM via Vite's
+// OpenChatBrowserPage.tsx — the same unit-testability move as @/lib/chatDisplay) and are loaded REAL (transpiled TS -> ESM via Vite's
 // OXC transform), like watchCatchup.test.mjs. localStorage is a minimal
 // in-memory shim, and console.warn is spied so the tests assert the warn FIRES
 // (with the convention's exact namespaced message) for real failures and does

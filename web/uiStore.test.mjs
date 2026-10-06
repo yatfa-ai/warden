@@ -94,7 +94,7 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 41 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 39 STORE_PERSISTED_KEYS
   // facts, workspaces / activeWorkspaceId included since WARDEN-1526); the
   // `{...loadUi(), …}` open stands in for every DEFAULT_UI field the snapshot
   // always carried.
@@ -907,115 +907,6 @@ test('a store seeded with two snippets renders them through the replySnippetPrev
   assert.deepEqual(replySnippetPreview(store.getState().snippets), next);
 });
 
-console.log('\nWARDEN-1375 (roadmap slice 7) — agentFilter/agentSort: the sidebar fleet filter/sort pair');
-test("a fresh store seeds 'all'/'manual' on a clean install (the DEFAULT_UI values, not local literals)", () => {
-  reset();
-  const store = createUiStore();
-  assert.equal(store.getState().agentFilter, 'all');
-  assert.equal(store.getState().agentFilter, DEFAULT_UI.agentFilter);
-  assert.equal(store.getState().agentSort, 'manual');
-  assert.equal(store.getState().agentSort, DEFAULT_UI.agentSort);
-});
-test('a fresh store seeds both from the PERSISTED payload when one exists', () => {
-  reset();
-  saveUi({ ...loadUi(), agentFilter: 'yatfa', agentSort: 'name' });
-  const store = createUiStore();
-  assert.equal(store.getState().agentFilter, 'yatfa');
-  assert.equal(store.getState().agentSort, 'name');
-});
-test("the seed runs through loadUi's sanitizers (a bogus filter falls back to 'all'; a legal sort is accepted)", () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], agentFilter: 'claude-only-please', agentSort: 'activity' }));
-  const store = createUiStore();
-  // agentFilter's enum-membership sanitizer rejects the bogus value (the same
-  // normalizer App's retired lazy initializer inherited from loadUi) …
-  assert.equal(store.getState().agentFilter, 'all');
-  // … while agentSort's ?? sanitizer passes the legal value straight through.
-  assert.equal(store.getState().agentSort, 'activity');
-});
-test('an explicit seed overrides the persisted read (so a test needs no localStorage) — the UiStoreSeed addition', () => {
-  reset();
-  saveUi({ ...loadUi(), agentFilter: 'yatfa', agentSort: 'name' });
-  const store = createUiStore({ agentFilter: 'manual', agentSort: 'status' });
-  assert.equal(store.getState().agentFilter, 'manual');
-  assert.equal(store.getState().agentSort, 'status');
-});
-
-console.log("\nsetAgentFilter/setAgentSort — the popover's writes, and they do NOT touch localStorage");
-test('the setters replace both values, and a subscriber is notified (the SHARING channel ChatSidebar reads)', () => {
-  reset();
-  const store = createUiStore({ agentFilter: 'all', agentSort: 'manual' });
-  const seen = [];
-  const unsubscribe = store.subscribe((s) => seen.push([s.agentFilter, s.agentSort]));
-  store.getState().setAgentFilter('claude');
-  store.getState().setAgentSort('host');
-  unsubscribe();
-  assert.deepEqual(seen, [['claude', 'manual'], ['claude', 'host']]);
-  // After unsubscribing, a further write must not reach it.
-  store.getState().setAgentFilter('all');
-  assert.equal(seen.length, 2);
-});
-test('the setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
-  reset();
-  const store = createUiStore({ agentFilter: 'all', agentSort: 'manual' });
-  store.getState().setAgentFilter('yatfa');
-  store.getState().setAgentSort('name');
-  // The store deliberately has no write-through persistence: a second writer
-  // here would silently race the ONE compile-locked saveUi effect.
-  assert.equal(mem.get('warden:ui:v3'), undefined);
-});
-test('the action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
-  reset();
-  const store = createUiStore({ agentFilter: 'all', agentSort: 'manual' });
-  const beforeFilter = store.getState().setAgentFilter;
-  const beforeSort = store.getState().setAgentSort;
-  beforeFilter('yatfa');
-  beforeSort('name');
-  assert.equal(store.getState().setAgentFilter, beforeFilter);
-  assert.equal(store.getState().setAgentSort, beforeSort);
-});
-
-console.log('\nround trip: sidebar popover → store → App snapshot → the saveUi effect → loadUi');
-test('a filter/sort picked in ANY of the three headers survives a restart', () => {
-  reset();
-  const store = createUiStore();
-  assert.equal(store.getState().agentFilter, 'all');
-  assert.equal(store.getState().agentSort, 'manual');
-  store.getState().setAgentFilter('claude');   // the popover's filter Select
-  store.getState().setAgentSort('status');     // the popover's sort Select
-  flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
-  assert.equal(loadUi().agentFilter, 'claude'); // next launch
-  assert.equal(loadUi().agentSort, 'status');
-  // And the next launch's store seeds from exactly that.
-  assert.equal(createUiStore().getState().agentFilter, 'claude');
-  assert.equal(createUiStore().getState().agentSort, 'status');
-});
-test("the reset path restores 'all'/'manual' through the store-backed setters", () => {
-  reset();
-  const store = createUiStore({ agentFilter: 'yatfa', agentSort: 'name' });
-  // App's resetSetters entries are `agentFilter: setAgentFilter` /
-  // `agentSort: setAgentSort` — the SAME setters, now backed by the store,
-  // called with resetUiPrefDefaults()' values.
-  store.getState().setAgentFilter(DEFAULT_UI.agentFilter);
-  store.getState().setAgentSort(DEFAULT_UI.agentSort);
-  flushSnapshotToDisk(store);
-  assert.equal(store.getState().agentFilter, 'all');
-  assert.equal(store.getState().agentSort, 'manual');
-  assert.equal(loadUi().agentFilter, 'all');
-  assert.equal(loadUi().agentSort, 'manual');
-});
-test('the pair is independent of the other migrated facts', () => {
-  reset();
-  const store = createUiStore({ agentFilter: 'yatfa', agentSort: 'name' });
-  store.getState().setAgentFilter('manual');
-  assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().fileViewerViewMode, 'rendered');
-  assert.deepEqual(store.getState().hostLabels, {});
-  store.getState().setTimestampFormat('absolute');
-  assert.equal(store.getState().agentFilter, 'manual');
-  assert.equal(store.getState().agentSort, 'name');
-});
-
 // ─── the new-chats spawn family (WARDEN-1383, roadmap WARDEN-1204 slice 8) ───
 //
 // Eight facts — defaultNewChatPreset, defaultNewChatPresetByHost,
@@ -1260,7 +1151,6 @@ test('the family is independent of the other migrated facts', () => {
   store.getState().setDefaultNewChatHost('box-1');
   store.getState().setDefaultNewChatPreset('codex');
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().timestampFormat, 'relative');
   assert.deepEqual(store.getState().hostLabels, {});
 });
@@ -1381,7 +1271,6 @@ test('the pair is independent of the other migrated facts', () => {
   const store = createUiStore({ attentionDesktopAlerts: true });
   store.getState().setAttentionStates({ stuck: false });
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().defaultNewChatHost, '(local)');
   store.getState().setAttentionDesktopAlerts(false);
   assert.deepEqual(store.getState().attentionStates, { stuck: false });
@@ -1610,7 +1499,6 @@ test('the family is independent of the other migrated facts', () => {
   store.getState().setTheme('dracula');
   store.getState().setPaneLayout('stacked');
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().timestampFormat, 'relative');
   assert.equal(store.getState().defaultNewChatHost, '(local)');
   assert.equal(store.getState().attentionDesktopAlerts, false);
@@ -1757,7 +1645,6 @@ test('the pair is independent of the other migrated facts', () => {
   const store = createUiStore({ healthGroupBy: 'host' });
   store.getState().setHealthCollapsedHosts({ 'build-01': true });
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().theme, 'system');
   assert.equal(store.getState().defaultNewChatHost, '(local)');
   // …and writing one of the pair does not disturb the other.
@@ -1907,7 +1794,6 @@ test('the pair is independent of the other migrated facts', () => {
   const store = createUiStore({ paneColRatios: [0.6, 0.4] });
   store.getState().setPaneRowRatios([0.3, 0.7]);
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().theme, 'system');
   assert.equal(store.getState().defaultNewChatHost, '(local)');
   // …and writing one axis does not disturb the other.
@@ -2127,7 +2013,6 @@ test('the four prefs are independent of the other migrated facts', () => {
   const store = createUiStore({ observerViewMode: 'activity' });
   store.getState().setObserverActivityFilters({ type: 'error', agent: 'all', host: 'all' });
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().agentFilter, 'all');
   assert.equal(store.getState().theme, 'system');
   assert.deepEqual(store.getState().paneColRatios, []);
   // …and writing one axis does not disturb the others.
@@ -2342,7 +2227,7 @@ test('MODE 1 (WARDEN-1477): a store write with NO ObserverTabs mounted survives 
   // this file's header states: the store writes, then the always-mounted
   // writer's effect hop (flushObsStoreToDisk — the exact calls
   // useObsPersistence.ts makes), then a FRESH store as the restart.
-  // terminalFontSize/agentSort ride the SAME store through the warden:ui:v3
+  // terminalFontSize/timestampFormat ride the SAME store through the warden:ui:v3
   // hop as the CONTROLS: they are store facts written through the identical
   // gesture in the identical harness, so a passing pair proves the
   // instrument persists a store write — a failed ObsUi pair is then a
@@ -2351,7 +2236,7 @@ test('MODE 1 (WARDEN-1477): a store write with NO ObserverTabs mounted survives 
   const store = createUiStore();
   // App's own writes — no ObserverTabs anywhere in this story.
   store.getState().setTerminalFontSize(19);                       // CONTROL 1 (warden:ui:v3)
-  store.getState().setAgentSort('recent');                        // CONTROL 2 (warden:ui:v3)
+  store.getState().setTimestampFormat('absolute');                // CONTROL 2 (warden:ui:v3)
   store.getState().setObserverViewMode('activity');               // TARGET 1
   store.getState().setObserverActivityFilters({ type: 'task', agent: 'claude-1', host: 'h1' }); // TARGET 2
   flushSnapshotToDisk(store);   // useConfigPersistence's effect hop
@@ -2359,7 +2244,7 @@ test('MODE 1 (WARDEN-1477): a store write with NO ObserverTabs mounted survives 
   // Restart: a fresh store seeds from loadUi() + loadObs().
   const restarted = createUiStore();
   assert.equal(restarted.getState().terminalFontSize, 19, 'CONTROL 1 lost — the probe is broken, not the fix');
-  assert.equal(restarted.getState().agentSort, 'recent', 'CONTROL 2 lost — the probe is broken, not the fix');
+  assert.equal(restarted.getState().timestampFormat, 'absolute', 'CONTROL 2 lost — the probe is broken, not the fix');
   assert.equal(restarted.getState().observerViewMode, 'activity', 'TARGET 1 lost across restart — the always-mounted ObsUi writer is not persisting the store half');
   assert.deepEqual(
     restarted.getState().observerActivityFilters,
@@ -2546,13 +2431,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (41 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (39 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2650,14 +2535,14 @@ test('a clean install seeds paneHost as {}', () => {
   assert.deepEqual(createUiStore().getState().paneHost, {});
 });
 
-console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (41) and rides the selector');
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (39) and rides the selector');
 test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const store = createUiStore({ paneHost: { a: 'h' } });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
   assert.deepEqual(picked.paneHost, { a: 'h' });
 });
 
@@ -2710,10 +2595,10 @@ test('setWatchedChats replaces the set and keeps a stable identity', () => {
 test('watchedChats is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('watchedChats'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const store = createUiStore({ watchedChats: ['w'] });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
   assert.deepEqual(picked.watchedChats, ['w']);
 });
 test('a watched set survives a restart through the production hop; [] persists as []', () => {
@@ -2782,12 +2667,12 @@ test('toggleSidebarCollapsed / toggleObserverCollapsed flip atomically; twice ->
   assert.equal(store.getState().observerCollapsed, false);
   assert.equal(store.getState().toggleSidebarCollapsed, toggleSidebarCollapsed, 'stable identity');
 });
-test('the three flags join STORE_PERSISTED_KEYS (41) and ride selectPersistedStorePrefs', () => {
+test('the three flags join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of COLLAPSE_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const picked = selectPersistedStorePrefs(createUiStore().getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
 });
 test('each flag round-trips store -> snapshot -> saveUi -> loadUi -> a fresh store', () => {
   reset();
@@ -2869,12 +2754,12 @@ test('setters write one width each, with stable identity', () => {
   assert.equal(store.getState().setSidebarWidth, setSidebarWidth);
   assert.equal(store.getState().setObserverWidth, setObserverWidth);
 });
-test('both widths join STORE_PERSISTED_KEYS (41) and ride selectPersistedStorePrefs', () => {
+test('both widths join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of WIDTH_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const picked = selectPersistedStorePrefs(createUiStore({ sidebarWidth: 233, observerWidth: 411 }).getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
   assert.equal(picked.sidebarWidth, 233);
   assert.equal(picked.observerWidth, 411);
 });
@@ -3021,14 +2906,14 @@ test('reclampPanelWidths has a stable identity across calls', () => {
 console.log('\ncreateUiStore — workspaces + activeWorkspaceId (slice 23)');
 const ws = (id, openPanes = [], focused = null, name = id) => ({ id, name, openPanes, focused, recentlyClosed: [] });
 const seeded = (workspaces, activeWorkspaceId = workspaces[0].id) => createUiStore({ workspaces, activeWorkspaceId });
-test('workspaces + activeWorkspaceId join STORE_PERSISTED_KEYS (41) and ride selectPersistedStorePrefs', () => {
+test('workspaces + activeWorkspaceId join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('workspaces'));
   assert.ok(STORE_PERSISTED_KEYS.includes('activeWorkspaceId'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   const s = seeded([ws('a'), ws('b')], 'b');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
   assert.equal(picked.workspaces, s.getState().workspaces);
   assert.equal(picked.activeWorkspaceId, 'b');
 });
@@ -3245,13 +3130,13 @@ test('maximized starts null; setMaximized takes value and functional forms and i
   s.getState().setMaximized('p1');
   assert.equal(s.getState(), same);
 });
-test('maximized is NOT persisted: STORE_PERSISTED_KEYS stays 41 and excludes it; the selector never carries it', () => {
+test('maximized is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; the selector never carries it', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 41);
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
   assert.ok(!STORE_PERSISTED_KEYS.includes('maximized'));
   const s = maxSeeded();
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 41);
+  assert.equal(Object.keys(picked).length, 39);
   assert.ok(!('maximized' in picked));
   assert.equal(createUiStore().getState().maximized, null, 'never seeded');
 });

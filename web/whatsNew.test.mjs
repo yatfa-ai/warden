@@ -1,7 +1,6 @@
 // Pure tests for the per-agent "What's new since you last looked" catch-up
 // (WARDEN-356). The logic core lives in src/lib/whatsNew.ts so it is unit-
-// testable without a React runner (mirroring formatTimestamp.test.mjs /
-// agentFilter.test.mjs): lastSeen stamping, the relative-date parser (retained
+// testable without a React runner (mirroring formatTimestamp.test.mjs): lastSeen stamping, the relative-date parser (retained
 // utility), the exact-epoch since-filter, the summary line, the truncation
 // signal, and the marker-visibility gate.
 //

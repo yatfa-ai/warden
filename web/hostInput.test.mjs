@@ -10,7 +10,7 @@
 // "button does nothing" feel the ticket set out to remove — so a duplicate MUST
 // be rejected here (with a message) rather than swallowed downstream.
 //
-// No FE test runner in this repo, so (like agentFilter.test.mjs) this loads the
+// No FE test runner in this repo, so (like diff.test.mjs) this loads the
 // REAL src/lib/hostInput.ts plus its ./chatDisplay dependency (for THIS_MACHINE),
 // transpiled TS -> ESM via Vite's OXC transform, rewriting the relative specifier
 // so it resolves from the temp dir.

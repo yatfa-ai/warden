@@ -39,7 +39,7 @@
 // remains the documented future optimization for very large logs — not needed now.
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring
-// gitStateSummary.ts / agentFilter.ts (extracted "so it's testable without a
+// gitStateSummary.ts (extracted "so it's testable without a
 // React runner"). The only I/O is the localStorage getters/setters for lastSeen,
 // which mirror loadUi/saveUi's localStorage discipline.
 

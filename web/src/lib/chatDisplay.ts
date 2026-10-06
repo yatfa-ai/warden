@@ -9,8 +9,8 @@ export function basename(p: string) { return (p || '').replace(/[\\/]+/g, '/').r
 
 // Short process/type label for a chat (yatfa | claude | resume | shell | <bin> | manual).
 // Takes the minimal structural slice it actually reads (kind + cmd) rather than the
-// full Chat, so the import-light lib/agentFilter.ts can call this canonical copy with
-// its own local AgentFilterChat slice (WARDEN-936) instead of duplicating the body.
+// full Chat, so import-light callers can pass a minimal structural slice (WARDEN-936)
+// instead of the full Chat.
 // Chat is structurally assignable, so every existing call site is unchanged.
 export function chatType(c?: { kind?: string; cmd?: string }): string {
   if (!c) return '?';
@@ -26,8 +26,8 @@ export function chatType(c?: { kind?: string; cmd?: string }): string {
 
 // Minimal structural slice the NAMING helpers (processCwdLabel + displayName)
 // actually read — the same narrowing WARDEN-936 applied to chatType above, for
-// the same reason: lib/agentFilter.ts is deliberately import-light and passes
-// its own local AgentFilterChat slice, which carries every field named here.
+// the same reason: this module is deliberately import-light and callers may pass a
+// minimal slice that carries every field named here.
 // Chat (lib/types) remains structurally assignable (its `kind` union
 // 'yatfa' | 'tmux' | 'local' satisfies `kind?: string`), so every existing call
 // site is unchanged. With this, the module no longer references Chat at all —
