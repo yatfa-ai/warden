@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, resetObsPrefDefaults, type ResettableKey, type ResetUiDefaults, type ObsResetKey, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, mergeRecentlyClosed, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, HEALTH_WIDTH } from '@/lib/layout';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId } from '@/lib/theme';
@@ -21,7 +21,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useSetTerminalColorScheme, useSetResolvedThemeId, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
+import { useHostLabels, useDefaultShell, useDefaultShellByHost, useTheme, useDensity, useAutoFocusNewPane, useRestoreOnStartup, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -120,7 +120,6 @@ function App() {
   // resolves the opening workspace from the DISK payload before React renders anything.
   // Where the LIVE pref lives is independent of both.
   const restoreOnStartup = useRestoreOnStartup();
-  const setRestoreOnStartup = useSetRestoreOnStartup();
   // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed live INSIDE
   // per-workspace pane-sets. The active workspace's panes are what render in the
   // grid; switching activeWorkspaceId swaps the grid instantly. paneHost stays
@@ -218,9 +217,6 @@ function App() {
   // quartet). All four are zustand actions: stable identities, safe to list —
   // or omit — in dependency arrays.
   const setObserverViewMode = useSetObserverViewMode();
-  const setObserverActivityFilters = useSetObserverActivityFilters();
-  const setObserverDirectiveFilters = useSetObserverDirectiveFilters();
-  const setObserverAttentionFilters = useSetObserverAttentionFilters();
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   // The past-conversation whose read-only transcript is open from a global-search
   // result (WARDEN-719). Lifted to App level — NOT inside GlobalSearchDialog —
@@ -284,7 +280,6 @@ function App() {
   // partition. Since slice 16 (WARDEN-1471) the persisted snapshot is NOT an
   // App-side reason any more: useConfigPersistence reads the store half.
   const theme = useTheme();
-  const setTheme = useSetTheme();
   // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula') lives on
   // the store as a NON-persisted fact (WARDEN-1574, slice 31). The `theme` pref
   // stays 'system' on an OS flip, so chrome re-paints via a direct DOM attribute
@@ -296,12 +291,10 @@ function App() {
   // theme" live-update on an OS flip (nuance #1).
   const setResolvedThemeId = useSetResolvedThemeId();
   const density = useDensity();
-  const setDensity = useSetDensity();
   // paneLayout (WARDEN-1471, slice 16): App keeps only the SETTER — the reset
   // partition needs it; the value rides useConfigPersistence's single store
   // subscription into the same saveUi effect (PaneGrid subscribes to the
   // store directly for its own reads).
-  const setPaneLayout = useSetPaneLayout();
   // Draggable resize-gutter ratios (WARDEN-660): per-axis PaneGrid track
   // weights ([] = equal split, the default). Pure client-side pref (like
   // paneLayout/terminalFontSize): persisted by the saveUi effect below, never
@@ -318,7 +311,7 @@ function App() {
   // re-render the saveUi effect — and the setters were already gone (the
   // ratios are NOT resettable: both keys sit in RESET_PRESERVED_KEYS —
   // WARDEN-934: "they are panel layout, which the shipped button promises to
-  // keep" — so no resetSetters entry ever needed them, and an unused local
+  // keep" — so no reset entry ever needed them, and an unused local
   // would only fail noUnusedLocals).
 
   // "Pane on agent exit" behavior: what an already-open pane does when its agent
@@ -347,7 +340,6 @@ function App() {
   // snapshot's field changes → the saveUi effect fires → persistUiState →
   // localStorage. The store seeds itself from loadUi() at module load, the
   // same persisted read the useState lazy initializers did.
-  const setOnExitBehavior = useSetOnExitBehavior();
   // "Auto-focus new pane": whether opening/resuming/splitting a chat moves
   // keyboard focus to the new pane (default true = today's behavior). When false
   // the currently focused pane is preserved — xterm's native click-to-focus lets
@@ -358,12 +350,10 @@ function App() {
   // WARDEN-1420 (slice 12): migrated onto the shared store with the rest of the
   // appearance family (see theme above).
   const autoFocusNewPane = useAutoFocusNewPane();
-  const setAutoFocusNewPane = useSetAutoFocusNewPane();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above) — PaneTile and AppearanceSection subscribe. Since WARDEN-1471
   // (slice 16) App keeps only the SETTER (the reset partition); the value
   // rides the hook's store subscription.
-  const setTerminalFontSize = useSetTerminalFontSize();
   // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the attention/notification pair
   // migrated onto the shared store (see onExitBehavior above) — NotificationsSection
   // (the writer), useAttentionRollup's three poller gates and useTokenBudget's
@@ -372,22 +362,18 @@ function App() {
   // SETTERS (the reset partition); the values ride the hook's store
   // subscription. The WARDEN-1274 "what the master toggle still gates"
   // note moved with the fact (see UiStoreState in lib/uiStore.ts).
-  const setAttentionDesktopAlerts = useSetAttentionDesktopAlerts();
   // Per-state Attention toggle (WARDEN-344): which pane states raise the badge.
   // Each defaults ON; persisted by the saveUi effect below and forwarded to the
   // AttentionBadge's useAttentionRollup. Purely a DISPLAY filter on the passive
   // readout since WARDEN-1274 retired the alert. WARDEN-1360: only the states the
   // passive readout can substantiate remain (stuck / done) — erroring / waiting /
   // blocked were substring guesses and their buckets (and knobs) are gone.
-  const setAttentionStates = useSetAttentionStates();
   // WARDEN-1506 (slice 20): the per-chat watch set lives on the shared store
   // (persisted via STORE_PERSISTED_KEYS, read by useAttentionRollup directly).
   // App keeps only the SETTER, for Settings → Reset.
-  const setWatchedChats = useSetWatchedChats();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
   // rides the hook's store subscription.
-  const setTerminalScrollback = useSetTerminalScrollback();
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above). The store seed preserves the truthiness fallback below VERBATIM —
   // DEFAULT_UI.terminalFontFamily is '' (blank = default stack) and a persisted
@@ -397,7 +383,6 @@ function App() {
   // to DEFAULT_UI's '') lives there and is untouched. Since WARDEN-1471
   // (slice 16) App keeps only the SETTER; the value rides the hook's store
   // subscription.
-  const setTerminalFontFamily = useSetTerminalFontFamily();
   // Terminal color scheme: 'auto' follows the effective app theme (above);
   // 'dark'/'light' force the terminal surface. Pure client-side pref (like
   // terminalFontSize/scrollback): persisted by the saveUi effect below, never
@@ -408,14 +393,12 @@ function App() {
   // it no longer reads it at all (WARDEN-1574, slice 31): the derived terminal
   // theme id is a store selector PaneTile subscribes to, so only the setter
   // stays here for the reset partition.
-  const setTerminalColorScheme = useSetTerminalColorScheme();
   // Terminal cursor style (shape × blink). 'blink-block' is the default (today's
   // exact cursor).
   //
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
   // rides the hook's store subscription.
-  const setTerminalCursorStyle = useSetTerminalCursorStyle();
   // "Copy on select" (WARDEN-285): when ON, completing a text selection in any
   // agent pane copies it to the clipboard immediately (no Ctrl/Cmd+C). Default
   // OFF = today's exact behavior. Applies LIVE to all open panes (PaneTile
@@ -424,17 +407,15 @@ function App() {
   // WARDEN-1322 (slice 3): migrated onto the shared store (see onExitBehavior
   // above). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
   // rides the hook's store subscription.
-  const setCopyOnSelect = useSetCopyOnSelect();
   // Timestamp format (WARDEN-213): how every timestamp surface reads — 'relative'
   // (default = "2m"/"3h" buckets) or 'absolute' (clock time). Pure client-side
   // pref (like copyOnSelect/density): persisted by the saveUi effect below,
   // threaded to every timestamp display via the shared formatTimestamp helper,
   // and never sent to the backend.
   // WARDEN-1342 (slice 4): the pref lives on the shared uiStore — same plain-value
-  // signatures, so the resetSetters entry below is untouched (the slice-3
+  // signatures, so the reset is untouched (the slice-3
   // pattern). Since WARDEN-1471 (slice 16) App keeps only the SETTER; the value
   // rides the hook's store subscription.
-  const setTimestampFormat = useSetTimestampFormat();
   // WARDEN-468: HealthDashboard "Group agents by: Health | Host | Project" toggle
   // (WARDEN-237; Project added in WARDEN-741). Was a HealthDashboard-local
   // useState that silently reset to 'health' on every Warden restart. Lifted to
@@ -450,7 +431,6 @@ function App() {
   // the value rides the hook's store subscription. The store seeds itself from
   // loadUi() with the same 'health' default DEFAULT_UI has, through loadUi's
   // own 3-way enum allow-list.
-  const setHealthGroupBy = useSetHealthGroupBy();
   // File Viewer markdown view mode (WARDEN-480): 'rendered' (default = docs/
   // README reading) or 'source' (raw markdown). One global remembered choice,
   // surfaced only through the existing in-dialog toggle. Pure client-side pref;
@@ -469,7 +449,6 @@ function App() {
   // effect fires → persistUiState → localStorage. The store seeds itself from
   // loadUi() at module load, the same persisted read the useState lazy
   // initializer did.
-  const setFileViewerViewMode = useSetFileViewerViewMode();
   // WARDEN-490 — per-host display labels (friendly names). A raw host string
   // ('(local)' / SSH host) → the human's label, shown in every host-tag display
   // surface. Migrated onto the shared uiStore (roadmap WARDEN-1204 slice 6):
@@ -480,7 +459,6 @@ function App() {
   // persisted by the saveUi effect below, never sent to the backend /
   // /api/config. An empty map (or a host with no entry) = today's behavior.
   const hostLabels = useHostLabels();
-  const setHostLabels = useSetHostLabels();
   // WARDEN-500: the per-host expand/collapse state INSIDE Health's Host grouping.
   // Was a HealthDashboard-local useState that reset to {} on every restart — so
   // the durable grouping choice (WARDEN-468) survived reload but the collapsed
@@ -494,7 +472,6 @@ function App() {
   // subscribes directly, and the store's `?? {}` seed reproduces the retired
   // initializer's fallback. WARDEN-1471 (slice 16): App keeps only the SETTER
   // (the reset partition); the value rides the hook's store subscription.
-  const setHealthCollapsedHosts = useSetHealthCollapsedHosts();
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -518,12 +495,6 @@ function App() {
   // merged snapshot's field changes → the effect fires → persistUiState →
   // localStorage. The store seeds itself from loadUi() at module load, the same
   // persisted read the useState lazy initializers did.
-  const setDefaultNewChatPreset = useSetDefaultNewChatPreset();
-  const setDefaultNewChatHost = useSetDefaultNewChatHost();
-  const setDefaultNewChatCwd = useSetDefaultNewChatCwd();
-  const setDefaultNewChatCwdByHost = useSetDefaultNewChatCwdByHost();
-  const setDefaultNewChatPresetByHost = useSetDefaultNewChatPresetByHost();
-  const setCustomPresets = useSetCustomPresets();
   // Saved instruction snippets (WARDEN-323): a named, reusable intervention
   // library surfaced at the Broadcast dialog (insert-only) and a focused pane's
   // context menu (one-click send). Pure client-side localStorage pref like the
@@ -550,7 +521,6 @@ function App() {
   // persistUiState → localStorage. The store seeds itself from loadUi() at
   // module load, which is the same persisted read the useState lazy
   // initializer did.
-  const setSnippets = useSetSnippets();
   // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
   // button (WARDEN-429 — unifies the prior split-only defaultSplitShell, migrated
   // into defaultShell on load). Blank means "no explicit shell" → the host
@@ -558,14 +528,12 @@ function App() {
   // above): persisted by the saveUi effect below, never sent to the backend.
   // Store-backed since WARDEN-1383 (slice 8) like the rest of the spawn family.
   const defaultShell = useDefaultShell();
-  const setDefaultShell = useSetDefaultShell();
   // Per-host default-shell overrides (WARDEN-429 — mirrors the cwd/preset maps
   // above). Keys are host strings ('(local)' / SSH host name); a host with no
   // entry (or an empty value, dropped on load) falls through to defaultShell,
   // then blank (host login shell). Pure client-side pref like defaultShell
   // above: persisted by the saveUi effect below, never sent to the backend.
   const defaultShellByHost = useDefaultShellByHost();
-  const setDefaultShellByHost = useSetDefaultShellByHost();
   // "Remember window position and size" is an Electron-main-owned pref, NOT a
   // renderer localStorage pref like the ones above: the OS window bounds must be
   // readable at createWindow() time (before this renderer loads), so the flag +
@@ -913,10 +881,11 @@ function App() {
   //
   //   ResettableKey = (PERSISTED_PREF_KEYS ∪ restoreOnStartup) − RESET_PRESERVED_KEYS
   //
-  // and BOTH maps are keyed by it — resetUiPrefDefaults() (storage.ts) for the
-  // values, resetSetters below for the state setters. A pref that is neither
-  // listed in RESET_PRESERVED_KEYS nor given a default + setter is a TypeScript
-  // error; the storage.test.mjs exhaustiveness test covers the runtime half.
+  // and the reset is keyed by it — resetUiPrefDefaults() (storage.ts) for the
+  // values, the store's resetUiPrefs action (uiStore.ts) applying them. A pref
+  // that is neither listed in RESET_PRESERVED_KEYS nor given a default + store
+  // fact is a TypeScript error; the storage.test.mjs exhaustiveness test covers
+  // the runtime half.
   //
   // The two things the types can NOT say:
   //   - terminalFontFamily resets to DEFAULT_TERMINAL_FONT_FAMILY (the curated
@@ -932,77 +901,19 @@ function App() {
   //     reset too: this is a destructive, confirm-gated "back to factory
   //     defaults", consistent with customPresets → [].
   //
-  // Identity is stable because every value it closes over is: the useState
-  // setters are stable by React contract, setWatchedChats is a
-  // store setter, and setSnippets /
-  // setFileViewerViewMode — plus the six terminal setters this reset covers
-  // since WARDEN-1322 (setTerminalFontSize/setTerminalScrollback/
-  // setTerminalFontFamily/setTerminalCursorStyle/setCopyOnSelect/
-  // setOnExitBehavior), the attention pair since WARDEN-1408
-  // (setAttentionDesktopAlerts/setAttentionStates), and the six appearance
-  // prefs since WARDEN-1420 (setTheme/setDensity/setPaneLayout/
-  // setAutoFocusNewPane/setRestoreOnStartup/setTerminalColorScheme) — are
-  // zustand actions created once with the store (lib/uiStore.ts) — so listing
-  // them in the dep array below costs nothing and keeps the lint rule satisfied
-  // honestly rather than by suppression.
-  //
-  // The health pair's setters (setHealthGroupBy/setHealthCollapsedHosts, since
-  // WARDEN-1426) are zustand actions on exactly the same terms, so the dep
-  // array is left UNCHANGED for them: a store action's identity never varies,
-  // so an unlisted one cannot go stale. The same now holds for the Observer
-  // quartet's setters (setObserverViewMode + the three filter-shape setters,
-  // since WARDEN-1441/slice 15) — they arm the obsResetSetters map below and
-  // stay out of the array for the same reason. They join the several
-  // store-backed setters the array already omits for that reason (the standing
-  // exhaustive-deps warning here is about those, and this slice neither adds to
-  // it nor resolves it).
+  // Identity is stable: the store half is `uiStore.getState().resetUiPrefs()`
+  // (a store action created once with the store), so the dep array is `[]`.
+  // Slice 34 (WARDEN-1596) retired the per-pref setter map this callback used
+  // to close over.
   const resetUiPrefsToDefaults = useCallback(() => {
-    const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
-      // Appearance
-      theme: setTheme,
-      density: setDensity,
-      paneLayout: setPaneLayout,
-      // Behavior
-      onExitBehavior: setOnExitBehavior,
-      autoFocusNewPane: setAutoFocusNewPane,
-      restoreOnStartup: setRestoreOnStartup,
-      copyOnSelect: setCopyOnSelect,
-      timestampFormat: setTimestampFormat,
-      // File Viewer markdown view mode (WARDEN-480) — the WARDEN-934 omission.
-      fileViewerViewMode: setFileViewerViewMode,
-      // Health grouping (WARDEN-468), per-host collapse (WARDEN-500),
-      // per-host display labels (WARDEN-490).
-      healthGroupBy: setHealthGroupBy,
-      healthCollapsedHosts: setHealthCollapsedHosts,
-      hostLabels: setHostLabels,
-      // Terminal
-      terminalFontSize: setTerminalFontSize,
-      terminalScrollback: setTerminalScrollback,
-      terminalFontFamily: setTerminalFontFamily,
-      terminalColorScheme: setTerminalColorScheme,
-      terminalCursorStyle: setTerminalCursorStyle,
-      // New chats
-      defaultNewChatPreset: setDefaultNewChatPreset,
-      defaultNewChatPresetByHost: setDefaultNewChatPresetByHost,
-      defaultNewChatHost: setDefaultNewChatHost,
-      defaultNewChatCwd: setDefaultNewChatCwd,
-      defaultNewChatCwdByHost: setDefaultNewChatCwdByHost,
-      customPresets: setCustomPresets,
-      snippets: setSnippets,
-      defaultShell: setDefaultShell,
-      defaultShellByHost: setDefaultShellByHost,
-      // Attention / desktop alerts
-      attentionDesktopAlerts: setAttentionDesktopAlerts,
-      attentionStates: setAttentionStates,
-      // Per-chat watch set (store fact since WARDEN-1506; reset value is [])
-      watchedChats: setWatchedChats,
-    };
-    const defaults = resetUiPrefDefaults();
-    // The per-key types are locked by the two maps above; TS cannot correlate
-    // them across a dynamic index, so the call site casts once.
-    for (const key of Object.keys(defaults) as ResettableKey[]) {
-      (resetSetters[key] as (value: unknown) => void)(defaults[key]);
-    }
+    // WARDEN-1596 (client-state slice 34): the STORE half of the reset — every
+    // ResettableKey plus the four observer facts, in one atomic `set` — lives
+    // in the store's own `resetUiPrefs` action (lib/uiStore.ts), so this
+    // callback no longer subscribes to 32 per-pref setters and a new pref needs
+    // no App edit to stay covered (the ResettableKey type lock in uiStore.ts
+    // makes a missing store fact a compile error). Reading it through
+    // `uiStore.getState()` keeps the callback identity stable with `[]` deps.
+    uiStore.getState().resetUiPrefs();
 
     // WARDEN-981 — the Observer panel's prefs are the one resettable view state
     // OUTSIDE UiState: ObsUi / warden:observer:v1, behind its own loadObs/
@@ -1013,7 +924,7 @@ function App() {
     //      workspaces/activeWorkspaceId above). This keeps warden:observer:v1
     //      in agreement: it is what a page reload re-reads, and it is where the
     //      panel re-seeds openIds/activeId (via obsSeed) on remount.
-    //   2. STORE: snap the four store facts to resetObsPrefDefaults()' values.
+    //   2. STORE: resetUiPrefs() above snaps the four store facts to resetObsPrefDefaults()' values.
     //      This is the half that resets the panel — for BOTH audiences, because
     //      slice 15 moved the prefs onto the process-lifetime uiStore, which is
     //      seeded ONCE at import and is never re-read from disk. A panel that
@@ -1027,21 +938,10 @@ function App() {
     //      — so a direct store write replaces the retired resetToken nonce.
     //      WARDEN-981's same-value-bailout worry dissolves with the nonce
     //      retired: a repeated reset is just another store transition.
-    // The setter map keeps the ObsResetKey-keyed shape the live-panel half used
-    // to own (now HERE, where the reset lives), so a future ObsUi pref added to
-    // OBS_RESET_KEYS but not wired to this map is a missing-property compile
-    // error, not a reset that silently skips it. `d` is a fresh factory build,
-    // so handing its sub-objects to the store aliases nothing.
+    // Disk half stays HERE on purpose: the uiStore.test.mjs saveObs guard pins
+    // exactly three production call sites.
     saveObs(resetObsPrefsPreservingWorkspace(loadObs()));
-    const d = resetObsPrefDefaults();
-    const obsResetSetters: { [K in ObsResetKey]: () => void } = {
-      viewMode: () => setObserverViewMode(d.viewMode),
-      activityFilters: () => setObserverActivityFilters(d.activityFilters),
-      directiveFilters: () => setObserverDirectiveFilters(d.directiveFilters),
-      attentionFilters: () => setObserverAttentionFilters(d.attentionFilters),
-    };
-    for (const apply of Object.values(obsResetSetters)) apply();
-  }, [setWatchedChats, setSnippets, setFileViewerViewMode, setTerminalFontSize, setTerminalScrollback, setTerminalFontFamily, setTerminalCursorStyle, setCopyOnSelect, setOnExitBehavior, setAttentionDesktopAlerts, setAttentionStates, setTheme, setDensity, setPaneLayout, setAutoFocusNewPane, setRestoreOnStartup, setTerminalColorScheme]);
+  }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
