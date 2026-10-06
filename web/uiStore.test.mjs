@@ -70,7 +70,7 @@ await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectRecentlyClosed, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
@@ -3105,6 +3105,47 @@ test('dropRecentlyClosed removes the id from EVERY workspace; no match is an ide
   const before = s.getState();
   s.getState().dropRecentlyClosed('nope');
   assert.equal(s.getState(), before);
+});
+
+// ─── recentlyClosed selector (WARDEN-1580, roadmap WARDEN-1204 slice 32) ───
+test('selectRecentlyClosed: a workspace with none returns the SAME frozen reference on every read (loop guard)', () => {
+  reset();
+  const s = seeded([{ ...ws('a'), recentlyClosed: undefined }, ws('b')], 'a');
+  const first = selectRecentlyClosed(s.getState());
+  assert.deepEqual(first, []);
+  assert.ok(Object.isFrozen(first), 'shared empty constant is frozen');
+  assert.equal(selectRecentlyClosed(s.getState()), first, 'identity-stable across reads');
+  s.getState().setFocused('x');
+  assert.equal(selectRecentlyClosed(s.getState()), first, 'identity-stable across unrelated store changes');
+  // a workspace whose field is missing entirely hits the same constant
+  const t = seeded([{ ...ws('b'), recentlyClosed: undefined }], 'b');
+  assert.equal(selectRecentlyClosed(t.getState()), first, 'one shared constant across stores');
+});
+test('selectRecentlyClosed: tracks the close action path and dropRecentlyClosed', () => {
+  reset();
+  const e = (id) => ({ id, name: id, host: '', cwd: '', closedAt: 1 });
+  const s = seeded([ws('a')], 'a');
+  const entry = e('x');
+  s.getState().updateActiveWorkspace((w) => ({ ...w, recentlyClosed: [entry, ...(w.recentlyClosed ?? [])] }));
+  const afterClose = selectRecentlyClosed(s.getState());
+  assert.deepEqual(afterClose.map((r) => r.id), ['x']);
+  assert.equal(selectRecentlyClosed(s.getState()), afterClose, 'real array reference is stable between reads');
+  s.getState().dropRecentlyClosed('x');
+  assert.deepEqual(selectRecentlyClosed(s.getState()).map((r) => r.id), []);
+});
+test('selectRecentlyClosed: switching activeWorkspaceId swaps the result', () => {
+  reset();
+  const e = (id) => ({ id, name: id, host: '', cwd: '', closedAt: 1 });
+  const s = seeded([{ ...ws('a'), recentlyClosed: [e('x')] }, { ...ws('b'), recentlyClosed: [e('y')] }], 'a');
+  assert.deepEqual(selectRecentlyClosed(s.getState()).map((r) => r.id), ['x']);
+  s.setState({ activeWorkspaceId: 'b' });
+  assert.deepEqual(selectRecentlyClosed(s.getState()).map((r) => r.id), ['y']);
+});
+test('selectRecentlyClosed: a dangling activeWorkspaceId falls back to workspaces[0]', () => {
+  reset();
+  const e = (id) => ({ id, name: id, host: '', cwd: '', closedAt: 1 });
+  const s = createUiStore({ workspaces: [{ ...ws('a'), recentlyClosed: [e('x')] }, ws('b')], activeWorkspaceId: 'gone' });
+  assert.deepEqual(selectRecentlyClosed(s.getState()).map((r) => r.id), ['x']);
 });
 
 // ─── maximized pane id (WARDEN-1530, roadmap WARDEN-1204 slice 24): first NON-persisted shared fact ───

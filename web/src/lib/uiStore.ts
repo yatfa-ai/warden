@@ -84,7 +84,7 @@ import {
 } from '@/lib/storage';
 import { clampLayoutWidths } from '@/lib/layout';
 import { bumpReconnectToken as bumpReconnectTokenIn } from '@/lib/paneAttach';
-import type { PaneLayout, RestoreOnStartup, ObsUi } from '@/lib/storage';
+import type { PaneLayout, RestoreOnStartup, ObsUi, RecentlyClosedEntry } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import type { HostLabels } from '@/lib/chatDisplay';
 import type { Theme, TerminalColorScheme } from '@/lib/theme';
@@ -2127,6 +2127,28 @@ export function useSetFocused(): (value: string | null | ((f: string | null) => 
  */
 export function useFocused(): string | null {
   return useUiStore((s) => selectActiveWorkspace(s)?.focused ?? null);
+}
+
+/**
+ * WARDEN-1580 (roadmap WARDEN-1204 slice 32): the single shared empty result for
+ * `selectRecentlyClosed`. MUST be a module-level constant — a fresh `[]` per call
+ * is a changed snapshot on every read under zustand v5 (useSyncExternalStore) and
+ * loops the re-render forever. Frozen so a consumer cannot mutate the shared value.
+ */
+const EMPTY_RECENTLY_CLOSED: readonly RecentlyClosedEntry[] = Object.freeze([]);
+
+/**
+ * The active workspace's just-closed pane snapshots. Returns the real array
+ * reference when present (store actions replace it immutably, so identity changes
+ * only on a real change) and the frozen `EMPTY_RECENTLY_CLOSED` otherwise.
+ * Delegates to `selectActiveWorkspace` (dangling-id fallback to workspaces[0]).
+ */
+export function selectRecentlyClosed(state: Pick<UiStoreState, 'workspaces' | 'activeWorkspaceId'>): readonly RecentlyClosedEntry[] {
+  return selectActiveWorkspace(state)?.recentlyClosed ?? EMPTY_RECENTLY_CLOSED;
+}
+
+export function useRecentlyClosed(): readonly RecentlyClosedEntry[] {
+  return useUiStore(selectRecentlyClosed);
 }
 
 export function useRevealPane(): (workspaceId: string, paneId: string, focus: boolean) => void {
