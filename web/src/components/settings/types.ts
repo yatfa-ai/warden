@@ -275,9 +275,9 @@ export interface AppearancePrefs {
 // here because App, not a component, was its only runtime reader; that is
 // SUPERSEDED rather than contradicted — once the family moves, a UiState pref
 // still riding a props bag IS the second sharing channel this direction exists
-// to end. Its derived product terminalThemeId remains an App-computed prop so
-// an OS theme flip can re-theme open panes live; App reads the scheme itself
-// through the store hook.
+// to end. Its derived product, the terminal theme id, is the store's
+// useTerminalThemeId() selector (WARDEN-1574, slice 31) — PaneTile subscribes
+// to it directly, so an OS theme flip re-themes open panes live with no prop.
 
 /** Re-exported so sections that take a hostLabels pref share one type. */
 export type { HostLabels };

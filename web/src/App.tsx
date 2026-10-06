@@ -4,7 +4,7 @@ import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, mergeRecentlyClosed, resetUiPrefDefaults, loadObs, saveObs, resetObsPrefsPreservingWorkspace, resetObsPrefDefaults, type ResettableKey, type ResetUiDefaults, type ObsResetKey, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, HEALTH_WIDTH } from '@/lib/layout';
 import { mergeHostList } from '@/lib/hostList';
-import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type ThemeId } from '@/lib/theme';
+import { applyTheme, listenSystemThemeChange, resolveThemeId } from '@/lib/theme';
 import { applyDensity } from '@/lib/density';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useTokenBudget } from '@/lib/useTokenBudget';
@@ -21,7 +21,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useSetTerminalColorScheme, useSetResolvedThemeId, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -280,26 +280,21 @@ function App() {
   // shared store (lib/uiStore.ts) — AppearanceSection subscribes (it is the
   // only writer of all six) and PaneGrid subscribes to paneLayout; App
   // subscribes for its own runtime reads (the [theme]/[density] effects, the
-  // openChat focus gate, the terminalThemeId derivation) plus the reset
+  // openChat focus gate) plus the reset
   // partition. Since slice 16 (WARDEN-1471) the persisted snapshot is NOT an
   // App-side reason any more: useConfigPersistence reads the store half.
   const theme = useTheme();
   const setTheme = useSetTheme();
-  // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula'). The
-  // `theme` state variable stays 'system' on an OS flip, so chrome re-paints via
-  // a direct DOM attribute mutation in the [theme] effect — no React re-render.
-  // But the terminal surface re-themes imperatively inside PaneTile's effect,
-  // which only re-fires when its prop changes. Tracking resolvedThemeId as React
-  // state and feeding it to resolveTerminalThemeId is what makes "Match app
-  // theme" live-update on an OS flip (nuance #1): listenSystemThemeChange calls
-  // setResolvedThemeId, the prop propagates to PaneTile, and its effect
-  // re-paints open panes with the new theme's xterm palette.
-  //
-  // WARDEN-1420 (slice 12): seeded from the STORE's live `theme` above rather
-  // than from a second read of the persisted payload — the store seeded itself
-  // from the same loadUi() document at module load, so the value is identical
-  // and the pref keeps exactly ONE read channel.
-  const [resolvedThemeId, setResolvedThemeId] = useState<ThemeId>(() => resolveThemeId(theme));
+  // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula') lives on
+  // the store as a NON-persisted fact (WARDEN-1574, slice 31). The `theme` pref
+  // stays 'system' on an OS flip, so chrome re-paints via a direct DOM attribute
+  // mutation in the [theme] effect — no React re-render. The terminal surface
+  // re-themes imperatively inside PaneTile's effect, which re-fires when the
+  // store's derived `useTerminalThemeId()` changes: this App only WRITES the
+  // resolved id (setResolvedThemeId, below, from the [theme] effect and the OS
+  // listener) and PaneTile subscribes directly — that is what makes "Match app
+  // theme" live-update on an OS flip (nuance #1).
+  const setResolvedThemeId = useSetResolvedThemeId();
   const density = useDensity();
   const setDensity = useSetDensity();
   // paneLayout (WARDEN-1471, slice 16): App keeps only the SETTER — the reset
@@ -410,9 +405,9 @@ function App() {
   //
   // WARDEN-1420 (slice 12): migrated onto the shared store with the rest of the
   // appearance family (see theme above). App is still its only RUNTIME reader —
-  // it derives terminalThemeId below — but it reads it through the hook now, so
-  // no UiState pref rides a Settings props bag any more.
-  const terminalColorScheme = useTerminalColorScheme();
+  // it no longer reads it at all (WARDEN-1574, slice 31): the derived terminal
+  // theme id is a store selector PaneTile subscribes to, so only the setter
+  // stays here for the reset partition.
   const setTerminalColorScheme = useSetTerminalColorScheme();
   // Terminal cursor style (shape × blink). 'blink-block' is the default (today's
   // exact cursor).
@@ -713,13 +708,13 @@ function App() {
     // Apply theme immediately: sets the [data-theme] attribute (selecting the
     // matching CSS token block) and toggles `.dark` from the theme's mode.
     applyTheme(theme);
-    // Keep the resolved concrete theme id in sync so the terminal pane (which
-    // derives its xterm palette from it) follows a manual theme change live.
+    // Keep the store's resolved concrete theme id in sync so the terminal pane
+    // (which derives its xterm palette from it) follows a manual theme change live.
     setResolvedThemeId(resolveThemeId(theme));
 
     // If system mode, listen for system theme changes. The `theme` state stays
     // 'system' here (chrome re-paints via applyTheme's direct DOM attribute set),
-    // but we ALSO push the OS-resolved theme id into React state so the terminal
+    // but we ALSO push the OS-resolved theme id into the store so the terminal
     // surface — which re-themes imperatively in PaneTile — live-updates on an OS
     // flip (nuance #1).
     if (theme === 'system') {
@@ -1815,13 +1810,6 @@ function App() {
   // rollup itself still feeds the header badge, and useWatchCatchup still reads
   // watchedAgentStates directly.
   const tiles = openPanes.map((id) => ({ id }));
-  // Resolved terminal theme id (which named theme's xterm palette to use).
-  // 'auto' defers to the active (OS-resolved) app theme; 'dark'/'light' force it
-  // to the system default dark/light theme. Recomputed every render so a manual
-  // theme change — and, critically, an OS theme flip while the app theme =
-  // "System" (which updates resolvedThemeId via listenSystemThemeChange) —
-  // changes this prop and re-themes already-open panes live via PaneTile's effect.
-  const terminalThemeId = resolveTerminalThemeId(terminalColorScheme, resolvedThemeId);
   // focusedChat + focusedPaneKey are derived above the lifted useAttentionRollup
   // call (WARDEN-426/436); focusedChat is reused below for the observer bind.
   // Selectable host list for the Open Chat browser's multiselect chips: this
@@ -2213,15 +2201,15 @@ function App() {
             // subscribes to them in the shared store (lib/uiStore.ts) and
             // PaneGrid never read them. WARDEN-1420 (slice 12): `paneLayout`
             // stopped riding through too — PaneGrid DOES read that one, so it
-            // subscribes to the same store directly. terminalThemeId STAYS a
-            // prop: it is derived per render below so an OS theme flip re-themes
-            // open panes live.
+            // subscribes to the same store directly. WARDEN-1574 (slice 31): the
+            // derived terminal theme id stopped riding through too — PaneTile
+            // subscribes to useTerminalThemeId(), so an OS theme flip re-themes
+            // open panes live without an App prop.
             // WARDEN-1433 (slice 14): the pane-ratio pair stopped riding through
             // the same way — PaneGrid DOES read AND write it (persisted values
             // in, committed arrays out), and it now subscribes to the store for
             // both under the exact local names the props used, so every drag /
             // template / equalize / reset-reorder call site below is unchanged.
-            terminalThemeId={terminalThemeId}
             showHostTags={displaySettings.showHostTags}
             // WARDEN-1388: the issue-key link integration — server config
             // fetched by refreshConfigPrefs, live-updating already-open panes.

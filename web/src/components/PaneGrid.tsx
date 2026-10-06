@@ -31,7 +31,6 @@ import {
 } from '@/lib/paneGrid';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { resolveActingChat } from '@/lib/actingChat';
-import type { ThemeId } from '@/lib/theme';
 
 export interface OpenTile { id: string }
 
@@ -98,7 +97,8 @@ interface Props {
   // fontFamily, terminalCursorStyle, copyOnSelect, onExitBehavior — as a pure
   // pass-through to the single PaneTile below. PaneTile now SUBSCRIBES to those
   // six in the shared client-state store (lib/uiStore.ts), so none of them ride
-  // through here any more. `terminalThemeId` STAYS a prop (see below).
+  // through here any more. WARDEN-1574 (slice 31): the resolved terminal theme id
+  // stopped riding through too — PaneTile subscribes to useTerminalThemeId().
   //
   // WARDEN-1420 (slice 12): `paneLayout` left this Props interface too — unlike
   // the seven above, this grid genuinely READS it (gridShape below), so it now
@@ -111,11 +111,6 @@ interface Props {
   // destructure used (see below the signature) and every drag / template /
   // equalize / reset-reorder call site is textually unchanged.
   //
-  // Resolved terminal theme id (App resolves terminalColorScheme + the active
-  // theme down to a concrete named-theme id here). Pure pass-through to PaneTile
-  // — App owns the resolution so an OS theme flip can re-theme open panes live
-  // without PaneGrid knowing about the scheme pref.
-  terminalThemeId: ThemeId;
   // Show the host tag in each pane header (WARDEN-290). Pure pass-through to
   // PaneTile — App owns the persisted showHostTags pref (displaySettings) so a
   // Settings toggle live-updates already-open pane headers, mirroring the
@@ -144,7 +139,7 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -832,7 +827,6 @@ export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceK
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
                     onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} onBrowseFiles={() => openBrowseFor(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
-                    terminalThemeId={terminalThemeId}
                     showHostTags={showHostTags}
                     issueLinksEnabled={issueLinksEnabled}
                     issueLinkTrackers={issueLinkTrackers}
