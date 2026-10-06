@@ -616,6 +616,21 @@ export interface UiStoreState {
   /** Clear `id`'s flag. A full no-op (same state object) when it is not flagged. */
   clearPaneActivity: (id: string) => void;
   /**
+   * Session ids just saved from the recently-closed flyout (WARDEN-1552,
+   * roadmap WARDEN-1204 slice 28) — the one-shot "saved" pill on their sidebar
+   * row (and the lead of the host's working list). The third NON-persisted
+   * session fact (after `maximized` and `newActivity`): NOT a STORE_PERSISTED_KEYS
+   * member, never seeded from disk. Treated as immutable — every change copies
+   * the Set. Lives on the store (not in ChatSidebar) because the writer (App,
+   * after the async save POST) and the reader (ChatSidebar) differ, and the
+   * marker must survive ChatSidebar remounts within its RECENTLY_SAVED_TTL_MS life.
+   */
+  recentlySavedIds: ReadonlySet<string>;
+  /** Add `id` to the set and schedule its expiry after RECENTLY_SAVED_TTL_MS. */
+  markRecentlySaved: (id: string) => void;
+  /** Drop `id`. A full no-op (same state object) when it is not marked. */
+  expireRecentlySaved: (id: string) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -950,6 +965,9 @@ export function selectActiveWorkspace(state: Pick<UiStoreState, 'workspaces' | '
   return state.workspaces.find((w) => w.id === state.activeWorkspaceId) ?? state.workspaces[0] ?? null;
 }
 
+/** Lifetime of a "just saved" sidebar pill marker (WARDEN-1552). */
+export const RECENTLY_SAVED_TTL_MS = 30_000;
+
 /**
  * Build an INDEPENDENT store instance.
  *
@@ -1187,6 +1205,25 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         const n = new Set(s.newActivity);
         n.delete(id);
         return { newActivity: n };
+      }),
+    // WARDEN-1552 (slice 28): the not-persisted "just saved" pill marker set.
+    // Initial empty — never seeded. The expiry timer is store-owned.
+    recentlySavedIds: new Set<string>(),
+    markRecentlySaved: (id) => {
+      set((s) => {
+        if (s.recentlySavedIds.has(id)) return s;
+        const n = new Set(s.recentlySavedIds);
+        n.add(id);
+        return { recentlySavedIds: n };
+      });
+      setTimeout(() => get().expireRecentlySaved(id), RECENTLY_SAVED_TTL_MS);
+    },
+    expireRecentlySaved: (id) =>
+      set((s) => {
+        if (!s.recentlySavedIds.has(id)) return s;
+        const n = new Set(s.recentlySavedIds);
+        n.delete(id);
+        return { recentlySavedIds: n };
       }),
     // WARDEN-256 (folded, slice 24): every action below that changes the active
     // id clears `maximized` in the SAME set — guarded on an actual id MOVE.
@@ -2066,6 +2103,18 @@ export function useMarkPaneActivity(): (id: string) => void {
 
 export function useClearPaneActivity(): (id: string) => void {
   return useUiStore((s) => s.clearPaneActivity);
+}
+
+/**
+ * The "just saved" sidebar pill marker set (WARDEN-1552, slice 28) — NOT
+ * persisted. The Set reference only changes on a real add/expire.
+ */
+export function useRecentlySavedIds(): ReadonlySet<string> {
+  return useUiStore((s) => s.recentlySavedIds);
+}
+
+export function useMarkRecentlySaved(): (id: string) => void {
+  return useUiStore((s) => s.markRecentlySaved);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {

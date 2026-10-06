@@ -69,7 +69,7 @@ await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore, selectActiveWorkspace, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectActiveWorkspace, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
@@ -3268,6 +3268,93 @@ test('newActivity is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes i
   assert.equal(Object.keys(picked).length, 39);
   assert.ok(!('newActivity' in picked));
   assert.equal(createUiStore().getState().newActivity.size, 0, 'never seeded');
+});
+
+// ─── recentlySavedIds (WARDEN-1552, roadmap WARDEN-1204 slice 28): third NON-persisted shared fact ───
+console.log('\ncreateUiStore — recentlySavedIds (not persisted; "just saved" pill marker with store-owned expiry)');
+// Capture the scheduled expiry timers instead of really waiting (no module mocking).
+const withCapturedTimers = (fn) => {
+  const real = globalThis.setTimeout;
+  const timers = [];
+  globalThis.setTimeout = (cb, ms) => { timers.push({ cb, ms }); return timers.length; };
+  try { fn(timers); } finally { globalThis.setTimeout = real; }
+};
+test('recentlySavedIds starts empty; markRecentlySaved adds the id', () => {
+  reset();
+  withCapturedTimers(() => {
+    const s = createUiStore();
+    assert.equal(s.getState().recentlySavedIds.size, 0);
+    s.getState().markRecentlySaved('c1');
+    assert.deepEqual([...s.getState().recentlySavedIds], ['c1']);
+    s.getState().markRecentlySaved('c2');
+    assert.deepEqual([...s.getState().recentlySavedIds].sort(), ['c1', 'c2'], 'mark ADDS, never replaces');
+  });
+});
+test('marking an id already present keeps it present (and the identical Set)', () => {
+  reset();
+  withCapturedTimers(() => {
+    const s = createUiStore();
+    s.getState().markRecentlySaved('c1');
+    const set = s.getState().recentlySavedIds;
+    s.getState().markRecentlySaved('c1');
+    assert.ok(s.getState().recentlySavedIds.has('c1'));
+    assert.equal(s.getState().recentlySavedIds, set);
+  });
+});
+test('markRecentlySaved copies on write (the previous Set is never mutated)', () => {
+  reset();
+  withCapturedTimers(() => {
+    const s = createUiStore();
+    s.getState().markRecentlySaved('c1');
+    const prev = s.getState().recentlySavedIds;
+    s.getState().markRecentlySaved('c2');
+    assert.notEqual(s.getState().recentlySavedIds, prev);
+    assert.deepEqual([...prev], ['c1']);
+  });
+});
+test('expireRecentlySaved removes the id; a no-op (identical state object) when absent', () => {
+  reset();
+  withCapturedTimers(() => {
+    const s = createUiStore();
+    s.getState().markRecentlySaved('c1');
+    s.getState().markRecentlySaved('c2');
+    s.getState().expireRecentlySaved('c1');
+    assert.deepEqual([...s.getState().recentlySavedIds], ['c2']);
+    const before = s.getState();
+    s.getState().expireRecentlySaved('nope');
+    assert.equal(s.getState(), before);
+  });
+});
+test('the scheduled expiry fires after RECENTLY_SAVED_TTL_MS (30 s) and removes only that id', () => {
+  reset();
+  assert.equal(RECENTLY_SAVED_TTL_MS, 30_000);
+  withCapturedTimers((timers) => {
+    const s = createUiStore();
+    s.getState().markRecentlySaved('c1');
+    s.getState().markRecentlySaved('c2');
+    assert.equal(timers.length, 2);
+    assert.ok(timers.every((t) => t.ms === RECENTLY_SAVED_TTL_MS));
+    assert.deepEqual([...s.getState().recentlySavedIds].sort(), ['c1', 'c2'], 'still marked before the timer fires');
+    timers[0].cb();
+    assert.deepEqual([...s.getState().recentlySavedIds], ['c2'], 'only c1 expired');
+    timers[1].cb();
+    assert.equal(s.getState().recentlySavedIds.size, 0);
+  });
+});
+test('recentlySavedIds is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('recentlySavedIds'));
+  withCapturedTimers(() => {
+    const s = createUiStore();
+    s.getState().markRecentlySaved('c1');
+    const picked = selectPersistedStorePrefs(s.getState());
+    assert.equal(Object.keys(picked).length, 39);
+    assert.ok(!('recentlySavedIds' in picked));
+    saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+    assert.ok(!('recentlySavedIds' in loadUi()));
+    assert.equal(createUiStore().getState().recentlySavedIds.size, 0, 'never seeded');
+  });
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
