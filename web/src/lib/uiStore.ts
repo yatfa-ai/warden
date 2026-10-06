@@ -321,8 +321,8 @@ export interface UiStoreState {
    * The slice-3 note kept terminalColorScheme in the bag because App — not a
    * component — was its only runtime reader. That is SUPERSEDED, not
    * contradicted: once the family moves, a UiState pref still riding a props
-   * bag IS the second sharing channel this direction exists to end, and App
-   * AppearanceSection is its writer; the derived terminal theme id is the
+   * bag IS the second sharing channel this direction exists to end.
+   * AppearanceSection is its only writer; the derived terminal theme id is the
    * `selectTerminalThemeId` store selector (WARDEN-1574).
    *
    * Every one of the six is pure client localStorage — shared + persisted
