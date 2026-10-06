@@ -64,7 +64,8 @@ const emitStoreModule = async (relPath, outName, rewrite = (c) => c) => {
 await emitStoreModule('src/lib/themes.ts', 'themes.mjs');
 await emitStoreModule('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emitStoreModule('src/lib/layout.ts', 'layout.mjs');
-await emitStoreModule('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs'));
+await emitStoreModule('src/lib/paneAttach.ts', 'paneAttach.mjs');
+await emitStoreModule('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs'));
 const { createUiStore } = await import(join(storeTmpDir, 'uiStore.mjs'));
 rmSync(storeTmpDir, { recursive: true, force: true });
 

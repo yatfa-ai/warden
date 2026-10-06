@@ -61,7 +61,8 @@ const emit = (relPath, outName, rewrite = (c) => c) => {
 await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emit('src/lib/layout.ts', 'layout.mjs');
-await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs'));
+await emit('src/lib/paneAttach.ts', 'paneAttach.mjs');
+await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs'));
 // WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
 // erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
@@ -3355,6 +3356,56 @@ test('recentlySavedIds is NOT persisted: STORE_PERSISTED_KEYS stays 39 and exclu
     assert.ok(!('recentlySavedIds' in loadUi()));
     assert.equal(createUiStore().getState().recentlySavedIds.size, 0, 'never seeded');
   });
+});
+
+// ─── reconnectTokens (WARDEN-1558, roadmap WARDEN-1204 slice 29): fourth NON-persisted shared fact ───
+console.log('\ncreateUiStore — reconnectTokens (not persisted; per-pane re-attach bump counts)');
+test('reconnectTokens starts empty; bumping an absent id → 1, repeated → 2', () => {
+  reset();
+  const s = createUiStore();
+  assert.deepEqual(s.getState().reconnectTokens, {});
+  s.getState().bumpReconnectToken('p1');
+  assert.equal(s.getState().reconnectTokens.p1, 1);
+  s.getState().bumpReconnectToken('p1');
+  assert.equal(s.getState().reconnectTokens.p1, 2);
+});
+test('bumpReconnectToken leaves other panes unchanged and never mutates the prior map', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().bumpReconnectToken('p1');
+  s.getState().bumpReconnectToken('p2');
+  s.getState().bumpReconnectToken('p2');
+  const prev = s.getState().reconnectTokens;
+  const snapshot = { ...prev };
+  s.getState().bumpReconnectToken('p1');
+  const next = s.getState().reconnectTokens;
+  assert.notEqual(next, prev, 'a fresh map');
+  assert.deepEqual(prev, snapshot, 'prior map not mutated');
+  assert.equal(next.p1, 2);
+  assert.equal(next.p2, 2, 'other pane untouched');
+});
+test('bump for a not-open pane is harmless: the entry waits unused, nothing else moves', () => {
+  reset();
+  const s = createUiStore();
+  const before = s.getState();
+  s.getState().bumpReconnectToken('not-open-pane');
+  assert.equal(s.getState().reconnectTokens['not-open-pane'], 1);
+  assert.equal(s.getState().workspaces, before.workspaces);
+  assert.equal(s.getState().maximized, before.maximized);
+  assert.equal(s.getState().reconnectTokens['some-other-id'], undefined, 'never-bumped pane reads undefined');
+});
+test('reconnectTokens is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('reconnectTokens'));
+  const s = createUiStore();
+  s.getState().bumpReconnectToken('p1');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('reconnectTokens' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('reconnectTokens' in loadUi()));
+  assert.deepEqual(createUiStore().getState().reconnectTokens, {}, 'never seeded');
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
