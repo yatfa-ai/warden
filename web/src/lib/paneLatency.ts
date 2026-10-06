@@ -229,10 +229,13 @@ export function createPaneLatencySampler({
   let startedAt = Date.now();
 
   function recordIfRoom(op: string, ms: number): boolean {
+    if (typeof ms !== 'number' || !(ms >= 0) || !Number.isFinite(ms)) { rejectedInvalid += 1; return false; }
+    if (ms > pendingMaxAgeMs) { rejectedStale += 1; return false; }
+    // Lazy (LoAF) accumulators are created only AFTER the sample validates, so a
+    // rejected sample can never leak a zero-count row into the window.
     let acc = accs.get(op);
     if (!acc && LAZY_OPS.has(op)) { acc = emptyAccumulator(); accs.set(op, acc); }
-    if (!acc || typeof ms !== 'number' || !(ms >= 0) || !Number.isFinite(ms)) { rejectedInvalid += 1; return false; }
-    if (ms > pendingMaxAgeMs) { rejectedStale += 1; return false; }
+    if (!acc) { rejectedInvalid += 1; return false; }
     if (acc.count >= maxPerWindow) return false; // bounded fold: drop, never grow
     fold(acc, ms);
     return true;

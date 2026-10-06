@@ -341,6 +341,20 @@ test('LoAF: window resets lazily; original three ops are the whole set without L
   assert.equal(s.snapshot().operations.length, 3, 'LoAF ops gone after flush until observed again');
 });
 
+test('LoAF: invalid / >10s samples leave no zero-count rows (original three ops only)', () => {
+  const s = createPaneLatencySampler({ now: makeClock().now });
+  s.noteLongAnimationFrame({
+    duration: 20000, startTime: 0, renderStart: 10, blockingDuration: 15000,
+    scripts: [{ invokerType: 'event-listener' }, { duration: 12000, invokerType: 'module-script' }],
+  });
+  const snap = s.snapshot();
+  assert.deepEqual(snap.operations.map((o) => o.operation).sort(),
+    ['pane-echo-e2e', 'pane-echo-paint', 'renderer-long-task']);
+  assert.ok(snap.rejected > 0, 'rejected samples are counted');
+  const fl = s.flush();
+  assert.equal(fl.operations.some((o) => o.count === 0 && o.operation.startsWith('renderer-frame-')), false);
+});
+
 test('LoAF: per-window cap applies to the new ops', () => {
   const s = createPaneLatencySampler({ now: makeClock().now, maxPerWindow: 5 });
   for (let i = 0; i < 20; i += 1) s.noteLongAnimationFrame({ duration: 60, startTime: 0, renderStart: 30, blockingDuration: 10, scripts: [] });
