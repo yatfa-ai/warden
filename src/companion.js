@@ -419,6 +419,16 @@ function formatCompanionError(host, e, op = 'op') {
 // request/response by id. The transport layer (write/onLine/onExit/kill) is
 // injectable so the framing + bootstrap are unit-testable with no real ssh.
 
+// WARDEN-1598 — module-level observer for CompanionChannel.call(): invoked once per
+// settled RPC with (method, durationMs, ok). Same shape as setInputAckObserver /
+// ssh.js setSshRunObserver: null by default, a non-function resets to null, called
+// inside try/catch. Only the method name, a duration and a boolean cross it —
+// host, params, result and error text never do.
+let companionRpcObserver = null;
+export function setCompanionRpcObserver(fn) {
+  companionRpcObserver = typeof fn === 'function' ? fn : null;
+}
+
 export class CompanionChannel {
   constructor(host, transport) {
     this.host = host;
@@ -504,7 +514,38 @@ export class CompanionChannel {
     (this._deadHandlers ||= []).push(cb);
   }
 
+  // WARDEN-1598 — the per-RPC telemetry seam. Wraps the real call (`_call`) with an
+  // observer; what a caller sees (resolution, rejection, unhandled-rejection
+  // behaviour) is identical to before. `ok` = "the channel DELIVERED A VERDICT": the transport rejects (dead
+  // channel / timeout / write throw / channel death mid-flight) are ok:false, while
+  // a host-side ok:false response (CompanionRpcError) is a COMMAND RESULT and is
+  // ok:true — the WARDEN-1531 handshake-vs-verdict discipline. ping (infra) and
+  // attachInput (already folded as companion-input-ack) are not observed here.
+  // Latency is request-write → settle on the JS side (includes host serial-lane
+  // queueing and the ssh hop); a timeout folds at its timeout value.
   call(method, params, opts = {}) {
+    const startedAt = Date.now();
+    const p = this._call(method, params, opts);
+    if (method === 'ping' || method === 'attachInput') return p;
+    const report = (ok) => {
+      const obs = companionRpcObserver;
+      if (!obs) return;
+      try { obs(method, Date.now() - startedAt, ok); } catch { /* observing must never alter call() */ }
+    };
+    // Settle through a thin wrapper rather than `p.then(a, b)` on the side: a side
+    // `.then(a, b)` would mark `p` HANDLED and silently suppress Node's
+    // unhandled-rejection report for a caller that drops a rejected call(). The
+    // caller holds THIS promise, so resolution value, rejection reason and
+    // unhandled-rejection behaviour are exactly what they were.
+    return new Promise((resolve, reject) => {
+      p.then(
+        (v) => { report(true); resolve(v); },
+        (e) => { report(e instanceof CompanionRpcError); reject(e); },
+      );
+    });
+  }
+
+  _call(method, params, opts = {}) {
     // WARDEN-1312: count the op at the seam. `n` increments once per issued op
     // (ping excluded — infra, see the companionOps block comment), including ops
     // that go on to fail, so `failures <= n` always holds. Each of the three
