@@ -79,23 +79,45 @@ export async function createCollection(name, criteria = {}, metadata = {}) {
  * @throws {Error} If collection not found or name conflict
  */
 export async function updateCollection(id, updates = {}) {
+  // Allow-list: only name/criteria/metadata may be changed; every other key in the
+  // request body is ignored. A null/non-object body is treated as {}.
+  const src = updates && typeof updates === 'object' && !Array.isArray(updates) ? updates : {};
+  const has = (key) => Object.prototype.hasOwnProperty.call(src, key);
+  const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+  // Validate BEFORE touching storage so rejected input never reaches disk. Messages
+  // must not contain "not found" (the route maps that to 404; everything else → 400).
+  const patch = {};
+  if (has('name')) {
+    const trimmedName = typeof src.name === 'string' ? src.name.trim().slice(0, 60) : '';
+    if (!trimmedName) {
+      throw new Error('Collection name is required');
+    }
+    patch.name = trimmedName;
+  }
+  if (has('criteria')) {
+    if (!isPlainObject(src.criteria)) throw new Error('Collection criteria must be an object');
+    patch.criteria = src.criteria;
+  }
+  if (has('metadata')) {
+    if (!isPlainObject(src.metadata)) throw new Error('Collection metadata must be an object');
+    patch.metadata = src.metadata;
+  }
+
   const collections = await loadCollections();
   const index = collections.findIndex((c) => c.id === id);
   if (index === -1) {
     throw new Error('Collection not found');
   }
 
-  // Check name uniqueness if name is being changed
-  if (updates.name && updates.name !== collections[index].name) {
-    const trimmedName = String(updates.name).trim().slice(0, 60);
-    if (collections.some((c) => c.name === trimmedName && c.id !== id)) {
-      throw new Error(`Collection "${trimmedName}" already exists`);
-    }
+  // Name uniqueness on the same trimmed value that gets stored (self excluded).
+  if (patch.name !== undefined && collections.some((c) => c.name === patch.name && c.id !== id)) {
+    throw new Error(`Collection "${patch.name}" already exists`);
   }
 
   const updated = {
     ...collections[index],
-    ...updates,
+    ...patch,
     id: collections[index].id, // Preserve original ID
     createdAt: collections[index].createdAt, // Preserve creation time
     updatedAt: Date.now(),
