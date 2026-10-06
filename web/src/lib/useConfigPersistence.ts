@@ -6,9 +6,8 @@ import {
   loadUi,
   PERSISTED_PREF_KEYS,
   type UiState,
-  type RestoreOnStartup,
 } from '@/lib/storage';
-import { useUiStore, selectPersistedStorePrefs } from '@/lib/uiStore';
+import { useUiStore, selectPersistedStorePrefs, useRestoreOnStartup } from '@/lib/uiStore';
 
 /**
  * The persisted-pref snapshot: ONE typed bag, bidirectionally locked to
@@ -52,8 +51,6 @@ export type PersistedPrefSnapshot = Required<
 >;
 
 export interface UseConfigPersistenceArgs {
-  /** "Restore workspace on startup" pref — steers persistUiState's workspace carry-forward. */
-  restoreOnStartup: RestoreOnStartup;
   /** True when this launch started with an empty workspace (suppresses workspace overwrite). */
   startedEmpty: boolean;
   /** Reload chats/ssh-hosts from the disk catalog (App's chat-list refresh). */
@@ -85,7 +82,6 @@ export interface UseConfigPersistenceResult {
  * (WARDEN-1471, WARDEN-1526).
  */
 export function useConfigPersistence({
-  restoreOnStartup,
   startedEmpty,
   refresh,
   reloadNotificationPrefs,
@@ -99,6 +95,9 @@ export function useConfigPersistence({
   // the 24 declarations). This is a READ channel only: nothing here writes
   // through the store, and the effect below remains the ONE saveUi call site.
   const storePrefs = useUiStore(useShallow(selectPersistedStorePrefs));
+  // "Restore workspace on startup" pref — steers persistUiState's workspace
+  // carry-forward. Read here, not passed by App (WARDEN-1600, slice 35).
+  const restoreOnStartup = useRestoreOnStartup();
 
   // Persist live UI state, honoring the "Restore workspace on startup" pref.
   // persistUiState carries the on-disk workspace forward (instead of the live
