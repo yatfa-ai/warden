@@ -3408,4 +3408,43 @@ test('reconnectTokens is NOT persisted: STORE_PERSISTED_KEYS stays 39 and exclud
   assert.deepEqual(createUiStore().getState().reconnectTokens, {}, 'never seeded');
 });
 
+// ─── externalSearchQuery (WARDEN-1568, roadmap WARDEN-1204 slice 30): fifth NON-persisted shared fact ───
+console.log('\ncreateUiStore — externalSearchQuery (not persisted; one-shot search-jump command)');
+test('externalSearchQuery starts null', () => {
+  reset();
+  assert.equal(createUiStore().getState().externalSearchQuery, null);
+});
+test('setExternalSearchQuery stores the exact object; null clears', () => {
+  reset();
+  const s = createUiStore();
+  const v = { paneId: 'p1', query: 'needle' };
+  s.getState().setExternalSearchQuery(v);
+  assert.equal(s.getState().externalSearchQuery, v, 'same reference stored as-is');
+  s.getState().setExternalSearchQuery(null);
+  assert.equal(s.getState().externalSearchQuery, null);
+});
+test('two successive sets of equal-valued objects yield two DISTINCT references', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setExternalSearchQuery({ paneId: 'p1', query: 'q' });
+  const a = s.getState().externalSearchQuery;
+  s.getState().setExternalSearchQuery({ paneId: 'p1', query: 'q' });
+  const b = s.getState().externalSearchQuery;
+  assert.notEqual(a, b);
+  assert.deepEqual(a, b);
+});
+test('externalSearchQuery is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('externalSearchQuery'));
+  const s = createUiStore();
+  s.getState().setExternalSearchQuery({ paneId: 'p1', query: 'q' });
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('externalSearchQuery' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('externalSearchQuery' in loadUi()));
+  assert.equal(createUiStore().getState().externalSearchQuery, null, 'never seeded');
+});
+
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);

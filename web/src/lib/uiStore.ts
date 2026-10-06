@@ -643,6 +643,16 @@ export interface UiStoreState {
   /** Bump `id`'s token by one (absent → 1); other panes' entries are untouched. */
   bumpReconnectToken: (id: string) => void;
   /**
+   * The one-shot "scroll this pane's scrollback to this text" command raised by
+   * global-search jump and attention anchors (WARDEN-1568, roadmap WARDEN-1204
+   * slice 30). The fifth NON-persisted session fact: NOT a STORE_PERSISTED_KEYS
+   * member, initial `null`, never seeded from disk, never cleared by the store.
+   * Each set stores the passed object AS-IS (fresh reference per call, no equality
+   * short-circuit); PaneTile's effect keys on the derived query STRING.
+   */
+  externalSearchQuery: Readonly<{ paneId: string; query: string }> | null;
+  setExternalSearchQuery: (v: { paneId: string; query: string } | null) => void;
+  /**
    * The Observer panel's four view prefs (roadmap WARDEN-1204 slice 15,
    * WARDEN-1441) — which tab is showing (`observerViewMode`) plus the three
    * per-tab filter shapes (activity type/agent/host, directives agent/host,
@@ -1242,6 +1252,10 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     reconnectTokens: {},
     bumpReconnectToken: (id) =>
       set((s) => ({ reconnectTokens: bumpReconnectTokenIn(s.reconnectTokens, id) })),
+    // WARDEN-1568 (slice 30): the not-persisted search-jump command. Initial
+    // null — never seeded; the setter stores the passed object as-is.
+    externalSearchQuery: null,
+    setExternalSearchQuery: (externalSearchQuery) => set({ externalSearchQuery }),
     // WARDEN-256 (folded, slice 24): every action below that changes the active
     // id clears `maximized` in the SAME set — guarded on an actual id MOVE.
     selectWorkspace: (activeWorkspaceId) =>
@@ -2145,6 +2159,16 @@ export function useReconnectTokens(): Readonly<Record<string, number>> {
 /** Stable-identity action: bump a pane's reconnect token so it re-attaches. */
 export function useBumpReconnectToken(): (id: string) => void {
   return useUiStore((s) => s.bumpReconnectToken);
+}
+
+/** The pending search-jump command (WARDEN-1568, slice 30) — NOT persisted. */
+export function useExternalSearchQuery(): Readonly<{ paneId: string; query: string }> | null {
+  return useUiStore((s) => s.externalSearchQuery);
+}
+
+/** Stable-identity action: raise (or clear with null) the search-jump command. */
+export function useSetExternalSearchQuery(): (v: { paneId: string; query: string } | null) => void {
+  return useUiStore((s) => s.setExternalSearchQuery);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
