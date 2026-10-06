@@ -53,6 +53,16 @@ export const NAMES_FLUSH_MS = 5 * 60_000;
 // never needs a schema bump.
 export const NAMES_MAX = 200;
 
+// Provenance of a resumed chat (WARDEN-1550). POST /api/resume persists a row
+// with `session: resume-<first 8 chars of the sid>` and a `.name` that is the
+// owner's FIRST PROMPT (whitespace-squished, sliced to 80 chars) — verbatim
+// conversation text, which the WARDEN-443 contract drops wholesale. The sid is
+// validated /^[\w-]+$/, so the shape is exactly this.
+const RESUME_SESSION_RE = /^resume-[\w-]{1,8}$/;
+
+// The constant stand-in a resume-spawned row contributes instead of its text.
+export const RESUMED_SESSION_LABEL = 'resumed-session';
+
 /**
  * Project the live chat catalog onto the bounded name list.
  *
@@ -62,6 +72,14 @@ export const NAMES_MAX = 200;
  * collection boundary, so the snapshot can never grow a carrier for one.
  * `chatCount` is the TRUE number of named chats (before the cap) and
  * `truncated` says whether the cap bit — a capped list is loud, never silent.
+ *
+ * PROVENANCE RULE (WARDEN-1550, fail closed): a row whose `session` matches
+ * /^resume-[\w-]{1,8}$/ AND whose `name` differs from its `session` was spawned
+ * by /api/resume, where `.name` is the owner's first prompt (or an
+ * indistinguishable user rename). Its text is NEVER shipped: the row still
+ * counts toward `chatCount` (the true catalog size) but contributes the
+ * constant RESUMED_SESSION_LABEL instead, so all such rows collapse to one
+ * entry. When in doubt, strip more. Dedup, cap and `truncated` are unchanged.
  *
  * @param {Array<{name?: unknown}>} chats the catalog rows (chatCatalog.snapshot())
  * @param {number} [max] the list cap (tests inject a small one)
@@ -76,9 +94,14 @@ export function buildNamesSnapshot(chats, max = NAMES_MAX) {
     const name = chat && typeof chat === 'object' ? chat.name : undefined;
     if (typeof name !== 'string' || name.length === 0) continue;
     named += 1;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    if (names.length < max) names.push(name);
+    const session = chat.session;
+    const label =
+      typeof session === 'string' && RESUME_SESSION_RE.test(session) && name !== session
+        ? RESUMED_SESSION_LABEL
+        : name;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    if (names.length < max) names.push(label);
   }
   return {
     chats: names,
