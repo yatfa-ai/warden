@@ -1467,6 +1467,18 @@ app.post('/api/config/reset', async (_req, res) => {
   res.json({ ok: true });
 });
 
+// Shared by the telemetry producers below: the one IPC egress to the Electron
+// main process (no-op when standalone — no parent). `process.send` is read at
+// CALL time, never captured, so a test installing it after import still works.
+function forwardToParent(type, snapshot) {
+  if (typeof process.send !== 'function') return;
+  process.send({ type, snapshot });
+}
+// The operational-metrics consent, resolved LIVE through the one authority
+// (cfg is mutated in place by applyConfigPut). The `incidents` and `names`
+// producers use different categories and keep their own lambdas.
+const operationalMetricsConsent = () => resolveConsent(cfg)['operational-metrics'] === true;
+
 // WARDEN-1258 — the file-exists probe metrics producer. Consent is resolved
 // LIVE through the one authority (cfg is mutated in place by applyConfigPut,
 // so a Settings flip gates the very next record()), and the windowed snapshot
@@ -1476,11 +1488,8 @@ app.post('/api/config/reset', async (_req, res) => {
 // module is inert on the wire). Started immediately: the interval is unref'd,
 // so importing server.js in a test never hangs on it.
 const fileExistsTelemetry = createFileExistsTelemetry({
-  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
-  send: (snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-metrics', snapshot });
-  },
+  consent: operationalMetricsConsent,
+  send: (snapshot) => forwardToParent('telemetry-metrics', snapshot),
 });
 fileExistsTelemetry.start();
 
@@ -1503,10 +1512,7 @@ fileExistsTelemetry.start();
 const serverStallTelemetry = createServerStallTelemetry({
   consent: () => resolveConsent(cfg).incidents === true,
   knownSegments: () => routeSegmentsOf(app),
-  send: (snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-stalls', snapshot });
-  },
+  send: (snapshot) => forwardToParent('telemetry-stalls', snapshot),
 });
 serverStallTelemetry.start();
 
@@ -1525,11 +1531,8 @@ serverStallTelemetry.start();
 // (below) so the correlation object exists before the first attach; the
 // producer is handed to setupWsLayer, which correlates per pane.
 const paneInputTelemetry = createPaneInputTelemetry({
-  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
-  send: (snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-metrics', snapshot });
-  },
+  consent: operationalMetricsConsent,
+  send: (snapshot) => forwardToParent('telemetry-metrics', snapshot),
 });
 paneInputTelemetry.start();
 // WARDEN-1491: the companion attachInput request→ack leg of the felt path, so a
@@ -1552,11 +1555,8 @@ setInputAckObserver((ms, ok) => paneInputTelemetry.noteInputAck(ms, ok));
 // middleware that references it — safe because no request is served before
 // module evaluation completes (same lazy-reference pattern as wireStallSink).
 const requestTelemetry = createRequestTelemetry({
-  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
-  send: (snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-metrics', snapshot });
-  },
+  consent: operationalMetricsConsent,
+  send: (snapshot) => forwardToParent('telemetry-metrics', snapshot),
 });
 requestTelemetry.start();
 
@@ -1565,11 +1565,8 @@ requestTelemetry.start();
 // completed/failed, NOT the remote command's verdict (see src/sshTelemetry.js).
 // Same consent + IPC-forward discipline as the producers above.
 const sshTelemetry = createSshTelemetry({
-  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
-  send: (snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-metrics', snapshot });
-  },
+  consent: operationalMetricsConsent,
+  send: (snapshot) => forwardToParent('telemetry-metrics', snapshot),
 });
 sshTelemetry.start();
 setSshRunObserver((ms, ok) => sshTelemetry.recordRun(ms, ok));
@@ -1590,11 +1587,8 @@ const serverProcessMemory = createProcessMemoryProducer({
       return { rssBytes: m.rss, heapUsedBytes: m.heapUsed, ageMs: Math.round(process.uptime() * 1000) };
     },
   }],
-  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
-  send: (_runtime, snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-process-memory', snapshot });
-  },
+  consent: operationalMetricsConsent,
+  send: (_runtime, snapshot) => forwardToParent('telemetry-process-memory', snapshot),
 });
 serverProcessMemory.start();
 
@@ -1615,10 +1609,7 @@ serverProcessMemory.start();
 const workspaceNamesTelemetry = createWorkspaceNamesTelemetry({
   consent: () => resolveConsent(cfg).names === true,
   catalog: () => chatCatalog.snapshot(),
-  send: (snapshot) => {
-    if (typeof process.send !== 'function') return;
-    process.send({ type: 'telemetry-names', snapshot });
-  },
+  send: (snapshot) => forwardToParent('telemetry-names', snapshot),
 });
 workspaceNamesTelemetry.start();
 
