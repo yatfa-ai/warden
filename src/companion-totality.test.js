@@ -1008,7 +1008,7 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       'ensureControlMaster', 'startConnectionPoolCleanup', 'HostConnectionError',
       'isTransportFailure', 'buildAttachRemoteScript', 'LOCAL_ENV', 'TMUX_BIN',
       'toMsysPath', 'runLocalTmux', 'attachLocalTmux', 'buildRunCommand',
-      'buildAttachCommand', 'whereWindows', 'buildAttachInteractiveCommand'];
+      'buildAttachCommand', 'whereWindows', 'buildAttachInteractiveCommand', 'setSshRunObserver'];
 
     // Per-file expected call-site counts of the raw-transport bindings,
     // re-derived LIVE against origin/main @ 8cd0a31 (WARDEN-1462). Every row is

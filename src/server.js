@@ -25,6 +25,7 @@ import { createProcessMemoryProducer } from './telemetry-process-memory.cjs';
 import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTelemetry.js';
 import { createPaneInputTelemetry } from './paneInputTelemetry.js';
 import { createRequestTelemetry } from './requestTelemetry.js';
+import { createSshTelemetry } from './sshTelemetry.js';
 import { createWorkspaceNamesTelemetry } from './workspaceNamesTelemetry.js';
 import { applyCompanionToggle, applyCompanionExclusions } from './companion.js';
 import * as collections from './collections.js';
@@ -46,7 +47,7 @@ import { resolvePaneContainer, projectFromContainerResolution } from './paneCont
 // `deliverRemoteScript`, which owns the run()-vs-companion choice. Every
 // remaining remote script in this file goes through that guard or through
 // runInContext.
-import { runLocalTmux, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
+import { runLocalTmux, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost, setSshRunObserver } from './ssh.js';
 // The single source of the working-directory containment rule (WARDEN-1234):
 // the JS clause for local resolution, and the bash fragment spliced into every
 // remote script that guards a path against its cwd.
@@ -1558,6 +1559,20 @@ const requestTelemetry = createRequestTelemetry({
   },
 });
 requestTelemetry.start();
+
+// WARDEN-1578 — the raw-ssh vantage: one `ssh-run` fold per settled ssh.js run()
+// (on win32 that IS one full handshake). okCount/failCount = handshake
+// completed/failed, NOT the remote command's verdict (see src/sshTelemetry.js).
+// Same consent + IPC-forward discipline as the producers above.
+const sshTelemetry = createSshTelemetry({
+  consent: () => resolveConsent(cfg)['operational-metrics'] === true,
+  send: (snapshot) => {
+    if (typeof process.send !== 'function') return;
+    process.send({ type: 'telemetry-metrics', snapshot });
+  },
+});
+sshTelemetry.start();
+setSshRunObserver((ms, ok) => sshTelemetry.recordRun(ms, ok));
 
 // WARDEN-1508 — the server child's own process-memory producer: samples THIS
 // process (RSS + JS heap + uptime) every ~30s into fixed-size accumulators and
@@ -3108,6 +3123,10 @@ export { paneInputTelemetry };
 // the window with flushNow(), rather than reaching into the producer's
 // internals or waiting 5 minutes for a timer.
 export { requestTelemetry };
+
+// WARDEN-1578 — exported so the wiring test drives a REAL run() observation
+// through the REAL observer and closes the window with flushNow().
+export { sshTelemetry };
 
 // WARDEN-1416 — exported on the same reasoning: a test seeds the REAL chat
 // catalog and closes the window with flushNow(), proving the catalog read and

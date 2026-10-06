@@ -432,6 +432,18 @@ export async function validateHost(host, cfg) {
 // subprocess can't reproduce that order reliably on every machine (and ssh isn't
 // available in every sandbox). Mirrors runLocalCapture's `spawn` seam; runWithPool
 // uses the same idea via its `deps` param.
+// WARDEN-1578 — module-level observer for the raw-ssh vantage (telemetry).
+// Same shape as companion.js's setInputAckObserver: null by default, a
+// non-function resets to null, called inside try/catch so an observer fault can
+// never change what run() resolves. Called ONCE per settled spawn with
+// (durationMs, ok) where ok === !isTransportFailure(result) — "the handshake
+// completed", NOT "the remote command succeeded". Host, command, stderr and
+// argv are never passed to it.
+let sshRunObserver = null;
+export function setSshRunObserver(fn) {
+  sshRunObserver = typeof fn === 'function' ? fn : null;
+}
+
 export function run(host, cmd, opts = {}, cfg = {}) {
   const spawnFn = opts.spawn ?? spawn;
   const timeout = opts.timeout ?? 30000;
@@ -450,7 +462,19 @@ export function run(host, cmd, opts = {}, cfg = {}) {
     command: remote,
   });
 
-  return new Promise((resolve) => {
+  return new Promise((resolveRaw) => {
+    const startedAt = Date.now();
+    // Observe-then-resolve: the observer sees the settled result but can never
+    // alter it (try/catch; the resolved value is the untouched `result`).
+    let observed = false;
+    const resolve = (result) => {
+      if (observed) return resolveRaw(result);
+      observed = true;
+      if (host !== '(local)' && sshRunObserver) {
+        try { sshRunObserver(Date.now() - startedAt, !isTransportFailure(result)); } catch { /* telemetry must never break run() */ }
+      }
+      resolveRaw(result);
+    };
     const child = spawnFn(SSH_BIN, args, { windowsHide: true });
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
     // The stdout/stderr accumulation + 'close'-not-'exit' settlement is the shared
