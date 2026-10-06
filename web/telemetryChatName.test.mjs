@@ -10,7 +10,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildNamesSnapshot, RESUMED_SESSION_LABEL as PRODUCER_LABEL } from '../src/workspaceNamesTelemetry.js';
+import { buildNamesSnapshot, RESUMED_SESSION_LABEL as PRODUCER_LABEL, HOST_LABEL as PRODUCER_HOST_LABEL } from '../src/workspaceNamesTelemetry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const tsPath = resolve(__dirname, 'src/lib/telemetryChatName.ts');
@@ -18,7 +18,7 @@ const { code } = await transformWithOxc(readFileSync(tsPath, 'utf8'), tsPath, {}
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetryChatName-test-'));
 const tmpFile = join(tmpDir, 'telemetryChatName.mjs');
 writeFileSync(tmpFile, code);
-const { telemetryChatName, RESUME_SESSION_RE, RESUMED_SESSION_LABEL } = await import(tmpFile);
+const { telemetryChatName, RESUME_SESSION_RE, RESUMED_SESSION_LABEL, HOST_LABEL } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 const PROMPT = 'проверь доступность ремоут хостов whitego';
@@ -78,5 +78,36 @@ test('parity table: renderer rule === producer snapshot rule for every row', () 
     const theirs = buildNamesSnapshot([row]).chats.length === 1
       && buildNamesSnapshot([row]).chats[0] === 'resumed-session';
     assert.equal(mine, theirs, JSON.stringify(row));
+  }
+});
+
+test('host alias: own host is replaced by <host>', () => {
+  assert.equal(telemetryChatName({ host: 'netcup', session: 'x', name: 'shell @ netcup' }), 'shell @ <host>');
+  assert.equal(telemetryChatName({ host: '(local)', session: 'x', name: 'shell @ local' }), 'shell @ local');
+  assert.equal(telemetryChatName({ host: 'arch', session: 'x', name: 'search arch' }), 'search <host>');
+  assert.equal(telemetryChatName({ session: 'x', name: 'shell @ netcup' }), 'shell @ netcup');
+  assert.equal(telemetryChatName({ host: 'a.b', session: 'x', name: 'shell @ axb' }), 'shell @ axb');
+  assert.equal(telemetryChatName({ host: 'resume-host', session: 'resume-3f9a1c2d', name: 'resume-host p' }), 'resumed-session');
+});
+
+test('parity: host label equals the producer constant', () => {
+  assert.equal(HOST_LABEL, PRODUCER_HOST_LABEL);
+});
+
+test('parity table: host-bearing rows — renderer === producer snapshot', () => {
+  const rows = [
+    { host: 'netcup', session: 'shell-ab12cd', name: 'shell @ netcup' },
+    { host: '(local)', session: 's', name: 'shell @ local' },
+    { host: 'arch', session: 't', name: 'search arch' },
+    { host: 'NetCup', session: 'u', name: 'shell @ netcup netcup' },
+    { host: 'a.b', session: 'v', name: 'shell @ a.b axb' },
+    { host: 'x+y', session: 'w', name: 'x+y xxy' },
+    { host: 'whitego', session: 'resume-3f9a1c2d', name: PROMPT },
+    { host: '', session: 'z', name: 'shell @ netcup' },
+    { session: 'z', name: 'shell @ netcup' },
+    { host: 'macmini', session: 'z', name: 'unrelated' },
+  ];
+  for (const row of rows) {
+    assert.equal(telemetryChatName(row), buildNamesSnapshot([row]).chats[0], JSON.stringify(row));
   }
 });

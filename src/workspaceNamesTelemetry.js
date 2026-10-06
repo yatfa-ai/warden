@@ -63,6 +63,28 @@ const RESUME_SESSION_RE = /^resume-[\w-]{1,8}$/;
 // The constant stand-in a resume-spawned row contributes instead of its text.
 export const RESUMED_SESSION_LABEL = 'resumed-session';
 
+// The constant stand-in for a row's OWN SSH host alias inside its name
+// (WARDEN-1564). The retired "Open shell" generator stored
+// `shell @ <raw SSH host alias>` as the catalog `.name`; a bare alias is
+// invisible to the redactor's FQDN/IP/user@host rules, and WARDEN-443 makes
+// hostnames a hard exclusion. Mirrored in web/src/lib/telemetryChatName.ts.
+export const HOST_LABEL = '<host>';
+
+// The local-host sentinel on a catalog row — not an alias, never stripped.
+const LOCAL_HOST = '(local)';
+
+/**
+ * Replace every case-insensitive standalone occurrence of the row's own `host`
+ * in `name` with HOST_LABEL. "Standalone" = not adjacent to [A-Za-z0-9_-], so
+ * host `arch` leaves `search` alone. The host is regex-escaped. Rows with no
+ * (or the local) host are returned unchanged.
+ */
+export function stripOwnHost(name, host) {
+  if (typeof host !== 'string' || host.trim().length === 0 || host === LOCAL_HOST) return name;
+  const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return name.replace(new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, 'gi'), HOST_LABEL);
+}
+
 /**
  * Project the live chat catalog onto the bounded name list.
  *
@@ -81,6 +103,11 @@ export const RESUMED_SESSION_LABEL = 'resumed-session';
  * constant RESUMED_SESSION_LABEL instead, so all such rows collapse to one
  * entry. When in doubt, strip more. Dedup, cap and `truncated` are unchanged.
  *
+ * HOST-ALIAS RULE (WARDEN-1564, applied AFTER the resume rule, which wins): the
+ * row's own `host` (other than '(local)') is replaced by HOST_LABEL wherever it
+ * appears in the name — see stripOwnHost. Rows still count toward `chatCount`;
+ * rows differing only in alias collapse to one entry.
+ *
  * @param {Array<{name?: unknown}>} chats the catalog rows (chatCatalog.snapshot())
  * @param {number} [max] the list cap (tests inject a small one)
  * @returns {{ chats: string[], chatCount: number, truncated: boolean }}
@@ -98,7 +125,7 @@ export function buildNamesSnapshot(chats, max = NAMES_MAX) {
     const label =
       typeof session === 'string' && RESUME_SESSION_RE.test(session) && name !== session
         ? RESUMED_SESSION_LABEL
-        : name;
+        : stripOwnHost(name, chat.host);
     if (seen.has(label)) continue;
     seen.add(label);
     if (names.length < max) names.push(label);
