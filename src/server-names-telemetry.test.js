@@ -41,7 +41,11 @@ const CATALOG = [
   { host: '(local)', session: 'demo', name: 'demo', cwd: '/tmp/probe-repo', cmd: 'bash', kind: 'tmux' },
   { host: '(local)', session: 'refactor', name: 'Refactor auth module', cwd: '/tmp/probe-repo', cmd: 'claude --resume 7b3a2f1', kind: 'tmux' },
   { host: '(local)', session: 'gen', name: 'chat-4nh15o', cwd: '/tmp/probe-repo', cmd: 'bash', kind: 'tmux' },
+  // WARDEN-1550: a resume-spawned row whose `.name` is the owner's first prompt.
+  { host: '(local)', session: 'resume-3f9a1c2d', name: 'проверь доступность ремоут хостов whitego', cwd: '/tmp/probe-repo', cmd: 'bash', kind: 'tmux' },
 ];
+const RESUME_PROMPT = 'проверь доступность ремоут хостов whitego';
+const SHIPPED_NAMES = CATALOG.map((c) => (c.session.startsWith('resume-') ? 'resumed-session' : c.name));
 
 before(async () => {
   originalHome = process.env.HOME;
@@ -84,8 +88,8 @@ describe('workspace-names telemetry through the REAL chat catalog (WARDEN-1416)'
     assert.equal(window.chatCount, CATALOG.length, 'every seeded chat is counted');
     assert.deepEqual(
       [...window.chats].sort(),
-      CATALOG.map((c) => c.name).sort(),
-      'the sidebar names arrive — and only the names',
+      SHIPPED_NAMES.sort(),
+      'the sidebar names arrive — and only the names (a resume row ships the constant label)',
     );
     assert.equal(window.truncated, false, 'nothing was cut at this size');
     // ONE window. The shape itself is the proof: a single object with a single
@@ -101,7 +105,7 @@ describe('workspace-names telemetry through the REAL chat catalog (WARDEN-1416)'
       ['chatCount', 'chats', 'endedAt', 'startedAt', 'truncated'],
     );
     const serialized = JSON.stringify(window);
-    for (const forbidden of ['/tmp/probe-repo', '(local)', 'claude --resume', '7b3a2f1', 'tmux', 'bash']) {
+    for (const forbidden of ['/tmp/probe-repo', '(local)', 'claude --resume', '7b3a2f1', 'tmux', 'bash', RESUME_PROMPT, 'whitego', 'resume-3f9a1c2d']) {
       assert.ok(
         !serialized.includes(forbidden),
         `no catalog field may ride the window: ${JSON.stringify(forbidden)}`,

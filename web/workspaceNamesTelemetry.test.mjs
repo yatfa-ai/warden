@@ -29,6 +29,7 @@ import {
   buildNamesSnapshot,
   NAMES_FLUSH_MS,
   NAMES_MAX,
+  RESUMED_SESSION_LABEL,
 } from '../src/workspaceNamesTelemetry.js';
 
 // A catalog row shaped exactly like chatCatalog.snapshot()'s — every field the
@@ -279,4 +280,47 @@ test('the flush interval is armed UNREF\'d so a library import never holds the l
 test('the shipped cadence + cap are the documented values', () => {
   assert.equal(NAMES_FLUSH_MS, 5 * 60_000, 'the same 5-minute window every producer uses');
   assert.equal(NAMES_MAX, 200);
+});
+
+// ==========================================================================
+// Resume-spawned rows carry the owner's first PROMPT as `.name` (WARDEN-1550)
+// ==========================================================================
+
+test('a resume-<sid8> row with a prompt-text name ships the constant label, never the prompt', () => {
+  const prompt = 'проверь доступность ремоут хостов whitego';
+  const snapshot = buildNamesSnapshot([
+    chatRow(prompt, { session: 'resume-3f9a1c2d' }),
+    chatRow('demo'),
+  ]);
+  assert.ok(!snapshot.chats.includes(prompt), 'the prompt text is not shipped');
+  assert.ok(!JSON.stringify(snapshot).includes(prompt), 'nor anywhere else in the snapshot');
+  assert.ok(snapshot.chats.includes(RESUMED_SESSION_LABEL), 'the constant label stands in');
+  assert.ok(snapshot.chats.includes('demo'), 'a normally-named chat is unaffected');
+  assert.equal(snapshot.chatCount, 2, 'the true catalog size still counts the resumed row');
+});
+
+test('two different resume rows collapse to ONE label while chatCount counts both', () => {
+  const snapshot = buildNamesSnapshot([
+    chatRow('first prompt A', { session: 'resume-aaaaaaaa' }),
+    chatRow('second prompt B', { session: 'resume-bbbbbbbb' }),
+    chatRow('resume cccccccc', { session: 'resume-cccccccc' }),
+  ]);
+  assert.deepEqual(snapshot.chats, [RESUMED_SESSION_LABEL]);
+  assert.equal(snapshot.chatCount, 3);
+  assert.ok(snapshot.chatCount >= snapshot.chats.length, 'chatCount >= chats.length invariant');
+  assert.equal(snapshot.truncated, true, 'collapsed entries make chatCount exceed the list, as dedup always did');
+});
+
+test('a resume-shaped row whose name equals its session is not prompt-derived and passes through', () => {
+  const snapshot = buildNamesSnapshot([chatRow('resume-3f9a1c2d')]);
+  assert.deepEqual(snapshot.chats, ['resume-3f9a1c2d']);
+});
+
+test('only the exact resume-<sid> shape is stripped — look-alike sessions keep their names', () => {
+  const snapshot = buildNamesSnapshot([
+    chatRow('Refactor auth', { session: 'resume-' }),
+    chatRow('Other thing', { session: 'resume-123456789' }),
+    chatRow('Third', { session: 'my-resume-abc' }),
+  ]);
+  assert.deepEqual(snapshot.chats, ['Refactor auth', 'Other thing', 'Third']);
 });
