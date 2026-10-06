@@ -38,9 +38,9 @@ import { extractMessageText, snippetFromLine } from './claudeSessions.js';
 
 // ---- helpers under test ----
 // extractMessageText + snippetFromLine imported directly from the side-effect-free
-// claudeSessions.js module; buildSessionSearchScript still lives in server.js, so
-// it is assigned from the dynamic import in before() (server.js is deferred until
-// HOME/config/archive are in place).
+// claudeSessions.js module; buildSessionSearchScript is now defined in claudeSessions.js
+// too (WARDEN-1548) but is still read off server.js's re-export via the dynamic import in
+// before() (server.js is deferred until HOME/config/archive are in place).
 let buildSessionSearchScript;
 
 let httpServer;

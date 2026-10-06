@@ -53,7 +53,6 @@ import { runLocalTmux, shellQuote, splitCmd, TMUX_BIN, detectClaude, startConnec
 // remote script that guards a path against its cwd.
 import { isWithinResolvedCwd, CWD_CONTAINMENT_CASE } from './pathContainment.js';
 import {
-  parseJsonlHead, snippetFromLine,
   // `remoteClaudeSessions` (the frozen bare-array variant) is deliberately NOT
   // imported here any more: since WARDEN-1208 both fleet readers go through
   // `sessionCache`, which fetches the richer detail variant and projects down.
@@ -63,7 +62,10 @@ import {
   // fan-out) and explicitly out of this slice's scope.
   localClaudeSessions, remoteClaudeSessionsDetail,
   mergeAndPaginateSessions,
-  readLocalSessionTranscript, buildSessionReadScript, parseSessionReadOutput,
+  readLocalSessionTranscript, parseSessionReadOutput,
+  // WARDEN-1548: the full-content search helpers + transcript-delivery leg moved here.
+  searchLocalClaudeSessions, remoteSearchClaudeSessions, remoteReadSessionTranscript,
+  SESSION_SEARCH_PER_HOST, SESSION_SEARCH_GLOBAL,
 } from './claudeSessions.js';
 // WARDEN-1282 — deliver a pasted clipboard image to where the agent lives
 // (ssh + `docker exec -i` stdin, or a direct local write). Image bytes NEVER
@@ -85,7 +87,7 @@ import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
 import { setInputAckObserver, isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, recordCompanionUninstall, deliverRemoteScript, pingProbe } from './companion.js';
-import { parseSearchOutput, buildSearchScript, streamBoundedSearch, searchLocalRaw } from './workspaceSearch.js';
+import { parseSearchOutput, buildSearchScript, searchLocalRaw } from './workspaceSearch.js';
 import { createGitRouter, runInContext, gitCwd } from './gitRoutes.js';
 // WARDEN-1381 — the WebSocket layer (observe wss + streamWss + the upgrade router).
 import { setupWsLayer } from './wsLayer.js';
@@ -100,6 +102,9 @@ import { createSuspendClock } from '../electron/suspend-clock.cjs';
 import { appendStall, readStalls, pruneStallLog, stallLogFile } from './stall-log.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 export { parseSearchLine, parseSearchOutput, buildSearchScript, streamBoundedSearch, searchLocalRaw } from './workspaceSearch.js';
+// WARDEN-1548: the Claude-session search + transcript-delivery helpers live in claudeSessions.js;
+// re-exported so every `server.X` consumer is untouched.
+export { searchLocalClaudeSessions, remoteSearchClaudeSessions, buildSessionSearchScript, remoteReadSessionTranscript } from './claudeSessions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -1837,144 +1842,6 @@ app.get('/api/search-pane', async (req, res) => {
   }
 });
 
-// ---- full-content session search (WARDEN-161) ----
-// Caps: per-host before merge, then global after recency sort. A per-host cap
-// stops one prolific host from starving the others; the global cap bounds the
-// response. The remote transfer caps (head bytes for cwd/summary, snippet bytes
-// for the matched line) keep one giant tool_result line from flooding SSH.
-const SESSION_SEARCH_PER_HOST = 20;
-const SESSION_SEARCH_GLOBAL = 50;
-const SESSION_SEARCH_HEAD_BYTES = 6000;    // matches remoteClaudeSessions' `head -c`
-const SESSION_SEARCH_SNIP_TRANSFER = 1500; // bounded matched-line transfer over SSH
-// Cap on matching files gathered locally before the recency sort (grep -m1 emits
-// one row per file). High enough to honor recency ranking across a real archive,
-// bounded so a wildly common term can't stream unbounded output. statSync'ing a
-// few hundred files is cheap; only the top PER_HOST get a head read.
-const SESSION_SEARCH_LOCAL_SCAN = 500;
-
-// Search the local JSONL archive for sessions whose body contains `q` (literal,
-// case-insensitive — same fixed-string semantics as the remote `grep -F`). Returns
-// up to SESSION_SEARCH_PER_HOST matches, most-recent first, each with cwd/summary
-// (from the head) + a snippet (from the first matching line), so matches OUTSIDE
-// the top-40 list are found.
-//
-// Streams ONE `grep -r -m1` over the archive and bounds output AT THE SOURCE
-// (line count + per-line transfer cap via streamBoundedSearch) — it never reads
-// whole JSONL files into Node memory. This mirrors searchLocalRaw's pattern (the
-// workspace-content search): a whole-file readFileSync approach would block the
-// event loop and balloon memory on large transcripts. The query is a literal argv
-// element (no shell), so it needs no shellQuote.
-export async function searchLocalClaudeSessions(q) {
-  const needle = q.toLowerCase();
-  if (!needle) return [];
-  const archiveDir = path.join(os.homedir(), '.claude', 'projects');
-  try { if (!fs.statSync(archiveDir).isDirectory()) return []; } catch { return []; }
-  const raw = await streamBoundedSearch(
-    'grep', ['-r', '-m', '1', '--include=*.jsonl', '-F', '-i', '-I', '-n', '--', q, archiveDir], undefined,
-    { maxResults: SESSION_SEARCH_LOCAL_SCAN, transferLen: SESSION_SEARCH_SNIP_TRANSFER },
-  );
-  // grep -m1 emits one `file:line:text` row per matching file. Collect them, sort
-  // by recency, then enrich the most-recent SESSION_SEARCH_PER_HOST with cwd/summary
-  // (a small head read) + a cleaned snippet (from grep's matched-line text).
-  // parseSearchOutput's per-line cap is raised to the transfer cap so a needle
-  // deep in a long matched line (but within the bounded transfer) survives to the
-  // snippet builder instead of being chopped at the default 300-char display cap.
-  const ranked = [];
-  for (const row of parseSearchOutput(raw, SESSION_SEARCH_LOCAL_SCAN, SESSION_SEARCH_SNIP_TRANSFER)) {
-    let mtime;
-    try { mtime = fs.statSync(row.file).mtimeMs; } catch { continue; }
-    ranked.push({ file: row.file, text: row.text, mtime });
-  }
-  ranked.sort((a, b) => b.mtime - a.mtime);
-  const out = [];
-  for (const e of ranked) {
-    if (out.length >= SESSION_SEARCH_PER_HOST) break;
-    let head = '';
-    try {
-      const fd = fs.openSync(e.file, 'r');
-      const buf = Buffer.alloc(8192);
-      fs.readSync(fd, buf, 0, 8192, 0);
-      fs.closeSync(fd);
-      head = buf.toString('utf8');
-    } catch { continue; }
-    const { cwd, summary } = parseJsonlHead(head);
-    if (!cwd) continue;
-    // Push UNCONDITIONALLY — grep genuinely matched this file, so the session
-    // must surface even when a clean snippet can't be built. snippetFromLine
-    // returns '' when the needle sits past the 1500-byte matched-line transfer
-    // cap (e.g. an error string deep inside a large tool_result blob): the cap
-    // chops the line before the needle, but that's a snippet-quality issue, not
-    // a "this session didn't match" signal. Dropping it here would be a false
-    // negative that breaks "a phrase inside the body returns that session". The
-    // remote twin pushes regardless of snippet (see remoteSearchClaudeSessions),
-    // the frontend renders an empty snippet as nothing — so push here too, to
-    // keep the two implementations consistent.
-    const snippet = snippetFromLine(e.text, needle);
-    out.push({ id: path.basename(e.file, '.jsonl'), cwd, summary, snippet, mtime: e.mtime });
-  }
-  return out;
-}
-
-// Remote (SSH) twin of searchLocalClaudeSessions. Builds a `bash -lc` script that
-// walks the same ~/.claude/projects/*/*.jsonl archive, greps each file for the
-// literal query, and emits id/mtime/head/snippet per match — delimited with the
-// same ___S/___E markers remoteClaudeSessions uses. Exported so the quoting can
-// be unit-tested like buildSearchScript (the query is user input in a remote
-// shell: shellQuoted + `-F` literal + `--` option stop = no injection surface).
-export function buildSessionSearchScript(q) {
-  const sq = shellQuote(q);
-  return `set +o pipefail
-for f in ~/.claude/projects/*/*.jsonl; do
-  [ -f "$f" ] || continue
-  m=$(grep -m1 -F -i -I -- ${sq} "$f" 2>/dev/null | head -c ${SESSION_SEARCH_SNIP_TRANSFER})
-  [ -n "$m" ] || continue
-  id=$(basename "$f" .jsonl)
-  mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
-  printf '___S\\t%s\\t%s\\n' "$id" "$mt"
-  head -c ${SESSION_SEARCH_HEAD_BYTES} "$f"
-  printf '\\n___SNIP\\t'
-  printf '%s' "$m"
-  printf '\\n___E\\t%s\\n' "$id"
-done`;
-}
-
-// Parse the remote script's delimited output into {id, cwd, summary, snippet,
-// mtime} rows. Mirrors remoteClaudeSessions' ___S/___E state machine, adding the
-// ___SNIP line (the bounded matched line, cleaned server-side via snippetFromLine
-// so the snippet stays human-readable regardless of where grep matched).
-//
-// WARDEN-1284 (companion transport): the search script is delivered through
-// `deliverRemoteScript`, so under the toggle it rides the persistent companion
-// channel instead of a fresh un-pooled ssh handshake per search. PARITY: the
-// script is still built ONCE by buildSessionSearchScript and delivered
-// byte-for-byte by either transport. `deps` is the shared routing test seam;
-// exported so the routing is assertable without real ssh.
-export async function remoteSearchClaudeSessions(host, q, deps = {}) {
-  const needle = q.toLowerCase();
-  const res = await deliverRemoteScript(host, buildSessionSearchScript(q), { timeout: 15000 }, {}, deps);
-  if (!res.ok) return [];
-  const out = [];
-  let cur = null;
-  const buf = [];
-  for (const line of res.stdout.split('\n')) {
-    const sm = line.match(/^___S\t(\S+)\t(\d+)/);
-    if (sm) { cur = { id: sm[1], mtime: Number(sm[2]) * 1000, snippet: '' }; buf.length = 0; continue; }
-    const snm = line.match(/^___SNIP\t(.*)$/);
-    if (snm && cur) { cur.snippet = snippetFromLine(snm[1], needle); continue; }
-    if (/^___E\t/.test(line)) {
-      if (cur) {
-        const { cwd, summary } = parseJsonlHead(buf.join('\n'));
-        if (cwd) out.push({ id: cur.id, cwd, summary, snippet: cur.snippet, mtime: cur.mtime });
-      }
-      cur = null;
-      continue;
-    }
-    if (cur) buf.push(line);
-  }
-  out.sort((a, b) => b.mtime - a.mtime);
-  return out.slice(0, SESSION_SEARCH_PER_HOST);
-}
-
 // An unreachable REMOTE host answers `{ host, sessions: [], error: 'host
 // unreachable' }` — and, critically, WITHOUT a `claudeAvailable` key (WARDEN-1196).
 //
@@ -2180,21 +2047,6 @@ app.get('/api/claude-sessions-search', async (req, res) => {
   all.sort((a, b) => b.mtime - a.mtime);
   res.json({ results: all.slice(0, SESSION_SEARCH_GLOBAL) });
 });
-
-// Deliver the session-transcript read script to a REMOTE host (leg 4 of
-// WARDEN-1284). Extracted from the /api/claude-session handler so the routing —
-// which transport carries the script — is assertable through the shared `deps`
-// seam without real ssh; the handler's own parse/response shaping is unchanged.
-//
-// Under the `companionTransportEnabled` toggle the script rides the persistent
-// companion channel instead of its own un-pooled ssh handshake. Opening a
-// session in the session browser is a user-initiated read where a human is
-// waiting. PARITY: buildSessionReadScript still assembles the script (its
-// `before` cursor arithmetic untouched) and it is delivered byte-for-byte by
-// either transport; parseSessionReadOutput reads the identical {ok, stdout}.
-export async function remoteReadSessionTranscript(host, id, { before } = {}, deps = {}) {
-  return deliverRemoteScript(host, buildSessionReadScript(id, { before }), { timeout: 15000 }, {}, deps);
-}
 
 // GET /api/claude-session?id=&host=&before= — read-only transcript of ONE past
 // session across any host, WITHOUT resuming it (no live `claude` process, no tmux
