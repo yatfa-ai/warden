@@ -26,6 +26,7 @@ import { createServerStallTelemetry, routeSegmentsOf } from './serverStallTeleme
 import { createPaneInputTelemetry } from './paneInputTelemetry.js';
 import { createRequestTelemetry } from './requestTelemetry.js';
 import { createSshTelemetry } from './sshTelemetry.js';
+import { createCompanionRpcTelemetry } from './companionRpcTelemetry.js';
 import { createWorkspaceNamesTelemetry } from './workspaceNamesTelemetry.js';
 import { applyCompanionToggle, applyCompanionExclusions } from './companion.js';
 import * as collections from './collections.js';
@@ -85,7 +86,7 @@ import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { setInputAckObserver, isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, recordCompanionUninstall, deliverRemoteScript, pingProbe } from './companion.js';
+import { setInputAckObserver, setCompanionRpcObserver, isCompanionTransportEnabled, isCompanionExcludedHost, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion, recordCompanionUninstall, deliverRemoteScript, pingProbe } from './companion.js';
 import { parseSearchOutput, buildSearchScript, searchLocalRaw } from './workspaceSearch.js';
 import { createGitRouter, runInContext, gitCwd } from './gitRoutes.js';
 import { isBinaryFile, isBinaryBlob, readWorkingTreeFile, readChatFile, resolveLocalFile, probeRemoteFile } from './chatFiles.js';
@@ -1570,6 +1571,18 @@ const sshTelemetry = createSshTelemetry({
 });
 sshTelemetry.start();
 setSshRunObserver((ms, ok) => sshTelemetry.recordRun(ms, ok));
+
+// WARDEN-1598 — the companion-RPC vantage: one fold per settled
+// CompanionChannel.call() into a closed per-method table. okCount = the channel
+// delivered a verdict (host-side ok:false is a command result and counts ok);
+// failCount = transport failure incl. timeout (right-censored). See
+// src/companionRpcTelemetry.js.
+const companionRpcTelemetry = createCompanionRpcTelemetry({
+  consent: operationalMetricsConsent,
+  send: (snapshot) => forwardToParent('telemetry-metrics', snapshot),
+});
+companionRpcTelemetry.start();
+setCompanionRpcObserver((method, ms, ok) => companionRpcTelemetry.recordRpc(method, ms, ok));
 
 // WARDEN-1508 — the server child's own process-memory producer: samples THIS
 // process (RSS + JS heap + uptime) every ~30s into fixed-size accumulators and
@@ -3118,6 +3131,9 @@ export { requestTelemetry };
 // WARDEN-1578 — exported so the wiring test drives a REAL run() observation
 // through the REAL observer and closes the window with flushNow().
 export { sshTelemetry };
+
+// WARDEN-1598 — exported on the same reasoning (wiring test).
+export { companionRpcTelemetry };
 
 // WARDEN-1416 — exported on the same reasoning: a test seeds the REAL chat
 // catalog and closes the window with flushNow(), proving the catalog read and
