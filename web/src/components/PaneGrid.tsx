@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity, useReconnectTokens } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity, useReconnectTokens, useExternalSearchQuery } from '@/lib/uiStore';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -93,7 +93,6 @@ interface Props {
   // this per-pane (onSplitShell?.(t.id)) when handing it to each PaneTile.
   onSplitShell?: (id?: string) => void;
   onSpawned: (chat: Chat) => void;
-  externalSearchQuery?: { paneId: string; query: string } | null;
   // WARDEN-1322 (roadmap WARDEN-1204 slice 3): this grid used to carry SEVEN
   // terminal-config props it never read — fontSize/onFontSizeChange, scrollback,
   // fontFamily, terminalCursorStyle, copyOnSelect, onExitBehavior — as a pure
@@ -145,7 +144,7 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, externalSearchQuery, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, terminalThemeId, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -157,6 +156,8 @@ export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceK
   // pane). Read per tile as reconnectTokens[t.id]; the fold into the attach
   // trigger lives inside PaneTile.
   const reconnectTokens = useReconnectTokens();
+  // WARDEN-1568 (slice 30): the search-jump command is read straight from the store.
+  const externalSearchQuery = useExternalSearchQuery();
   // WARDEN-1530 (roadmap WARDEN-1204 slice 24): the maximized pane id is a
   // shared, NOT-persisted store fact (App used to thread it as a prop). The
   // store clears it on workspace switch / pane removal; resolveVisibleTiles

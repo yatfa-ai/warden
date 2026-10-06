@@ -21,7 +21,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken } from '@/lib/uiStore';
+import { useSetSnippets, useSetFileViewerViewMode, useSetTerminalFontSize, useSetTerminalScrollback, useSetTerminalFontFamily, useSetTerminalCursorStyle, useSetCopyOnSelect, useSetOnExitBehavior, useSetTimestampFormat, useHostLabels, useSetHostLabels, useSetDefaultNewChatPreset, useSetDefaultNewChatPresetByHost, useSetDefaultNewChatHost, useSetDefaultNewChatCwd, useSetDefaultNewChatCwdByHost, useSetCustomPresets, useDefaultShell, useSetDefaultShell, useDefaultShellByHost, useSetDefaultShellByHost, useSetAttentionDesktopAlerts, useSetAttentionStates, useSetWatchedChats, useTheme, useSetTheme, useDensity, useSetDensity, useSetPaneLayout, useAutoFocusNewPane, useSetAutoFocusNewPane, useRestoreOnStartup, useSetRestoreOnStartup, useTerminalColorScheme, useSetTerminalColorScheme, useSetHealthGroupBy, useSetHealthCollapsedHosts, useSetObserverViewMode, useSetObserverActivityFilters, useSetObserverDirectiveFilters, useSetObserverAttentionFilters, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -227,7 +227,9 @@ function App() {
   // because that dialog auto-closes on result-click, which would unmount a viewer
   // rendered within it. Mirrors OpenChatBrowserPage's internal `viewing` state.
   const [viewingSession, setViewingSession] = useState<{ id: string; host: string; label: string } | null>(null);
-  const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
+  // WARDEN-1568 (slice 30): the search-jump command lives on the uiStore (non-persisted);
+  // App only WRITES it, PaneGrid subscribes directly.
+  const setExternalSearchQuery = useSetExternalSearchQuery();
   // WARDEN-1422 (QA round 5): per-pane reconnect tokens. A saved session whose
   // pane is OPEN and stuck in session_dead must re-attach when (a) the sidebar
   // respawns its chat (respawnChat below) or (b) a resume click hits the pane
@@ -1165,7 +1167,7 @@ function App() {
     // Otherwise add to the active workspace + focus it.
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     if (autoFocusNewPane) setFocused(id);
-  }, [autoFocusNewPane, setOpenPanes, setFocused, revealPane, bumpReconnectToken]);
+  }, [autoFocusNewPane, setOpenPanes, setFocused, revealPane, bumpReconnectToken, setExternalSearchQuery]);
 
   // WARDEN-417 / WARDEN-476: in-app catch-up for per-chat watch pings that fired while
   // the human was away (the OS notification was unsupported / denied / cleared / lost).
@@ -1752,7 +1754,7 @@ function App() {
   const handleJumpToMatch = useCallback((id: string, query: string) => {
     openChat(id);
     setExternalSearchQuery({ paneId: id, query });
-  }, [openChat]);
+  }, [openChat, setExternalSearchQuery]);
 
   // --- Multi-workspace operations (WARDEN-256) --------------------------------
   // Switching is instant and remembers the focused pane per workspace (focused
@@ -2202,7 +2204,6 @@ function App() {
             onForceKill={forceKill}
             onSplitShell={handleSplitShell}
             onSpawned={handlePaneSpawned}
-            externalSearchQuery={externalSearchQuery}
             // WARDEN-1422 (QA round 5): per-pane reconnect tokens + phase
             // reports — the respawn/resume → open-dead-pane re-attach chain.
             onPanePhaseChange={handlePanePhaseChange}
