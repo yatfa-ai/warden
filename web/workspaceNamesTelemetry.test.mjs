@@ -30,6 +30,7 @@ import {
   NAMES_FLUSH_MS,
   NAMES_MAX,
   RESUMED_SESSION_LABEL,
+  HOST_LABEL,
 } from '../src/workspaceNamesTelemetry.js';
 
 // A catalog row shaped exactly like chatCatalog.snapshot()'s — every field the
@@ -323,4 +324,63 @@ test('only the exact resume-<sid> shape is stripped — look-alike sessions keep
     chatRow('Third', { session: 'my-resume-abc' }),
   ]);
   assert.deepEqual(snapshot.chats, ['Refactor auth', 'Other thing', 'Third']);
+});
+
+// ==========================================================================
+// A row's own SSH host alias is stripped from its name (WARDEN-1564)
+// ==========================================================================
+
+test('a row\'s own host alias is replaced by <host>; (local) and non-owning names are untouched', () => {
+  const snapshot = buildNamesSnapshot([
+    { host: 'netcup', session: 'shell-ab12cd', name: 'shell @ netcup' },
+    { host: '(local)', session: 's', name: 'shell @ local' },
+    { host: 'arch', session: 't', name: 'search arch' },
+  ]);
+  assert.equal(HOST_LABEL, '<host>');
+  assert.deepEqual(snapshot.chats, ['shell @ <host>', 'shell @ local', 'search <host>']);
+  assert.equal(snapshot.chatCount, 3);
+  assert.ok(!JSON.stringify(snapshot).includes('netcup'));
+});
+
+test('host alias: row without host, or name not containing its host, is unchanged', () => {
+  const snapshot = buildNamesSnapshot([
+    { session: 'a', name: 'shell @ netcup' },
+    { host: '', session: 'b', name: 'shell @ netcup2' },
+    { host: 'macmini', session: 'c', name: 'my notes' },
+    { host: 'netcup', session: 'd', name: 'netcupish' },
+    { host: 'arch', session: 'e', name: 'search' },
+  ]);
+  assert.deepEqual(snapshot.chats, ['shell @ netcup', 'shell @ netcup2', 'my notes', 'netcupish', 'search']);
+});
+
+test('host alias: matching is case-insensitive and replaces every occurrence', () => {
+  const snapshot = buildNamesSnapshot([{ host: 'netcup', session: 'x', name: 'NetCup and netcup' }]);
+  assert.deepEqual(snapshot.chats, ['<host> and <host>']);
+});
+
+test('host alias: two rows with different aliases collapse to one entry while chatCount counts both', () => {
+  const snapshot = buildNamesSnapshot([
+    { host: 'netcup', session: 'shell-aaaaaa', name: 'shell @ netcup' },
+    { host: 'whitego', session: 'shell-bbbbbb', name: 'shell @ whitego' },
+  ]);
+  assert.deepEqual(snapshot.chats, ['shell @ <host>']);
+  assert.equal(snapshot.chatCount, 2);
+});
+
+test('host alias: regex-metacharacter hosts neither throw nor over-match', () => {
+  const snapshot = buildNamesSnapshot([
+    { host: 'a.b', session: 'p', name: 'shell @ a.b' },
+    { host: 'a.b', session: 'q', name: 'shell @ axb' },
+    { host: 'x+y', session: 'r', name: 'shell @ x+y' },
+    { host: 'x+y', session: 's', name: 'shell @ xxy' },
+    { host: '(', session: 't', name: 'shell @ (' },
+  ]);
+  assert.deepEqual(snapshot.chats, ['shell @ <host>', 'shell @ axb', 'shell @ xxy']);
+});
+
+test('host alias: the resume rule still wins over the host rule', () => {
+  const snapshot = buildNamesSnapshot([
+    { host: 'whitego', session: 'resume-3f9a1c2d', name: 'check whitego please' },
+  ]);
+  assert.deepEqual(snapshot.chats, [RESUMED_SESSION_LABEL]);
 });

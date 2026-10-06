@@ -43,9 +43,14 @@ const CATALOG = [
   { host: '(local)', session: 'gen', name: 'chat-4nh15o', cwd: '/tmp/probe-repo', cmd: 'bash', kind: 'tmux' },
   // WARDEN-1550: a resume-spawned row whose `.name` is the owner's first prompt.
   { host: '(local)', session: 'resume-3f9a1c2d', name: 'проверь доступность ремоут хостов whitego', cwd: '/tmp/probe-repo', cmd: 'bash', kind: 'tmux' },
+  // WARDEN-1564: a retired "Open shell" row whose name carries a bare SSH alias.
+  { host: 'whitego', session: 'shell-zz9999', name: 'shell @ whitego', cwd: '/tmp/probe-repo', cmd: 'bash', kind: 'tmux' },
 ];
 const RESUME_PROMPT = 'проверь доступность ремоут хостов whitego';
-const SHIPPED_NAMES = CATALOG.map((c) => (c.session.startsWith('resume-') ? 'resumed-session' : c.name));
+const SHIPPED_NAMES = CATALOG.map((c) => {
+  if (c.session.startsWith('resume-')) return 'resumed-session';
+  return c.host !== '(local)' ? c.name.replace(c.host, '<host>') : c.name;
+});
 
 before(async () => {
   originalHome = process.env.HOME;
