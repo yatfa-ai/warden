@@ -2243,7 +2243,6 @@ function App() {
       <GlobalSearchDialog
         open={showGlobalSearch}
         onClose={() => setShowGlobalSearch(false)}
-        openPanes={openPanes}
         onFocusPane={handleFocusPane}
         onJumpToMatch={handleJumpToMatch}
         onOpenSession={(id, host, label) => {

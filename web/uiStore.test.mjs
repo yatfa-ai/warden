@@ -70,7 +70,7 @@ await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
-const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectRecentlyClosed, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
+const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectRecentlyClosed, selectOpenPanes, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
@@ -3146,6 +3146,44 @@ test('selectRecentlyClosed: a dangling activeWorkspaceId falls back to workspace
   const e = (id) => ({ id, name: id, host: '', cwd: '', closedAt: 1 });
   const s = createUiStore({ workspaces: [{ ...ws('a'), recentlyClosed: [e('x')] }, ws('b')], activeWorkspaceId: 'gone' });
   assert.deepEqual(selectRecentlyClosed(s.getState()).map((r) => r.id), ['x']);
+});
+
+// ─── openPanes selector (WARDEN-1591, roadmap WARDEN-1204 slice 33) ───
+test('selectOpenPanes: a workspace with none returns the SAME frozen reference on every read (loop guard)', () => {
+  reset();
+  const s = seeded([{ ...ws('a'), openPanes: undefined }, ws('b')], 'a');
+  const first = selectOpenPanes(s.getState());
+  assert.deepEqual(first, []);
+  assert.ok(Object.isFrozen(first), 'shared empty constant is frozen');
+  assert.equal(selectOpenPanes(s.getState()), first, 'identity-stable across reads');
+  s.getState().setFocused('x');
+  assert.equal(selectOpenPanes(s.getState()), first, 'identity-stable across unrelated store changes');
+  const t = seeded([{ ...ws('b'), openPanes: undefined }], 'b');
+  assert.equal(selectOpenPanes(t.getState()), first, 'one shared constant across stores');
+});
+test('selectOpenPanes: tracks setOpenPanes and the close path, reference-stable between reads', () => {
+  reset();
+  const s = seeded([ws('a', ['p1', 'p2'], 'p1')], 'a');
+  s.getState().setOpenPanes(['p1', 'p2', 'p3']);
+  const afterOpen = selectOpenPanes(s.getState());
+  assert.deepEqual([...afterOpen], ['p1', 'p2', 'p3']);
+  assert.equal(selectOpenPanes(s.getState()), afterOpen, 'real array reference is stable between reads');
+  s.getState().setOpenPanes((p) => p.filter((x) => x !== 'p2'));
+  const afterClose = selectOpenPanes(s.getState());
+  assert.deepEqual([...afterClose], ['p1', 'p3']);
+  assert.equal(selectOpenPanes(s.getState()), afterClose);
+});
+test('selectOpenPanes: switching activeWorkspaceId swaps the result', () => {
+  reset();
+  const s = seeded([ws('a', ['p1'], 'p1'), ws('b', ['p2', 'p3'], 'p2')], 'a');
+  assert.deepEqual([...selectOpenPanes(s.getState())], ['p1']);
+  s.setState({ activeWorkspaceId: 'b' });
+  assert.deepEqual([...selectOpenPanes(s.getState())], ['p2', 'p3']);
+});
+test('selectOpenPanes: a dangling activeWorkspaceId falls back to workspaces[0]', () => {
+  reset();
+  const s = createUiStore({ workspaces: [ws('a', ['p1'], 'p1'), ws('b', ['p2'], 'p2')], activeWorkspaceId: 'gone' });
+  assert.deepEqual([...selectOpenPanes(s.getState())], ['p1']);
 });
 
 // ─── maximized pane id (WARDEN-1530, roadmap WARDEN-1204 slice 24): first NON-persisted shared fact ───
