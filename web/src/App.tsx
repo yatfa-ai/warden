@@ -209,13 +209,14 @@ function App() {
 
   // WARDEN-1510 (roadmap WARDEN-1204 slice 21): the three panel-collapse flags
   // live on the shared store (lib/uiStore.ts); App still READS them (layout
-  // styles, applyLayoutClamp deps, drag-start captures) but owns no state, and
+  // styles, applyLayoutClamp deps) but owns no state, and
   // PaneGrid's Alt+S/Alt+O call the toggle actions directly (no prop callbacks).
   // Persistence rides useConfigPersistence's snapshot (all 41 store facts).
   const sidebarCollapsed = useSidebarCollapsed();
   // WARDEN-1516 (slice 22): the two panel widths live on the store too (first-
   // paint clamp runs at store creation; reclampPanelWidths is the one re-clamp
-  // action). App reads the values for layout styles / drag-start captures.
+  // action). ResizableRail owns and reads the widths (and the drag); App only
+  // calls reclampPanelWidths.
   const reclampPanelWidths = useReclampPanelWidths();
   const observerCollapsed = useObserverCollapsed();
   const healthCollapsed = useHealthCollapsed();
