@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { shellQuote } from './ssh.js';
 import { unescapeGitPath } from './gitStatus.js';
-import { runLocalCapture } from './gitRoutes.js';
+import { runLocalCapture } from './gitTransport.js';
 
 // ---- Workspace content search (grep) — WARDEN-145 ---------------------------
 // Completes the locate→read loop WARDEN-39 (file reading) started: lets a human
