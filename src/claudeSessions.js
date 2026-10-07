@@ -23,7 +23,7 @@
 // `server.X` consumer is unchanged; the Express routes stay in server.js.
 //
 // Module-load note: importing this module now pulls in ./workspaceSearch.js,
-// which imports ssh/gitStatus/gitRoutes (workspaceSearch.js -> gitRoutes.js);
+// which imports ssh/gitStatus/gitTransport (workspaceSearch.js -> gitTransport.js);
 // none of those import claudeSessions.js, so there is no cycle.
 
 import path from 'node:path';
