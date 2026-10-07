@@ -1813,11 +1813,6 @@ export function useWatchedChats(): string[] {
   return useUiStore((s) => s.watchedChats);
 }
 
-/** The watched-set setter (App's resetSetters clears it on Settings → Reset). Stable across renders. */
-export function useSetWatchedChats(): (v: string[]) => void {
-  return useUiStore((s) => s.setWatchedChats);
-}
-
 // ─── the six remaining appearance prefs (WARDEN-1420, roadmap WARDEN-1204 slice 12) ───
 //
 // AppearanceSection (the writer of all six) subscribes here instead of
@@ -2086,10 +2081,6 @@ export function useHealthCollapsed(): boolean {
 }
 
 /** Setters/toggles are stable across renders (created once with the store) — safe in dependency arrays. */
-export function useSetSidebarCollapsed(): (collapsed: boolean) => void {
-  return useUiStore((s) => s.setSidebarCollapsed);
-}
-
 export function useSetObserverCollapsed(): (collapsed: boolean) => void {
   return useUiStore((s) => s.setObserverCollapsed);
 }

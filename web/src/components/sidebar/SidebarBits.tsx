@@ -23,32 +23,6 @@ export function UpdatedAgo({ at }: { at?: number | null }) {
 }
 
 /**
- * A small expand/collapse section header — "▾/▸ label (count)" — that toggles a
- * collapsed summary group in the sidebar (hidden tabs, offline hosts).
- * Built on shadcn <Button> per WARDEN-68 (Rule 1 + Rule 2): no raw <button>, and
- * sizes come from the Tailwind scale (text-xs) rather than arbitrary literals.
- */
-export function SectionToggle({ expanded, onClick, label, title }: {
-  expanded: boolean;
-  onClick: () => void;
-  label: string;
-  title?: string;
-}) {
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      onClick={onClick}
-      title={title}
-      className="justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60"
-    >
-      <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-      <span className="flex-1 min-w-0 wrap-anywhere whitespace-normal text-left">{label}</span>
-    </Button>
-  );
-}
-
-/**
  * The contextual action bar for multi-select (WARDEN-292 broadcast + WARDEN-328
  * batch kill + WARDEN-492 batch interrupt + WARDEN-581 bulk watch). Appears at the
  * foot of a fleet view only when ≥1 agent is selected, showing the live count and
