@@ -1148,7 +1148,14 @@ app.post('/api/sessions', async (req, res) => {
 });
 app.patch('/api/sessions/:id', async (req, res) => {
   if (!isValidSessionId(String(req.params.id))) return res.status(400).json({ error: 'invalid session id' });
-  const s = await renameSession(String(req.params.id), String(req.body?.name || ''));
+  let s;
+  try {
+    s = await renameSession(String(req.params.id), req.body?.name);
+  } catch (e) {
+    // Map ONLY the name-validation error to 400; everything else propagates.
+    if (e?.message === 'session name is required') return res.status(400).json({ error: 'session name is required' });
+    throw e;
+  }
   return s ? res.json(s) : res.status(404).json({ error: 'not found' });
 });
 app.delete('/api/sessions/:id', async (req, res) => {

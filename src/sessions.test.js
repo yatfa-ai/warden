@@ -650,3 +650,66 @@ describe('invalid session ids are rejected at the path choke point (WARDEN-1577)
     assert.strictEqual(mod.getSession(s.id), null);
   });
 });
+
+describe('session name validation/normalization (WARDEN-1604)', () => {
+  const snap = (id) => ({ json: fs.readFileSync(jsonPath(id)), md: fs.readFileSync(mdPath(id)) });
+
+  it('renameSession rejects blank / non-string names and leaves JSON + md byte-identical', async () => {
+    const s = await mod.createSession('keep me');
+    await mod.appendTranscript(s.id, 'user', 'hello');
+    const before = snap(s.id);
+    for (const bad of ['', '   ', '\n \r\n', { a: 1 }, null, undefined, 42, true, ['x']]) {
+      await assert.rejects(() => mod.renameSession(s.id, bad), /session name is required/, `name=${JSON.stringify(bad)}`);
+      const after = snap(s.id);
+      assert.ok(before.json.equals(after.json), `json unchanged for ${JSON.stringify(bad)}`);
+      assert.ok(before.md.equals(after.md), `md unchanged for ${JSON.stringify(bad)}`);
+    }
+  });
+
+  it('a multi-line name is stored single-line and cannot inject markdown headings', async () => {
+    const s = await mod.createSession('orig');
+    const r = await mod.renameSession(s.id, 'a\n\n## injected\r\n');
+    assert.strictEqual(r.name, 'a ## injected');
+    assert.strictEqual(JSON.parse(fs.readFileSync(jsonPath(s.id), 'utf8')).name, 'a ## injected');
+    const md = fs.readFileSync(mdPath(s.id), 'utf8');
+    assert.strictEqual(md.split('\n').filter((l) => /^#+ /.test(l)).length, 1, 'exactly one heading line');
+    assert.ok(!/^## /m.test(md), 'no injected ## heading');
+    assert.ok(md.startsWith('# a ## injected\n'));
+  });
+
+  it('createSession flattens multi-line names too', async () => {
+    const s = await mod.createSession('x\n## y');
+    assert.strictEqual(s.name, 'x ## y');
+    assert.strictEqual(fs.readFileSync(mdPath(s.id), 'utf8').split('\n').filter((l) => /^#+ /.test(l)).length, 1);
+  });
+
+  it('a 5000-char name is capped at <= 100 chars (rename and create)', async () => {
+    const s = await mod.createSession('y'.repeat(5000));
+    assert.ok(s.name.length <= 100);
+    const r = await mod.renameSession(s.id, 'z'.repeat(5000));
+    assert.ok(r.name.length <= 100);
+    assert.ok(JSON.parse(fs.readFileSync(jsonPath(s.id), 'utf8')).name.length <= 100);
+  });
+
+  it('createSession with non-string / blank names stores a string (default name)', async () => {
+    for (const bad of [{ a: 1 }, 42, true, '  ', '', null, undefined]) {
+      const s = await mod.createSession(bad);
+      assert.strictEqual(typeof s.name, 'string', `name=${JSON.stringify(bad)}`);
+      assert.strictEqual(s.name, `session ${s.id.slice(0, 4)}`);
+      assert.strictEqual(JSON.parse(fs.readFileSync(jsonPath(s.id), 'utf8')).name, s.name);
+    }
+  });
+
+  it('a valid name round-trips unchanged; surrounding whitespace is trimmed', async () => {
+    const s = await mod.createSession('My Session');
+    assert.strictEqual(s.name, 'My Session');
+    assert.strictEqual((await mod.renameSession(s.id, 'Renamed 2')).name, 'Renamed 2');
+    assert.strictEqual((await mod.renameSession(s.id, '  padded  ')).name, 'padded');
+    assert.ok(fs.readFileSync(mdPath(s.id), 'utf8').startsWith('# padded\n'));
+  });
+
+  it('invalid/unknown ids still return null for a valid name', async () => {
+    assert.strictEqual(await mod.renameSession('../config', 'ok'), null);
+    assert.strictEqual(await mod.renameSession('abcdef123456', 'ok'), null);
+  });
+});
