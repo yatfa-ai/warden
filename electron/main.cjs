@@ -416,8 +416,14 @@ const receiveTelemetryWindow = createWindowReceipt({
 // validate stages remain the wire's last line of defense — a malformed or
 // hostile snapshot is dropped pre-send, never trusted because it came from our
 // child.
+//
+// WARDEN-1606 — recorded with `runtime: 'server'`: this function's ONLY caller
+// is the server child's IPC channel, and every producer on it (file-exists,
+// pane-input, request, ssh, companion-rpc) lives in the backend child. Without
+// the extra the builder fell back to 'main' and mislabelled them (the sibling
+// server receipts — stall, names, process-memory — already pass 'server').
 function recordOperationalMetricsWindow(snapshot) {
-  receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot);
+  receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot, { runtime: 'server' });
 }
 
 // WARDEN-1385 — the RENDERER's pane-latency window (web/src/lib/paneLatency.ts,

@@ -167,7 +167,7 @@ const mainSrc = readFileSync(new URL('../electron/main.cjs', import.meta.url), '
 // opt-in and must NEVER ride a metrics category), `incidents` is the stall
 // category, `operational-metrics` the aggregates-only one.
 const RECEIPTS = [
-  { fn: 'recordOperationalMetricsWindow', call: "receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot)" },
+  { fn: 'recordOperationalMetricsWindow', call: "receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot, { runtime: 'server' })" },
   { fn: 'recordRendererPaneMetrics', call: "receiveTelemetryWindow('operational-metrics', buildOperationalMetricsEvent, snapshot, { runtime: 'renderer' })" },
   { fn: 'recordWorkspaceShapeWindow', call: "receiveTelemetryWindow('operational-metrics', buildWorkspaceShapeEvent, snapshot)" },
   { fn: 'recordServerStallWindow', call: "receiveTelemetryWindow('incidents', buildServerStallEvent, snapshot)" },
