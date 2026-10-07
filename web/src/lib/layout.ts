@@ -25,7 +25,7 @@ export interface LayoutContext {
   // panel is hidden — its flex column is width 0 — so it reserves NO shared
   // space and is never trimmed; only the *visible* panel(s) are clamped against
   // the space they actually occupy. The drag clamps already pass the OTHER panel
-  // as 0 when it is collapsed (`dragOtherWidth = otherCollapsed ? 0 : other`),
+  // as 0 when it is collapsed (ResizableRail captures the neighbour as `otherCollapsed ? 0 : other`),
   // so a panel can be dragged wide while its neighbor is hidden, storing a width
   // that only fits alone. The shared clamp must match that collapse-awareness so
   // a lone visible panel is never trimmed to reserve room for a hidden one, and
