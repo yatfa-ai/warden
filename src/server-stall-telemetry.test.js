@@ -71,8 +71,19 @@ async function captureStderr(fn) {
   return lines;
 }
 
-/** Settle the async appendStall write the callback fires and forgets. */
-const settle = () => new Promise((r) => setTimeout(r, 50));
+/**
+ * Settle the async appendStall write the callback fires and forgets. When the
+ * caller knows how many journal entries it expects, poll (bounded) until they
+ * land — a fixed sleep alone races the fire-and-forget append under full-suite
+ * load. The 50ms tail is kept so a late stray append is still caught.
+ */
+const settle = async (expected = null) => {
+  const deadline = Date.now() + 5000;
+  while (expected !== null && readJournal().length < expected && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  await new Promise((r) => setTimeout(r, 50));
+};
 
 before(async () => {
   originalCompanionEnv = process.env.WARDEN_COMPANION_TRANSPORT;
@@ -117,6 +128,7 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
   it('folds N stalls into ONE window carrying count / totalMs / maxMs / histogram / culprits', async () => {
     cfg.telemetryIncidentsEnabled = true;
     serverStallTelemetry.flushNow(); // start from a clean window
+    const journalBefore = readJournal().length;
 
     await captureStderr(async () => {
       // Deliver two real stall records through the PRODUCTION sink.
@@ -126,7 +138,7 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
         attribution: [{ label: 'GET /api/claude-sessions', overlapMs: 5900, open: false, durationMs: 5900 }],
         syncTotals: [{ label: 'fs.readFileSync', calls: 812, totalMs: 5800 }],
       }));
-      await settle();
+      await settle(journalBefore + 2);
     });
 
     const window = serverStallTelemetry.flushNow();
@@ -147,11 +159,12 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
     // verbatim. Driven through the REAL callback with the REAL live route set.
     cfg.telemetryIncidentsEnabled = true;
     serverStallTelemetry.flushNow();
+    const journalBefore = readJournal().length;
     await captureStderr(async () => {
       loopMonitor._deliverStall(STALL({
         attribution: [{ label: 'GET /api/chats/myproject-researcher', overlapMs: 4000, open: false, durationMs: 4000 }],
       }));
-      await settle();
+      await settle(journalBefore + 1);
     });
     const window = serverStallTelemetry.flushNow();
     const serialized = JSON.stringify(window);
@@ -165,9 +178,10 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
   it('consent OFF — the window is dropped and nothing is retained', async () => {
     cfg.telemetryIncidentsEnabled = false;
     serverStallTelemetry.flushNow();
+    const journalBefore = readJournal().length;
     await captureStderr(async () => {
       loopMonitor._deliverStall(STALL({ lagMs: 9000 }));
-      await settle();
+      await settle(journalBefore + 1);
     });
     assert.equal(serverStallTelemetry.flushNow(), null, 'nothing was collected');
     // And nothing was PARKED either: re-enabling must not resurrect it.
@@ -183,7 +197,7 @@ describe('the owner\'s three LOCAL channels are untouched by the telemetry fold'
     const record = STALL({ lagMs: 4200 });
     const lines = await captureStderr(async () => {
       loopMonitor._deliverStall(record);
-      await settle();
+      await settle(before + 1);
     });
     assert.equal(lines.length, 1, 'exactly one stderr line, as before');
     assert.match(lines[0], /^\[warden:stall\] server event loop blocked 4200ms/);
@@ -203,7 +217,7 @@ describe('the owner\'s three LOCAL channels are untouched by the telemetry fold'
     const record = STALL({ lagMs: 4200 });
     const lines = await captureStderr(async () => {
       loopMonitor._deliverStall(record);
-      await settle();
+      await settle(before + 1);
     });
     assert.equal(lines.length, 1, 'consent has no effect on the local channels');
     assert.match(lines[0], /^\[warden:stall\] server event loop blocked 4200ms/);
@@ -223,7 +237,7 @@ describe('the owner\'s three LOCAL channels are untouched by the telemetry fold'
       const before = readJournal().length;
       const lines = await captureStderr(async () => {
         loopMonitor._deliverStall(STALL({ lagMs: 7777 }));
-        await settle();
+        await settle(before + 1);
       });
       assert.equal(lines.length, 1, 'the stderr line still fired');
       assert.match(lines[0], /blocked 7777ms/);
