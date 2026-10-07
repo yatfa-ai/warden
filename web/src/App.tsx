@@ -42,7 +42,7 @@ import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
 import { ResizableRail } from '@/components/ResizableRail';
 import { WatchCatchup } from '@/components/WatchCatchup';
-import { StatusDot } from '@/components/StatusDot';
+import { StreamStatusDot } from '@/components/StreamStatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
@@ -86,7 +86,6 @@ function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [, setLastRefreshAt] = useState<number | null>(null);
   // Read persisted UI state ONCE on mount (lazy initializer runs only the first
   // render) and reuse it for every useState seed below — consolidates the prior
   // per-state loadUi() calls into a single read.
@@ -172,7 +171,6 @@ function App() {
   // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
   // hosts rather than the whole fleet.
   const discoveredHostsRef = useRef<Set<string>>(new Set());
-  const [streamConn, setStreamConn] = useState(false);
   // WARDEN-1441 (client-state slice 15): the Observer panel's four view prefs
   // (viewMode + the 3 per-tab filter shapes) moved onto the shared uiStore — the
   // observerViewMode/observerActivityFilters/observerDirectiveFilters/
@@ -530,8 +528,6 @@ function App() {
   const [companionTransportEnabled, setCompanionTransportEnabled] = useState(true);
 
   useEffect(() => {
-    streamApi.onOpen = () => setStreamConn(true);
-    streamApi.onClose = () => setStreamConn(false);
     streamApi.onAnyMessage = (m) => {
       if (m.type === 'pty' && m.id !== focusedRef.current) {
         markPaneActivity(m.id);
@@ -557,8 +553,6 @@ function App() {
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
-      streamApi.onOpen = null;
-      streamApi.onClose = null;
       streamApi.onAnyMessage = null;
       window.removeEventListener('beforeunload', handleBeforeUnload);
       handleBeforeUnload();
@@ -638,7 +632,6 @@ function App() {
         // its server round-trip is still pending (the disk file hasn't updated).
         return applyOptimisticGuard(base, killedChatIdsRef.current, pendingRenamesRef.current);
       });
-      setLastRefreshAt(Date.now());
     } catch (e) { console.error(e); }
     if (!silent) setLoading(false);
   }, []);
@@ -1683,12 +1676,7 @@ function App() {
         {/* Right-side control cluster — shrink-0 so the tab region yields first
             and this whole cluster stays fully visible at the default width. */}
         <div className="flex items-center gap-3 shrink-0">
-          <StatusDot
-            tone={streamConn ? 'green' : 'red'}
-            variant={streamConn ? 'solid' : 'ring'}
-            label={streamConn ? 'Connected' : 'Disconnected'}
-            className="transition-colors duration-300 ease-in-out"
-          />
+          <StreamStatusDot />
           <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setGlobalSearchOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => { if (healthCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-health'); setHealthCollapsed(!healthCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
