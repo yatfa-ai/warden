@@ -659,6 +659,15 @@ export interface UiStoreState {
   externalSearchQuery: Readonly<{ paneId: string; query: string }> | null;
   setExternalSearchQuery: (v: { paneId: string; query: string } | null) => void;
   /**
+   * Whether the global-search dialog is open (WARDEN-1620, roadmap WARDEN-1204
+   * slice 37) — the "open global search" command's ONE home. A NON-persisted
+   * session fact: NOT a STORE_PERSISTED_KEYS member, initial `false`, never
+   * seeded from disk. Written by the header ⌕ button (App) and the dialog's close;
+   * read + Ctrl+Shift+F-raised by <GlobalSearchHost/>.
+   */
+  globalSearchOpen: boolean;
+  setGlobalSearchOpen: (v: boolean) => void;
+  /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
    * now, or the chosen theme id itself. The sixth NON-persisted session fact:
@@ -1309,6 +1318,10 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // null — never seeded; the setter stores the passed object as-is.
     externalSearchQuery: null,
     setExternalSearchQuery: (externalSearchQuery) => set({ externalSearchQuery }),
+    // WARDEN-1620 (slice 37): the not-persisted "global search open" flag.
+    // Initial false — never seeded.
+    globalSearchOpen: false,
+    setGlobalSearchOpen: (globalSearchOpen) => set({ globalSearchOpen }),
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
     // seed — a pure mapping of the theme pref ('system' → dark placeholder that
     // App's [theme] effect overwrites on mount); never read from disk itself.
@@ -2305,6 +2318,16 @@ export function useSetResolvedThemeId(): (v: ThemeId) => void {
 /** Stable-identity action: raise (or clear with null) the search-jump command. */
 export function useSetExternalSearchQuery(): (v: { paneId: string; query: string } | null) => void {
   return useUiStore((s) => s.setExternalSearchQuery);
+}
+
+/** Whether the global-search dialog is open (WARDEN-1620, slice 37) — NOT persisted. */
+export function useGlobalSearchOpen(): boolean {
+  return useUiStore((s) => s.globalSearchOpen);
+}
+
+/** Stable-identity action: open/close the global-search dialog. */
+export function useSetGlobalSearchOpen(): (v: boolean) => void {
+  return useUiStore((s) => s.setGlobalSearchOpen);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {

@@ -19,7 +19,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery } from '@/lib/uiStore';
+import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -36,8 +36,7 @@ import { PaneGrid } from '@/components/PaneGrid';
 import { WorkspaceTabs } from '@/components/WorkspaceTabs';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
-import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
-import { SessionTranscriptViewer } from '@/components/SessionTranscriptViewer';
+import { GlobalSearchHost } from '@/components/GlobalSearchHost';
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
@@ -187,15 +186,11 @@ function App() {
   // quartet). All four are zustand actions: stable identities, safe to list —
   // or omit — in dependency arrays.
   const setObserverViewMode = useSetObserverViewMode();
-  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
-  // The past-conversation whose read-only transcript is open from a global-search
-  // result (WARDEN-719). Lifted to App level — NOT inside GlobalSearchDialog —
-  // because that dialog auto-closes on result-click, which would unmount a viewer
-  // rendered within it. Mirrors OpenChatBrowserPage's internal `viewing` state.
-  const [viewingSession, setViewingSession] = useState<{ id: string; host: string; label: string } | null>(null);
   // WARDEN-1568 (slice 30): the search-jump command lives on the uiStore (non-persisted);
   // App only WRITES it, PaneGrid subscribes directly.
   const setExternalSearchQuery = useSetExternalSearchQuery();
+  // WARDEN-1620 (slice 37): "open global search" is a store command; the GlobalSearchHost component reads it.
+  const setGlobalSearchOpen = useSetGlobalSearchOpen();
   // WARDEN-1422 (QA round 5): per-pane reconnect tokens. A saved session whose
   // pane is OPEN and stuck in session_dead must re-attach when (a) the sidebar
   // respawns its chat (respawnChat below) or (b) a resume click hits the pane
@@ -640,18 +635,6 @@ function App() {
   useEffect(() => {
     applyDensity(density);
   }, [density]);
-
-  // keyboard shortcut for global search
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.shiftKey && e.key === 'F') {
-        e.preventDefault();
-        setShowGlobalSearch(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
 
   // Refresh the chat list from the disk catalog (/api/chats, zero SSH in lazy mode). `silent`
   // skips the loading toggle so background auto-refresh ticks don't flash the ↻ button. In
@@ -1536,17 +1519,6 @@ function App() {
     setObserverViewMode('activity');
   }, [setObserverCollapsed, setObserverViewMode]);
 
-  // Focus a pane from global search / observer — routed through openChat so a
-  // pane already open in another workspace switches there instead of duplicating.
-  const handleFocusPane = useCallback((id: string) => {
-    openChat(id);
-  }, [openChat]);
-
-  const handleJumpToMatch = useCallback((id: string, query: string) => {
-    openChat(id);
-    setExternalSearchQuery({ paneId: id, query });
-  }, [openChat, setExternalSearchQuery]);
-
   // --- Multi-workspace operations (WARDEN-256) --------------------------------
   // Switching is instant and remembers the focused pane per workspace (focused
   // lives inside each workspace). Each op keeps ≥1 workspace and dedups pane ids
@@ -1858,7 +1830,7 @@ function App() {
             className="transition-colors duration-300 ease-in-out"
           />
           <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
-          <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
+          <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setGlobalSearchOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => { if (healthCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-health'); setHealthCollapsed(!healthCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { toggleObserverCollapsed(); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
           <IconTooltip label="settings" side="bottom"><button onClick={() => { getFeatureUsageSampler().sampler.recordFeatureUse('settings'); setSettingsOpen(true); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
@@ -1953,26 +1925,7 @@ function App() {
       </main>
         </>
       )}
-      <GlobalSearchDialog
-        open={showGlobalSearch}
-        onClose={() => setShowGlobalSearch(false)}
-        onFocusPane={handleFocusPane}
-        onJumpToMatch={handleJumpToMatch}
-        onOpenSession={(id, host, label) => {
-          // Set the App-level viewing session, then close the search dialog. The
-          // viewer (rendered just below) survives the dialog closing because its
-          // open state + session live here, not inside the dialog.
-          getFeatureUsageSampler().sampler.recordFeatureUse('session-view');
-          setViewingSession({ id, host, label });
-          setShowGlobalSearch(false);
-        }}
-      />
-      <SessionTranscriptViewer
-        open={!!viewingSession}
-        onOpenChange={(o) => { if (!o) setViewingSession(null); }}
-        session={viewingSession}
-        issueEntries={markdownIssueEntries}
-      />
+      <GlobalSearchHost onOpenChat={openChat} issueEntries={markdownIssueEntries} />
       <ConfirmDialog
         open={killTarget !== null}
         onOpenChange={(o) => { if (!o) cancelKill(); }}

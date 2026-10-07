@@ -247,12 +247,17 @@ test('App gates the markdown entries on the integration toggle (off by default)'
 });
 test('App threads markdownIssueEntries to the fleet-level mounts', () => {
   // WARDEN-1422: the third mount was <OpenChatBrowserPage>, deleted with the
-  // Open chat page itself.
-  for (const mount of ['<ObserverTabs', '<SessionTranscriptViewer']) {
+  // Open chat page itself. WARDEN-1620: <SessionTranscriptViewer> moved into
+  // <GlobalSearchHost>, so App threads the entries to the host instead.
+  for (const mount of ['<ObserverTabs', '<GlobalSearchHost']) {
     const at = appSrc.indexOf(mount);
     assert.notEqual(at, -1, `${mount} mount findable`);
     assert.ok(/issueEntries=\{markdownIssueEntries\}/.test(appSrc.slice(at, at + 1600)), `${mount} passes issueEntries`);
   }
+  const hostSrc = readFileSync(resolve(__dirname, 'src/components/GlobalSearchHost.tsx'), 'utf8');
+  const viewerAt = hostSrc.indexOf('<SessionTranscriptViewer');
+  assert.notEqual(viewerAt, -1, '<SessionTranscriptViewer mount findable in GlobalSearchHost.tsx');
+  assert.ok(/issueEntries=\{issueEntries\}/.test(hostSrc.slice(viewerAt, viewerAt + 600)), 'host passes issueEntries to the viewer');
 });
 
 console.log(`\n${passed} markdown issue-links assertions passed`);
