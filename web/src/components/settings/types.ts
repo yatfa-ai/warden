@@ -15,9 +15,9 @@
 //                       WARDEN-1420 (roadmap WARDEN-1204 slice 12) finished
 //                       that migration: every remaining UiState appearance pref
 //                       moved, so NO UiState pref is threaded through this
-//                       module any more. `AppearancePrefs` — the one surviving
-//                       `*Prefs` group — now carries only the three main-owned
-//                       ELECTRON pairs, which are not localStorage prefs at all.
+//                       module any more. The one `*Prefs` group that
+//                       survived it (the three main-owned ELECTRON pairs, not
+//                       localStorage prefs at all) was retired by WARDEN-1622.
 //                       A pref's persistence sink was unchanged throughout;
 //                       only the SHARING channel differs.
 //
@@ -194,38 +194,12 @@ export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
 // prop type is its group intersected with whatever extra (backend state, the
 // `hidden` toggle) it needs — see each section file.
 //
-// WARDEN-1420 (roadmap WARDEN-1204 slice 12): exactly ONE group survives here,
-// and it holds no UiState pref at all — every shared/persisted client pref now
-// lives in the shared store (lib/uiStore.ts) and its section subscribes. What
-// remains in AppearancePrefs is the three main-owned ELECTRON pairs.
+// WARDEN-1622 (roadmap WARDEN-1204 slice 38): NO group survives here any more.
+// The last one (the three main-owned Electron window prefs) moved into
+// AppearanceSection itself via useMainOwnedPref (lib/useMainOwnedPref.ts) —
+// state with ONE reader belongs in that reader, not App.
 
 import type { HostLabels } from '@/lib/chatDisplay';
-
-/**
- * Window/launch prefs — the three ELECTRON pairs, all main-owned via IPC and
- * mirrored here for the switches. (These were the most-footgun-heavy props:
- * each carried a "must never be added to the config state / PUT /api/config
- * body" comment. Grouping them here makes that comment structural — none of
- * these types are even expressible in `ConfigData`.)
- *
- * WARDEN-1420 (roadmap WARDEN-1204 slice 12) shrank this bag from nine pairs to
- * three: theme, density, paneLayout, autoFocusNewPane, restoreOnStartup and
- * terminalColorScheme joined the six terminal prefs slice 3 already moved, so
- * every remaining UiState appearance pref now lives in the shared client-state
- * store (lib/uiStore.ts) and AppearanceSection subscribes. The three below
- * deliberately STAY App-local: each has one reader and one writer, and each is
- * an electron integration (window bounds / login item / tray) rather than a
- * UiState pref — there is no second sharing channel to end, and global storage
- * without global meaning is a cost.
- */
-export interface AppearancePrefs {
-  rememberWindowBounds: boolean;
-  setRememberWindowBounds: (v: boolean) => void;
-  launchAtLogin: boolean;
-  setLaunchAtLogin: (v: boolean) => void;
-  closeToTray: boolean;
-  setCloseToTray: (v: boolean) => void;
-}
 
 // NOTE (WARDEN-1383, roadmap WARDEN-1204 slice 8): there is no `NewChatsPrefs`
 // group here any more. The new-chats spawn family (default agent type / host /
@@ -235,7 +209,7 @@ export interface AppearancePrefs {
 // the shared client-state store (lib/uiStore.ts): NewChatsSection and
 // NewChatForm SUBSCRIBE to it directly and the bag is retired. Its persistence
 // sink is unchanged; only the SHARING channel differs. The same happened to
-// `SnippetsPrefs` (WARDEN-1271, below), to six pairs of `AppearancePrefs`
+// `SnippetsPrefs` (WARDEN-1271, below), to six pairs of the appearance bag
 // (WARDEN-1322), and — roadmap WARDEN-1204 slice 11, WARDEN-1408 — to
 // `DesktopAlertPrefs` itself (the note below).
 
@@ -260,7 +234,7 @@ export interface AppearancePrefs {
 // the single writer. A pref that is read by exactly one section still belongs
 // in a *Prefs group below; this one is read by five surfaces.
 //
-// NOTE (WARDEN-1322): the same shape took SIX more pairs out of AppearancePrefs —
+// NOTE (WARDEN-1322): the same shape took SIX more pairs out of the appearance bag —
 // terminalFontSize, terminalScrollback, terminalFontFamily, terminalCursorStyle,
 // copyOnSelect and onExitBehavior — the largest shared cluster behind a single
 // proven-zero-use carrier (PaneGrid forwarded all six to PaneTile without
@@ -270,8 +244,8 @@ export interface AppearancePrefs {
 //
 // NOTE (WARDEN-1420, roadmap WARDEN-1204 slice 12): the SIX remaining UiState
 // pairs followed — theme, density, paneLayout, autoFocusNewPane,
-// restoreOnStartup and terminalColorScheme — so AppearancePrefs now carries
-// nothing but the three electron pairs. Slice 3 kept `terminalColorScheme`
+// restoreOnStartup and terminalColorScheme — so the appearance bag carried
+// nothing but the three electron pairs (retired by WARDEN-1622). Slice 3 kept `terminalColorScheme`
 // here because App, not a component, was its only runtime reader; that is
 // SUPERSEDED rather than contradicted — once the family moves, a UiState pref
 // still riding a props bag IS the second sharing channel this direction exists

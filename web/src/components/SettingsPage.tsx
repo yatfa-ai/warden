@@ -25,9 +25,6 @@ import {
 } from '@/components/settings/sectionSearch';
 import { applyRowMatchHighlights, clearRowMatchHighlights } from '@/components/settings/rowHighlight';
 import { SettingsSection } from '@/components/settings/SettingsSection';
-import {
-  type AppearancePrefs,
-} from '@/components/settings/types';
 
 import { HostsSection } from '@/components/settings/sections/HostsSection';
 import { ObserverSection } from '@/components/settings/sections/ObserverSection';
@@ -61,7 +58,8 @@ interface Props {
   // component. Backend /api/config fields are NOT here — they live in the
   // useBackendConfig seam and never round-trip through App, which is what makes
   // the "client pref never reaches PUT /api/config" invariant structural.
-  appearance: AppearancePrefs;
+  // WARDEN-1622 (slice 38): no `appearance` group — AppearanceSection owns the
+  // three main-owned Electron prefs itself (useMainOwnedPref).
   // WARDEN-1383 (slice 8): no `newChats` group — NewChatsSection subscribes to
   // the shared client-state store (lib/uiStore.ts) directly, like
   // SnippetsSection (WARDEN-1271) before it. WARDEN-1408 (slice 11): no
@@ -82,7 +80,6 @@ interface Props {
 export function SettingsPage({
   onClose,
   onConfigChange,
-  appearance,
   resetUiPrefsToDefaults,
 }: Props) {
   // The backend /api/config persistence seam: GET on mount, PUT on Save, the
@@ -297,7 +294,7 @@ export function SettingsPage({
                   label and sectionGate() read. `availableHosts` settles on its
                   own decoupled fetch (WARDEN-828) and degrades to the configured
                   hosts, so NewChats does not wait on it either. */}
-              <AppearanceSection {...appearance} hidden={activeSection !== 'appearance'} />
+              <AppearanceSection hidden={activeSection !== 'appearance'} />
               <NewChatsSection availableHosts={availableHosts} hidden={activeSection !== 'newchats'} />
               <SnippetsSection hidden={activeSection !== 'snippets'} />
 
