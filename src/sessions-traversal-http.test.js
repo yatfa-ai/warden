@@ -109,3 +109,21 @@ describe('PATCH /api/sessions/:id validates the name (WARDEN-1604)', () => {
     assert.strictEqual((await patch('abcdef123456', { name: 'x' })).status, 404);
   });
 });
+
+describe('POST /api/sessions normalizes chat-context fields (WARDEN-1614)', () => {
+  it('object/array/number context fields → null in the response and on disk; long strings capped', async () => {
+    const res = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'ctx', host: 'h'.repeat(100000), container: ['c'], project: 123, role: { r: 1 }, chatKey: { k: 1 } }),
+    });
+    const body = await res.json();
+    assert.strictEqual(body.chatKey, null);
+    assert.strictEqual(body.container, null);
+    assert.strictEqual(body.project, null);
+    assert.strictEqual(body.role, null);
+    assert.strictEqual(body.host.length, 200);
+    const stored = JSON.parse(fs.readFileSync(path.join(wardenDir, 'sessions', `${body.id}.json`), 'utf8'));
+    assert.strictEqual(stored.chatKey, null);
+    assert.strictEqual(stored.host.length, 200);
+  });
+});
