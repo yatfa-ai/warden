@@ -1216,15 +1216,25 @@ app.get('/api/activity/stats', async (req, res) => {
 // from getSeriesSince (and getStatsSince's total) so the heatmap reverts to its
 // pre-feature volume-of-activity meaning; stateSeries is an additive sibling
 // field computed by getStateSeriesSince, the one reader of those transitions.
+// WARDEN-1618: getSeriesSince/getStateSeriesSince allocate one slot per bucket in
+// [after, now] synchronously on the single event loop, so an unbounded `bucket`
+// (e.g. 1) or a far-past `after` blocked it for seconds (and threw "Map maximum
+// size exceeded"). Clamp both: bucket >= 1 min, window <= the 7d store retention.
+// Worst case is 7d / 1min = 10,080 buckets.
+const SERIES_MIN_BUCKET_MS = 60_000;
+const SERIES_MAX_WINDOW_MS = 7 * 24 * 3_600_000;
 app.get('/api/activity/series', async (req, res) => {
-  const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
-  const rawBucket = req.query.bucket ? parseInt(String(req.query.bucket), 10) : 3_600_000; // default 1h
-  const bucket = Number.isFinite(rawBucket) && rawBucket > 0 ? rawBucket : 3_600_000;
   // Both series share one axis: derive the bucket grid from a SINGLE `now` so the
   // heatmap's volume columns and the timeline's state columns can never desync by a
   // bucket (the two functions would otherwise each call Date.now() and could straddle
   // a bucket boundary). Spread volume then add the additive stateSeries sibling field.
   const now = Date.now();
+  const requestedAfter = req.query.after ? new Date(req.query.after).getTime() : now - (24 * 60 * 60 * 1000); // Default: last 24 hours
+  // Math.max(NaN, x) is NaN, so an unparseable `after` still flows through to an
+  // empty grid exactly as before; only finite far-past values are clamped.
+  const after = Math.max(requestedAfter, now - SERIES_MAX_WINDOW_MS);
+  const rawBucket = req.query.bucket ? parseInt(String(req.query.bucket), 10) : 3_600_000; // default 1h
+  const bucket = Number.isFinite(rawBucket) && rawBucket > 0 ? Math.max(rawBucket, SERIES_MIN_BUCKET_MS) : 3_600_000;
   const volume = await getSeriesSince(after, { bucketMs: bucket, now });
   const state = await getStateSeriesSince(after, { bucketMs: bucket, now });
   res.json({ ...volume, stateSeries: state.series });

@@ -164,6 +164,37 @@ describe('/api/activity/series HTTP endpoint (real Express app from server.js)',
     assert.strictEqual(body.bucketMs, 60 * 60 * 1000);
   });
 
+  it('clamps bucket below 60s up to 60s so ?bucket=1 cannot allocate millions of slots (WARDEN-1618)', async () => {
+    const after = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    const res = await fetch(`${baseUrl}/api/activity/series?after=${encodeURIComponent(after)}&bucket=1`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.bucketMs, 60_000);
+    assert.ok(body.buckets.length <= 1441, `got ${body.buckets.length} buckets`);
+  });
+
+  it('clamps a far-past `after` to the 7d window (WARDEN-1618)', async () => {
+    for (const farPast of [new Date(0).toISOString(), '-8e15', '1970-01-01']) {
+      const started = Date.now();
+      const res = await fetch(`${baseUrl}/api/activity/series?after=${encodeURIComponent(farPast)}&bucket=1`);
+      assert.strictEqual(res.status, 200, `after=${farPast}`);
+      const body = await res.json();
+      assert.ok(body.buckets.length <= 10_081, `got ${body.buckets.length} buckets for after=${farPast}`);
+      assert.ok(Date.now() - started < 5_000, 'responds promptly');
+    }
+  });
+
+  it('still returns an empty grid for a future `after` and 200 for garbage `after` (WARDEN-1618)', async () => {
+    const future = new Date(now + 24 * 60 * 60 * 1000).toISOString();
+    const f = await fetch(`${baseUrl}/api/activity/series?after=${encodeURIComponent(future)}`);
+    assert.strictEqual(f.status, 200);
+    assert.strictEqual((await f.json()).buckets.length, 0);
+
+    const g = await fetch(`${baseUrl}/api/activity/series?after=not-a-date`);
+    assert.strictEqual(g.status, 200);
+    assert.strictEqual((await g.json()).buckets.length, 0);
+  });
+
   it('defaults to the last 24h when no `after` is supplied', async () => {
     // No `after` → server uses Date.now() - 24h. A 24h grid at 1h has 24..25 buckets.
     const body = await (await fetch(`${baseUrl}/api/activity/series`)).json();
