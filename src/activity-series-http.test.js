@@ -170,7 +170,13 @@ describe('/api/activity/series HTTP endpoint (real Express app from server.js)',
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.strictEqual(body.bucketMs, 60_000);
-    assert.ok(body.buckets.length <= 1441, `got ${body.buckets.length} buckets`);
+    // 1441 buckets when the server's `now` is in the same minute as the test's; a minute
+    // boundary between before() and the request yields 1442. The upper bound still catches
+    // a clamp regression (millions of buckets).
+    assert.ok(
+      body.buckets.length >= 1440 && body.buckets.length <= 1442,
+      `got ${body.buckets.length} buckets`,
+    );
   });
 
   it('clamps a far-past `after` to the 7d window (WARDEN-1618)', async () => {
