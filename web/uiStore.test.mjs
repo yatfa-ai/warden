@@ -3526,6 +3526,34 @@ test('externalSearchQuery is NOT persisted: STORE_PERSISTED_KEYS stays 39 and ex
   assert.equal(createUiStore().getState().externalSearchQuery, null, 'never seeded');
 });
 
+// ─── globalSearchOpen (WARDEN-1620, roadmap WARDEN-1204 slice 37): NON-persisted "open global search" command ───
+console.log('\ncreateUiStore — globalSearchOpen (not persisted; "open global search" session fact)');
+test('globalSearchOpen starts false', () => {
+  reset();
+  assert.equal(createUiStore().getState().globalSearchOpen, false);
+});
+test('setGlobalSearchOpen stores the value (open then close)', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setGlobalSearchOpen(true);
+  assert.equal(s.getState().globalSearchOpen, true);
+  s.getState().setGlobalSearchOpen(false);
+  assert.equal(s.getState().globalSearchOpen, false);
+});
+test('globalSearchOpen is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('globalSearchOpen'));
+  const s = createUiStore();
+  s.getState().setGlobalSearchOpen(true);
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('globalSearchOpen' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('globalSearchOpen' in loadUi()));
+  assert.equal(createUiStore().getState().globalSearchOpen, false, 'never seeded');
+});
+
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
 console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
 test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {
