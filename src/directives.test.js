@@ -112,6 +112,14 @@ describe('readDirectives — parses directives.md back into structured records',
     assert.strictEqual(out[0].timestamp, tNew);
   });
 
+  it('treats a non-positive / non-integer limit as no limit (WARDEN-1619)', async () => {
+    const full = await readDirectives();
+    for (const limit of [-1, -5, 0, NaN]) {
+      const out = await readDirectives({ limit });
+      assert.strictEqual(out.length, full.length, `limit ${limit}`);
+    }
+  });
+
   // WARDEN-733: pre-WARDEN-642, logDirective wrote the bare `${chat.container}@
   // ${chat.host}` for a local/tmux chat whose container is null — stringifying
   // null to the literal "null" and permanently recording `## <ts> → null@<host>
