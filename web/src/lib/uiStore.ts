@@ -317,9 +317,9 @@ export interface UiStoreState {
    * WARDEN-1420) — theme, density, paneLayout, autoFocusNewPane,
    * restoreOnStartup and terminalColorScheme. Slice 3 (WARDEN-1322) took the
    * six terminal prefs out of the same bag; this takes the rest, so
-   * `AppearancePrefs` shrinks to the three ELECTRON pairs (rememberWindowBounds
-   * / launchAtLogin / closeToTray) that deliberately stay App-local: one
-   * reader, one writer, an IPC integration with no second sharing channel.
+   * the appearance props bag shrinks to the three ELECTRON pairs (rememberWindowBounds
+   * / launchAtLogin / closeToTray) — later moved into AppearanceSection itself
+   * (WARDEN-1622, slice 38): one reader, one writer, no second sharing channel.
    *
    * The slice-3 note kept terminalColorScheme in the bag because App — not a
    * component — was its only runtime reader. That is SUPERSEDED, not
@@ -1821,7 +1821,7 @@ export function useSetWatchedChats(): (v: string[]) => void {
 // ─── the six remaining appearance prefs (WARDEN-1420, roadmap WARDEN-1204 slice 12) ───
 //
 // AppearanceSection (the writer of all six) subscribes here instead of
-// destructuring them from the AppearancePrefs bag, and PaneGrid subscribes to
+// destructuring them from the appearance props bag, and PaneGrid subscribes to
 // `paneLayout` instead of taking it as a prop from App — so the bag shrinks to
 // the three electron pairs and the App→PaneGrid pass site is gone. App
 // subscribes too (keep-local-names) for its [theme]/[density] effects, the

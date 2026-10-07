@@ -11,7 +11,7 @@ import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
+import { setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { useRecordOnExpand } from '@/lib/useRecordOnExpand';
@@ -51,7 +51,6 @@ import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
 import { telemetryChatName } from '@/lib/telemetryChatName';
-import { reconcileMainOwnedPref } from '@/lib/mainOwnedPref';
 import { toast } from 'sonner';
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
@@ -500,31 +499,6 @@ function App() {
   // then blank (host login shell). Pure client-side pref like defaultShell
   // above: persisted by the saveUi effect below, never sent to the backend.
   // (call-time read in spawnShell too, WARDEN-1600.)
-  // "Remember window position and size" is an Electron-main-owned pref, NOT a
-  // renderer localStorage pref like the ones above: the OS window bounds must be
-  // readable at createWindow() time (before this renderer loads), so the flag +
-  // bounds live in main's window-state.json and are read/written through the IPC
-  // bridge in electron.ts. This React state is only a display mirror — main's
-  // file is the source of truth — so it is deliberately NOT part of UiState or
-  // the saveUi effect. Defaults to true; loads from main on mount (a no-op that
-  // stays true in a plain browser where the bridge is absent). See WARDEN-263.
-  const [rememberWindowBounds, setRememberWindowBoundsState] = useState(true);
-  // "Launch Warden at login" is the sibling Electron-main-owned pref: the OS
-  // (not Warden's own file) is the source of truth, read/written via the IPC
-  // bridge in electron.ts. As with remember-bounds, this React state is only a
-  // display mirror and is deliberately NOT part of UiState or the saveUi effect.
-  // Defaults to FALSE (consent — auto-start modifies the OS login items, so it
-  // is more invasive than restoring bounds); loads from main on mount (a no-op
-  // that stays false in a plain browser where the bridge is absent). See
-  // WARDEN-278.
-  const [launchAtLogin, setLaunchAtLoginState] = useState(false);
-  // "Close to tray" preference (default OFF, opt-in). When ON, closing the
-  // window hides it to a system-tray icon instead of quitting, keeping the
-  // backend (and renderer-side desktop alerts) alive while the window is closed.
-  // Same display-mirror / write-through pattern as launch-at-login — NOT part of
-  // UiState / saveUi. Loads from main on mount (stays false in a browser where
-  // the bridge is absent). See WARDEN-330.
-  const [closeToTray, setCloseToTrayState] = useState(false);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -568,15 +542,6 @@ function App() {
     streamApi.connect();
     refresh();
     refreshConfigPrefs();
-    // Load the main-owned "remember window bounds" flag (no-op in a browser;
-    // stays at the true default when the IPC bridge is absent). WARDEN-263.
-    void getRememberWindowBounds().then(setRememberWindowBoundsState);
-    // Load the main-owned "launch at login" flag (no-op in a browser; stays at
-    // the false default when the IPC bridge is absent). WARDEN-278.
-    void getLaunchAtLogin().then(setLaunchAtLoginState);
-    // Load the main-owned "close to tray" flag (no-op in a browser; stays at the
-    // false default when the IPC bridge is absent). WARDEN-330.
-    void getCloseToTray().then(setCloseToTrayState);
 
     // Store close timestamp on unmount. try/warn per the WARDEN-89 persistence
     // convention (storage.ts:18-20): a quota/SecurityError here must never
@@ -754,35 +719,6 @@ function App() {
   // saveObs({ ...loadObs(), … }) — the second namespace, merged over the disk
   // document so the component half (openIds/activeId) is never clobbered.
   useObsPersistence();
-
-  // Write-through setters for the three main-owned prefs: update the display
-  // mirror optimistically, persist to main via IPC, then RECONCILE the mirror
-  // with what main actually did. Main's set handlers return what happened, not
-  // what was asked (it refuses close-to-tray with no working tray, and re-reads
-  // the OS for launch-at-login), so a discarded return left the switch reading
-  // ON while the feature was OFF — see lib/mainOwnedPref.ts and WARDEN-973.
-  // In a browser the bridge is absent and lib/electron.ts echoes the passed
-  // value, so the refusal branch is unreachable there (no spurious toast); the
-  // switches are `disabled={!hasWindowBridge()}` besides. All three keep empty
-  // deps so the SettingsPage prop identity doesn't churn on every poll tick
-  // (matching the other stable setters passed down). WARDEN-263/278/330.
-  const setRememberWindowBounds = useCallback((v: boolean) => {
-    void reconcileMainOwnedPref(v, persistRememberWindowBounds, setRememberWindowBoundsState, () => {
-      toast.error("Couldn't save that preference.");
-    });
-  }, []);
-
-  const setLaunchAtLogin = useCallback((v: boolean) => {
-    void reconcileMainOwnedPref(v, persistLaunchAtLogin, setLaunchAtLoginState, () => {
-      toast.error("Couldn't set Launch at login — your OS didn't accept the change. On Linux this depends on your desktop environment.");
-    });
-  }, []);
-
-  const setCloseToTray = useCallback((v: boolean) => {
-    void reconcileMainOwnedPref(v, persistCloseToTray, setCloseToTrayState, () => {
-      toast.error("Couldn't enable Close to tray — this desktop has no working system tray, so closing the window would leave Warden with no way to reopen it.");
-    });
-  }, []);
 
   // Reset every UI PREF to its effective default value (the value loadUi()
   // yields post-coercion, so live React state / persisted state / a fresh
@@ -1780,19 +1716,6 @@ function App() {
         <SettingsPage
           onClose={() => setSettingsOpen(false)}
           onConfigChange={handleConfigChange}
-          appearance={{
-            // WARDEN-1420 (roadmap WARDEN-1204 slice 12): this bag is now the
-            // three ELECTRON pairs and nothing else. theme/density/paneLayout/
-            // autoFocusNewPane/restoreOnStartup/terminalColorScheme joined the
-            // six terminal prefs slice 3 moved — AppearanceSection subscribes to
-            // every one of them in the shared store (lib/uiStore.ts). The three
-            // below stay App-local by design: one reader, one writer, an IPC
-            // integration (window bounds / login item / tray) with no second
-            // sharing channel.
-            rememberWindowBounds, setRememberWindowBounds,
-            launchAtLogin, setLaunchAtLogin,
-            closeToTray, setCloseToTray,
-          }}
           // WARDEN-1383 (roadmap WARDEN-1204 slice 8): no `newChats` group —
           // NewChatsSection subscribes to the shared client-state store
           // (lib/uiStore.ts) directly, like SnippetsSection (WARDEN-1271) and

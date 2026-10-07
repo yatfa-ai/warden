@@ -19,10 +19,11 @@
 //
 // WARDEN-1420 (slice 12): the SIX REMAINING pairs followed — theme, density,
 // paneLayout, autoFocusNewPane, restoreOnStartup and terminalColorScheme — so
-// the bag this section still receives is exactly the three ELECTRON pairs
-// (rememberWindowBounds / launchAtLogin / closeToTray), which stay App-local by
-// design: one reader, one writer, an IPC integration with no second sharing
-// channel. Slice 3's note kept `terminalColorScheme` here because App (not a
+// the bag this section still received was exactly the three ELECTRON pairs
+// (rememberWindowBounds / launchAtLogin / closeToTray). WARDEN-1622 (slice 38)
+// retired that bag too: one reader, one writer, an IPC integration with no
+// second sharing channel, so the state lives HERE via useMainOwnedPref (main/OS
+// stays the source of truth) and App no longer holds or threads it. Slice 3's note kept `terminalColorScheme` here because App (not a
 // component) was its only runtime reader; that is superseded rather than
 // contradicted — once the family moves, a UiState pref still riding a props bag
 // IS the second sharing channel this direction exists to end. (Since WARDEN-1574
@@ -43,7 +44,16 @@ import {
 } from '@/components/ui/select';
 import { THEMES } from '@/lib/theme';
 import { DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
-import { hasWindowBridge } from '@/lib/electron';
+import {
+  hasWindowBridge,
+  getRememberWindowBounds,
+  setRememberWindowBounds as persistRememberWindowBounds,
+  getLaunchAtLogin,
+  setLaunchAtLogin as persistLaunchAtLogin,
+  getCloseToTray,
+  setCloseToTray as persistCloseToTray,
+} from '@/lib/electron';
+import { useMainOwnedPref } from '@/lib/useMainOwnedPref';
 import { TERMINAL_FONT_OPTIONS, CUSTOM_FONT_VALUE } from '../fontOptions';
 import { SettingsSection } from '../SettingsSection';
 import { ClientPrefResetToDefaultButton, ResetToDefaultButton } from '../rows/ResetToDefaultButton';
@@ -77,17 +87,32 @@ import {
   useSetTerminalColorScheme,
 } from '@/lib/uiStore';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
-import { type AppearancePrefs } from '../types';
 
-export type AppearanceSectionProps = AppearancePrefs & { hidden: boolean };
+export type AppearanceSectionProps = { hidden: boolean };
 
 export function AppearanceSection(props: AppearanceSectionProps) {
-  const {
-    rememberWindowBounds, setRememberWindowBounds,
-    launchAtLogin, setLaunchAtLogin,
-    closeToTray, setCloseToTray,
-    hidden,
-  } = props;
+  const { hidden } = props;
+  // WARDEN-1622 (slice 38): the three Electron-main-owned display mirrors.
+  // Defaults match the pre-load state (bounds ON; login/tray OFF = consent).
+  // See WARDEN-263/278/330 and WARDEN-973 (refusal reconcile).
+  const [rememberWindowBounds, setRememberWindowBounds] = useMainOwnedPref(
+    getRememberWindowBounds,
+    persistRememberWindowBounds,
+    true,
+    "Couldn't save that preference.",
+  );
+  const [launchAtLogin, setLaunchAtLogin] = useMainOwnedPref(
+    getLaunchAtLogin,
+    persistLaunchAtLogin,
+    false,
+    "Couldn't set Launch at login — your OS didn't accept the change. On Linux this depends on your desktop environment.",
+  );
+  const [closeToTray, setCloseToTray] = useMainOwnedPref(
+    getCloseToTray,
+    persistCloseToTray,
+    false,
+    "Couldn't enable Close to tray — this desktop has no working system tray, so closing the window would leave Warden with no way to reopen it.",
+  );
   // WARDEN-1322 (slice 3): the six terminal prefs + their setters come from the
   // shared store, keeping the exact names the AppearancePrefs destructure used
   // so every row body below (Inputs, Selects, the Switch, the reset buttons,
