@@ -388,8 +388,19 @@ test('wiring: main routes the server IPC message to the server-path receipt and 
 
 test('wiring: the server child samples ITSELF under operational-metrics and forwards over process.send', () => {
   assert.match(serverSrc, /runtime: 'server'/);
-  assert.match(serverSrc, /type: 'telemetry-process-memory', snapshot/);
   assert.match(serverSrc, /serverProcessMemory\.start\(\)/);
   const block = serverSrc.slice(serverSrc.indexOf('const serverProcessMemory'), serverSrc.indexOf('serverProcessMemory.start()'));
-  assert.ok(block.includes("resolveConsent(cfg)['operational-metrics'] === true"), 'gated live on operational-metrics');
+  // The producer forwards through the ONE IPC egress and is gated live on the shared consent predicate.
+  assert.ok(block.includes("forwardToParent('telemetry-process-memory', snapshot)"), 'forwards via forwardToParent');
+  assert.match(block, /consent: operationalMetricsConsent,/, 'gated on operationalMetricsConsent');
+  // The guarantees are pinned at their definitions.
+  assert.ok(
+    serverSrc.includes("const operationalMetricsConsent = () => resolveConsent(cfg)['operational-metrics'] === true;"),
+    'consent resolved LIVE and only when operational-metrics === true',
+  );
+  assert.match(
+    serverSrc,
+    /function forwardToParent\(type, snapshot\) \{\s*if \(typeof process\.send !== 'function'\) return;\s*process\.send\(\{ type, snapshot \}\);\s*\}/,
+    'no IPC when standalone; otherwise sends {type, snapshot}',
+  );
 });
