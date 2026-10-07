@@ -40,11 +40,42 @@ function uniqueSession() {
     return { host: '(local)', id: `(local):${session}`, key: session, container: null, session };
   }
 
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+  // `node --test src` runs many tmux-spawning files concurrently on one default
+  // tmux socket, so a server start/exit race can make new-session fail or
+  // silently leave no session (WARDEN-1592 fixed the same flake in
+  // session-recovery.test.js). Create the session, VERIFY it with has-session,
+  // and retry with backoff, so the test fails on capturePanes — not tmux startup.
+  async function startSession(name) {
+    let lastErr = '';
+    for (let i = 0; i < 10; i++) {
+      const r = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', name], { encoding: 'utf8' });
+      lastErr = r.stderr || lastErr;
+      const has = spawnSync(TMUX_BIN, ['has-session', '-t', name], { encoding: 'utf8' });
+      if (has.status === 0) return;
+      await sleep(100 * (i + 1));
+    }
+    throw new Error(`could not start tmux session ${name}: ${lastErr}`);
+  }
+
+  // Re-capture until every chat's pane contains its expected marker (bounded:
+  // 5s deadline, 50ms step) so a slow shell init does not yield a one-shot blank
+  // capture. Returns the last capture either way; callers still assert strictly.
+  async function captureUntilMarkers(chats, markerFor, { deadlineMs = 5000, stepMs = 50 } = {}) {
+    const deadline = Date.now() + deadlineMs;
+    let out = await capturePanes(chats, {});
+    while (!chats.every((c) => out[c.id] && out[c.id].includes(markerFor(c))) && Date.now() < deadline) {
+      await sleep(stepMs);
+      out = await capturePanes(chats, {});
+    }
+    return out;
+  }
+
   // For these tests runLocalTmux captures from a REAL detached tmux session.
   function withSession(name, fn) {
     return async () => {
-      const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', name], { encoding: 'utf8' });
-      assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+      await startSession(name);
       try {
         spawnSync(TMUX_BIN, ['send-keys', '-t', name, 'WARDEN_LOCAL_MARKER_7'], { encoding: 'utf8' });
         await fn();
@@ -61,7 +92,7 @@ function uniqueSession() {
     try {
       await withSession(name, async () => {
         const chat = makeLocalChat(name);
-        const out = await capturePanes([chat], {});
+        const out = await captureUntilMarkers([chat], () => 'WARDEN_LOCAL_MARKER_7');
         // The capture succeeded via the LOCAL path — proving the companion (which
         // refuses (local) hosts) was NOT consulted. Keyed by the HOST-QUALIFIED id
         // (WARDEN-1223).
@@ -82,7 +113,7 @@ function uniqueSession() {
     try {
       await withSession(name, async () => {
         const chat = makeLocalChat(name);
-        const out = await capturePanes([chat], {});
+        const out = await captureUntilMarkers([chat], () => 'WARDEN_LOCAL_MARKER_7');
         assert.ok(out[chat.id], 'default LOCAL capture works');
         assert.ok(out[chat.id].includes('WARDEN_LOCAL_MARKER_7'));
       })();
@@ -103,13 +134,12 @@ function uniqueSession() {
     const names = [uniqueSession(), uniqueSession(), uniqueSession()];
     // Set up three real detached sessions, each with its own marker.
     for (const n of names) {
-      const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', n], { encoding: 'utf8' });
-      assert.strictEqual(setup.status, 0, `tmux new-session failed for ${n}: ${setup.stderr}`);
+      await startSession(n);
       spawnSync(TMUX_BIN, ['send-keys', '-t', n, `MARK_${n}`], { encoding: 'utf8' });
     }
     try {
       const chats = names.map(makeLocalChat);
-      const out = await capturePanes(chats, {});
+      const out = await captureUntilMarkers(chats, (c) => `MARK_${c.key}`);
       // Every pane must be present and carry its own marker — proving the
       // concurrent fan-out populated each key, not just one. Keys are the
       // HOST-QUALIFIED ids (WARDEN-1223).
