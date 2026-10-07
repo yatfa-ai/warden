@@ -85,12 +85,23 @@ export async function getSessionAsync(id) {
   return readJsonDefensive(jsonPath(id), { fallback: null });
 }
 
+// Session names are untrusted input (POST/PATCH /api/sessions): they are written
+// into the transcript markdown heading and rendered as a React child. Accept
+// strings only, flatten newlines (a multi-line name would inject markdown
+// headings into the transcript), trim, and cap the length. Returns '' for a
+// non-string or blank name (WARDEN-1604).
+const SESSION_NAME_MAX = 100;
+function normalizeSessionName(name) {
+  if (typeof name !== 'string') return '';
+  return name.replace(/[\r\n]+/g, ' ').trim().slice(0, SESSION_NAME_MAX).trim();
+}
+
 export async function createSession(name, { host, container, project, role, chatKey } = {}) {
   await ensureDir();
   const id = randomBytes(6).toString('hex');
   const now = Date.now();
   const s = {
-    id, name: name || `session ${id.slice(0, 4)}`, createdAt: now, updatedAt: now, messages: [],
+    id, name: normalizeSessionName(name) || `session ${id.slice(0, 4)}`, createdAt: now, updatedAt: now, messages: [],
     // NEW: chat context metadata
     host: host || null, container: container || null, project: project || null, role: role || null, chatKey: chatKey || null,
   };
@@ -102,7 +113,11 @@ export async function createSession(name, { host, container, project, role, chat
   return s;
 }
 
-export async function renameSession(id, name) {
+export async function renameSession(id, rawName) {
+  // Validate the name FIRST, before any id/disk work, so a rejected rename can
+  // never touch the stored session (WARDEN-1604).
+  const name = normalizeSessionName(rawName);
+  if (!name) throw new Error('session name is required');
   if (!isValidSessionId(id)) return null;
   const s = await getSessionAsync(id);
   if (!s) return null;

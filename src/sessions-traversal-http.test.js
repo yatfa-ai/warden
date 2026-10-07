@@ -79,3 +79,33 @@ describe('/api/sessions/:id rejects traversal ids (WARDEN-1577)', () => {
     assert.strictEqual(d.status, 200);
   });
 });
+
+describe('PATCH /api/sessions/:id validates the name (WARDEN-1604)', () => {
+  const patch = (id, body) => fetch(`${baseUrl}/api/sessions/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  it('blank / non-string / missing names → 400 and the stored session is byte-identical', async () => {
+    const created = await (await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'stay' }),
+    })).json();
+    const jp = path.join(wardenDir, 'sessions', `${created.id}.json`);
+    const mp = path.join(wardenDir, 'sessions', `${created.id}.md`);
+    const beforeJson = fs.readFileSync(jp);
+    const beforeMd = fs.readFileSync(mp);
+    for (const body of [{ name: '' }, { name: '   ' }, { name: { a: 1 } }, { name: null }, { name: 42 }, {}]) {
+      const res = await patch(created.id, body);
+      assert.strictEqual(res.status, 400, JSON.stringify(body));
+      assert.deepStrictEqual(await res.json(), { error: 'session name is required' });
+      assert.ok(beforeJson.equals(fs.readFileSync(jp)));
+      assert.ok(beforeMd.equals(fs.readFileSync(mp)));
+    }
+    const ok = await patch(created.id, { name: 'renamed' });
+    assert.strictEqual(ok.status, 200);
+    assert.strictEqual((await ok.json()).name, 'renamed');
+  });
+
+  it('an unknown well-formed id with a valid name is still 404', async () => {
+    assert.strictEqual((await patch('abcdef123456', { name: 'x' })).status, 404);
+  });
+});
