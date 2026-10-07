@@ -161,3 +161,34 @@ test('runtime param: server is honored, garbage falls back to main', () => {
   assert.equal(garbageEvent.runtime, 'main', 'unrecognized runtime falls back to main');
   assert.equal(validateEvent(garbageEvent), true);
 });
+
+// WARDEN-1606 — the receipt wiring: electron/main.cjs cannot be required under
+// node --test, so the `extra` main.cjs's recordOperationalMetricsWindow really
+// passes is read out of its source and fed through the REAL createWindowReceipt
+// + REAL builder + REAL aggregator snapshot. Deleting `{ runtime: 'server' }`
+// from main.cjs makes the event label 'main' and this test goes red.
+test('server-child receipt (recordOperationalMetricsWindow) labels the event runtime "server"', () => {
+  const { createWindowReceipt } = require('../electron/telemetry-receipt.cjs');
+  const mainSrc = readFileSync(join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+  const body = mainSrc.match(/function recordOperationalMetricsWindow\(snapshot\) \{[\s\S]*?\n\}/);
+  assert.ok(body, 'main.cjs still defines recordOperationalMetricsWindow(snapshot)');
+  const call = body[0].match(/receiveTelemetryWindow\('operational-metrics', buildOperationalMetricsEvent, snapshot(?:, (\{[^}]*\}))?\)/);
+  assert.ok(call, 'the receipt routes through receiveTelemetryWindow with the operational-metrics builder');
+  const extra = call[1] ? new Function(`return (${call[1]});`)() : undefined;
+
+  const recorded = [];
+  const receive = createWindowReceipt({
+    consent: () => ({ 'operational-metrics': true }),
+    record: (e) => recorded.push(e),
+    schemaVersion: SCHEMA_VERSION,
+    labels: () => ({ appVersion: '0.1.91', platform: 'linux' }),
+    now: () => TS,
+  });
+  const snapshot = realSnapshot();
+  const event = receive('operational-metrics', buildOperationalMetricsEvent, snapshot, extra);
+  assert.ok(event, 'a consented window builds an event');
+  assert.equal(event.runtime, 'server');
+  assert.deepEqual(event.operations, snapshot.operations, 'same operations list as the snapshot');
+  assert.equal(validateEvent(event), true, 'the server-labelled event passes the canonical validator');
+  assert.deepEqual(recorded, [event]);
+});

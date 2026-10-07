@@ -44,8 +44,9 @@ function buildOperationalMetricsEvent({ snapshot, schemaVersion, appVersion, pla
     schemaVersion,
     type: 'operational-metrics',
     // WARDEN-1385 — the window's origin runtime. The schema's Runtime enum is
-    // main | renderer | server; the default stays 'main' (byte-identical for
-    // the existing server-child receipt), and the renderer bridge passes
+    // main | renderer | server; 'main' is this builder's FALLBACK (no/unknown
+    // runtime supplied), not the server receipt's label — the server child's
+    // receipt passes 'server' (WARDEN-1606) and the renderer bridge passes
     // 'renderer' so the felt-path histograms are attributable to the surface
     // the user types on. Anything else falls back to 'main' rather than
     // fabricating a runtime the schema never named.
