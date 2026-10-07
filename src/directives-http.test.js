@@ -89,6 +89,12 @@ describe('/api/directives HTTP endpoint (real Express app from server.js)', () =
     assert.strictEqual(body.directives[0].timestamp, tNew);
   });
 
+  it('treats ?limit=-1 as no limit (WARDEN-1619)', async () => {
+    const full = await (await fetch(`${baseUrl}/api/directives`)).json();
+    const body = await (await fetch(`${baseUrl}/api/directives?limit=-1`)).json();
+    assert.strictEqual(body.directives.length, full.directives.length);
+  });
+
   it('returns { directives: [] } (never 500) when the file is empty', async () => {
     fs.writeFileSync(logPath, '');
     const res = await fetch(`${baseUrl}/api/directives`);

@@ -264,7 +264,7 @@ export async function readDirectives({ agent, host, limit } = {}) {
   let result = out;
   if (agent) result = result.filter((d) => d.container === agent);
   if (host) result = result.filter((d) => d.host === host);
-  if (limit && result.length > limit) result = result.slice(0, limit);
+  if (Number.isInteger(limit) && limit > 0 && result.length > limit) result = result.slice(0, limit);
   return result;
 }
 
