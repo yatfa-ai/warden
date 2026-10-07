@@ -96,6 +96,16 @@ function normalizeSessionName(name) {
   return name.replace(/[\r\n]+/g, ' ').trim().slice(0, SESSION_NAME_MAX).trim();
 }
 
+// Chat-context fields (host/container/project/role/chatKey) are untrusted input
+// from POST /api/sessions and are rendered as React children (ObserverPanel), so a
+// non-string would crash the panel on every open. Accept strings only, trim, cap the
+// length; anything else (or blank) is null (WARDEN-1614).
+const CONTEXT_FIELD_MAX = 200;
+function normalizeContextField(v) {
+  if (typeof v !== 'string') return null;
+  return v.trim().slice(0, CONTEXT_FIELD_MAX) || null;
+}
+
 export async function createSession(name, { host, container, project, role, chatKey } = {}) {
   await ensureDir();
   const id = randomBytes(6).toString('hex');
@@ -103,7 +113,8 @@ export async function createSession(name, { host, container, project, role, chat
   const s = {
     id, name: normalizeSessionName(name) || `session ${id.slice(0, 4)}`, createdAt: now, updatedAt: now, messages: [],
     // NEW: chat context metadata
-    host: host || null, container: container || null, project: project || null, role: role || null, chatKey: chatKey || null,
+    host: normalizeContextField(host), container: normalizeContextField(container),
+    project: normalizeContextField(project), role: normalizeContextField(role), chatKey: normalizeContextField(chatKey),
   };
   // Write the JSON atomically first (the source of truth), then the human-readable
   // stub. Order matters: a crash here leaves no session JSON rather than a partial

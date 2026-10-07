@@ -713,3 +713,46 @@ describe('session name validation/normalization (WARDEN-1604)', () => {
     assert.strictEqual(await mod.renameSession('abcdef123456', 'ok'), null);
   });
 });
+
+describe('createSession normalizes chat-context fields (WARDEN-1614)', () => {
+  const FIELDS = ['host', 'container', 'project', 'role', 'chatKey'];
+  const persisted = (id) => JSON.parse(fs.readFileSync(jsonPath(id), 'utf8'));
+
+  it('non-string values are stored as null for each of the five fields', async () => {
+    for (const bad of [{ a: 1 }, ['c'], 123, true, 0, {}]) {
+      for (const f of FIELDS) {
+        const s = await mod.createSession('x', { [f]: bad });
+        assert.strictEqual(s[f], null, `${f}=${JSON.stringify(bad)}`);
+        assert.strictEqual(persisted(s.id)[f], null, `persisted ${f}=${JSON.stringify(bad)}`);
+      }
+    }
+    const all = await mod.createSession('x', { host: { a: 1 }, container: ['c'], project: 123, role: { r: 1 }, chatKey: { k: 1 } });
+    for (const f of FIELDS) {
+      assert.strictEqual(all[f], null);
+      assert.strictEqual(persisted(all.id)[f], null);
+    }
+  });
+
+  it('a 100000-char string is capped at 200 chars for each field', async () => {
+    for (const f of FIELDS) {
+      const s = await mod.createSession('x', { [f]: 'h'.repeat(100000) });
+      assert.strictEqual(s[f].length, 200, f);
+      assert.strictEqual(persisted(s.id)[f].length, 200, f);
+    }
+  });
+
+  it('whitespace-padded strings are trimmed; blank becomes null', async () => {
+    for (const f of FIELDS) {
+      assert.strictEqual((await mod.createSession('x', { [f]: '  padded  ' }))[f], 'padded', f);
+      assert.strictEqual((await mod.createSession('x', { [f]: '   ' }))[f], null, f);
+    }
+  });
+
+  it('normal strings are unchanged and omitted fields default to null', async () => {
+    const ctx = { host: 'h1', container: 'c1', project: 'p1', role: 'worker', chatKey: 'h1|c1' };
+    const s = await mod.createSession('x', ctx);
+    for (const f of FIELDS) assert.strictEqual(s[f], ctx[f], f);
+    const d = await mod.createSession('x');
+    for (const f of FIELDS) assert.strictEqual(d[f], null, f);
+  });
+});
