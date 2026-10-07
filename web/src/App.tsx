@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, mergeRecentlyClosed, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type RecentlyClosedEntry } from '@/lib/storage';
-import { clampSidebarWidth, clampObserverWidth, HEALTH_WIDTH } from '@/lib/layout';
+import { HEALTH_WIDTH } from '@/lib/layout';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId } from '@/lib/theme';
 import { applyDensity } from '@/lib/density';
@@ -19,7 +19,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useSidebarWidth, useObserverWidth, useSetSidebarWidth, useSetObserverWidth, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
+import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -40,6 +40,7 @@ import { GlobalSearchHost } from '@/components/GlobalSearchHost';
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
+import { ResizableRail } from '@/components/ResizableRail';
 import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -208,17 +209,14 @@ function App() {
 
   // WARDEN-1510 (roadmap WARDEN-1204 slice 21): the three panel-collapse flags
   // live on the shared store (lib/uiStore.ts); App still READS them (layout
-  // styles, applyLayoutClamp deps, drag-start captures) but owns no state, and
+  // styles, applyLayoutClamp deps) but owns no state, and
   // PaneGrid's Alt+S/Alt+O call the toggle actions directly (no prop callbacks).
   // Persistence rides useConfigPersistence's snapshot (all 41 store facts).
   const sidebarCollapsed = useSidebarCollapsed();
   // WARDEN-1516 (slice 22): the two panel widths live on the store too (first-
   // paint clamp runs at store creation; reclampPanelWidths is the one re-clamp
-  // action). App reads the values for layout styles / drag-start captures.
-  const sidebarWidth = useSidebarWidth();
-  const observerWidth = useObserverWidth();
-  const setSidebarWidth = useSetSidebarWidth();
-  const setObserverWidth = useSetObserverWidth();
+  // action). ResizableRail owns and reads the widths (and the drag); App only
+  // calls reclampPanelWidths.
   const reclampPanelWidths = useReclampPanelWidths();
   const observerCollapsed = useObserverCollapsed();
   const healthCollapsed = useHealthCollapsed();
@@ -1606,67 +1604,6 @@ function App() {
   const markdownIssueEntries = displaySettings.issueLinksEnabled
     ? unambiguousPrefixEntries(issueLinkTrackers)
     : [];
-  // Resize drag state
-  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
-  const [isResizingObserver, setIsResizingObserver] = useState(false);
-  const dragStartX = useRef<number>(0);
-  const dragStartSidebarWidth = useRef<number>(0);
-  const dragStartObserverWidth = useRef<number>(0);
-  // Width of the *other* (non-dragged) panel + health state captured at drag
-  // start, so the mousemove clamp can reserve the middle-pane floor (WARDEN-183)
-  // without the effect needing live state in its deps — keeps the original
-  // ref-based drag pattern (effect deps stay just the isResizing flags).
-  const dragOtherWidth = useRef<number>(0);
-  const dragHealthCollapsed = useRef<boolean>(true);
-
-  const handleSidebarMouseDown = (e: React.MouseEvent) => {
-    setIsResizingSidebar(true);
-    dragStartX.current = e.clientX;
-    dragStartSidebarWidth.current = sidebarWidth;
-    dragOtherWidth.current = observerCollapsed ? 0 : observerWidth;
-    dragHealthCollapsed.current = healthCollapsed;
-    e.preventDefault();
-  };
-
-  const handleObserverMouseDown = (e: React.MouseEvent) => {
-    setIsResizingObserver(true);
-    dragStartX.current = e.clientX;
-    dragStartObserverWidth.current = observerWidth;
-    dragOtherWidth.current = sidebarCollapsed ? 0 : sidebarWidth;
-    dragHealthCollapsed.current = healthCollapsed;
-    e.preventDefault();
-  };
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      const ctx = { windowWidth: window.innerWidth, healthCollapsed: dragHealthCollapsed.current };
-      if (isResizingSidebar) {
-        const delta = e.clientX - dragStartX.current;
-        const newWidth = dragStartSidebarWidth.current + delta;
-        setSidebarWidth(clampSidebarWidth(newWidth, dragOtherWidth.current, ctx));
-      }
-      if (isResizingObserver) {
-        const delta = dragStartX.current - e.clientX;
-        const newWidth = dragStartObserverWidth.current + delta;
-        setObserverWidth(clampObserverWidth(newWidth, dragOtherWidth.current, ctx));
-      }
-    };
-
-    const handleMouseUp = () => {
-      setIsResizingSidebar(false);
-      setIsResizingObserver(false);
-    };
-
-    if (isResizingSidebar || isResizingObserver) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-      return () => {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-      };
-    }
-  }, [isResizingSidebar, isResizingObserver]);
-
   // Re-clamp both panel widths against the current viewport, health state, AND
   // panel-collapse state so the visible panels together can never starve the
   // middle pane column. This is the single re-clamp entry point for every change
@@ -1692,7 +1629,7 @@ function App() {
   // Health expanding reserves HEALTH_WIDTH (−320px). Expanding a side panel
   // re-introduces a width that may have been dragged wide while the OTHER panel
   // was collapsed — the drag clamp treats a collapsed neighbor as width 0
-  // (`dragOtherWidth = otherCollapsed ? 0 : other`), so a wide drag there stores
+  // (ResizableRail captures the neighbour as `otherCollapsed ? 0 : other` at mousedown), so a wide drag there stores
   // a value that only fits when that neighbor is hidden. Without re-clamping on
   // the expand, both visible panels keep their full stored widths and the middle
   // pane column is crushed (to ~0 at the 900px floor). Collapsing only frees
@@ -1760,13 +1697,7 @@ function App() {
         </div>
       </header>
       <main className="flex flex-1 min-h-0">
-        <section className="chat-sidebar border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
-          style={{ width: sidebarCollapsed ? 0 : sidebarWidth, flexShrink: 0, opacity: sidebarCollapsed ? 0 : 1 }}>
-          <div
-            className="absolute top-0 right-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
-            onMouseDown={handleSidebarMouseDown}
-            title="Drag to resize sidebar"
-          />
+        <ResizableRail side="sidebar" className="chat-sidebar border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative" handleTitle="Drag to resize sidebar">
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
             <ChatSidebar
               chats={chats}
@@ -1787,7 +1718,7 @@ function App() {
               pollIntervalMs={pollIntervalMs}
             />
           </ErrorBoundary>
-        </section>
+        </ResizableRail>
         <section className="flex-1 min-h-0 min-w-0">
           <PaneGrid
             tiles={tiles}
@@ -1825,17 +1756,11 @@ function App() {
             onReorderPanes={reorderPanes}
           />
         </section>
-        <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
-          style={{ width: observerCollapsed ? 0 : observerWidth, flexShrink: 0, opacity: observerCollapsed ? 0 : 1 }}>
-          <div
-            className="absolute top-0 left-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
-            onMouseDown={handleObserverMouseDown}
-            title="Drag to resize observer panel"
-          />
+        <ResizableRail side="observer" className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative" handleTitle="Drag to resize observer panel">
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
             <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
           </ErrorBoundary>
-        </section>
+        </ResizableRail>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
           style={{ width: healthCollapsed ? 0 : HEALTH_WIDTH, flexShrink: 0, opacity: healthCollapsed ? 0 : 1 }}>
           <HealthDashboard
