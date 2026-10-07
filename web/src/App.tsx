@@ -19,7 +19,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useSelectWorkspace, useCreateWorkspace, useRenameWorkspace, useCloseWorkspace, useMovePaneToWorkspace, useMovePaneToNewWorkspace, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
+import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -1279,8 +1279,8 @@ function App() {
   }, [setMaximized]);
 
   // The destructive-action gate BOTH kill machines consult. One predicate, two
-  // useConfirmTarget call sites below — the close-workspace machine deliberately
-  // passes none (see its comment).
+  // useConfirmTarget call sites below (the close-workspace machine lives in
+  // <WorkspaceTabs/> and deliberately passes none).
   const shouldConfirmDestructive = useCallback(() => confirmDestructiveActions, [confirmDestructiveActions]);
 
   // Force-kill confirmation. The ⏹ force-kill button sits directly beside
@@ -1447,50 +1447,8 @@ function App() {
   }, [setObserverCollapsed, setObserverViewMode]);
 
   // --- Multi-workspace operations (WARDEN-256) --------------------------------
-  // Switching is instant and remembers the focused pane per workspace (focused
-  // lives inside each workspace). Each op keeps ≥1 workspace and dedups pane ids
-  // across workspaces. Underlying chats/tmux sessions are never affected by a
-  // move — only which workspace's grid the pane renders in.
-  // WARDEN-1526 (slice 23): the transitions are STORE actions (lib/uiStore.ts —
-  // unit-tested via createUiStore); the feature-usage telemetry stays HERE at
-  // the call site, because it is a side effect, not state, and keeps the
-  // actions pure.
-  const selectWorkspaceAction = useSelectWorkspace();
-  const createWorkspaceAction = useCreateWorkspace();
-  const renameWorkspace = useRenameWorkspace();
-  const movePaneToWorkspace = useMovePaneToWorkspace();
-  const movePaneToNewWorkspaceAction = useMovePaneToNewWorkspace();
-  const closeWorkspace = useCloseWorkspace();
-  const selectWorkspace = useCallback((id: string) => {
-    // WARDEN-1479 — the feature-adoption seed: a workspace switch is one use.
-    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-switch');
-    selectWorkspaceAction(id);
-  }, [selectWorkspaceAction]);
-  // Create a new workspace (default name "Workspace N"; renameable via the tab strip).
-  const createWorkspace = useCallback((seedPaneId?: string) => {
-    // WARDEN-1479 — the feature-adoption seed: a workspace create is one use.
-    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
-    return createWorkspaceAction(seedPaneId);
-  }, [createWorkspaceAction]);
-  // Drop a pane on the ＋ button → new workspace containing it, then switch (a
-  // create, so it records the same feature use createWorkspace always did).
-  const movePaneToNewWorkspace = useCallback((paneId: string) => {
-    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
-    movePaneToNewWorkspaceAction(paneId);
-  }, [movePaneToNewWorkspaceAction]);
-
-  // Pending-target confirm machine for the close above. NOTE: no gate predicate
-  // is passed — unlike the two kill machines, closing a workspace is NOT
-  // destructive (its panes leave the grid but the chats stay in the sidebar
-  // catalog and can be reopened), so the dialog is unconditional by design.
-  // That asymmetry is deliberate and load-bearing (WARDEN-1239 out-of-scope).
-  const {
-    target: workspaceCloseTarget,
-    request: requestCloseWorkspace,
-    confirm: confirmCloseWorkspace,
-    cancel: cancelCloseWorkspace,
-  } = useConfirmTarget(closeWorkspace);
-
+  // WARDEN-1638 (slice 41): the six workspace actions, their feature-use ticks and
+  // the close-workspace confirm dialog live in <WorkspaceTabs/> now.
 
   // WARDEN-514: per-key CURRENT-state lookup for the watched rows — so a watched chat
   // that needs the human right now (waiting/erroring/stuck/blocked) shows a persistent,
@@ -1665,12 +1623,6 @@ function App() {
             tabs internally so it can never push the right-side control cluster
             (below) off-screen at the default width. */}
         <WorkspaceTabs
-          onSelect={selectWorkspace}
-          onCreate={() => createWorkspace()}
-          onRename={renameWorkspace}
-          onClose={requestCloseWorkspace}
-          onDropPane={movePaneToWorkspace}
-          onDropPaneNew={movePaneToNewWorkspace}
           className="flex-1 min-w-0"
         />
         {/* Right-side control cluster — shrink-0 so the tab region yields first
@@ -1781,16 +1733,6 @@ function App() {
         cancelLabel="Cancel"
         destructive
         onConfirm={confirmForceKill}
-      />
-      <ConfirmDialog
-        open={workspaceCloseTarget !== null}
-        onOpenChange={(o) => { if (!o) cancelCloseWorkspace(); }}
-        title="Close workspace?"
-        description="Closing a workspace removes its panes from the grid only — the chats stay in the sidebar and can be reopened."
-        confirmLabel="Close workspace"
-        cancelLabel="Cancel"
-        destructive
-        onConfirm={confirmCloseWorkspace}
       />
     </div>
   );

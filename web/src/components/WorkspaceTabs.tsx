@@ -13,24 +13,66 @@ import { cn } from '@/lib/utils';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import type { WorkspacePaneSet } from '@/lib/storage';
-import { useWorkspaces, useActiveWorkspaceId } from '@/lib/uiStore';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
+import { useConfirmTarget } from '@/lib/useConfirmTarget';
+import {
+  useWorkspaces,
+  useActiveWorkspaceId,
+  useSelectWorkspace,
+  useCreateWorkspace,
+  useRenameWorkspace,
+  useMovePaneToWorkspace,
+  useMovePaneToNewWorkspace,
+  useCloseWorkspace,
+} from '@/lib/uiStore';
 
 interface Props {
-  onSelect: (id: string) => void;
-  onCreate: () => void;
-  onRename: (id: string, name: string) => void;
-  onClose: (id: string) => void;
-  // Drop a dragged pane onto an existing workspace tab → move it there.
-  // The dropped pane id leads — matching movePaneToWorkspace(paneId, targetId)
-  // and onDropPaneNew(paneId) — so the prop wires straight through with no
-  // arg-order adapter (which is exactly what caused the prior swap bug).
-  onDropPane: (paneId: string, workspaceId: string) => void;
-  // Drop a dragged pane onto the ＋ button → new workspace containing it.
-  onDropPaneNew: (paneId: string) => void;
   className?: string;
 }
 
-export function WorkspaceTabs({ onSelect, onCreate, onRename, onClose, onDropPane, onDropPaneNew, className }: Props) {
+// WARDEN-1638 (client-state slice 41): the strip owns its six workspace actions
+// (store hooks), the feature-use ticks (a side effect, not state — kept at the
+// call site so the store actions stay pure) and the close-workspace confirm
+// machine + dialog. App passes only `className`.
+export function WorkspaceTabs({ className }: Props) {
+  const selectWorkspace = useSelectWorkspace();
+  const createWorkspace = useCreateWorkspace();
+  const onRename = useRenameWorkspace();
+  const onDropPane = useMovePaneToWorkspace();
+  const movePaneToNewWorkspace = useMovePaneToNewWorkspace();
+  const closeWorkspace = useCloseWorkspace();
+  // WARDEN-1479 — the feature-adoption seed: a workspace switch is one use.
+  const onSelect = (id: string) => {
+    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-switch');
+    selectWorkspace(id);
+  };
+  // ＋ click: create with the default name ("Workspace N"; renameable here).
+  // NB: call with NO args — onClick would otherwise pass the event as seedPaneId.
+  const onCreate = () => {
+    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
+    createWorkspace();
+  };
+  // Drop a pane on the ＋ button → new workspace containing it, then switch (a
+  // create, so it records the same feature use onCreate does).
+  const onDropPaneNew = (paneId: string) => {
+    getFeatureUsageSampler().sampler.recordFeatureUse('workspace-create');
+    movePaneToNewWorkspace(paneId);
+  };
+  // Pending-target confirm machine for the close. NOTE: no gate predicate is
+  // passed — unlike the two kill machines in App, closing a workspace is NOT
+  // destructive (its panes leave the grid but the chats stay in the sidebar
+  // catalog and can be reopened), so the dialog is unconditional by design.
+  // That asymmetry is deliberate and load-bearing (WARDEN-1239 out-of-scope).
+  // The target is local useState: if Settings opens (the header, hence this
+  // strip, unmounts) while the dialog is up, the pending confirmation is simply
+  // cancelled and nothing stale resurrects on return.
+  const {
+    target: workspaceCloseTarget,
+    request: onClose,
+    confirm: confirmCloseWorkspace,
+    cancel: cancelCloseWorkspace,
+  } = useConfirmTarget(closeWorkspace);
   // WARDEN-1526 (slice 23): the workspace set lives on the shared store — this
   // strip subscribes directly instead of receiving it as two props from App.
   const workspaces = useWorkspaces();
@@ -96,6 +138,7 @@ export function WorkspaceTabs({ onSelect, onCreate, onRename, onClose, onDropPan
   };
 
   return (
+    <>
     <div className={cn('flex items-center gap-1 h-full min-w-0 overflow-x-auto py-1', className)}>
       {workspaces.map((ws) => {
         const active = ws.id === activeWorkspaceId;
@@ -194,5 +237,16 @@ export function WorkspaceTabs({ onSelect, onCreate, onRename, onClose, onDropPan
         <Plus />
       </Button>
     </div>
+    <ConfirmDialog
+      open={workspaceCloseTarget !== null}
+      onOpenChange={(o) => { if (!o) cancelCloseWorkspace(); }}
+      title="Close workspace?"
+      description="Closing a workspace removes its panes from the grid only — the chats stay in the sidebar and can be reopened."
+      confirmLabel="Close workspace"
+      cancelLabel="Cancel"
+      destructive
+      onConfirm={confirmCloseWorkspace}
+    />
+    </>
   );
 }
