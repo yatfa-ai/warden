@@ -1929,6 +1929,15 @@ async function buildAndSpawn({ host, session, name, cwd, cmd }) {
   return { chat: { id: `${host}:${session}`, key: session, kind: 'tmux', host, container: null, session, project: 'manual', role: 'claude', name: chat.name, cwd, cmd: finalCmd, active: true } };
 }
 
+// WARDEN-1661 — the activity timeline is bookkeeping, not part of the action. The
+// human lifecycle routes (/api/spawn, /api/resume, /api/kill) append their event AFTER
+// the irreversible work (tmux session + catalog mutation) is done; a failing append
+// (full disk, EACCES, EISDIR) must not turn that success into a 500 (a retry would then
+// 409 "already exists"). The await is kept so the event is on disk before res.json.
+async function appendEventSafe(route, event) {
+  try { await appendEvent(event); } catch (e) { console.error(`[warden] ${route}: activity-log append failed (action succeeded):`, e?.message || e); }
+}
+
 app.post('/api/spawn', async (req, res) => {
   const host = String(req.body?.host || LOCAL).trim() || LOCAL;
   const cwd = String(req.body?.cwd || '').trim();
@@ -1997,7 +2006,7 @@ app.post('/api/spawn', async (req, res) => {
   if (temporary) r.chat.temporary = true;
   // Record the human's own spawn action so a returning human can see the agents
   // they brought up (WARDEN-484). Mirrors the existing attached/ended row shape.
-  await appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
+  await appendEventSafe('/api/spawn', { type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
   res.json({ ok: true, chat: r.chat });
 });
 
@@ -2037,7 +2046,7 @@ app.post('/api/resume', async (req, res) => {
   ]);
   // Record the human's own resume action (WARDEN-484). container is always null
   // here (resume spawns a bare-tmux session), matching the existing row shape.
-  await appendEvent({ type: 'resumed', id: out.id, host, container: null, role: out.role, name });
+  await appendEventSafe('/api/resume', { type: 'resumed', id: out.id, host, container: null, role: out.role, name });
   res.json({ ok: true, chat: out });
 });
 
@@ -2061,7 +2070,7 @@ app.post('/api/kill', async (req, res) => {
   // client-killed sessions (server.js:3339) — so this ALWAYS lands, even with no
   // attach-viewer open (WARDEN-484). yatfa chats carry no `name`, so fall back to
   // the container (the agent's display name) for a friendlier label.
-  await appendEvent({ type: 'killed', id: chat.id, host: chat.host, container: chat.container ?? null, role: chat.role, name: chat.name ?? chat.container ?? null });
+  await appendEventSafe('/api/kill', { type: 'killed', id: chat.id, host: chat.host, container: chat.container ?? null, role: chat.role, name: chat.name ?? chat.container ?? null });
   res.json({ ok: true });
 });
 
