@@ -2,7 +2,6 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, mergeRecentlyClosed, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type RecentlyClosedEntry } from '@/lib/storage';
-import { HEALTH_WIDTH } from '@/lib/layout';
 import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId } from '@/lib/theme';
 import { applyDensity } from '@/lib/density';
@@ -14,12 +13,11 @@ import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
-import { useRecordOnExpand } from '@/lib/useRecordOnExpand';
 import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSidebarCollapsed, useObserverCollapsed, useHealthCollapsed, useSetObserverCollapsed, useSetHealthCollapsed, useToggleSidebarCollapsed, useToggleObserverCollapsed, useReclampPanelWidths, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
+import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -37,7 +35,9 @@ import { WorkspaceTabs } from '@/components/WorkspaceTabs';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
 import { GlobalSearchHost } from '@/components/GlobalSearchHost';
-import { HealthDashboard } from '@/components/HealthDashboard';
+import { HealthPanel } from '@/components/HealthPanel';
+import { PanelToggleButtons } from '@/components/PanelToggleButtons';
+import { PanelLayoutSync } from '@/components/PanelLayoutSync';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
 import { ResizableRail } from '@/components/ResizableRail';
@@ -205,27 +205,14 @@ function App() {
     panePhaseRef.current[id] = phase;
   }, []);
 
-  // WARDEN-1510 (roadmap WARDEN-1204 slice 21): the three panel-collapse flags
-  // live on the shared store (lib/uiStore.ts); App still READS them (layout
-  // styles, applyLayoutClamp deps) but owns no state, and
-  // PaneGrid's Alt+S/Alt+O call the toggle actions directly (no prop callbacks).
-  // Persistence rides useConfigPersistence's snapshot (all 41 store facts).
-  const sidebarCollapsed = useSidebarCollapsed();
-  // WARDEN-1516 (slice 22): the two panel widths live on the store too (first-
-  // paint clamp runs at store creation; reclampPanelWidths is the one re-clamp
-  // action). ResizableRail owns and reads the widths (and the drag); App only
-  // calls reclampPanelWidths.
-  const reclampPanelWidths = useReclampPanelWidths();
-  const observerCollapsed = useObserverCollapsed();
-  const healthCollapsed = useHealthCollapsed();
+  // WARDEN-1510 (roadmap WARDEN-1204 slice 21) / WARDEN-1645 (slice 42): the three
+  // panel-collapse flags live on the shared store (lib/uiStore.ts) and App no longer
+  // subscribes to them — <PanelLayoutSync/> (always mounted) owns the expand ticks,
+  // resize listener and re-clamp; <PanelToggleButtons/> and <HealthPanel/> read the
+  // flags themselves. PaneGrid's Alt+S/Alt+O call the toggle actions directly.
+  // Persistence rides useConfigPersistence's snapshot (all 41 store facts). App keeps
+  // only the call-time write below (openActivityTab).
   const setObserverCollapsed = useSetObserverCollapsed();
-  const setHealthCollapsed = useSetHealthCollapsed();
-  const toggleSidebarCollapsed = useToggleSidebarCollapsed();
-  const toggleObserverCollapsed = useToggleObserverCollapsed();
-  // WARDEN-1494: count panel expands on the state edge so every path (button,
-  // Alt+S/Alt+O, openActivityTab) records exactly once.
-  useRecordOnExpand(sidebarCollapsed, 'panel-expand-sidebar');
-  useRecordOnExpand(observerCollapsed, 'panel-expand-observer');
   // WARDEN-431 / WARDEN-1422: the Source Control section collapse migrated onto
   // the shared store (lib/uiStore.ts, roadmap WARDEN-1204 slice 18, WARDEN-1486)
   // — ChatSidebar is its only reader and writer and subscribes directly, so App
@@ -1555,42 +1542,6 @@ function App() {
   const markdownIssueEntries = displaySettings.issueLinksEnabled
     ? unambiguousPrefixEntries(issueLinkTrackers)
     : [];
-  // Re-clamp both panel widths against the current viewport, health state, AND
-  // panel-collapse state so the visible panels together can never starve the
-  // middle pane column. This is the single re-clamp entry point for every change
-  // in AVAILABLE/VISIBLE LAYOUT SPACE — effect (1) (window resize) and effect
-  // (2) (health + sidebar/observer collapse toggles) both call it (WARDEN-183).
-  // Since WARDEN-1516 the clamp itself is a store action (reclampPanelWidths)
-  // that reads the widths and collapse flags from the store; the deps below are
-  // the space-shaping flags only, so the effect re-fires on each toggle.
-  const applyLayoutClamp = useCallback(() => {
-    reclampPanelWidths(window.innerWidth);
-    // healthCollapsed/sidebarCollapsed/observerCollapsed are deliberate effect
-    // triggers (the action reads them from the store, not from this closure).
-  }, [reclampPanelWidths, healthCollapsed, sidebarCollapsed, observerCollapsed]);
-
-  // (1) Window resize: a smaller viewport shrinks the space the two panels share.
-  useEffect(() => {
-    window.addEventListener('resize', applyLayoutClamp);
-    return () => window.removeEventListener('resize', applyLayoutClamp);
-  }, [applyLayoutClamp]);
-
-  // (2) Space-shape changes: the health toggle AND the sidebar/observer collapse
-  // toggles all change how much shared width the VISIBLE panels may occupy.
-  // Health expanding reserves HEALTH_WIDTH (−320px). Expanding a side panel
-  // re-introduces a width that may have been dragged wide while the OTHER panel
-  // was collapsed — the drag clamp treats a collapsed neighbor as width 0
-  // (ResizableRail captures the neighbour as `otherCollapsed ? 0 : other` at mousedown), so a wide drag there stores
-  // a value that only fits when that neighbor is hidden. Without re-clamping on
-  // the expand, both visible panels keep their full stored widths and the middle
-  // pane column is crushed (to ~0 at the 900px floor). Collapsing only frees
-  // space (a no-op clamp); the EXPAND direction is the one that needs this.
-  // REQUIRED for the middle-pane invariant: removing it re-introduces the
-  // WARDEN-183 crush (see layout.test.mjs, "expand re-clamp").
-  useEffect(() => {
-    applyLayoutClamp();
-  }, [applyLayoutClamp]);
-
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       <ReturnBanner rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} />
@@ -1615,7 +1566,7 @@ function App() {
       ) : (
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
-        <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => { toggleSidebarCollapsed(); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
+        <PanelToggleButtons panel="sidebar" />
         <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{openPanes.length} open</span>
         {/* Workspace tab strip (WARDEN-256) — the flexible, bounded middle region.
@@ -1631,8 +1582,8 @@ function App() {
           <StreamStatusDot />
           <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setGlobalSearchOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
-          <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => { if (healthCollapsed) getFeatureUsageSampler().sampler.recordFeatureUse('panel-expand-health'); setHealthCollapsed(!healthCollapsed); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
-          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => { toggleObserverCollapsed(); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
+          <PanelToggleButtons panel="health" />
+          <PanelToggleButtons panel="observer" />
           <IconTooltip label="settings" side="bottom"><button onClick={() => { getFeatureUsageSampler().sampler.recordFeatureUse('settings'); setSettingsOpen(true); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
         </div>
       </header>
@@ -1701,18 +1652,15 @@ function App() {
             <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
           </ErrorBoundary>
         </ResizableRail>
-        <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
-          style={{ width: healthCollapsed ? 0 : HEALTH_WIDTH, flexShrink: 0, opacity: healthCollapsed ? 0 : 1 }}>
-          <HealthDashboard
-            onOpenChat={openChat}
-            onClose={() => setHealthCollapsed(true)}
-            pollIntervalMs={pollIntervalMs}
-            companionTransportEnabled={companionTransportEnabled}
-          />
-        </section>
+        <HealthPanel
+          onOpenChat={openChat}
+          pollIntervalMs={pollIntervalMs}
+          companionTransportEnabled={companionTransportEnabled}
+        />
       </main>
         </>
       )}
+      <PanelLayoutSync />
       <GlobalSearchHost onOpenChat={openChat} issueEntries={markdownIssueEntries} />
       <ConfirmDialog
         open={killTarget !== null}
