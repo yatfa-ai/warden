@@ -8,7 +8,6 @@ import { applyDensity } from '@/lib/density';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
-import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
@@ -1500,14 +1499,6 @@ function App() {
   // listed. The token-budget alarm's old deep-link into that page's heaviest-
   // first view goes with it; the alarm itself (toast + desktop) still fires.
   useTokenBudget({ hostLabels });
-  // Host connectivity statuses, sourced from the shared /api/hosts/status
-  // singleton (useHostStatuses, WARDEN-237). One ref-counted, visibility-gated
-  // poll backs every consumer — this App-level feed (host rows + the host view's
-  // unreachable state in the sidebar) plus the Fleet Health dashboard — so there
-  // is no second SSH-probing poll. The poll
-  // runs at a fixed 30s and is gated on Page Visibility (WARDEN-609); it does
-  // not track the "Poll Interval" pref (the catalog poll above still does).
-  const hostStatuses = useHostStatuses();
   // Display customization settings
   const [displaySettings, setDisplaySettings] = useState({
     showHostTags: true,
@@ -1604,7 +1595,6 @@ function App() {
               onRefresh={refresh}
               onDiscoverHost={discoverHost}
               loading={loading}
-              hostStatuses={hostStatuses}
               discoverErrors={discoverErrors}
               pollIntervalMs={pollIntervalMs}
             />

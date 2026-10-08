@@ -11,9 +11,8 @@ import { StatusDot } from '@/components/StatusDot';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { hostLabelFor, THIS_MACHINE } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
+import { useHostStatuses } from '@/lib/useHostStatuses';
 import type { Chat } from '@/lib/types';
-
-export type HostStatusMap = Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
 
 export interface HostsSectionProps {
   hosts: string[];
@@ -24,13 +23,14 @@ export interface HostsSectionProps {
   // the exhibit's hosts carry live ≫ saved (78 live, 1–6 saved) precisely
   // because the count carries the 20+-agents-per-host load the row list must not.
   tempChats: Chat[];
-  hostStatuses: HostStatusMap;
   onEnterHost: (host: string) => void;
   onDiscoverHost: (host: string) => void;
 }
 
-export function HostsSection({ hosts, chats, tempChats, hostStatuses, onEnterHost, onDiscoverHost }: HostsSectionProps) {
+export function HostsSection({ hosts, chats, tempChats, onEnterHost, onDiscoverHost }: HostsSectionProps) {
   const hostLabels = useHostLabels();
+  // WARDEN-1651: own subscription (shared TanStack key) instead of a prop from ChatSidebar.
+  const hostStatuses = useHostStatuses();
   const hostRows = hosts.map((h) => {
     const hostChats = chats.filter((c) => c.host === h);
     // `active !== false` on temps (WARDEN-1422 round-2 review): a temp the

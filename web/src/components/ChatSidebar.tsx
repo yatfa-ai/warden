@@ -32,6 +32,7 @@ import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed } from '@/lib/uiStore';
+import { useHostStatuses } from '@/lib/useHostStatuses';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
 import type { Chat, Collection } from '@/lib/types';
@@ -117,7 +118,6 @@ export interface ChatSidebarProps {
   onDiscoverHost: (host: string) => void;
   loading: boolean;
   /** Host connectivity (the shared /api/hosts/status poll): offline hosts are unknown, not empty. */
-  hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
   /** Per-host discovery failure reason (the unreachable state's "⟨reason⟩"). */
   discoverErrors: Record<string, string>;
   /** Forward poll cadence to the FileViewer (unchanged from the pre-rebuild sidebar). */
@@ -129,8 +129,11 @@ type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: '
 export function ChatSidebar({
   chats, tempChats, hosts, onOpenChat, onSpawnShell, onSaveSession,
   onReopenClosed, onRespawn, onKill, onRename, onRefresh, onDiscoverHost, loading,
-  hostStatuses, discoverErrors, pollIntervalMs,
+  discoverErrors, pollIntervalMs,
 }: ChatSidebarProps) {
+  // Host connectivity (WARDEN-1651): subscribed here, not threaded from App — one shared TanStack key
+  // (useHostStatuses, WARDEN-237), so this adds no second poll. Absent entry stays 'unknown', never offline.
+  const hostStatuses = useHostStatuses();
   // ids just saved from the closed-temp flyout — the one-shot "saved" pill (store-owned, WARDEN-1552).
   const recentlySavedIds = useRecentlySavedIds();
   // Store-owned (WARDEN-1580): the focused pane id (Source Control panel re-points to its repo) and the
@@ -548,7 +551,6 @@ export function ChatSidebar({
             hosts={hosts}
             chats={chats}
             tempChats={tempChats}
-            hostStatuses={hostStatuses}
             onEnterHost={enterHost}
             onDiscoverHost={(h) => { void onDiscoverHost(h); }}
           />
