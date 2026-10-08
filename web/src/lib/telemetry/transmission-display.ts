@@ -90,6 +90,28 @@ export function describeTransmissionEntry(
   };
 }
 
+/**
+ * One-line, copy-ready summary of a row (WARDEN-1286): outcome · HTTP status ·
+ * host · event count · attempts · absolute timestamp. Segment grammar mirrors the
+ * row rendering. The status and host segments are OMITTED when they are
+ * TRANSMISSION_DASH — the placeholder is a display device and never belongs in a
+ * copied string.
+ *
+ * `absoluteTime` is a PARAMETER (the caller passes `formatAbsoluteFull(d.timestamp)`,
+ * the same string the row tooltip shows) so this module stays `import type`-only:
+ * a value import of '@/lib/formatTimestamp' would fail the OXC test harness's bare
+ * import and kill the whole test file.
+ */
+export function formatTransmissionDetails(d: TransmissionRowDescriptor, absoluteTime: string): string {
+  const segments: string[] = [d.outcomeLabel];
+  if (d.statusLabel !== TRANSMISSION_DASH) segments.push(`HTTP ${d.statusLabel}`);
+  if (d.hostLabel !== TRANSMISSION_DASH) segments.push(d.hostLabel);
+  segments.push(`${d.eventCount} event${d.eventCount === 1 ? '' : 's'}`);
+  segments.push(`${d.attempts} attempt${d.attempts === 1 ? '' : 's'}`);
+  segments.push(absoluteTime);
+  return segments.join(' · ');
+}
+
 /** Aggregate counts for the section header (e.g. "3 delivered · 1 dropped · 2 rejected").
  *  Null/unknown outcomes count toward neither bucket but ARE included in total. */
 export interface TransmissionSummary {

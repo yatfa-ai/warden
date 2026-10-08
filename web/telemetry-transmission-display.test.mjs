@@ -37,6 +37,7 @@ writeFileSync(tmpFile, code);
 const {
   describeTransmissionEntry,
   summarizeTransmission,
+  formatTransmissionDetails,
   TRANSMISSION_DASH,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
@@ -178,6 +179,46 @@ test('summarize ignores null/malformed entries in the buckets but still counts t
   assert.equal(s.delivered, 1);
   assert.equal(s.dropped, 0);
   assert.equal(s.rejected, 0);
+});
+
+// ==========================================================================
+// formatTransmissionDetails — the "Copy details" one-line summary (WARDEN-1286)
+// ==========================================================================
+
+const ABS = '10/7/2026, 12:34:56 PM';
+
+test('details line for a healthy entry matches the pinned composition byte-for-byte', () => {
+  const d = describeTransmissionEntry({ ...OK, endpointHost: 'telemetry.example.com' });
+  assert.equal(
+    formatTransmissionDetails(d, ABS),
+    'Delivered · HTTP 200 · telemetry.example.com · 3 events · 1 attempt · 10/7/2026, 12:34:56 PM',
+  );
+});
+
+test('details line omits status + host segments for a null-shape entry (no DASH leakage)', () => {
+  const d = describeTransmissionEntry({ timestamp: 5, outcome: null, status: null, endpointHost: null });
+  const line = formatTransmissionDetails(d, ABS);
+  assert.equal(line, `Unknown · 0 events · 0 attempts · ${ABS}`);
+  assert.ok(!line.includes(TRANSMISSION_DASH), 'the DASH placeholder is never copied');
+  assert.ok(!line.includes('HTTP'));
+});
+
+test('details line omits only the missing segment (null status keeps host; null host keeps status)', () => {
+  const noStatus = formatTransmissionDetails(
+    describeTransmissionEntry({ ...OK, outcome: 'dropped', status: null }), ABS);
+  assert.equal(noStatus, `Dropped · telemetry.example.invalid · 3 events · 1 attempt · ${ABS}`);
+  const noHost = formatTransmissionDetails(
+    describeTransmissionEntry({ ...OK, endpointHost: null }), ABS);
+  assert.equal(noHost, `Delivered · HTTP 200 · 3 events · 1 attempt · ${ABS}`);
+});
+
+test('details line pluralizes events/attempts consistently with the row (1 singular, else plural)', () => {
+  const one = formatTransmissionDetails(
+    describeTransmissionEntry({ ...OK, eventCount: 1, attempts: 1 }), ABS);
+  assert.match(one, / · 1 event · 1 attempt · /);
+  const many = formatTransmissionDetails(
+    describeTransmissionEntry({ ...OK, eventCount: 2, attempts: 3, outcome: 'rejected' }), ABS);
+  assert.match(many, /^Rejected \(pre-send\) · HTTP 200 · .* · 2 events · 3 attempts · /);
 });
 
 console.log(`\n✓ TELEMETRY TRANSMISSION-DISPLAY TESTS PASS (${passed})`);

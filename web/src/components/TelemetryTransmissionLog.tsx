@@ -20,6 +20,13 @@
 // the list current as sends land while Settings is open; cleared on unmount.
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { AlertTriangle, Check, HelpCircle, X } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
@@ -29,7 +36,9 @@ import {
 } from '@/lib/electron';
 import {
   describeTransmissionEntry,
+  formatTransmissionDetails,
   summarizeTransmission,
+  TRANSMISSION_DASH,
 } from '@/lib/telemetry/transmission-display';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 
@@ -124,11 +133,11 @@ export function TelemetryTransmissionLog() {
         <ul className="flex flex-col gap-1">
           {rows.map((entry, i) => {
             const d = describeTransmissionEntry(entry);
+            const absoluteTime = formatAbsoluteFull(d.timestamp);
             return (
-              <li
-                key={`${d.timestamp}-${i}`}
-                className="flex flex-wrap items-center gap-1.5 text-[11px]"
-              >
+              <ContextMenu key={`${d.timestamp}-${i}`}>
+              <ContextMenuTrigger asChild>
+              <li className="flex flex-wrap items-center gap-1.5 text-[11px]">
                 {/*
                   The label text comes from `d.outcomeLabel` — the SINGLE source
                   of truth (set in describeTransmissionEntry), so a label change
@@ -176,11 +185,33 @@ export function TelemetryTransmissionLog() {
                 </span>
                 <span
                   className="ml-auto text-muted-foreground/70"
-                  title={formatAbsoluteFull(d.timestamp)}
+                  title={absoluteTime}
                 >
                   {formatTimestamp(d.timestamp, timestampFormat, { withSuffix: true })}
                 </span>
               </li>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ContextMenuItem
+                  onSelect={() => void copyWithToast(formatTransmissionDetails(d, absoluteTime))}
+                >
+                  Copy details
+                </ContextMenuItem>
+                {d.hostLabel !== TRANSMISSION_DASH && (
+                  <ContextMenuItem onSelect={() => void copyWithToast(d.hostLabel)}>
+                    Copy host
+                  </ContextMenuItem>
+                )}
+                {d.statusLabel !== TRANSMISSION_DASH && (
+                  <ContextMenuItem onSelect={() => void copyWithToast(d.statusLabel)}>
+                    Copy HTTP status
+                  </ContextMenuItem>
+                )}
+                <ContextMenuItem onSelect={() => void copyWithToast(absoluteTime)}>
+                  Copy timestamp
+                </ContextMenuItem>
+              </ContextMenuContent>
+              </ContextMenu>
             );
           })}
         </ul>
