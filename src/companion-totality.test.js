@@ -847,13 +847,13 @@ describe('WARDEN-1412 companion-totality sweep', () => {
     // Expected per-file counts, cross-checked against origin/main @ 06ed08f:
     // `git grep -n isCompanionExcludedHost -- 'src/*.js' | grep -v test`.
     const CENSUS = {
+      'agentStatePoll.js': 2, // import + pollFleetStates eligibility (moved from server.js, WARDEN-1647)
       'chats.js': 4,        // discover + viaCompanion(×2 legs) + capturePanes
       'cli.js': 2,          // import + cmdDash's useCompanion
       'companion.js': 11,   // the module's own doc line, predicate, status maps, the getChannel
                             // no-bootstrap gate (WARDEN-1475), op backstops
       'paneContainer.js': 2,// import + runWalk's remote route
       'pasteImage.js': 2,   // import + deliverPastedImage's remote gate (the WARDEN-1348 site)
-      'server.js': 2,       // import + pollFleetStates eligibility
       'tmux.js': 11,        // import + read/send/sendKey/hasSession/probeSession/resize/spawn/kill/attachStream/attachInteractive
       'wsLayer.js': 3,      // import + syncMonitorSubscription + close-handler grouping
     };
