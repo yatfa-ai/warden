@@ -25,6 +25,14 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -162,17 +170,33 @@ export function HostsSection({
               // `icon-xs` (not `icon-sm`) because those rows are full-height
               // form rows while this control sits beside an `h-5` Badge —
               // its `size-3` glyph matches the badge's own icon scale.
-              <div key={host} className="inline-flex items-center gap-0.5">
-                <Badge variant="secondary">{host}</Badge>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={() => setPendingRemoval(host)}
-                  aria-label={`Remove host ${host}`}
-                >
-                  <Trash2 />
-                </Button>
-              </div>
+              //
+              // WARDEN-1655 — the chip also carries a themed right-click menu
+              // (the sidebar host row's shape): the trigger is `asChild` on the
+              // chip div itself so no wrapper lands in the flex-wrap row.
+              // "Remove host…" routes through `setPendingRemoval` — the SAME
+              // ConfirmDialog path as the trash button — never removeHost.
+              <ContextMenu key={host}>
+                <ContextMenuTrigger asChild>
+                  <div className="inline-flex items-center gap-0.5">
+                    <Badge variant="secondary">{host}</Badge>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      onClick={() => setPendingRemoval(host)}
+                      aria-label={`Remove host ${host}`}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => copyWithToast(host)}>Copy host name</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(`ssh ${host}`)}>Copy SSH address</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem variant="destructive" onSelect={() => setPendingRemoval(host)}>Remove host…</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             ))
           )}
         </div>
