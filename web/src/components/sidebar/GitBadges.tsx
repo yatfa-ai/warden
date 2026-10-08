@@ -23,6 +23,7 @@ import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
+import { openExternalUrl } from '@/lib/electron';
 import { GitCompare, FileIcon, Search, X, ExternalLink } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
@@ -1470,22 +1471,37 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                     // rows (each StashFile is itself a role="button" div) inside this
                     // portaled popover — the same pattern CommitFile/the commit rows use.
                     <li key={s.ref || i} className="rounded">
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        aria-expanded={expandedStashRef === s.ref}
-                        aria-label={`inspect files in stash ${s.ref}`}
-                        onClick={(e) => { e.stopPropagation(); toggleStash(s.ref); }}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleStash(s.ref); } }}
-                        title="click to inspect the files this stash changed"
-                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[10px] text-foreground" title={s.subject}>{s.subject}</span>
-                          {s.date && <span className="block text-[10px] text-muted-foreground">{s.date}</span>}
-                        </span>
-                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedStashRef === s.ref ? '▾' : '▸'}</span>
-                      </div>
+                      {/* WARDEN-1649: themed right-click menu. The trigger wraps ONLY the
+                          role="button" header (asChild merges handlers onto it, so role /
+                          tabIndex / aria-* / onClick / onKeyDown stay on that same div); the
+                          expansion body with StashFile rows stays a SIBLING outside it, else
+                          right-click on a StashFile would resolve to the stash menu. */}
+                      <ContextMenu>
+                        <ContextMenuTrigger asChild>
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            aria-expanded={expandedStashRef === s.ref}
+                            aria-label={`inspect files in stash ${s.ref}`}
+                            onClick={(e) => { e.stopPropagation(); toggleStash(s.ref); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleStash(s.ref); } }}
+                            title="click to inspect the files this stash changed"
+                            className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                          >
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[10px] text-foreground" title={s.subject}>{s.subject}</span>
+                              {s.date && <span className="block text-[10px] text-muted-foreground">{s.date}</span>}
+                            </span>
+                            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedStashRef === s.ref ? '▾' : '▸'}</span>
+                          </div>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuItem onSelect={() => toggleStash(s.ref)}>Inspect files</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => copyWithToast(s.ref)}>Copy stash ref</ContextMenuItem>
+                          <ContextMenuItem onSelect={() => copyWithToast(s.subject)}>Copy stash subject</ContextMenuItem>
+                          {s.date && <ContextMenuItem onSelect={() => copyWithToast(s.date)}>Copy timestamp</ContextMenuItem>}
+                        </ContextMenuContent>
+                      </ContextMenu>
                       {expandedStashRef === s.ref && (
                         <div className="pb-1 pl-1">
                           {stashShowLoading[s.ref] && !stashShowCache[s.ref] ? (
@@ -1542,11 +1558,21 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                        per-entry unique selector, so `op.hash || i` still collides on a
                        duplicated (non-empty) hash. The list is a static snapshot fetched on
                        expand/refresh, so positional keys are correct. */
-                    <li key={i} className="rounded px-1 py-0.5 text-left">
-                      {/* The subject IS the operation (git's %gs), e.g. "reset: moving to HEAD~1" / "checkout: moving from main to feat". */}
-                      <span className="block truncate text-[10px] text-foreground" title={op.subject}>{op.subject}</span>
-                      {op.hash && <span className="block text-[10px] text-muted-foreground"><span className="font-mono">{op.hash}</span>{op.date ? ` · ${op.date}` : ''}</span>}
-                    </li>
+                    <ContextMenu key={i}>
+                      {/* WARDEN-1649: themed right-click menu; trigger wraps the <li>. */}
+                      <ContextMenuTrigger asChild>
+                        <li className="rounded px-1 py-0.5 text-left">
+                          {/* The subject IS the operation (git's %gs), e.g. "reset: moving to HEAD~1" / "checkout: moving from main to feat". */}
+                          <span className="block truncate text-[10px] text-foreground" title={op.subject}>{op.subject}</span>
+                          {op.hash && <span className="block text-[10px] text-muted-foreground"><span className="font-mono">{op.hash}</span>{op.date ? ` · ${op.date}` : ''}</span>}
+                        </li>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem onSelect={() => copyWithToast(op.subject)}>Copy operation</ContextMenuItem>
+                        {op.hash && <ContextMenuItem onSelect={() => copyWithToast(op.hash)}>Copy commit hash</ContextMenuItem>}
+                        {op.date && <ContextMenuItem onSelect={() => copyWithToast(op.date)}>Copy timestamp</ContextMenuItem>}
+                      </ContextMenuContent>
+                    </ContextMenu>
                   ))}
                 </ul>
               ) : (
@@ -1602,41 +1628,51 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                     if (b.behind > 0) titleParts.push(`${b.behind} behind remote`);
                     if (!b.merged) titleParts.push('not merged into HEAD — may carry unlanded commits');
                     return (
-                      <li
-                        /* key by name when stable; a duplicate/empty name (a
-                           pathological repo) falls back to the positional index so
-                           the list never crashes. */
-                        key={b.name || i}
-                        className="flex items-center gap-1 rounded px-1 py-0.5 text-left text-[10px]"
-                      >
-                        <span className={b.current ? 'text-cyan-400' : 'text-muted-foreground/40'}>{b.current ? '●' : '○'}</span>
-                        {href ? (
-                          <a
-                            href={href}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            onClick={(e) => e.stopPropagation()}
-                            title={titleParts.join(' · ')}
-                            className={cn('min-w-0 flex-1 truncate underline underline-offset-2 hover:opacity-80', b.current ? 'font-medium text-primary' : 'text-primary/80')}
+                      <ContextMenu key={b.name || i}>
+                        {/* WARDEN-1649: themed right-click menu; trigger wraps the <li>. Key by
+                            name when stable; a duplicate/empty name falls back to the index. */}
+                        <ContextMenuTrigger asChild>
+                          <li
+                            /* key by name when stable; a duplicate/empty name (a
+                               pathological repo) falls back to the positional index so
+                               the list never crashes. */
+                            className="flex items-center gap-1 rounded px-1 py-0.5 text-left text-[10px]"
                           >
-                            {b.name}
-                          </a>
-                        ) : (
-                          <span
-                            title={titleParts.join(' · ')}
-                            className={cn('min-w-0 flex-1 truncate', b.current ? 'font-medium text-foreground' : 'text-foreground/80')}
-                          >
-                            {b.name}
-                          </span>
-                        )}
-                        {fresh && (
-                          <span className={stale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatTimestamp(ms, timestampFormat)}</span>
-                        )}
-                        {b.ahead > 0 && <span className="text-amber-400">↑{b.ahead}</span>}
-                        {b.behind > 0 && <span className="text-blue-400">↓{b.behind}</span>}
-                        {b.gone && <span className="text-amber-400">gone</span>}
-                        {b.merged && !b.current && <span className="text-green-400" title="merged into HEAD">✓</span>}
-                      </li>
+                            <span className={b.current ? 'text-cyan-400' : 'text-muted-foreground/40'}>{b.current ? '●' : '○'}</span>
+                            {href ? (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                onClick={(e) => e.stopPropagation()}
+                                title={titleParts.join(' · ')}
+                                className={cn('min-w-0 flex-1 truncate underline underline-offset-2 hover:opacity-80', b.current ? 'font-medium text-primary' : 'text-primary/80')}
+                              >
+                                {b.name}
+                              </a>
+                            ) : (
+                              <span
+                                title={titleParts.join(' · ')}
+                                className={cn('min-w-0 flex-1 truncate', b.current ? 'font-medium text-foreground' : 'text-foreground/80')}
+                              >
+                                {b.name}
+                              </span>
+                            )}
+                            {fresh && (
+                              <span className={stale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatTimestamp(ms, timestampFormat)}</span>
+                            )}
+                            {b.ahead > 0 && <span className="text-amber-400">↑{b.ahead}</span>}
+                            {b.behind > 0 && <span className="text-blue-400">↓{b.behind}</span>}
+                            {b.gone && <span className="text-amber-400">gone</span>}
+                            {b.merged && !b.current && <span className="text-green-400" title="merged into HEAD">✓</span>}
+                          </li>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          {href && <ContextMenuItem onSelect={() => { void openExternalUrl(href); }}>Open on remote</ContextMenuItem>}
+                          <ContextMenuItem onSelect={() => copyWithToast(b.name)}>Copy branch name</ContextMenuItem>
+                          {b.headSha && <ContextMenuItem onSelect={() => copyWithToast(b.headSha)}>Copy tip commit</ContextMenuItem>}
+                        </ContextMenuContent>
+                      </ContextMenu>
                     );
                   })}
                 </ul>
