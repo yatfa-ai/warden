@@ -3,8 +3,6 @@ import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { loadUi, mergeRecentlyClosed, loadObs, saveObs, resetObsPrefsPreservingWorkspace, type RecentlyClosedEntry } from '@/lib/storage';
 import { mergeHostList } from '@/lib/hostList';
-import { applyTheme, listenSystemThemeChange, resolveThemeId } from '@/lib/theme';
-import { applyDensity } from '@/lib/density';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
@@ -16,7 +14,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useTheme, useDensity, useSetResolvedThemeId, useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
+import { useHostLabels, useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -37,6 +35,7 @@ import { GlobalSearchHost } from '@/components/GlobalSearchHost';
 import { HealthPanel } from '@/components/HealthPanel';
 import { PanelToggleButtons } from '@/components/PanelToggleButtons';
 import { PanelLayoutSync } from '@/components/PanelLayoutSync';
+import { AppearanceSync } from '@/components/AppearanceSync';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
 import { ResizableRail } from '@/components/ResizableRail';
@@ -221,22 +220,15 @@ function App() {
   // autoFocusNewPane/restoreOnStartup/terminalColorScheme migrated onto the
   // shared store (lib/uiStore.ts) — AppearanceSection subscribes (it is the
   // only writer of all six) and PaneGrid subscribes to paneLayout; App
-  // subscribes for its own runtime reads (the [theme]/[density] effects, the
-  // openChat focus gate) plus the reset
-  // partition. Since slice 16 (WARDEN-1471) the persisted snapshot is NOT an
-  // App-side reason any more: useConfigPersistence reads the store half.
-  const theme = useTheme();
-  // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula') lives on
-  // the store as a NON-persisted fact (WARDEN-1574, slice 31). The `theme` pref
-  // stays 'system' on an OS flip, so chrome re-paints via a direct DOM attribute
-  // mutation in the [theme] effect — no React re-render. The terminal surface
-  // re-themes imperatively inside PaneTile's effect, which re-fires when the
-  // store's derived `useTerminalThemeId()` changes: this App only WRITES the
-  // resolved id (setResolvedThemeId, below, from the [theme] effect and the OS
-  // listener) and PaneTile subscribes directly — that is what makes "Match app
-  // theme" live-update on an OS flip (nuance #1).
-  const setResolvedThemeId = useSetResolvedThemeId();
-  const density = useDensity();
+  // subscribes for the openChat focus gate plus the reset partition.
+  // WARDEN-1659 (slice 44): theme/density/setResolvedThemeId are no longer
+  // subscribed here either — the always-mounted null-rendering <AppearanceSync/>
+  // hosts the [theme]/[density] apply effects (and the OS-flip listener that
+  // pushes the resolved concrete theme id into the store; PaneTile subscribes to
+  // useTerminalThemeId() directly), so a theme/density change re-renders only
+  // that component, not all of App. Since slice 16 (WARDEN-1471) the persisted
+  // snapshot is NOT an App-side reason any more: useConfigPersistence reads the
+  // store half.
   // paneLayout (WARDEN-1471, slice 16): App keeps only the SETTER — the reset
   // partition needs it; the value rides useConfigPersistence's single store
   // subscription into the same saveUi effect (PaneGrid subscribes to the
@@ -335,8 +327,8 @@ function App() {
   // sent to the backend.
   //
   // WARDEN-1420 (slice 12): migrated onto the shared store with the rest of the
-  // appearance family (see theme above). App is still its only RUNTIME reader —
-  // it no longer reads it at all (WARDEN-1574, slice 31): the derived terminal
+  // appearance family (see theme above). App is no longer a RUNTIME reader —
+  // it does not read it at all (WARDEN-1574, slice 31): the derived terminal
   // theme id is a store selector PaneTile subscribes to, so only the setter
   // stays here for the reset partition.
   // Terminal cursor style (shape × blink). 'blink-block' is the default (today's
@@ -549,35 +541,6 @@ function App() {
   useEffect(() => {
     if (focused) clearPaneActivity(focused);
   }, [focused]);
-
-  // apply theme on mount and when theme changes (theme itself persists via the
-  // single compile-locked saveUi effect in useConfigPersistence)
-  useEffect(() => {
-    // Apply theme immediately: sets the [data-theme] attribute (selecting the
-    // matching CSS token block) and toggles `.dark` from the theme's mode.
-    applyTheme(theme);
-    // Keep the store's resolved concrete theme id in sync so the terminal pane
-    // (which derives its xterm palette from it) follows a manual theme change live.
-    setResolvedThemeId(resolveThemeId(theme));
-
-    // If system mode, listen for system theme changes. The `theme` state stays
-    // 'system' here (chrome re-paints via applyTheme's direct DOM attribute set),
-    // but we ALSO push the OS-resolved theme id into the store so the terminal
-    // surface — which re-themes imperatively in PaneTile — live-updates on an OS
-    // flip (nuance #1).
-    if (theme === 'system') {
-      const cleanup = listenSystemThemeChange((id) => {
-        applyTheme('system');
-        setResolvedThemeId(id);
-      });
-      return cleanup;
-    }
-  }, [theme]);
-
-  // apply density on mount and when density changes (persisted via the saveUi effect below)
-  useEffect(() => {
-    applyDensity(density);
-  }, [density]);
 
   // Refresh the chat list from the disk catalog (/api/chats, zero SSH in lazy mode). `silent`
   // skips the loading toggle so background auto-refresh ticks don't flash the ↻ button. In
@@ -1651,6 +1614,7 @@ function App() {
         </>
       )}
       <PanelLayoutSync />
+      <AppearanceSync />
       <GlobalSearchHost onOpenChat={openChat} issueEntries={markdownIssueEntries} />
       <ConfirmDialog
         open={killTarget !== null}
