@@ -923,18 +923,25 @@ export class Observer {
       const decision = await this.gate(chat, input.directive);
       if (!decision.approved) return { sent: false, reason: 'user declined the directive' };
       const text = decision.edited != null ? decision.edited : input.directive;
+      // Only a sendPane failure is a failed send. Once the pane has the text the
+      // directive is delivered and irreversible, so the bookkeeping below must never
+      // turn it into a reported { error } (the Observer LLM would retry and type the
+      // same directive again). Each log write is guarded independently so a
+      // logDirective failure still attempts the activity event (WARDEN-1658).
       try {
         await this._io.sendPane(chat, this.cfg, text);
-        await logDirective(chat, text);
-        // Record the *sent* directive in the activity log. This is the single
-        // point that proves the directive actually reached an agent, so it
-        // captures BOTH paths: gated human-approve AND auto-safe auto-send
-        // (which skips the directive_proposed gate entirely). The Activity
-        // banner/timeline count `directive_sent` (not `directive_proposed`) so
-        // rejected directives are no longer miscounted as sent.
-        await appendEvent({ type: 'directive_sent', container: chat.container, host: chat.host, role: chat.role, directive: text });
-        return { sent: true, to: agentTarget(chat), chars: text.length };
       } catch (e) { return { error: e.message }; }
+      try { await logDirective(chat, text); } catch { /* bookkeeping only; directive already delivered */ }
+      // Record the *sent* directive in the activity log. This is the single
+      // point that proves the directive actually reached an agent, so it
+      // captures BOTH paths: gated human-approve AND auto-safe auto-send
+      // (which skips the directive_proposed gate entirely). The Activity
+      // banner/timeline count `directive_sent` (not `directive_proposed`) so
+      // rejected directives are no longer miscounted as sent.
+      try {
+        await appendEvent({ type: 'directive_sent', container: chat.container, host: chat.host, role: chat.role, directive: text });
+      } catch { /* bookkeeping only; directive already delivered */ }
+      return { sent: true, to: agentTarget(chat), chars: text.length };
     }
     if (name === 'write_file') {
       // Writes confined to the warden data dir only. Ensure it exists (first run),
