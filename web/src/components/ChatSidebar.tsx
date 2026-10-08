@@ -117,7 +117,6 @@ export interface ChatSidebarProps {
   onRefresh: () => void;
   onDiscoverHost: (host: string) => void;
   loading: boolean;
-  /** Host connectivity (the shared /api/hosts/status poll): offline hosts are unknown, not empty. */
   /** Per-host discovery failure reason (the unreachable state's "⟨reason⟩"). */
   discoverErrors: Record<string, string>;
   /** Forward poll cadence to the FileViewer (unchanged from the pre-rebuild sidebar). */
