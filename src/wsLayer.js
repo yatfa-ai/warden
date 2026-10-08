@@ -46,6 +46,15 @@ import { loopMonitor } from './loop-monitor.js';
 // already hardcode this same string).
 const LOCAL = '(local)';
 
+// WARDEN-1653 — an activity-log write failure (full disk, EACCES, bad HOME) must never
+// escape a ws.on('message', async …) / pty.onExit(async …) callback: `ws` does not await
+// listener promises, so a rejection is an unhandledRejection that terminates the process
+// (Node >= 15). Mirrors server.js's appendLifecycleEvent. The await is kept so the event
+// is on disk before the handler continues.
+async function appendEventSafe(e) {
+  try { await appendEvent(e); } catch { /* a single activity write failure must never kill the WS handler / process */ }
+}
+
 // WARDEN-1385 — the per-pane output coalescing window (ms). An 8ms batch floor
 // collapses the per-chunk WS framing three streaming agents otherwise produce
 // (~4,700 msgs/sec measured — one renderer main-thread wakeup each) while adding
@@ -112,7 +121,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         // Otherwise, require confirmation
         const requestId = String(++reqCounter);
         send({ type: 'directive_proposed', requestId, container: chat.container, host: chat.host, role: chat.role, directive });
-        await appendEvent({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
+        await appendEventSafe({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
         // Stash the directive meta alongside the resolver so the gate_decision
         // handler can append a `directive_rejected` event (approved sends are
         // recorded in observer.js at logDirective, which also covers auto-safe).
@@ -131,7 +140,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         try { send({ type: 'done', text: await obs.step(String(msg.text || '')) }); }
         catch (e) {
           send({ type: 'error', error: e.message });
-          await appendEvent({ type: 'error', error: e.message });
+          await appendEventSafe({ type: 'error', error: e.message });
         }
       } else if (msg.type === 'gate_decision') {
         const entry = pending.get(msg.requestId);
@@ -140,7 +149,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           entry.resolve({ approved: !!msg.approved, edited: msg.edited });
           // A human rejection is distinct from an approved send — record it so the
           // timeline can show rejected directives separately from sent ones.
-          if (!msg.approved) await appendEvent({ type: 'directive_rejected', ...entry.meta });
+          if (!msg.approved) await appendEventSafe({ type: 'directive_rejected', ...entry.meta });
         }
       }
     });
@@ -268,7 +277,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           } catch { /* fall through; resolve() still has a locate fallback */ }
         }
         const r = await resolve(String(m.id));
-        if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); await appendEvent({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
+        if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); await appendEventSafe({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
         const chat = r.chat;
         const cols = Math.max(20, Math.floor(m.cols || 100));
         const rows = Math.max(6, Math.floor(m.rows || 30));
@@ -286,12 +295,12 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         catch { /* probe threw → leave reason null and attempt a normal attach */ }
         if (reason === 'host_unreachable') {
           send({ type: 'host_unreachable', id: m.id });
-          await appendEvent({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+          await appendEventSafe({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
           return;
         }
         if (reason === 'session_dead') {
           send({ type: 'session_dead', id: m.id });
-          await appendEvent({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+          await appendEventSafe({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
           return;
         }
 
@@ -299,7 +308,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         try { pty = attachStream(chat, cfg, { cols, rows }); }
         catch (e) {
           send({ type: 'attach_error', id: m.id, error: String((e && e.message) || e) });
-          await appendEvent({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
+          await appendEventSafe({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
           return;
         }
         // WARDEN-365 (defense-in-depth): bind a per-attach `entry` object and gate
@@ -369,11 +378,11 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           // evidence about the pane that just ended).
           try { paneInputTelemetry?.dropPending(String(m.id)); } catch { /* noop */ }
           send({ type: 'ended', id: m.id, code: exitCode });
-          await appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
+          await appendEventSafe({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
         });
         try { await resize(chat, cfg, cols, rows); } catch { /* noop */ }
         send({ type: 'attached', id: m.id });
-        await appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
+        await appendEventSafe({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
       } else if (m.type === 'input') {
         const a = attaches.get(m.id);
         if (a) {
