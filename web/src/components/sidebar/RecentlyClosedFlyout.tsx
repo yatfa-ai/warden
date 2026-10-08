@@ -11,6 +11,14 @@ import { History, X, Bookmark } from 'lucide-react';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { StatusDot } from '@/components/StatusDot';
 import { hueOf } from '@/components/sidebar/SavedSessionRows';
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import type { RecentlyClosedEntry } from '@/lib/storage';
@@ -33,7 +41,10 @@ export function RecentlyClosedFlyout({ open, onOpenChange, entries, onReopen, on
   // Dismiss on Escape — the flyout is an overlay, and the header icon toggles.
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onOpenChange(false); };
+    // Radix's DismissableLayer handles Escape in the capture phase and calls
+    // preventDefault() when it closes a row context menu, so an already-handled
+    // Escape must not also dismiss the flyout (WARDEN-1643).
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onOpenChange(false); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onOpenChange]);
@@ -69,7 +80,9 @@ export function RecentlyClosedFlyout({ open, onOpenChange, entries, onReopen, on
             <div className="px-3 py-2.5 text-[10.5px] text-muted-foreground">No recently closed sessions.</div>
           ) : (
             entries.map((entry) => (
-              <div key={entry.id} className="group mx-0.5 block rounded-[7px] px-2 pb-1 pt-[5px] hover:bg-accent">
+              <ContextMenu key={entry.id}>
+                <ContextMenuTrigger asChild>
+              <div className="group mx-0.5 block rounded-[7px] px-2 pb-1 pt-[5px] hover:bg-accent">
                 <div className="flex items-start gap-[7px]">
                   <span
                     aria-hidden="true"
@@ -109,6 +122,16 @@ export function RecentlyClosedFlyout({ open, onOpenChange, entries, onReopen, on
                   </span>
                 </div>
               </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => onReopen(entry.id)}>Reopen</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onSave(entry.id)}>Save</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => copyWithToast(entry.name || entry.id)}>Copy session name</ContextMenuItem>
+                  {entry.cwd && <ContextMenuItem onSelect={() => copyWithToast(entry.cwd)}>Copy working directory</ContextMenuItem>}
+                  {entry.host && <ContextMenuItem onSelect={() => copyWithToast(entry.host)}>Copy host</ContextMenuItem>}
+                </ContextMenuContent>
+              </ContextMenu>
             ))
           )}
         </div>
