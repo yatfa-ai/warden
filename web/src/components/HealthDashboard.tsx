@@ -31,7 +31,7 @@ import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { KillDialog } from './KillDialog';
@@ -1597,6 +1597,14 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
                         index.css. The `min-w-0`s here are belt-and-suspenders.
                         (WARDEN-237)
                       */}
+                      {/* WARDEN-1667: themed right-click menu on the per-host header
+                          (Roadmap WARDEN-362). The trigger wraps ONLY the header row
+                          (asChild — no extra DOM) so a right-click anywhere in it,
+                          descendants included, opens the menu; the agent rows below
+                          keep their own menu. Left-click behaviour of the checkbox /
+                          collapse / trash controls is untouched. */}
+                      <ContextMenu>
+                      <ContextMenuTrigger asChild>
                       <div className="flex items-start gap-1 w-full min-w-0">
                         {/* Select all agents RENDERED for this host (WARDEN-371).
                             SIBLING of the collapse Button (interactive elements
@@ -1715,6 +1723,28 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
                           </span>
                         )}
                       </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          onSelect={() => setCollapsedHosts({ ...collapsedHosts, [group.host]: !collapsedHosts[group.host] })}
+                        >
+                          {collapsed ? 'Expand' : 'Collapse'}
+                        </ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onSelect={() => copyWithToast(group.host)}>Copy host name</ContextMenuItem>
+                        {group.host !== THIS_MACHINE && (
+                          <ContextMenuItem onSelect={() => copyWithToast(`ssh ${group.host}`)}>Copy SSH address</ContextMenuItem>
+                        )}
+                        {companionTransportEnabled && group.host !== THIS_MACHINE && (
+                          <>
+                            <ContextMenuSeparator />
+                            <ContextMenuItem variant="destructive" onSelect={() => setRemoveCompanionHost(group.host)}>
+                              Remove companion…
+                            </ContextMenuItem>
+                          </>
+                        )}
+                      </ContextMenuContent>
+                      </ContextMenu>
 
                       {/* Agents beneath, reusing the standard row */}
                       {!collapsed && (
