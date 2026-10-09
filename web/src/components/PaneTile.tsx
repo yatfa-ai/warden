@@ -732,7 +732,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // The Select All item cannot be intercepted like cut: webContents.selectAll()
     // fires NO DOM event at all (verified live — zero events at the pane while a
     // real <input> in the same run emitted selectionchange/selectstart), so the
-    // template item is a wired click instead and App.tsx broadcasts
+    // template item is a wired click instead and AppMenuBridge broadcasts
     // TERMINAL_SELECT_ALL_EVENT after routeMenuSelectAll saw a terminal textarea
     // as document.activeElement. THIS side's identity check is the load-bearing
     // half: only the pane whose helper textarea IS the active element responds,

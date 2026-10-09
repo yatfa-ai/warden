@@ -199,7 +199,7 @@ export async function openExternalUrl(url: string): Promise<boolean> {
 
 // WARDEN-1280 — subscribe to the application menu's "Settings…" (CmdOrCtrl+,)
 // item. The menu lives in MAIN; the Settings page is renderer state, so the menu
-// reaches it through a main→renderer push. App.tsx installs ONE effect on this
+// reaches it through a main→renderer push. AppMenuBridge.tsx installs ONE effect on this
 // that calls the same setSettingsOpen(true) the gear button calls, so the menu
 // item and the gear are literally the same destination.
 //
@@ -223,7 +223,7 @@ export function onOpenSettings(cb: () => void): () => void {
 // ---------------------------------------------------------------------------
 // WARDEN-1356 — subscribe to the application menu's Edit ▸ Select All item.
 // The item is a wired click (the bare role is inert on the agent-pane surface),
-// so this is the renderer's door into it. App.tsx installs ONE effect that
+// so this is the renderer's door into it. AppMenuBridge.tsx installs ONE effect that
 // routes by real DOM focus: the focused pane's term.selectAll(), or
 // document.execCommand('selectAll') for a focused field (Settings) — which is
 // what keeps Select All working there. Same three-context story as

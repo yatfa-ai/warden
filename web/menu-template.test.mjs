@@ -571,7 +571,7 @@ for (const platform of PLATFORMS) {
 // wiring itself is what the mutation check guards).
 test('EFFECT — the renderer wiring that gives Select All and Cut their pane effect is present', () => {
   const pane = readFileSync(new URL('./src/components/PaneTile.tsx', import.meta.url), 'utf8');
-  const app = readFileSync(new URL('./src/App.tsx', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('./src/components/AppMenuBridge.tsx', import.meta.url), 'utf8');
 
   // CUT: the capture-phase claim, the shared predicate, and the honest
   // copy-then-clear route. (web/terminalEdit.test.mjs holds the predicate's
@@ -618,9 +618,9 @@ test('EFFECT — the renderer wiring that gives Select All and Cut their pane ef
     'PaneTile no longer listens for the menu select-all broadcast',
   );
 
-  // SELECT ALL: App routes the pushed event by real DOM focus.
+  // SELECT ALL: <AppMenuBridge/> (WARDEN-1671, extracted from App) routes the pushed event by real DOM focus.
   const routeEffect = app.match(/useEffect\(\(\) => onSelectAll\(\(\) => \{[\s\S]*?\n  \}\), \[\]\);/);
-  assert.ok(routeEffect, 'App.tsx no longer subscribes to the menu select-all push');
+  assert.ok(routeEffect, 'AppMenuBridge.tsx no longer subscribes to the menu select-all push');
   assert.match(
     routeEffect[0],
     /routeMenuSelectAll\(document\.activeElement\)/,
