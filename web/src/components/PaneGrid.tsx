@@ -122,10 +122,6 @@ interface Props {
   // (refreshConfigPrefs) so a Settings save live-updates already-open panes.
   issueLinksEnabled?: boolean;
   issueLinkTrackers?: IssueLinkEntry[];
-  // Follow poll cadence (WARDEN-749): pure pass-through to PaneTile and to this
-  // grid's own FileViewer — App owns the resolved value (the same one the catalog
-  // poll uses), so Follow shares the dashboard cadence instead of hardcoding one.
-  pollIntervalMs: number;
   // WARDEN-909: drag a pane header onto ANOTHER pane tile in this grid to swap
   // the two panes' positions. App owns the mutation (swapPanes over the active
   // workspace's openPanes via the setOpenPanes shim); PaneGrid only reports the
@@ -139,7 +135,7 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, showHostTags, issueLinksEnabled, issueLinkTrackers, pollIntervalMs, onReorderPanes, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, showHostTags, issueLinksEnabled, issueLinkTrackers, onReorderPanes, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -831,7 +827,6 @@ export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceK
                     issueLinksEnabled={issueLinksEnabled}
                     issueLinkTrackers={issueLinkTrackers}
                     onSpawned={onSpawned}
-                    pollIntervalMs={pollIntervalMs}
                     reconnectToken={reconnectTokens[t.id]}
                     onPhaseChange={onPanePhaseChange ? (phase) => onPanePhaseChange(t.id, phase) : undefined}
                   />
@@ -915,7 +910,6 @@ export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceK
           line={fileLine}
           open={fileOpen}
           onNavigate={(p) => { setFilePath(p); setFileLine(undefined); }}
-          pollIntervalMs={pollIntervalMs}
           onOpenChange={(open) => {
             setFileOpen(open);
             if (!open) {

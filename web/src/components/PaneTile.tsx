@@ -241,8 +241,6 @@ interface Props {
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
   onSpawned: (chat: Chat) => void;
-  // Follow poll cadence (WARDEN-749): pure pass-through to this pane's FileViewer.
-  pollIntervalMs: number;
   // WARDEN-1422 (QA round 5): App's per-pane reconnect token — the pane MUST
   // re-attach NOW. App bumps this pane's entry in its reconnectTokens map when
   // (a) a sidebar respawn of this chat succeeded, or (b) a resume click
@@ -263,7 +261,7 @@ interface Props {
 // it may probe again (see existsFailedAtRef).
 const EXISTS_FAILURE_COOLDOWN_MS = 15_000;
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, pollIntervalMs, reconnectToken, onPhaseChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, reconnectToken, onPhaseChange }: Props) {
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
   // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
@@ -1652,7 +1650,6 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           line={viewerLine}
           open={viewerOpen}
           onNavigate={(p) => { setViewerPath(p); setViewerLine(undefined); }}
-          pollIntervalMs={pollIntervalMs}
           onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}
         />
       )}
