@@ -12,7 +12,7 @@ import { useSetSettingsOpen } from '@/lib/uiStore';
 export function AppMenuBridge() {
   const setSettingsOpen = useSetSettingsOpen();
   // WARDEN-1280 — the application menu's "Settings…" (CmdOrCtrl+,) item. Until
-  // now the gear button below was the SOLE way into Settings; the menu item is
+  // now the gear button in App was the SOLE way into Settings; the menu item is
   // the second, and it is deliberately the SAME destination rather than a
   // parallel one — main pushes 'menu:open-settings' on the click and this effect
   // calls the exact setSettingsOpen(true) the gear calls. Runs once (the setter

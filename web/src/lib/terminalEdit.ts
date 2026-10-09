@@ -45,7 +45,7 @@
 // decisions with plain structurally-typed arguments (no DOM), the same
 // contract as shouldRouteNativePasteToTerminal in lib/pasteImage.ts.
 
-/** CustomEvent name the App-level select-all handler broadcasts to the panes. */
+/** CustomEvent name the AppMenuBridge select-all handler broadcasts to the panes. */
 export const TERMINAL_SELECT_ALL_EVENT = 'warden:menu-select-all';
 
 /** What the renderer should do with the menu's Select All push. */

@@ -40,7 +40,7 @@ contextBridge.exposeInMainWorld('wardenWindow', {
   // wardenWindow: the renderer passes one string and gets one boolean.
   openExternal: (url) => ipcRenderer.invoke('window:open-external', url),
   // WARDEN-1280 — the application menu's "Settings…" (CmdOrCtrl+,) item. The
-  // menu lives in MAIN; the Settings page is RENDERER state (App.tsx's
+  // menu lives in MAIN; the Settings page is RENDERER state (the uiStore's
   // settingsOpen), so opening it from the menu needs a main→renderer PUSH. This
   // is that subscription: main sends 'menu:open-settings' on the click, the web
   // bundle's one effect calls the same setSettingsOpen(true) the gear button
