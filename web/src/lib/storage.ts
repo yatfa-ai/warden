@@ -1353,6 +1353,15 @@ export function loadUi(): UiState {
   return { ...DEFAULT_UI };
 }
 
+/**
+ * Boot fact: true when the persisted document says this launch is a "Start
+ * empty" launch. Read it ONCE at launch (lazy useState) — it is deliberately not
+ * the live pref, which stops describing the launch the moment the user flips it.
+ */
+export function launchedEmpty(): boolean {
+  return loadUi().restoreOnStartup === 'empty';
+}
+
 export function saveUi(s: UiState) {
   try { localStorage.setItem(KEY, JSON.stringify(s)); }
   catch (e) { console.warn('[warden:storage] saveUi failed', e); }

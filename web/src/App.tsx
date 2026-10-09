@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson, fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { loadUi, mergeRecentlyClosed, type RecentlyClosedEntry } from '@/lib/storage';
+import { mergeRecentlyClosed, type RecentlyClosedEntry } from '@/lib/storage';
 import { mergeHostList } from '@/lib/hostList';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useTokenBudget } from '@/lib/useTokenBudget';
@@ -84,23 +84,13 @@ function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  // Read persisted UI state ONCE on mount (lazy initializer runs only the first
-  // render) and reuse it for every useState seed below — consolidates the prior
-  // per-state loadUi() calls into a single read.
-  const [uiState] = useState(() => loadUi());
-  // Stable for the session: true when THIS launch started in "Start empty" mode.
-  // The live workspace is then a gated clean slate, not a legitimate workspace to
-  // persist — so for the whole session persistUiState carries the on-disk workspace
-  // forward (even after flipping back to "Reopen previous"), never the live arrays.
-  const startedEmpty = uiState.restoreOnStartup === 'empty';
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12) / WARDEN-1600 (slice 35): the
   // LIVE "restore on startup" pref lives on the shared store; AppearanceSection
-  // and useConfigPersistence subscribe, App does NOT. The `uiState.restoreOnStartup`
-  // read above is deliberately NOT migrated with it: it is a BOOT fact about what
-  // this launch started as, which the live pref stops being the moment the user
-  // flips it. `startedEmpty` must stay pinned to the at-launch value for the whole
-  // session, and the store's `initialWorkspace` call resolves the opening workspace
-  // from the DISK payload before React renders anything.
+  // and useConfigPersistence subscribe, App does NOT. The "launched in Start empty"
+  // BOOT fact is derived inside useConfigPersistence (launchedEmpty(), pinned to
+  // the at-launch value for the whole session), and the store's `initialWorkspace`
+  // call resolves the opening workspace from the DISK payload before React renders
+  // anything.
   // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed live INSIDE
   // per-workspace pane-sets. The active workspace's panes are what render in the
   // grid; switching activeWorkspaceId swaps the grid instantly. paneHost stays
@@ -639,7 +629,6 @@ function App() {
   // refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so the deps
   // are initialized (no TDZ).
   const { handleConfigChange } = useConfigPersistence({
-    startedEmpty,
     refresh,
     reloadNotificationPrefs,
     refreshConfigPrefs,

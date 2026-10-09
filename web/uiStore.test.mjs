@@ -69,7 +69,7 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 await emit('src/lib/resetUiPrefs.ts', 'resetUiPrefs.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/uiStore', './uiStore.mjs'));
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
-const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS } =
+const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, launchedEmpty } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectRecentlyClosed, selectOpenPanes, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
@@ -3723,6 +3723,22 @@ test('resetUiPrefsToDefaults() (lib/resetUiPrefs.ts, WARDEN-1677): disk viewMode
   assert.deepEqual(st.observerViewMode, obsDefaults.viewMode);
   assert.deepEqual(st.observerActivityFilters, obsDefaults.activityFilters);
   assert.equal(st.workspaces, keep, 'workspaces (RESET_PRESERVED_KEY) untouched (===)');
+});
+
+console.log('\nlaunchedEmpty — the "launched in Start empty" boot fact (WARDEN-1685)');
+test('launchedEmpty is true when "empty" is on disk', () => {
+  reset();
+  saveUi({ ...loadUi(), restoreOnStartup: 'empty' });
+  assert.equal(launchedEmpty(), true);
+});
+test('launchedEmpty is false when "previous" is on disk', () => {
+  reset();
+  saveUi({ ...loadUi(), restoreOnStartup: 'previous' });
+  assert.equal(launchedEmpty(), false);
+});
+test('launchedEmpty is false when nothing is stored', () => {
+  reset();
+  assert.equal(launchedEmpty(), false);
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
