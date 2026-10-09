@@ -19,7 +19,7 @@ const { code } = await transformWithOxc(readFileSync(srcPath, 'utf8'), srcPath, 
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-app-config-query-test-'));
 const tmpFile = join(tmpDir, 'appConfigQuery.mjs');
 writeFileSync(tmpFile, code);
-const { APP_CONFIG_KEY, appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled } = await import(tmpFile);
+const { APP_CONFIG_KEY, appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 const jsonResponse = (json, status = 200) => async (url) => {
@@ -53,4 +53,20 @@ test('fetchAppConfig GETs /api/config and returns the parsed body', async () => 
 
 test('fetchAppConfig throws on a non-ok status', async () => {
   await assert.rejects(() => fetchAppConfig(jsonResponse({}, 500)), /config HTTP 500/);
+});
+
+test('observer auto-start selector: false unless explicitly true', () => {
+  assert.equal(selectObserverAutoStart(undefined), false);
+  assert.equal(selectObserverAutoStart(null), false);
+  assert.equal(selectObserverAutoStart({}), false);
+  assert.equal(selectObserverAutoStart({ observerAutoStart: false }), false);
+  assert.equal(selectObserverAutoStart({ observerAutoStart: true }), true);
+});
+
+test('observer session timeout selector: 30 before config, null once loaded-but-absent', () => {
+  assert.equal(selectObserverSessionTimeout(undefined), 30);
+  assert.equal(selectObserverSessionTimeout(null), 30);
+  assert.equal(selectObserverSessionTimeout({}), null, 'absent key on a loaded body is fail-safe null');
+  assert.equal(selectObserverSessionTimeout({ observerSessionTimeout: null }), null, 'explicit null = disabled');
+  assert.equal(selectObserverSessionTimeout({ observerSessionTimeout: 45 }), 45);
 });

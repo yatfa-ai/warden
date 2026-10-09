@@ -8,7 +8,7 @@
 // staleTime: 0), so subscribers live-update without a reload.
 
 import { useQuery } from '@tanstack/react-query';
-import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled } from '@/lib/appConfigQuery';
+import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout } from '@/lib/appConfigQuery';
 import { fetchBounded } from '@/lib/api';
 
 /**
@@ -40,4 +40,30 @@ export function useCompanionTransportEnabled(): boolean {
     select: selectCompanionTransportEnabled,
   });
   return data ?? true;
+}
+
+/** WARDEN-332 — observer auto-start (defaults false until config loads). */
+export function useObserverAutoStart(): boolean {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: selectObserverAutoStart,
+  });
+  return data ?? false;
+}
+
+/**
+ * WARDEN-332 — observer idle timeout in minutes; null disables auto-close.
+ * null is a LEGITIMATE value, so NO `?? 30` on data: only `undefined` (no body
+ * cached yet) falls back to the boot default 30.
+ */
+export function useObserverSessionTimeout(): number | null {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: selectObserverSessionTimeout,
+  });
+  return data === undefined ? 30 : data;
 }
