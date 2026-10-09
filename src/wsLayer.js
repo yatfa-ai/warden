@@ -89,7 +89,17 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
       return;
     }
     if (!sid) {
-      const s = await createSession(null, { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey });
+      // `ws` does not await listener promises, so a rejection here (full disk, EACCES,
+      // broken data dir) would be an unhandledRejection that kills the whole server
+      // (WARDEN-1693). Answer an error frame instead.
+      let s;
+      try {
+        s = await createSession(null, { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey });
+      } catch (err) {
+        console.error('[wsLayer] createSession failed:', err?.message || err);
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', error: 'could not create session' }));
+        return;
+      }
       sid = s.id;
       ws.send(JSON.stringify({
         type: 'session_created', sid: s.id, name: s.name,
