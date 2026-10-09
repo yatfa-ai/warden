@@ -144,6 +144,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     ws.on('message', async (data) => {
       let msg;
       try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'user') {
         send({ type: 'thinking' });
         obs.openTabs = Array.isArray(msg.panes) ? msg.panes : [];
@@ -248,6 +249,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     ws.on('message', async (data) => {
       let m;
       try { m = JSON.parse(data.toString()); } catch { return; }
+      if (!m || typeof m !== 'object') return;
       if (m.type === 'monitor') {
         const id = String(m.id);
         // Subscribe only on a NEWLY-added pane so monitor/unmonitor stay balanced
