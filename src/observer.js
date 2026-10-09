@@ -984,7 +984,10 @@ export class Observer {
     }
     if (!finalText) finalText = '(tool loop limit reached — try simplifying your request)';
     if (this.sid) {
-      await saveMessages(this.sid, this.messages, this.name);
+      // Deliberately omit the connect-time `this.name`: it is a stale snapshot, and passing
+      // it makes saveMessages overwrite a rename made via PATCH /api/sessions/:id while this
+      // Observer stayed open. Without it saveMessages keeps the live on-disk name (WARDEN-1681).
+      await saveMessages(this.sid, this.messages);
       await appendTranscript(this.sid, 'assistant', finalText);
     }
     return finalText;
