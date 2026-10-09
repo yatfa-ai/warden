@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+import { copyWithToast } from '@/lib/clipboardToast';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
 
 /**
  * CollapsibleSectionHeader — the ONE definition of the Fleet Health panel header
@@ -110,15 +112,27 @@ export function CollapsibleSectionHeader({
 
   // No actions → no wrapper, so the two action-less panels keep byte-identical
   // structure. The row wrapper exists only where there is a sibling to hold.
-  if (!actions) return toggle;
-
-  return (
-    // Geometry matches the pre-extraction inline header exactly: the toggle's
-    // pr-1.5 restores the old `gap-1.5` (6px) between the count and the action,
-    // and this pr-2 restores the old `px-2` (8px) right inset of the action.
+  // Geometry matches the pre-extraction inline header exactly: the toggle's
+  // pr-1.5 restores the old `gap-1.5` (6px) between the count and the action,
+  // and the wrapper's pr-2 restores the old `px-2` (8px) right inset of the action.
+  const header = actions ? (
     <div className="flex w-full items-center pr-2">
       {toggle}
       {actions}
     </div>
+  ) : (
+    toggle
+  );
+
+  // Themed right-click menu (WARDEN-1697). `asChild` only attaches the context-menu handler to
+  // the existing outermost element — no extra DOM wrapper, geometry unchanged.
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{header}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onToggle}>{open ? 'Collapse' : 'Expand'}</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(label)}>Copy section name</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
