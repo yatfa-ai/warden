@@ -23,6 +23,8 @@
 
 import { useMemo } from 'react';
 import { Button } from '@/components/ui/button';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { cn } from '@/lib/utils';
 import { GitChangedFile, GitRepoSummary, GitRepoDetails } from './GitBadges';
 import { groupGitFiles } from '@/lib/sourceControl';
@@ -62,9 +64,19 @@ function FileSection({ label, files, onOpenDiff, onOpenConflict, onOpenFile, ton
 }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <div className={cn('px-2 pb-0.5 text-[10px] font-medium uppercase tracking-wider', tone)}>
-        {label} · {files.length}
-      </div>
+      {/* Right-click on the bucket header only (WARDEN-1689). The file rows below are
+          SIBLINGS of this menu, not children, so each GitChangedFile keeps its own. */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className={cn('px-2 pb-0.5 text-[10px] font-medium uppercase tracking-wider', tone)}>
+            {label} · {files.length}
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => copyWithToast(files.map((f) => f.path).join('\n'))}>Copy file paths ({files.length})</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(label)}>Copy section name</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       <div className="flex flex-col gap-0.5 px-1">
         {files.map((file) => (
           <GitChangedFile key={file.path} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
@@ -133,38 +145,53 @@ export function SourceControlPanel({ chatId, gitInfo, onOpenDiff, onOpenConflict
 
   return (
     <div className="flex flex-col">
-      <Button
-        type="button"
-        variant="ghost"
-        onClick={() => onCollapsedChange(!collapsed)}
-        aria-expanded={!collapsed}
-        aria-label={`${collapsed ? 'expand' : 'collapse'} source control`}
-        title={`${collapsed ? 'expand' : 'collapse'} source control${gitInfo.cwd ? ` · ${gitInfo.cwd}` : ''}`}
-        className="flex-wrap justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60 hover:text-foreground"
-      >
-        <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
-        <span>Source Control</span>
-        {changedCount > 0 && (
-          <span className="text-[10px] text-muted-foreground">{changedCount}</span>
-        )}
-        {/* The repo summary — the whole of the old per-row branch badge's always-on
-            vocabulary, non-interactive so the header's only control stays the collapse
-            toggle it sits inside (a nested <button> would be invalid HTML, WARDEN-68). */}
-        <GitRepoSummary
-          className="ml-auto"
-          branch={gitInfo.branch}
-          clean={gitInfo.clean}
-          ahead={gitInfo.ahead}
-          behind={gitInfo.behind}
-          inProgress={gitInfo.inProgress}
-          stashCount={gitInfo.stashCount}
-          diffstat={gitInfo.diffstat}
-          detached={gitInfo.detached}
-          headSha={gitInfo.headSha}
-          headDate={gitInfo.headDate}
-          upstream={gitInfo.upstream}
-        />
-      </Button>
+      {/* Right-click menu on the header (WARDEN-1689). asChild merges onto the Button, so
+          layout, aria and click-to-toggle are unchanged. Copy items mirror the
+          presence of their data. */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => onCollapsedChange(!collapsed)}
+          aria-expanded={!collapsed}
+          aria-label={`${collapsed ? 'expand' : 'collapse'} source control`}
+          title={`${collapsed ? 'expand' : 'collapse'} source control${gitInfo.cwd ? ` · ${gitInfo.cwd}` : ''}`}
+          className="flex-wrap justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60 hover:text-foreground"
+        >
+          <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+          <span>Source Control</span>
+          {changedCount > 0 && (
+            <span className="text-[10px] text-muted-foreground">{changedCount}</span>
+          )}
+          {/* The repo summary — the whole of the old per-row branch badge's always-on
+              vocabulary, non-interactive so the header's only control stays the collapse
+              toggle it sits inside (a nested <button> would be invalid HTML, WARDEN-68). */}
+          <GitRepoSummary
+            className="ml-auto"
+            branch={gitInfo.branch}
+            clean={gitInfo.clean}
+            ahead={gitInfo.ahead}
+            behind={gitInfo.behind}
+            inProgress={gitInfo.inProgress}
+            stashCount={gitInfo.stashCount}
+            diffstat={gitInfo.diffstat}
+            detached={gitInfo.detached}
+            headSha={gitInfo.headSha}
+            headDate={gitInfo.headDate}
+            upstream={gitInfo.upstream}
+          />
+        </Button>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => onCollapsedChange(!collapsed)}>{collapsed ? 'Expand' : 'Collapse'}</ContextMenuItem>
+          <ContextMenuSeparator />
+          {!gitInfo.detached && <ContextMenuItem onSelect={() => copyWithToast(gitInfo.branch!)}>Copy branch name</ContextMenuItem>}
+          {gitInfo.headSha && <ContextMenuItem onSelect={() => copyWithToast(gitInfo.headSha!)}>Copy HEAD commit</ContextMenuItem>}
+          {gitInfo.upstream && <ContextMenuItem onSelect={() => copyWithToast(gitInfo.upstream!)}>Copy upstream</ContextMenuItem>}
+          {gitInfo.cwd && <ContextMenuItem onSelect={() => copyWithToast(gitInfo.cwd!)}>Copy repository path</ContextMenuItem>}
+        </ContextMenuContent>
+      </ContextMenu>
       {!collapsed && (
         <div className="flex flex-col gap-0.5 pb-1">
           {hasChanges ? (
