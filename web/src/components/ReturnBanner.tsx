@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { cn } from '@/lib/utils';
 import { dotForState } from '@/components/AttentionBadge';
 import {
@@ -129,6 +137,9 @@ export function ReturnBanner({ rollup, onOpenChat, onOpenActivity }: ReturnBanne
   const showReturnBanner = bannerShownOnce && !bannerDismissed;
 
   if (!showReturnBanner) return null;
+  // The callout's deep-link, shared by the Button click and the context menu's "Open"
+  // item so the two cannot drift.
+  const openTop = (top: AttentionItem) => onOpenChat(top.id, top.anchor ?? undefined);
   return (
     <div className="flex items-center justify-between gap-3 px-3 py-2 bg-blue-50 dark:bg-blue-950 border-b border-blue-200 dark:border-blue-800">
       {/*
@@ -161,18 +172,37 @@ export function ReturnBanner({ rollup, onOpenChat, onOpenActivity }: ReturnBanne
           // substring guess.)
           <div className="flex flex-col gap-1 min-w-0 shrink">
             <div className="flex items-center gap-1 min-w-0">
-              <Button
-                variant="ghost"
-                onClick={() => onOpenChat(attentionTop.id, attentionTop.anchor ?? undefined)}
-                aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
-                className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
-              >
-                <span className={cn('size-2 rounded-full shrink-0', dotForState(attentionTop.state))} aria-hidden />
-                <span className="text-sm whitespace-nowrap shrink-0">You&rsquo;re needed in</span>
-                <span className="text-sm font-semibold max-w-40 truncate">{attentionTop.name ?? attentionTop.id}</span>
-                <span className="text-xs text-blue-700/90 dark:text-blue-200/80 max-w-sm truncate">{attentionReason(attentionTop)}</span>
-                <span className="text-xs text-blue-600 dark:text-blue-300 shrink-0 whitespace-nowrap">open →</span>
-              </Button>
+              {/*
+                WARDEN-1663 — themed right-click menu on the directed callout, matching
+                its twin Callout in AttentionList (WARDEN-1269). `asChild` composes
+                the context-menu handler onto the existing deep-link Button (no wrapper, so
+                the shrink/min-w-0 truncation layout above is untouched); left-click
+                still opens the pane. No manual handlers or preventDefault here (WARDEN-926).
+              */}
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    onClick={() => openTop(attentionTop)}
+                    aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
+                    className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
+                  >
+                    <span className={cn('size-2 rounded-full shrink-0', dotForState(attentionTop.state))} aria-hidden />
+                    <span className="text-sm whitespace-nowrap shrink-0">You&rsquo;re needed in</span>
+                    <span className="text-sm font-semibold max-w-40 truncate">{attentionTop.name ?? attentionTop.id}</span>
+                    <span className="text-xs text-blue-700/90 dark:text-blue-200/80 max-w-sm truncate">{attentionReason(attentionTop)}</span>
+                    <span className="text-xs text-blue-600 dark:text-blue-300 shrink-0 whitespace-nowrap">open →</span>
+                  </Button>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => openTop(attentionTop)}>Open</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  {/* The (max-w-40 truncated) name shown in "You're needed in {name}". */}
+                  <ContextMenuItem onSelect={() => copyWithToast(attentionTop.name || attentionTop.id)}>Copy pane name</ContextMenuItem>
+                  {/* The (max-w-sm truncated) "because X" line, fully copyable here. */}
+                  <ContextMenuItem onSelect={() => copyWithToast(attentionReason(attentionTop))}>Copy reason</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             </div>
           </div>
         )}
