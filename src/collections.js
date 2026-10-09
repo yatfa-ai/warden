@@ -31,6 +31,31 @@ export async function saveCollections(collections) {
   await atomicWriteJson(collectionsPath, collections);
 }
 
+// Serialized read-modify-write (WARDEN-1675). collections.json is a WHOLE-FILE
+// document: create/update/delete each load → mutate in memory → saveCollections
+// (full atomicWriteJson). Writes are torn-free but not isolated, so overlapping
+// requests read the same snapshot and last write wins (5 concurrent creates
+// persisted 1; 2 concurrent deletes removed 1; the duplicate-name guard was racy).
+// Mirrors mutateCatalog in config.js: every mutation runs through ONE promise
+// chain and the read happens INSIDE the critical section so each mutation sees the
+// previous one's result. Return a falsy value from `fn` to skip the write. A
+// rejecting mutation does not poison later calls (the chain swallows the failure,
+// while the returned promise still rejects for THIS caller).
+//
+// LIMITATION — IN-PROCESS ONLY, same as mutateCatalog: only the server writes
+// collections.json (src/cli.js does not import this module), so no cross-process
+// ordering is provided and a file lock is deliberately out of scope.
+let collectionsChain = Promise.resolve();
+export function mutateCollections(fn) {
+  const run = collectionsChain.then(async () => {
+    const next = await fn(await loadCollections());
+    if (next) await saveCollections(next);
+    return next;
+  });
+  collectionsChain = run.catch(() => {});
+  return run;
+}
+
 /**
  * Generate a unique ID for a new collection.
  */
@@ -52,22 +77,24 @@ export async function createCollection(name, criteria = {}, metadata = {}) {
     throw new Error('Collection name is required');
   }
 
-  const collections = await loadCollections();
-  if (collections.some((c) => c.name === trimmedName)) {
-    throw new Error(`Collection "${trimmedName}" already exists`);
-  }
+  let newCollection;
+  await mutateCollections((collections) => {
+    if (collections.some((c) => c.name === trimmedName)) {
+      throw new Error(`Collection "${trimmedName}" already exists`);
+    }
 
-  const now = Date.now();
-  const newCollection = {
-    id: generateId(),
-    name: trimmedName,
-    criteria: criteria || {},
-    metadata: metadata || {},
-    createdAt: now,
-    updatedAt: now,
-  };
+    const now = Date.now();
+    newCollection = {
+      id: generateId(),
+      name: trimmedName,
+      criteria: criteria || {},
+      metadata: metadata || {},
+      createdAt: now,
+      updatedAt: now,
+    };
 
-  await saveCollections([...collections, newCollection]);
+    return [...collections, newCollection];
+  });
   return newCollection;
 }
 
@@ -104,27 +131,29 @@ export async function updateCollection(id, updates = {}) {
     patch.metadata = src.metadata;
   }
 
-  const collections = await loadCollections();
-  const index = collections.findIndex((c) => c.id === id);
-  if (index === -1) {
-    throw new Error('Collection not found');
-  }
+  let updated;
+  await mutateCollections((collections) => {
+    const index = collections.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error('Collection not found');
+    }
 
-  // Name uniqueness on the same trimmed value that gets stored (self excluded).
-  if (patch.name !== undefined && collections.some((c) => c.name === patch.name && c.id !== id)) {
-    throw new Error(`Collection "${patch.name}" already exists`);
-  }
+    // Name uniqueness on the same trimmed value that gets stored (self excluded).
+    if (patch.name !== undefined && collections.some((c) => c.name === patch.name && c.id !== id)) {
+      throw new Error(`Collection "${patch.name}" already exists`);
+    }
 
-  const updated = {
-    ...collections[index],
-    ...patch,
-    id: collections[index].id, // Preserve original ID
-    createdAt: collections[index].createdAt, // Preserve creation time
-    updatedAt: Date.now(),
-  };
+    updated = {
+      ...collections[index],
+      ...patch,
+      id: collections[index].id, // Preserve original ID
+      createdAt: collections[index].createdAt, // Preserve creation time
+      updatedAt: Date.now(),
+    };
 
-  collections[index] = updated;
-  await saveCollections(collections);
+    collections[index] = updated;
+    return collections;
+  });
   return updated;
 }
 
@@ -134,13 +163,16 @@ export async function updateCollection(id, updates = {}) {
  * @returns {boolean} True if deleted, false if not found
  */
 export async function deleteCollection(id) {
-  const collections = await loadCollections();
-  const filtered = collections.filter((c) => c.id !== id);
-  if (filtered.length === collections.length) {
-    return false; // Not found
-  }
-  await saveCollections(filtered);
-  return true;
+  let deleted = false;
+  await mutateCollections((collections) => {
+    const filtered = collections.filter((c) => c.id !== id);
+    if (filtered.length === collections.length) {
+      return undefined; // Not found — skip the write
+    }
+    deleted = true;
+    return filtered;
+  });
+  return deleted;
 }
 
 /**
