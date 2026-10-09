@@ -7,8 +7,10 @@
 // runs on mount and after every Settings save (queryClient.fetchQuery with
 // staleTime: 0), so subscribers live-update without a reload.
 
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout } from '@/lib/appConfigQuery';
+import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectIssueLinksEnabled, selectIssueLinkTrackersRaw, selectObserverAutoStart, selectObserverSessionTimeout, selectShowHostTags } from '@/lib/appConfigQuery';
+import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { fetchBounded } from '@/lib/api';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 
@@ -83,4 +85,65 @@ export function usePollIntervalMs(): number {
     select: (cfg) => resolvePollIntervalMs(cfg?.pollIntervalMs),
   });
   return data ?? WEB_POLL_DEFAULT_MS;
+}
+
+/** WARDEN-37 — show the host tag in pane headers (defaults true until config loads). */
+export function useShowHostTags(): boolean {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: selectShowHostTags,
+  });
+  return data ?? true;
+}
+
+/** WARDEN-1388 — issue-key link integration toggle (strict `=== true`; off until config loads). */
+export function useIssueLinksEnabled(): boolean {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: selectIssueLinksEnabled,
+  });
+  return data ?? false;
+}
+
+const NO_ISSUE_ENTRIES: IssueLinkEntry[] = [];
+
+/**
+ * WARDEN-1388 — the tracker mapping, defensively re-normalized on every read (a
+ * hand-edited config.json bypasses PUT sanitization). `select` returns the raw
+ * array (TanStack structural sharing keeps its identity while the body is
+ * unchanged) and the memo keeps the normalized array stable, so effects keyed on
+ * it do not refire every render. Empty until config loads.
+ */
+export function useIssueLinkTrackers(): IssueLinkEntry[] {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: selectIssueLinkTrackersRaw,
+  });
+  return useMemo(() => {
+    const out = normalizeIssueLinkEntries(data);
+    return out.length === 0 ? NO_ISSUE_ENTRIES : out;
+  }, [data]);
+}
+
+/**
+ * WARDEN-1394 — the markdown issue-key linkifier's entry set for the fleet-level
+ * markdown surfaces (observer messages, directive text, transcript messages).
+ * Unlike the terminal (strict per-pane project scoping), the markdown path
+ * consults EVERY configured entry whose prefix is unique across the set; a prefix
+ * mapped under two projects links nowhere. Gated on the integration toggle so OFF
+ * (the default) yields [] — no plugin registration, byte-identical rendering.
+ */
+export function useMarkdownIssueEntries(): IssueLinkEntry[] {
+  const enabled = useIssueLinksEnabled();
+  const trackers = useIssueLinkTrackers();
+  return useMemo(
+    () => (enabled ? unambiguousPrefixEntries(trackers) : NO_ISSUE_ENTRIES),
+    [enabled, trackers],
+  );
 }

@@ -9,6 +9,7 @@ import { openExternalUrl, forwardPaneMetrics } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { findUrlCandidates, maskUrls, maskSpans } from '@/lib/url-links';
+import { useIssueLinksEnabled, useIssueLinkTrackers, useShowHostTags } from '@/lib/appConfigHooks';
 import { findIssueCandidates, issueTrackerUrl, paneIssueEntryFor, shouldResolvePaneProject, type IssueLinkEntry } from '@/lib/issue-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/uiStore';
@@ -224,19 +225,6 @@ interface Props {
   // theme id stopped being a prop too — it is the store's derived
   // `useTerminalThemeId()` (terminalColorScheme folded over the NON-persisted
   // OS-resolved theme id), subscribed to directly below.
-  // Show the host tag in the pane header (WARDEN-290). Mirrors the sidebar's
-  // showHostTags preference (WARDEN-37) onto the pane surface so a cross-host
-  // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
-  // one toggle governs both surfaces. Undefined/true → shown, false → hidden.
-  showHostTags?: boolean;
-  // WARDEN-1388: the issue-key link integration. Master toggle + per-project
-  // tracker mapping, both from /api/config (server config, not a UI pref) —
-  // pure pass-through from App via PaneGrid, mirrored into refs below so a
-  // Settings save applies LIVE to already-open panes without a re-attach.
-  // Both default to off/empty: with either missing, the link provider's output
-  // is byte-identical to pre-1388 (no pixel changes anywhere).
-  issueLinksEnabled?: boolean;
-  issueLinkTrackers?: IssueLinkEntry[];
   // WARDEN-231: a new chat was spawned from this pane's recovery panel (open-
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
@@ -261,7 +249,14 @@ interface Props {
 // it may probe again (see existsFailedAtRef).
 const EXISTS_FAILURE_COOLDOWN_MS = 15_000;
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, showHostTags, issueLinksEnabled, issueLinkTrackers, onSpawned, reconnectToken, onPhaseChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, onSpawned, reconnectToken, onPhaseChange }: Props) {
+  // Show the host tag in the pane header (WARDEN-290; pref WARDEN-37) and the issue-key
+  // link integration (WARDEN-1388) are read straight from the shared ['app-config']
+  // cache (WARDEN-1714, slice 54) — a Settings save live-updates open panes with no prop
+  // chain. Defaults before config loads: host tag shown, integration off, no trackers.
+  const showHostTags = useShowHostTags();
+  const issueLinksEnabled = useIssueLinksEnabled();
+  const issueLinkTrackers = useIssueLinkTrackers();
   // WARDEN-1322 (slice 3): the six shared terminal prefs come from the store,
   // keeping the exact variable names the Props destructure used so every
   // consumer below (safeFontSize/safeScrollback/safeFontFamily, copyOnSelectRef,
@@ -427,10 +422,10 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // notifyErrors): the refs are what make a Settings save apply to
   // already-open panes without tearing down the terminal. Assigned during
   // render, the same latest-value mirror pattern as copyOnSelectRef above.
-  const issueLinksEnabledRef = useRef(issueLinksEnabled === true);
-  issueLinksEnabledRef.current = issueLinksEnabled === true;
-  const issueLinkTrackersRef = useRef<IssueLinkEntry[]>(issueLinkTrackers ?? []);
-  issueLinkTrackersRef.current = issueLinkTrackers ?? [];
+  const issueLinksEnabledRef = useRef(issueLinksEnabled);
+  issueLinksEnabledRef.current = issueLinksEnabled;
+  const issueLinkTrackersRef = useRef<IssueLinkEntry[]>(issueLinkTrackers);
+  issueLinkTrackersRef.current = issueLinkTrackers;
   // The pane's project (strict, case-sensitive) — from the chat prop, exactly
   // what buildChat put there (src/chatMeta.js). Undefined/null for non-yatfa
   // panes → issueEntriesForProject yields [] → no linkification.
@@ -464,7 +459,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   useEffect(() => {
     if (resolvedProjectRequestedRef.current) return;
     const c = chat;
-    if (!c || !shouldResolvePaneProject(c, issueLinksEnabled === true, issueLinkTrackers ?? [])) return;
+    if (!c || !shouldResolvePaneProject(c, issueLinksEnabled, issueLinkTrackers)) return;
     resolvedProjectRequestedRef.current = true;
     // ONE bounded attempt. Deliberately NO caller signal / cleanup: this effect's
     // deps re-fire whenever the chats poll hands PaneTile a fresh chat object,
@@ -1401,8 +1396,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // somewhere no click goes. The tooltip is built at construction time from
   // the entry (issueTrackerUrl — the same builder the click uses, no async
   // probe): `Issue keys here open https://<tracker>/<PREFIX>-…`.
-  const headerEntry = issueLinksEnabled === true
-    ? paneIssueEntryFor(issueLinkTrackers ?? [], chat?.project, resolvedProject)
+  const headerEntry = issueLinksEnabled
+    ? paneIssueEntryFor(issueLinkTrackers, chat?.project, resolvedProject)
     : null;
 
   return (

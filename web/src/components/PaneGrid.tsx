@@ -15,7 +15,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
-import type { IssueLinkEntry } from '@/lib/issue-links';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
 import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity, useReconnectTokens, useExternalSearchQuery } from '@/lib/uiStore';
 import {
@@ -111,17 +110,8 @@ interface Props {
   // destructure used (see below the signature) and every drag / template /
   // equalize / reset-reorder call site is textually unchanged.
   //
-  // Show the host tag in each pane header (WARDEN-290). Pure pass-through to
-  // PaneTile — App owns the persisted showHostTags pref (displaySettings) so a
-  // Settings toggle live-updates already-open pane headers, mirroring the
-  // sidebar's live update.
-  showHostTags?: boolean;
-  // WARDEN-1388: the issue-key link integration (master toggle + per-project
-  // tracker mapping, both /api/config server config). Pure pass-through to
-  // PaneTile, exactly the showHostTags shape — App owns the fetch
-  // (refreshConfigPrefs) so a Settings save live-updates already-open panes.
-  issueLinksEnabled?: boolean;
-  issueLinkTrackers?: IssueLinkEntry[];
+  // WARDEN-1714 (slice 54): showHostTags / issueLinksEnabled / issueLinkTrackers no
+  // longer pass through here — PaneTile reads them from the ['app-config'] cache.
   // WARDEN-909: drag a pane header onto ANOTHER pane tile in this grid to swap
   // the two panes' positions. App owns the mutation (swapPanes over the active
   // workspace's openPanes via the setOpenPanes shim); PaneGrid only reports the
@@ -135,7 +125,7 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, showHostTags, issueLinksEnabled, issueLinkTrackers, onReorderPanes, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, onReorderPanes, onPanePhaseChange }: Props) {
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
@@ -823,9 +813,6 @@ export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceK
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
                     onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} onBrowseFiles={() => openBrowseFor(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
-                    showHostTags={showHostTags}
-                    issueLinksEnabled={issueLinksEnabled}
-                    issueLinkTrackers={issueLinkTrackers}
                     onSpawned={onSpawned}
                     reconnectToken={reconnectTokens[t.id]}
                     onPhaseChange={onPanePhaseChange ? (phase) => onPanePhaseChange(t.id, phase) : undefined}

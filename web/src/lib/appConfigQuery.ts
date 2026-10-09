@@ -72,3 +72,26 @@ export function selectObserverSessionTimeout(cfg: AppConfig | null | undefined):
 export function selectConfirmDestructiveActions(cfg: AppConfig | null | undefined): boolean {
   return cfg?.confirmDestructiveActions ?? true;
 }
+
+/** WARDEN-37 — show the host tag in pane headers. Defaults TRUE (before config loads / key absent). */
+export function selectShowHostTags(cfg: AppConfig | null | undefined): boolean {
+  return cfg?.showHostTags ?? true;
+}
+
+/**
+ * WARDEN-1388: issue-key link integration master toggle (server config, off by
+ * default — `=== true` keeps a missing/absent field OFF, the same strict reading
+ * the server's boolean default encodes).
+ */
+export function selectIssueLinksEnabled(cfg: AppConfig | null | undefined): boolean {
+  return cfg?.issueLinksEnabled === true;
+}
+
+/**
+ * WARDEN-1388: the RAW tracker mapping off the body (untouched — GET is a raw
+ * arrayOrEmpty passthrough). Normalization is composed in appConfigHooks.ts so
+ * this module keeps its no-imports contract.
+ */
+export function selectIssueLinkTrackersRaw(cfg: AppConfig | null | undefined): unknown {
+  return cfg?.issueLinkTrackers;
+}
