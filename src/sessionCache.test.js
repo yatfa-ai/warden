@@ -338,15 +338,15 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // response" shape this cache exists to remove, just smaller.
       const gate = openGate();
       const remote = fakeRemote({ wedged: 1 }, { gate: new Map([['wedged', gate.promise]]) });
-      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 50 });
+      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 500 });
 
       await cache.snapshot(['wedged'], 40);   // the LAUNCHER — pays the window
       const t0 = Date.now();
       await cache.snapshot(['wedged'], 40);   // a JOINER — must not pay it again
       const joinerMs = Date.now() - t0;
 
-      assert.ok(joinerMs < 40,
-        `a joiner must not re-spend the settle window (took ${joinerMs}ms of a 50ms window)`);
+      assert.ok(joinerMs < 250,
+        `a joiner must not re-spend the settle window (took ${joinerMs}ms of a 500ms window)`);
       assert.strictEqual(remote.countFor('wedged'), 1, 'and it did not stack a second fetch');
       gate.release();
     });
@@ -357,13 +357,13 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       const hosts = ['s1', 's2', 's3', 's4', 's5'];
       const gate = new Map(hosts.map((h) => [h, g.promise]));
       const remote = fakeRemote(Object.fromEntries(hosts.map((h) => [h, 1])), { gate });
-      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 40 });
+      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 400 });
 
       const t0 = Date.now();
       await cache.snapshot(hosts, 40);
       const ms = Date.now() - t0;
 
-      assert.ok(ms < 40 * 2, `five cold hosts must cost ONE settle window, not five (took ${ms}ms)`);
+      assert.ok(ms < 400 * 2, `five cold hosts must cost ONE settle window, not five (took ${ms}ms)`);
       assert.strictEqual(remote.calls.length, 5, 'all five were still scheduled concurrently');
       g.release();
     });
