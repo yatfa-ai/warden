@@ -10,7 +10,7 @@
 //
 // WARDEN-1701 (slice 51) moved the two observer lifecycle prefs here too.
 // Later slices can reuse this key with their own `select` (pollIntervalMs,
-// confirmDestructiveActions, ...). Settings' draft editor
+// ...). Settings' draft editor
 // (useBackendConfig) and useNotificationPrefs are separate concerns.
 
 /** The ONE cache key for the app-level /api/config fact. */
@@ -62,4 +62,13 @@ export function selectObserverAutoStart(cfg: AppConfig | null | undefined): bool
  */
 export function selectObserverSessionTimeout(cfg: AppConfig | null | undefined): number | null {
   return cfg ? (cfg.observerSessionTimeout ?? null) : 30;
+}
+
+/**
+ * WARDEN-1706 — "confirm before destructive actions" pref. Defaults TRUE (before
+ * config loads, on a failed first fetch, or when the key is absent/null). `??`
+ * not `||` so an explicit false passes through.
+ */
+export function selectConfirmDestructiveActions(cfg: AppConfig | null | undefined): boolean {
+  return cfg?.confirmDestructiveActions ?? true;
 }
