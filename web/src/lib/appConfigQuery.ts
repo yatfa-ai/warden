@@ -8,8 +8,9 @@
 // with an injectable `fetcher`, so `node --test` drives them directly. The
 // bounded fetcher is injected from the React glue (appConfigHooks.ts).
 //
+// WARDEN-1701 (slice 51) moved the two observer lifecycle prefs here too.
 // Later slices can reuse this key with their own `select` (pollIntervalMs,
-// confirmDestructiveActions, observer prefs, ...). Settings' draft editor
+// confirmDestructiveActions, ...). Settings' draft editor
 // (useBackendConfig) and useNotificationPrefs are separate concerns.
 
 /** The ONE cache key for the app-level /api/config fact. */
@@ -45,4 +46,20 @@ export async function fetchAppConfig(fetcher: typeof fetch = fetch): Promise<App
  */
 export function selectCompanionTransportEnabled(cfg: AppConfig | null | undefined): boolean {
   return cfg?.companionTransportEnabled ?? true;
+}
+
+/** WARDEN-332 — observer auto-start. Defaults false (config not loaded / key absent). */
+export function selectObserverAutoStart(cfg: AppConfig | null | undefined): boolean {
+  return cfg?.observerAutoStart ?? false;
+}
+
+/**
+ * WARDEN-332 — observer idle auto-close timeout (minutes), or null = disabled.
+ * TWO-ARMED default (load-bearing): before any config body exists the boot
+ * default is 30 (config.js fresh-install value); once a body has loaded, an
+ * ABSENT key coalesces to null (fail-safe — never auto-close when unknown) and
+ * an explicit null stays null (user cleared the field; WARDEN-1172/1178).
+ */
+export function selectObserverSessionTimeout(cfg: AppConfig | null | undefined): number | null {
+  return cfg ? (cfg.observerSessionTimeout ?? null) : 30;
 }

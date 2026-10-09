@@ -471,13 +471,6 @@ function App() {
   // the force-kill / kill-chat useConfirmTarget machines) reads it via its
   // dependency array.
   const [confirmDestructiveActions, setConfirmDestructiveActions] = useState(true);
-  // WARDEN-332 — the two observer lifecycle preferences (auto-start + session
-  // auto-stop). Initialized to the config.js defaults (false / 30) and refreshed
-  // from /api/config below; passed to ObserverTabs so a Settings save applies
-  // without a reload. observerSessionTimeout may be null (user cleared the field)
-  // → disabled (never auto-close).
-  const [observerAutoStart, setObserverAutoStart] = useState(false);
-  const [observerSessionTimeout, setObserverSessionTimeout] = useState<number | null>(30);
   // WARDEN-394 — the dashboard auto-refresh cadence, resolved from the persisted
   // pollIntervalMs pref. Initialized to the 60s web default and refreshed from
   // /api/config below (after Settings saves) so a changed "Poll Interval" takes
@@ -583,12 +576,8 @@ function App() {
       // passthrough; only PUT is sanitized server-side).
       setIssueLinkTrackers(normalizeIssueLinkEntries(cfg.issueLinkTrackers));
       setConfirmDestructiveActions(cfg.confirmDestructiveActions ?? true);
-      // WARDEN-332 — observer lifecycle prefs. observerSessionTimeout is null OR
-      // a finite positive number (server.js:373-376); `?? null` preserves an
-      // explicit null (disabled) and coalesces an absent field to null (fail-safe
-      // — never auto-close when the value is unknown). A fresh install returns 30.
-      setObserverAutoStart(cfg.observerAutoStart ?? false);
-      setObserverSessionTimeout(cfg.observerSessionTimeout ?? null);
+      // WARDEN-1701 — the observer lifecycle prefs (auto-start / session timeout) are no
+      // longer App state: ObserverTabs reads them from the ['app-config'] query this fetch fills.
       // WARDEN-394 — resolve the persisted pollIntervalMs to a web-safe cadence.
       // cfg.pollIntervalMs defaults to 1500 (config.js CLI watch cadence); that,
       // any non-number/absent/sub-floor value, and anything over the ceiling all
@@ -1454,7 +1443,7 @@ function App() {
         </section>
         <ResizableRail side="observer" className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative" handleTitle="Drag to resize observer panel">
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
+            <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
           </ErrorBoundary>
         </ResizableRail>
         <HealthPanel

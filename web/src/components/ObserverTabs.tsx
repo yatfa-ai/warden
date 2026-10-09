@@ -12,6 +12,7 @@ import { EmptyState } from './EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
 import type { ObsUi } from '@/lib/storage';
 import { postJson } from '@/lib/api';
+import { useObserverAutoStart, useObserverSessionTimeout } from '@/lib/appConfigHooks';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -35,16 +36,6 @@ interface Props {
   focusedChat?: Chat | null;
   // Called when a resumed observer session should reconnect to its bound chat.
   onReconnectChat?: (chatKey: string, host?: string | null) => void;
-  // WARDEN-332 — the two preference-driven observer lifecycle behaviors. Both
-  // are persisted (server.js / config.js) and flow App → /api/config → here.
-  // observerAutoStart: when true, focusing a chat spawns+opens a bound observer
-  //   session with no manual "observe" click. Default false = today's manual
-  //   behavior, unchanged.
-  // observerSessionTimeout: auto-close an observer tab idle past N minutes. null
-  //   disables auto-close. Default 30 (see config.js) — a genuine, intended
-  //   behavior change for every fresh install, NOT a regression to "fix".
-  observerAutoStart?: boolean;
-  observerSessionTimeout?: number | null;
   // WARDEN-880 — the Attention view's data + handlers, threaded from App's lifted
   // attentionRollup (the SAME values the header AttentionBadge consumes). When
   // provided, a 4th "Attention" tab renders as a persistent peer to Activity/Directives
@@ -64,9 +55,16 @@ interface Props {
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, attention, issueEntries }: Props = {}) {
+export function ObserverTabs({ focusedChat, onReconnectChat, attention, issueEntries }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
+  // WARDEN-332 / WARDEN-1701 — the two observer lifecycle prefs come from the shared
+  // ['app-config'] query (refilled by App.refreshConfigPrefs after a Settings save), so a
+  // save applies without a reload. observerAutoStart: focusing a chat spawns+opens a bound
+  // observer (default false = fully manual). observerSessionTimeout: auto-close a tab idle
+  // past N minutes; null disables; boot default 30 (a deliberate fresh-install behavior).
+  const observerAutoStart = useObserverAutoStart();
+  const observerSessionTimeout = useObserverSessionTimeout();
   // WARDEN-1397 (client-state slice 10): ONE seed read of the ObsUi document.
   // loadObs is pure — a JSON.parse of the versioned warden:observer:v1 key — and
   // between this mount and the boot effect's re-read below nothing else writes
