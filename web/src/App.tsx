@@ -14,7 +14,7 @@ import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdi
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels, useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
+import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -389,14 +389,11 @@ function App() {
   // initializer did.
   // WARDEN-490 — per-host display labels (friendly names). A raw host string
   // ('(local)' / SSH host) → the human's label, shown in every host-tag display
-  // surface. Migrated onto the shared uiStore (roadmap WARDEN-1204 slice 6):
-  // App SUBSCRIBES to the fact instead of owning it in a useState — the old
-  // context provider and the SettingsPage props channel are gone, and readers
-  // plus the HostsSection writer subscribe at lib/uiStore directly.
-  // Pure client-side pref (like healthCollapsedHosts/defaultShellByHost):
-  // persisted by the saveUi effect below, never sent to the backend /
-  // /api/config. An empty map (or a host with no entry) = today's behavior.
-  const hostLabels = useHostLabels();
+  // surface. Migrated onto the shared uiStore (roadmap WARDEN-1204 slice 6);
+  // App does NOT subscribe (slice 45, WARDEN-1665): the readers and the
+  // HostsSection writer subscribe at lib/uiStore directly, and useTokenBudget
+  // reads uiStore.getState().hostLabels at alarm time, so a label edit no
+  // longer re-renders App. Pure client-side pref, persisted by the store.
   // WARDEN-500: the per-host expand/collapse state INSIDE Health's Host grouping.
   // Was a HealthDashboard-local useState that reset to {} on every restart — so
   // the durable grouping choice (WARDEN-468) survived reload but the collapsed
@@ -1461,7 +1458,7 @@ function App() {
   // the sidebar is the only session surface, and unsaved sessions are never
   // listed. The token-budget alarm's old deep-link into that page's heaviest-
   // first view goes with it; the alarm itself (toast + desktop) still fires.
-  useTokenBudget({ hostLabels });
+  useTokenBudget({});
   // Display customization settings
   const [displaySettings, setDisplaySettings] = useState({
     showHostTags: true,
