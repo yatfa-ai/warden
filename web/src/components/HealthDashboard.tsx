@@ -1448,6 +1448,16 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
                         host): the header is a plain div, not a collapse Button.
                         (WARDEN-741)
                       */}
+                      {/* WARDEN-1673: themed right-click menu on the Project-mode
+                          header (Roadmap WARDEN-362). ONE asChild trigger wraps the
+                          three header lines (name/checkbox/count, health distribution,
+                          host-span chips) so a right-click anywhere in them opens the
+                          menu; the agent rows beneath stay OUTSIDE it and keep their
+                          own menu. Left-click/hover (checkbox, CompanionIndicator
+                          tooltips) are untouched. */}
+                      <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                      <div className="flex flex-col gap-1 min-w-0">
                       <div className="flex items-center gap-1.5 px-1 py-1 min-w-0">
                         <span className="flex items-center shrink-0 pl-1">
                           <Checkbox
@@ -1531,6 +1541,22 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
                           );
                         })}
                       </div>
+                      </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          disabled={projectIds.length === 0}
+                          onSelect={() => toggleGroup(projectIds)}
+                        >
+                          {isSelectedAll(selectedIds, projectIds) ? 'Deselect all' : 'Select all'}
+                        </ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onSelect={() => copyWithToast(group.project)}>Copy project name</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(group.agents.map(agent => agent.name || agent.key || agent.id).join('\n'))}>
+                          Copy agent names
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                      </ContextMenu>
 
                       {/* Agents beneath, reusing the standard row (showHost=false —
                           project, like host, is the section key; don't repeat it
