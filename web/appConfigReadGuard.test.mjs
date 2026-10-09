@@ -42,3 +42,19 @@ test('(d) App.tsx has no confirmDestructiveActions state/setter; the gate reads 
   const gate = app.match(/const shouldConfirmDestructive = useCallback\([\s\S]*?\);/)?.[0] ?? '';
   assert.ok(/getQueryData/.test(gate) && /selectConfirmDestructiveActions/.test(gate), 'gate must use getQueryData + selectConfirmDestructiveActions');
 });
+
+// WARDEN-1709 (slice 53) — pollIntervalMs left App: usePollIntervalMs() reads the resolved
+// cadence from the ['app-config'] cache for App's poller and FileViewer; no prop chains remain.
+test('(e) pollIntervalMs is a hook read, not App state or a prop chain', () => {
+  assert.ok(!/setPollIntervalMs/.test(app), 'App.tsx must not have setPollIntervalMs');
+  assert.ok(!/useState<number>\(WEB_POLL_DEFAULT_MS\)/.test(app));
+  assert.ok(/const pollIntervalMs = usePollIntervalMs\(\)/.test(app));
+  for (const f of ['FileViewer', 'ChatSidebar', 'PaneGrid', 'PaneTile', 'HealthPanel', 'HealthDashboard']) {
+    const src = stripComments(read(`src/components/${f}.tsx`));
+    assert.ok(!/pollIntervalMs\??\s*:/.test(src), `${f} must not declare a pollIntervalMs prop`);
+    assert.ok(!/pollIntervalMs=\{/.test(src), `${f} must not pass a pollIntervalMs JSX attribute`);
+    if (f !== 'FileViewer') assert.ok(!/pollIntervalMs/.test(src), `${f} must not reference pollIntervalMs`);
+  }
+  assert.ok(/usePollIntervalMs\(\)/.test(stripComments(read('src/components/FileViewer.tsx'))));
+  assert.ok(!/^\s*import\s/m.test(query), 'appConfigQuery.ts stays import-free');
+});

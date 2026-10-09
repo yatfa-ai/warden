@@ -8,10 +8,9 @@ import { useHealthCollapsed, useSetHealthCollapsed } from '@/lib/uiStore';
 // button is a store write — a toggle re-renders only this wrapper, not App.
 export interface HealthPanelProps {
   onOpenChat: (id: string) => void;
-  pollIntervalMs: number;
 }
 
-export function HealthPanel({ onOpenChat, pollIntervalMs }: HealthPanelProps) {
+export function HealthPanel({ onOpenChat }: HealthPanelProps) {
   const companionTransportEnabled = useCompanionTransportEnabled();
   const healthCollapsed = useHealthCollapsed();
   const setHealthCollapsed = useSetHealthCollapsed();
@@ -21,7 +20,6 @@ export function HealthPanel({ onOpenChat, pollIntervalMs }: HealthPanelProps) {
       <HealthDashboard
         onOpenChat={onOpenChat}
         onClose={() => setHealthCollapsed(true)}
-        pollIntervalMs={pollIntervalMs}
         companionTransportEnabled={companionTransportEnabled}
       />
     </section>

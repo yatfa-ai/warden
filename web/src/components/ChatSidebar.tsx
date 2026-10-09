@@ -119,8 +119,6 @@ export interface ChatSidebarProps {
   loading: boolean;
   /** Per-host discovery failure reason (the unreachable state's "⟨reason⟩"). */
   discoverErrors: Record<string, string>;
-  /** Forward poll cadence to the FileViewer (unchanged from the pre-rebuild sidebar). */
-  pollIntervalMs: number;
 }
 
 type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection };
@@ -128,7 +126,7 @@ type SidebarView = { kind: 'root' } | { kind: 'host'; host: string } | { kind: '
 export function ChatSidebar({
   chats, tempChats, hosts, onOpenChat, onSpawnShell, onSaveSession,
   onReopenClosed, onRespawn, onKill, onRename, onRefresh, onDiscoverHost, loading,
-  discoverErrors, pollIntervalMs,
+  discoverErrors,
 }: ChatSidebarProps) {
   // Host connectivity (WARDEN-1651): subscribed here, not threaded from App — one shared TanStack key
   // (useHostStatuses, WARDEN-237), so this adds no second poll. Absent entry stays 'unknown', never offline.
@@ -689,7 +687,6 @@ export function ChatSidebar({
         line={fileTarget?.line}
         open={!!fileTarget}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
-        pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
     </div>

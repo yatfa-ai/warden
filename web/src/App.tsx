@@ -48,13 +48,13 @@ import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence } from '@/lib/useConfigPersistence';
 import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
-import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
+import { WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
 import { telemetryChatName } from '@/lib/telemetryChatName';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
 import { appConfigQueryKey, selectConfirmDestructiveActions, type AppConfig } from '@/lib/appConfigQuery';
-import { appConfigQueryFn } from '@/lib/appConfigHooks';
+import { appConfigQueryFn, usePollIntervalMs } from '@/lib/appConfigHooks';
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
 // are auto-discovered on mount so their dots are live without a click; remote SSH hosts stay
@@ -465,13 +465,12 @@ function App() {
   // (call-time read in spawnShell too, WARDEN-1600.)
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // WARDEN-394 — the dashboard auto-refresh cadence, resolved from the persisted
-  // pollIntervalMs pref. Initialized to the 60s web default and refreshed from
-  // /api/config below (after Settings saves) so a changed "Poll Interval" takes
-  // effect immediately without a reload. The stored value is ALWAYS already
-  // web-safe (resolvePollIntervalMs runs at read time), so the two poll effects
-  // below consume it directly — a stale CLI default (1500) or sub-floor value
-  // can never reach setInterval and flood SSH.
-  const [pollIntervalMs, setPollIntervalMs] = useState<number>(WEB_POLL_DEFAULT_MS);
+  // pollIntervalMs pref. WARDEN-1709: read from the shared ['app-config'] cache
+  // (60s web default until it loads); refreshConfigPrefs refreshes that cache after
+  // Settings saves so a changed "Poll Interval" takes effect without a reload. The
+  // hook resolves via resolvePollIntervalMs, so a stale CLI default (1500) or
+  // sub-floor value can never reach setInterval and flood SSH.
+  const pollIntervalMs = usePollIntervalMs();
   useEffect(() => {
     streamApi.connect();
     refresh();
@@ -570,12 +569,8 @@ function App() {
       setIssueLinkTrackers(normalizeIssueLinkEntries(cfg.issueLinkTrackers));
       // WARDEN-1701 — the observer lifecycle prefs (auto-start / session timeout) are no
       // longer App state: ObserverTabs reads them from the ['app-config'] query this fetch fills.
-      // WARDEN-394 — resolve the persisted pollIntervalMs to a web-safe cadence.
-      // cfg.pollIntervalMs defaults to 1500 (config.js CLI watch cadence); that,
-      // any non-number/absent/sub-floor value, and anything over the ceiling all
-      // land on the 60s web default (resolvePollIntervalMs). The resolved value
-      // feeds both dashboard poll effects so the pref actually governs refresh.
-      setPollIntervalMs(resolvePollIntervalMs(cfg.pollIntervalMs));
+      // WARDEN-1709 — pollIntervalMs is no longer App state: usePollIntervalMs() reads (and
+      // resolves) it from the ['app-config'] query this fetch fills.
       // WARDEN-882 — the companion transport toggle is read by HealthPanel
       // straight from the shared cache (WARDEN-1696); nothing to set here.
     } catch (e) {
@@ -1398,7 +1393,6 @@ function App() {
               onDiscoverHost={discoverHost}
               loading={loading}
               discoverErrors={discoverErrors}
-              pollIntervalMs={pollIntervalMs}
             />
           </ErrorBoundary>
         </ResizableRail>
@@ -1435,7 +1429,6 @@ function App() {
             // fetched by refreshConfigPrefs, live-updating already-open panes.
             issueLinksEnabled={displaySettings.issueLinksEnabled}
             issueLinkTrackers={issueLinkTrackers}
-            pollIntervalMs={pollIntervalMs}
             onReorderPanes={reorderPanes}
           />
         </section>
@@ -1446,7 +1439,6 @@ function App() {
         </ResizableRail>
         <HealthPanel
           onOpenChat={openChat}
-          pollIntervalMs={pollIntervalMs}
         />
       </main>
         </>

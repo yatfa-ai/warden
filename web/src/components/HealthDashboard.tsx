@@ -65,15 +65,6 @@ const HEALTH_FETCH_OPTS = pollerFetchOptions(HEALTH_POLL_MS);
 interface Props {
   onOpenChat: (id: string) => void;
   onClose: () => void;
-  // Follow live-update cadence for the fleet FileViewer (WARDEN-749). The SAME
-  // already-resolved web-safe interval App owns for ChatSidebar's FileViewer
-  // (resolvePollIntervalMs at the source) so Follow shares the dashboard's
-  // cadence rather than hardcoding its own. WARDEN-757 mounted the fleet
-  // FileViewer "mirroring ChatSidebar's mount verbatim" but OMITTED this prop
-  // (FileViewerProps.pollIntervalMs is required since WARDEN-749) — surfaced as a
-  // tsc error when this branch rebased past WARDEN-749/757; threaded here to keep
-  // the build green and complete the mirror the WARDEN-757 commit intended.
-  pollIntervalMs: number;
   // WARDEN-882 — whether the companion transport is enabled. Gates the per-host
   // "Remove companion" affordance's visibility (Host mode, remote hosts only).
   // The same gate every companion surface uses; the action is hidden unless the
@@ -635,7 +626,7 @@ const FLEET_GIT_AXES: FleetGitAxis[] = [
   },
 ];
 
-export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companionTransportEnabled }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1887,7 +1878,6 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
         chatId={fileTarget?.chatId ?? ''}
         filePath={fileTarget?.path ?? ''}
         open={!!fileTarget}
-        pollIntervalMs={pollIntervalMs}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />

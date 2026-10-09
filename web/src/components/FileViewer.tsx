@@ -55,7 +55,7 @@ import { splitPathSegments, ancestorDir, collapseCrumbs, crumbRunNeedsFloor } fr
 import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
 import { useStickToBottom } from '@/lib/useStickToBottom';
-import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
+import { usePollIntervalMs } from '@/lib/appConfigHooks';
 import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
 // The per-file git-diff READ seam (WARDEN-1187 / WARDEN-1194). BlameHash reads its
 // popover diff through the DETAIL reader — the sibling that also keeps the commit
@@ -93,12 +93,6 @@ interface FileViewerProps {
   // Optional so a render site that only needs to display (never navigate)
   // degrades to the plain non-clickable path; all three current sites wire it.
   onNavigate?: (path: string) => void;
-  // Follow live-update cadence (WARDEN-749): the already-resolved web-safe poll
-  // interval. App owns + resolves cfg.pollIntervalMs via resolvePollIntervalMs at
-  // the source (the same value the catalog poll uses), so Follow shares the
-  // dashboard's cadence rather than hardcoding its own. Drives ONLY the Follow
-  // toggle's visibility-gated poller; the rest of the viewer ignores it.
-  pollIntervalMs: number;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -192,7 +186,12 @@ function useGatedFetch<T>(opts: {
   }, deps);
 }
 
-export function FileViewer({ chatId, filePath, open, line, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, onNavigate, onOpenChange }: FileViewerProps) {
+  // Follow live-update cadence (WARDEN-749 → WARDEN-1709): the resolved web-safe poll
+  // interval read from the shared ['app-config'] cache (the same value App's catalog
+  // poll uses), so Follow shares the dashboard's cadence. Drives ONLY the Follow
+  // toggle's visibility-gated poller.
+  const pollIntervalMs = usePollIntervalMs();
   // The Rendered ⇄ Source toggle (WARDEN-480), read and written straight off the
   // shared client-state store (WARDEN-1288) rather than drilled down from App.
   const viewMode = useFileViewerViewMode();
@@ -476,7 +475,7 @@ export function FileViewer({ chatId, filePath, open, line, onNavigate, pollInter
   // cadence/file change clears the interval + listener (no leaked timers).
   useEffect(() => {
     if (!open || !follow) return;
-    const intervalMs = pollIntervalMs ?? WEB_POLL_DEFAULT_MS;
+    const intervalMs = pollIntervalMs;
     const tick = () => {
       if (document.visibilityState !== 'visible') return;
       void loadContent({ background: true });

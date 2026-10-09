@@ -10,6 +10,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout } from '@/lib/appConfigQuery';
 import { fetchBounded } from '@/lib/api';
+import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 
 /**
  * The fetcher the /api/config query runs through: the shared BOUNDED deadline
@@ -66,4 +67,20 @@ export function useObserverSessionTimeout(): number | null {
     select: selectObserverSessionTimeout,
   });
   return data === undefined ? 30 : data;
+}
+
+/**
+ * WARDEN-1709 — the resolved dashboard poll cadence (ms). `select` runs the tested
+ * `resolvePollIntervalMs` (CLI default 1500 / sub-floor / over-ceiling → web-safe),
+ * composed HERE so appConfigQuery.ts keeps its no-imports contract. Before config
+ * loads (or on a failed first fetch) it is the 60s web default.
+ */
+export function usePollIntervalMs(): number {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: (cfg) => resolvePollIntervalMs(cfg?.pollIntervalMs),
+  });
+  return data ?? WEB_POLL_DEFAULT_MS;
 }
