@@ -33,3 +33,12 @@ test('(b) HealthPanel reads the flag itself and takes no such prop', () => {
 test('(c) appConfigQuery.ts stays pure (no imports)', () => {
   assert.ok(!/^\s*import\s/m.test(query), 'appConfigQuery.ts must have no imports');
 });
+
+// WARDEN-1706 (slice 52) — confirmDestructiveActions left App.tsx: the shared destructive gate
+// reads the ['app-config'] cache at press time instead of subscribing via useState.
+test('(d) App.tsx has no confirmDestructiveActions state/setter; the gate reads the cache at press time', () => {
+  assert.ok(!/confirmDestructiveActions/.test(app), 'App.tsx must not reference confirmDestructiveActions');
+  assert.ok(!/setConfirmDestructiveActions/.test(app));
+  const gate = app.match(/const shouldConfirmDestructive = useCallback\([\s\S]*?\);/)?.[0] ?? '';
+  assert.ok(/getQueryData/.test(gate) && /selectConfirmDestructiveActions/.test(gate), 'gate must use getQueryData + selectConfirmDestructiveActions');
+});

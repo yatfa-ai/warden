@@ -53,7 +53,7 @@ import { swapPanes } from '@/lib/paneGrid';
 import { telemetryChatName } from '@/lib/telemetryChatName';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
-import { appConfigQueryKey } from '@/lib/appConfigQuery';
+import { appConfigQueryKey, selectConfirmDestructiveActions, type AppConfig } from '@/lib/appConfigQuery';
 import { appConfigQueryFn } from '@/lib/appConfigHooks';
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
@@ -464,13 +464,6 @@ function App() {
   // above: persisted by the saveUi effect below, never sent to the backend.
   // (call-time read in spawnShell too, WARDEN-1600.)
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
-  // "Confirm before destructive actions" preference (default on). Gates both
-  // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
-  // from /api/config on mount and refreshed after Settings saves. Declared up
-  // here because the shared destructive-confirm gate predicate below (feeding
-  // the force-kill / kill-chat useConfirmTarget machines) reads it via its
-  // dependency array.
-  const [confirmDestructiveActions, setConfirmDestructiveActions] = useState(true);
   // WARDEN-394 — the dashboard auto-refresh cadence, resolved from the persisted
   // pollIntervalMs pref. Initialized to the 60s web default and refreshed from
   // /api/config below (after Settings saves) so a changed "Poll Interval" takes
@@ -575,7 +568,6 @@ function App() {
       // hand the matcher a malformed mapping (GET is a raw arrayOrEmpty
       // passthrough; only PUT is sanitized server-side).
       setIssueLinkTrackers(normalizeIssueLinkEntries(cfg.issueLinkTrackers));
-      setConfirmDestructiveActions(cfg.confirmDestructiveActions ?? true);
       // WARDEN-1701 — the observer lifecycle prefs (auto-start / session timeout) are no
       // longer App state: ObserverTabs reads them from the ['app-config'] query this fetch fills.
       // WARDEN-394 — resolve the persisted pollIntervalMs to a web-safe cadence.
@@ -1105,8 +1097,14 @@ function App() {
 
   // The destructive-action gate BOTH kill machines consult. One predicate, two
   // useConfirmTarget call sites below (the close-workspace machine lives in
-  // <WorkspaceTabs/> and deliberately passes none).
-  const shouldConfirmDestructive = useCallback(() => confirmDestructiveActions, [confirmDestructiveActions]);
+  // <WorkspaceTabs/> and deliberately passes none). WARDEN-1706 — the pref is read
+  // from the shared ['app-config'] cache at PRESS time (useConfirmTarget.request calls
+  // this only on press), so App no longer subscribes to it; refreshConfigPrefs keeps
+  // the cache fresh after Settings saves. Default true before load / on failed fetch.
+  const shouldConfirmDestructive = useCallback(
+    () => selectConfirmDestructiveActions(queryClient.getQueryData<AppConfig>(appConfigQueryKey())),
+    [queryClient],
+  );
 
   // Force-kill confirmation. The ⏹ force-kill button sits directly beside
   // clear/download/close in the pane toolbar — a single misclick otherwise

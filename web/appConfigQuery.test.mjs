@@ -19,7 +19,7 @@ const { code } = await transformWithOxc(readFileSync(srcPath, 'utf8'), srcPath, 
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-app-config-query-test-'));
 const tmpFile = join(tmpDir, 'appConfigQuery.mjs');
 writeFileSync(tmpFile, code);
-const { APP_CONFIG_KEY, appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout } = await import(tmpFile);
+const { APP_CONFIG_KEY, appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout, selectConfirmDestructiveActions } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 const jsonResponse = (json, status = 200) => async (url) => {
@@ -69,4 +69,13 @@ test('observer session timeout selector: 30 before config, null once loaded-but-
   assert.equal(selectObserverSessionTimeout({}), null, 'absent key on a loaded body is fail-safe null');
   assert.equal(selectObserverSessionTimeout({ observerSessionTimeout: null }), null, 'explicit null = disabled');
   assert.equal(selectObserverSessionTimeout({ observerSessionTimeout: 45 }), 45);
+});
+
+test('confirm-destructive selector: true unless explicitly false', () => {
+  assert.equal(selectConfirmDestructiveActions(undefined), true);
+  assert.equal(selectConfirmDestructiveActions(null), true);
+  assert.equal(selectConfirmDestructiveActions({}), true);
+  assert.equal(selectConfirmDestructiveActions({ confirmDestructiveActions: null }), true);
+  assert.equal(selectConfirmDestructiveActions({ confirmDestructiveActions: true }), true);
+  assert.equal(selectConfirmDestructiveActions({ confirmDestructiveActions: false }), false);
 });
