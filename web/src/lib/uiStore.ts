@@ -748,9 +748,9 @@ export interface UiStoreState {
    * aliases a module-level default, WARDEN-896). RESET_PRESERVED_KEYS
    * (workspaces, activeWorkspaceId, paneHost, collapsed flags, widths, pane
    * ratios) are never in the patch, so they cannot move. The DISK half
-   * (the ObsUi payload rewrite) deliberately stays
-   * at App's call site — the uiStore.test.mjs saveObs guard pins exactly three
-   * production sites.
+   * (the ObsUi payload rewrite) deliberately stays out of the store, in
+   * lib/resetUiPrefs.ts (WARDEN-1677) — the uiStore.test.mjs saveObs census
+   * guard pins the exact production writer files.
    */
   resetUiPrefs: () => void;
 }

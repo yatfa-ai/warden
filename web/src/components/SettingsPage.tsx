@@ -65,7 +65,6 @@ interface Props {
   // SnippetsSection (WARDEN-1271) before it. WARDEN-1408 (slice 11): no
   // `alerts` group either — NotificationsSection subscribes to the store the
   // same way, and the DesktopAlertPrefs bag is retired.
-  resetUiPrefsToDefaults: () => void;
 }
 
 /**
@@ -80,7 +79,6 @@ interface Props {
 export function SettingsPage({
   onClose,
   onConfigChange,
-  resetUiPrefsToDefaults,
 }: Props) {
   // The backend /api/config persistence seam: GET on mount, PUT on Save, the
   // write-only secrets, the live test/runtime status. onSaved fires after a
@@ -395,7 +393,6 @@ export function SettingsPage({
               )}
 
               <ResetSection
-                resetUiPrefsToDefaults={resetUiPrefsToDefaults}
                 resettingBackend={resetting}
                 onResetBackendConfig={resetBackendConfig}
               />

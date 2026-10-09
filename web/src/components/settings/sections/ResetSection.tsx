@@ -28,13 +28,9 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Separator } from '@/components/ui/separator';
 import { SettingsSection } from '../SettingsSection';
+import { resetUiPrefsToDefaults } from '@/lib/resetUiPrefs';
 
 export interface ResetSectionProps {
-  // Reset every client-side UI PREF (appearance, terminal, new-chat, behavior)
-  // to its DEFAULT_UI value while preserving the open workspace (tabs/panes/
-  // focus/host map) and panel layout. App-owned callback; pure client-side,
-  // never touches the backend / config.json.
-  resetUiPrefsToDefaults: () => void;
   // True while the backend-config reset round-trip (POST /api/config/reset) is
   // in flight — disables the button so the destructive action can't double-fire.
   resettingBackend: boolean;
@@ -44,7 +40,7 @@ export interface ResetSectionProps {
   onResetBackendConfig: () => void;
 }
 
-export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onResetBackendConfig }: ResetSectionProps) {
+export function ResetSection({ resettingBackend, onResetBackendConfig }: ResetSectionProps) {
   // Both confirm dialogs are ALWAYS gated — these are rare, destructive-to-
   // preferences/config actions worth the friction regardless of the
   // confirmDestructiveActions kill-toggle (that toggle is about chat/session
@@ -52,9 +48,9 @@ export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onReset
   const [resetPrefsOpen, setResetPrefsOpen] = useState(false);
   const [resetBackendOpen, setResetBackendOpen] = useState(false);
 
-  // Confirm the workspace-preserving prefs reset: applies the App callback
-  // (which snaps every pref to its default and lets the saveUi effect persist
-  // it), closes the dialog, and toasts. The workspace (tabs/panes/focus) and
+  // Confirm the workspace-preserving prefs reset: calls lib/resetUiPrefs
+  // (which snaps every pref to its default in the store, where the always-mounted
+  // persistence hooks write it to disk), closes the dialog, and toasts. The workspace (tabs/panes/focus) and
   // panel layout are untouched by design.
   const confirmResetPrefs = () => {
     resetUiPrefsToDefaults();
