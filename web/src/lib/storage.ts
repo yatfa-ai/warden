@@ -1431,9 +1431,10 @@ export function persistUiState(
 }
 
 // Reset every UI PREF to its DEFAULT_UI value while copying the WORKSPACE +
-// panel-layout fields from `live`. Pure (no localStorage): the App callback
-// (resetUiPrefsToDefaults) applies it via the pref setters, and the existing
-// saveUi effect persists the result via persistUiState. This is the single
+// panel-layout fields from `live`. Pure (no localStorage): the reset
+// (lib/resetUiPrefs.ts resetUiPrefsToDefaults → the store's resetUiPrefs
+// action) applies it, and the store persistence hook writes the result via
+// persistUiState. This is the single
 // client-side "Reset UI preferences" path (the danger-zone button of the same
 // name): appearance/terminal/new-chat/behavior prefs snap to defaults while the
 // open workspace (tabs, panes, focus, host map) AND panel layout (collapse

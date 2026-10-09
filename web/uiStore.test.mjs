@@ -66,12 +66,14 @@ await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/stora
 // WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
 // erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
+await emit('src/lib/resetUiPrefs.ts', 'resetUiPrefs.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/uiStore', './uiStore.mjs'));
 await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS } =
   await import(join(tmpDir, 'storage.mjs'));
 const { createUiStore, uiStore, selectTerminalThemeId, selectActiveWorkspace, selectRecentlyClosed, selectOpenPanes, selectPersistedStorePrefs, STORE_PERSISTED_KEYS, RECENTLY_SAVED_TTL_MS, OBS_STORE_KEYS, selectPersistedObsPrefs } = await import(join(tmpDir, 'uiStore.mjs'));
 const { SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, clampObserverWidth, clampSidebarWidth } = await import(join(tmpDir, 'layout.mjs'));
+const { resetUiPrefsToDefaults } = await import(join(tmpDir, 'resetUiPrefs.mjs'));
 const { replySnippetPreview } = await import(join(tmpDir, 'quickReply.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -1927,7 +1929,7 @@ test('the four setters alone write NOTHING to localStorage (single-writer: Obser
   store.getState().setObserverAttentionFilters({ agent: 'all', host: 'web-02' });
   // The store deliberately has no write-through persistence for the ObsUi
   // namespace: a second writer here would silently race the ONE compile-locked
-  // saveObs effect (App's Settings-reset disk write is the only other site).
+  // saveObs effect (lib/resetUiPrefs.ts's Settings-reset disk write is the only other site).
   assert.equal(mem.get('warden:observer:v1'), undefined);
 });
 test('the four action identities are stable across writes (safe in a React dep array, and in App\u2019s obsResetSetters map)', () => {
@@ -2133,7 +2135,7 @@ test("'loadObs(' is read in exactly ONE component file — ObserverTabs.tsx — 
   );
 });
 
-test("'saveObs(' lives in exactly THREE production call sites — useObsPersistence.ts (the always-mounted store-half writer) + ObserverTabs.tsx (the compile-locked booted-gated bag effect, the component half) + App.tsx (the Settings-reset disk write) — plus its storage.ts definition (the ObsUi write-axis twin of the saveUi guard)", () => {
+test("'saveObs(' lives in exactly THREE production call sites — useObsPersistence.ts (the always-mounted store-half writer) + ObserverTabs.tsx (the compile-locked booted-gated bag effect, the component half) + lib/resetUiPrefs.ts (the Settings-reset disk write) — plus its storage.ts definition (the ObsUi write-axis twin of the saveUi guard)", () => {
   // The invariant this guards (WARDEN-832's "one writer per fact", applied to
   // the SECOND storage namespace; WARDEN-1397 slice 10): ObsUi has exactly
   // three writers, each with a distinct role — useObsPersistence's
@@ -2144,10 +2146,10 @@ test("'saveObs(' lives in exactly THREE production call sites — useObsPersiste
   // booted-gated saveObs effect, the COMPONENT-half writer whose payload is
   // the `satisfies Required<ObsUi>` compile-locked bag (so a field can only
   // reach disk through the bag; it also harmlessly re-asserts the four prefs
-  // it already holds live store values for); and App's reset write —
+  // it already holds live store values for); and the reset write (lib/resetUiPrefs.ts; App until WARDEN-1677) —
   // `saveObs(resetObsPrefsPreservingWorkspace(loadObs()))`, the disk half of
   // Settings → Reset (WARDEN-981), deliberately separated from the live half
-  // (see App's reset comment). Same file-set convention as the saveUi guard
+  // (see lib/resetUiPrefs.ts). Same file-set convention as the saveUi guard
   // above: storage.ts matches the pattern because it holds the `export
   // function saveObs(` definition itself, and tests are excluded (all suites
   // live in web/*.test.mjs, outside src/, but the exclusion is kept
@@ -2169,8 +2171,8 @@ test("'saveObs(' lives in exactly THREE production call sites — useObsPersiste
     .filter((p) => readFileSync(p, 'utf8').includes('saveObs('));
   assert.deepEqual(
     files.map((p) => p.slice(__dirname.length + 1)).sort(),
-    ['src/App.tsx', 'src/components/ObserverTabs.tsx', 'src/lib/storage.ts', 'src/lib/useObsPersistence.ts'],
-    "saveObs( must appear in exactly THREE production call sites (useObsPersistence.ts's always-mounted store-half writer + ObserverTabs.tsx's compile-locked booted-gated bag effect + App.tsx's Settings-reset disk write) plus its storage.ts definition — a fourth writer bypasses the Required<ObsUi> save bag",
+    ['src/components/ObserverTabs.tsx', 'src/lib/resetUiPrefs.ts', 'src/lib/storage.ts', 'src/lib/useObsPersistence.ts'],
+    "saveObs( must appear in exactly THREE production call sites (useObsPersistence.ts's always-mounted store-half writer + ObserverTabs.tsx's compile-locked booted-gated bag effect + lib/resetUiPrefs.ts's Settings-reset disk write) plus its storage.ts definition — a fourth writer bypasses the Required<ObsUi> save bag",
   );
 });
 
@@ -3699,11 +3701,28 @@ test('resetUiPrefs() aliases no module default: object/array values are fresh pe
   assert.deepEqual(a.getState().snippets, resetUiPrefDefaults().snippets);
   assert.equal(a.getState().observerActivityFilters.type, 'all');
 });
-test('resetUiPrefs() writes state only: no localStorage write (the disk half stays at App\'s saveObs site)', () => {
+test('resetUiPrefs() writes state only: no localStorage write (the disk half lives in lib/resetUiPrefs.ts)', () => {
   reset();
   const store = createUiStore();
   store.getState().resetUiPrefs();
   assert.equal(mem.size, 0);
+});
+test('resetUiPrefsToDefaults() (lib/resetUiPrefs.ts, WARDEN-1677): disk viewMode/filters default, openIds/activeId survive, store prefs default, RESET_PRESERVED key untouched', () => {
+  reset();
+  const dirtyFilters = { type: 'tool', host: 'web-01', agent: 'codex' };
+  saveObs({ openIds: ['s1'], activeId: 's1', viewMode: 'directives', activityFilters: dirtyFilters, directiveFilters: dirtyFilters, attentionFilters: dirtyFilters });
+  const obsDefaults = resetObsPrefDefaults();
+  const keep = [{ id: 'ws-keep', name: 'keep' }];
+  uiStore.setState({ workspaces: keep, observerViewMode: 'directives', observerActivityFilters: dirtyFilters });
+  resetUiPrefsToDefaults();
+  const disk = loadObs();
+  assert.deepEqual(disk.openIds, ['s1']);
+  assert.equal(disk.activeId, 's1');
+  for (const k of OBS_RESET_KEYS) assert.deepEqual(disk[k], obsDefaults[k], `disk ${k} defaulted`);
+  const st = uiStore.getState();
+  assert.deepEqual(st.observerViewMode, obsDefaults.viewMode);
+  assert.deepEqual(st.observerActivityFilters, obsDefaults.activityFilters);
+  assert.equal(st.workspaces, keep, 'workspaces (RESET_PRESERVED_KEY) untouched (===)');
 });
 
 console.log(`\n✓ UI STORE TESTS PASS (${passed})`);
