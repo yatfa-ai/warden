@@ -1,9 +1,10 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   saveUi,
   persistUiState,
   loadUi,
+  launchedEmpty,
   PERSISTED_PREF_KEYS,
   type UiState,
 } from '@/lib/storage';
@@ -51,8 +52,6 @@ export type PersistedPrefSnapshot = Required<
 >;
 
 export interface UseConfigPersistenceArgs {
-  /** True when this launch started with an empty workspace (suppresses workspace overwrite). */
-  startedEmpty: boolean;
   /** Reload chats/ssh-hosts from the disk catalog (App's chat-list refresh). */
   refresh: () => Promise<void>;
   /** Force a fresh fetch of notification prefs + broadcast to all subscribers. */
@@ -82,11 +81,18 @@ export interface UseConfigPersistenceResult {
  * (WARDEN-1471, WARDEN-1526).
  */
 export function useConfigPersistence({
-  startedEmpty,
   refresh,
   reloadNotificationPrefs,
   refreshConfigPrefs,
 }: UseConfigPersistenceArgs): UseConfigPersistenceResult {
+  // Stable for the session: true when THIS launch started in "Start empty" mode.
+  // This is a BOOT fact, NOT the live pref — it must stay pinned to the at-launch
+  // value. The live workspace is then a gated clean slate, not a legitimate
+  // workspace to persist, so for the whole session persistUiState carries the
+  // on-disk workspace forward (even after flipping back to "Reopen previous"),
+  // never the live arrays. Lazy initializer: runs once, in App's first render,
+  // before any effect (including the saveUi effect below).
+  const [startedEmpty] = useState(launchedEmpty);
   // The snapshot, subscribed ONCE (one selector, one subscription for all 41
   // store facts — every persisted fact lives on the store since slice 23).
   // useShallow keeps the returned object referentially stable across renders,

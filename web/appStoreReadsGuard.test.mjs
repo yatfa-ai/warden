@@ -55,3 +55,18 @@ test('useConfigPersistence reads restoreOnStartup itself, not as an arg', () => 
   assert.doesNotMatch(args.slice(0, args.indexOf('}')), /restoreOnStartup/);
   assert.doesNotMatch(appSrc, /useConfigPersistence\(\{[^}]*restoreOnStartup/);
 });
+
+// WARDEN-1685 (roadmap WARDEN-1204, slice 48): the "launched in Start empty" boot
+// fact is derived INSIDE useConfigPersistence; App no longer reads the persisted
+// document. Mutation check: re-add `useState(() => loadUi())` to App.tsx -> red.
+test('App.tsx neither imports nor calls loadUi (non-comment code)', () => {
+  const code = appSrc.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.doesNotMatch(code, /\bloadUi\b/);
+  assert.doesNotMatch(code, /\bstartedEmpty\b/);
+});
+
+test('useConfigPersistence derives startedEmpty via lazy useState(launchedEmpty), not as an arg', () => {
+  assert.match(persistSrc, /useState\(launchedEmpty\)/);
+  const args = persistSrc.slice(persistSrc.indexOf('interface UseConfigPersistenceArgs'));
+  assert.doesNotMatch(args.slice(0, args.indexOf('\n}')), /startedEmpty/);
+});
