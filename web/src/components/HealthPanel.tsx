@@ -1,5 +1,6 @@
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { HEALTH_WIDTH } from '@/lib/layout';
+import { useCompanionTransportEnabled } from '@/lib/appConfigHooks';
 import { useHealthCollapsed, useSetHealthCollapsed } from '@/lib/uiStore';
 
 // WARDEN-1645 (client-state slice 42): the collapsible health column, extracted
@@ -8,10 +9,10 @@ import { useHealthCollapsed, useSetHealthCollapsed } from '@/lib/uiStore';
 export interface HealthPanelProps {
   onOpenChat: (id: string) => void;
   pollIntervalMs: number;
-  companionTransportEnabled: boolean;
 }
 
-export function HealthPanel({ onOpenChat, pollIntervalMs, companionTransportEnabled }: HealthPanelProps) {
+export function HealthPanel({ onOpenChat, pollIntervalMs }: HealthPanelProps) {
+  const companionTransportEnabled = useCompanionTransportEnabled();
   const healthCollapsed = useHealthCollapsed();
   const setHealthCollapsed = useSetHealthCollapsed();
   return (

@@ -52,6 +52,9 @@ import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS, WEB_POLL_FLOOR_MS } from '@
 import { swapPanes } from '@/lib/paneGrid';
 import { telemetryChatName } from '@/lib/telemetryChatName';
 import { toast } from 'sonner';
+import { useQueryClient } from '@tanstack/react-query';
+import { appConfigQueryKey } from '@/lib/appConfigQuery';
+import { appConfigQueryFn } from '@/lib/appConfigHooks';
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
 // are auto-discovered on mount so their dots are live without a click; remote SSH hosts stay
@@ -82,6 +85,7 @@ function applyOptimisticGuard(list: Chat[], killed: Set<string>, renamed: Map<st
 installRendererErrorCapture();
 
 function App() {
+  const queryClient = useQueryClient();
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -482,15 +486,6 @@ function App() {
   // below consume it directly — a stale CLI default (1500) or sub-floor value
   // can never reach setInterval and flood SSH.
   const [pollIntervalMs, setPollIntervalMs] = useState<number>(WEB_POLL_DEFAULT_MS);
-  // WARDEN-882 — whether the companion transport is enabled (the per-host
-  // Go-binary transport, default on since WARDEN-1379). Read from /api/config
-  // on mount and after Settings saves, then threaded into Fleet Health so the
-  // per-host "Remove companion" action appears ONLY when the transport is on
-  // (the same gate every companion surface uses). The companion can be removed
-  // even after the flag is turned off, but the affordance is shown only while
-  // it's on — matching the WARDEN-878 companion-state chip's future gating.
-  const [companionTransportEnabled, setCompanionTransportEnabled] = useState(true);
-
   useEffect(() => {
     streamApi.connect();
     refresh();
@@ -567,7 +562,9 @@ function App() {
   // and after Settings saves, so toggles take effect immediately without a reload.
   const refreshConfigPrefs = useCallback(async () => {
     try {
-      const cfg = await fetch('/api/config').then((r) => r.json());
+      // WARDEN-1696: the config body lands in the shared ['app-config'] cache, so
+      // HealthPanel's useCompanionTransportEnabled live-updates on every save.
+      const cfg = await queryClient.fetchQuery({ queryKey: appConfigQueryKey(), queryFn: appConfigQueryFn, staleTime: 0 });
       setDisplaySettings({
         showHostTags: cfg.showHostTags ?? true,
         showTypeBadges: cfg.showTypeBadges ?? true,
@@ -598,13 +595,12 @@ function App() {
       // land on the 60s web default (resolvePollIntervalMs). The resolved value
       // feeds both dashboard poll effects so the pref actually governs refresh.
       setPollIntervalMs(resolvePollIntervalMs(cfg.pollIntervalMs));
-      // WARDEN-882 — companion transport toggle drives the Fleet Health
-      // per-host "Remove companion" affordance's visibility.
-      setCompanionTransportEnabled(cfg.companionTransportEnabled ?? true);
+      // WARDEN-882 — the companion transport toggle is read by HealthPanel
+      // straight from the shared cache (WARDEN-1696); nothing to set here.
     } catch (e) {
       console.error('Failed to refresh config preferences:', e);
     }
-  }, []);
+  }, [queryClient]);
 
   // Persist the live pref snapshot to disk (honoring "Restore workspace on
   // startup") and expose handleConfigChange — the post-Settings orchestration
@@ -1464,7 +1460,6 @@ function App() {
         <HealthPanel
           onOpenChat={openChat}
           pollIntervalMs={pollIntervalMs}
-          companionTransportEnabled={companionTransportEnabled}
         />
       </main>
         </>
