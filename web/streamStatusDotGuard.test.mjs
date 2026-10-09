@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(resolve(__dirname, 'src/App.tsx'), 'utf8');
+const paneActivitySrc = readFileSync(resolve(__dirname, 'src/components/PaneActivitySync.tsx'), 'utf8');
 const dotSrc = readFileSync(resolve(__dirname, 'src/components/StreamStatusDot.tsx'), 'utf8');
 
 test('(a) connection state + handler slots + write-only refresh state are gone from App.tsx', () => {
@@ -20,7 +21,9 @@ test('(a) connection state + handler slots + write-only refresh state are gone f
   }
   assert.ok(!/streamApi\.onOpen\b/.test(appSrc), 'streamApi.onOpen must not be assigned in App.tsx');
   assert.ok(!/streamApi\.onClose\b/.test(appSrc), 'streamApi.onClose must not be assigned in App.tsx');
-  assert.ok(/streamApi\.onAnyMessage\b/.test(appSrc), 'onAnyMessage stays in App (feeds markPaneActivity)');
+  // WARDEN-1691: onAnyMessage moved to <PaneActivitySync/>; App no longer touches it.
+  assert.ok(!/\b(onAnyMessage|markPaneActivity|clearPaneActivity)\b/.test(appSrc), 'App must not reference onAnyMessage/markPaneActivity/clearPaneActivity');
+  assert.ok(/streamApi\.onAnyMessage\b/.test(paneActivitySrc), 'onAnyMessage lives in PaneActivitySync (feeds markPaneActivity)');
 });
 
 test('(b) <StreamStatusDot/> is rendered once in App; component owns handlers and seeds from streamApi.ready', () => {

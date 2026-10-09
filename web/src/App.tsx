@@ -13,7 +13,7 @@ import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen, useSettingsOpen, useSetSettingsOpen } from '@/lib/uiStore';
+import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen, useSettingsOpen, useSetSettingsOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -36,6 +36,7 @@ import { PanelToggleButtons } from '@/components/PanelToggleButtons';
 import { PanelLayoutSync } from '@/components/PanelLayoutSync';
 import { AppearanceSync } from '@/components/AppearanceSync';
 import { AppMenuBridge } from '@/components/AppMenuBridge';
+import { PaneActivitySync } from '@/components/PaneActivitySync';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
 import { ResizableRail } from '@/components/ResizableRail';
@@ -139,8 +140,6 @@ function App() {
   const setOpenPanes = useSetOpenPanes();
   const setFocused = useSetFocused();
   const setMaximized = useSetMaximized();
-  const markPaneActivity = useMarkPaneActivity();
-  const clearPaneActivity = useClearPaneActivity();
   const revealPane = useRevealPane();
   const dropRecentlyClosed = useDropRecentlyClosed();
   const markRecentlySaved = useMarkRecentlySaved();
@@ -493,11 +492,6 @@ function App() {
   const [companionTransportEnabled, setCompanionTransportEnabled] = useState(true);
 
   useEffect(() => {
-    streamApi.onAnyMessage = (m) => {
-      if (m.type === 'pty' && m.id !== focusedRef.current) {
-        markPaneActivity(m.id);
-      }
-    };
     streamApi.connect();
     refresh();
     refreshConfigPrefs();
@@ -518,16 +512,10 @@ function App() {
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
-      streamApi.onAnyMessage = null;
       window.removeEventListener('beforeunload', handleBeforeUnload);
       handleBeforeUnload();
     };
   }, []);
-
-  // clear "new" badge when a pane becomes focused
-  useEffect(() => {
-    if (focused) clearPaneActivity(focused);
-  }, [focused]);
 
   // Refresh the chat list from the disk catalog (/api/chats, zero SSH in lazy mode). `silent`
   // skips the loading toggle so background auto-refresh ticks don't flash the ↻ button. In
@@ -1484,6 +1472,7 @@ function App() {
       <PanelLayoutSync />
       <AppearanceSync />
       <AppMenuBridge />
+      <PaneActivitySync />
       <GlobalSearchHost onOpenChat={openChat} issueEntries={markdownIssueEntries} />
       <ConfirmDialog
         open={killTarget !== null}
