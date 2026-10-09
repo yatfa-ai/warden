@@ -1378,7 +1378,11 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
 
                 return (
                   <div key={section} className="flex flex-col gap-1">
-                    {/* Section Header */}
+                    {/* Section Header — themed right-click menu (WARDEN-1679).
+                        Only the header is the trigger; the agent rows below stay
+                        OUTSIDE it so agent rows keep their own row menu. */}
+                    <ContextMenu>
+                    <ContextMenuTrigger asChild>
                     <div className={`flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider font-semibold ${sectionInfo.color}`}>
                       {/* Select all in this section (WARDEN-371). Boolean checked
                           = every RENDERED agent in the section is selected.
@@ -1393,6 +1397,21 @@ export function HealthDashboard({ onOpenChat, onClose, pollIntervalMs, companion
                       />
                       <span>{sectionInfo.icon} {sectionInfo.title} ({count})</span>
                     </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem
+                        disabled={sectionIds.length === 0}
+                        onSelect={() => toggleGroup(sectionIds)}
+                      >
+                        {isSelectedAll(selectedIds, sectionIds) ? 'Deselect all' : 'Select all'}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => copyWithToast(sectionInfo.title)}>Copy section name</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => copyWithToast(shown.map(agent => agent.name || agent.key || agent.id).join('\n'))}>
+                        Copy agent names
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                    </ContextMenu>
 
                     {/* Agent List */}
                     <div className="flex flex-col gap-0.5">
