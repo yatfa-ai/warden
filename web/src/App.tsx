@@ -7,14 +7,13 @@ import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
-import { setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture, onOpenSettings, onSelectAll } from '@/lib/electron';
+import { setTelemetryContext, forwardRendererError, forwardWorkspaceShape, forwardFeatureUsage, installRendererErrorCapture } from '@/lib/electron';
 import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
-import { routeMenuSelectAll, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
-import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen } from '@/lib/uiStore';
+import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useMarkPaneActivity, useClearPaneActivity, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen, useSettingsOpen, useSetSettingsOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -36,6 +35,7 @@ import { HealthPanel } from '@/components/HealthPanel';
 import { PanelToggleButtons } from '@/components/PanelToggleButtons';
 import { PanelLayoutSync } from '@/components/PanelLayoutSync';
 import { AppearanceSync } from '@/components/AppearanceSync';
+import { AppMenuBridge } from '@/components/AppMenuBridge';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
 import { ResizableRail } from '@/components/ResizableRail';
@@ -1415,45 +1415,11 @@ function App() {
   // machine plus every configured SSH host.
   const hosts = [THIS_MACHINE, ...sshHosts];
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  // WARDEN-1280 — the application menu's "Settings…" (CmdOrCtrl+,) item. Until
-  // now the gear button below was the SOLE way into Settings; the menu item is
-  // the second, and it is deliberately the SAME destination rather than a
-  // parallel one — main pushes 'menu:open-settings' on the click and this effect
-  // calls the exact setSettingsOpen(true) the gear calls. Runs once (the setter
-  // identity is stable), and outside the Electron app onOpenSettings finds no
-  // bridge and returns a no-op unsubscribe, so the `npm run dev` browser and
-  // `node web/smoke.cjs` are byte-unaffected — neither has an application menu
-  // to fire it.
-  useEffect(() => onOpenSettings(() => {
-    getFeatureUsageSampler().sampler.recordFeatureUse('settings');
-    setSettingsOpen(true);
-  }), []);
-  // WARDEN-1356 — the application menu's Edit ▸ Select All item. The item is a
-  // wired click (the bare role is inert on the agent-pane surface: xterm's
-  // helper textarea is empty and webContents.selectAll() fires no DOM event the
-  // pane could intercept), so main pushes 'menu:select-all' — the same bridge
-  // shape as Settings above — and this effect routes by REAL DOM focus:
-  //   terminal → broadcast to the panes; the one whose textarea is the active
-  //              element claims it and calls term.selectAll();
-  //   editable → a Settings (or other) field has focus;
-  //              document.execCommand('selectAll') reproduces the role's
-  //              native behaviour there, which is what keeps the item honest
-  //              off the pane surface;
-  //   none     → nothing editable has focus; a no-op, same as the role's
-  //              select-nothing today.
-  // DOM focus, not the focusedChat state, decides — focusedChat can still name
-  // a pane while a Settings search field actually holds the keyboard, and the
-  // role this replaces acted on real focus too. Runs once; outside the
-  // Electron app onSelectAll finds no bridge and returns a no-op unsubscribe.
-  useEffect(() => onSelectAll(() => {
-    const route = routeMenuSelectAll(document.activeElement);
-    if (route === 'terminal') {
-      window.dispatchEvent(new CustomEvent(TERMINAL_SELECT_ALL_EVENT));
-    } else if (route === 'editable') {
-      document.execCommand('selectAll');
-    }
-  }), []);
+  // WARDEN-1671 (slice 46): "open Settings" is a store command (non-persisted
+  // `settingsOpen`); the always-mounted AppMenuBridge component owns the application
+  // menu's Settings… and Edit ▸ Select All subscriptions.
+  const settingsOpen = useSettingsOpen();
+  const setSettingsOpen = useSetSettingsOpen();
   // WARDEN-1422: the full-page "Open chat" browser view (WARDEN-216) is DELETED —
   // the sidebar is the only session surface, and unsaved sessions are never
   // listed. The token-budget alarm's old deep-link into that page's heaviest-
@@ -1612,6 +1578,7 @@ function App() {
       )}
       <PanelLayoutSync />
       <AppearanceSync />
+      <AppMenuBridge />
       <GlobalSearchHost onOpenChat={openChat} issueEntries={markdownIssueEntries} />
       <ConfirmDialog
         open={killTarget !== null}

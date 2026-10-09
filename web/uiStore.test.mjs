@@ -3554,6 +3554,34 @@ test('globalSearchOpen is NOT persisted: STORE_PERSISTED_KEYS stays 39 and exclu
   assert.equal(createUiStore().getState().globalSearchOpen, false, 'never seeded');
 });
 
+// ─── settingsOpen (WARDEN-1671, roadmap WARDEN-1204 slice 46): NON-persisted "Settings open" command ───
+console.log('\ncreateUiStore — settingsOpen (not persisted; "open Settings" session fact)');
+test('settingsOpen starts false', () => {
+  reset();
+  assert.equal(createUiStore().getState().settingsOpen, false);
+});
+test('setSettingsOpen stores the value (open then close)', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSettingsOpen(true);
+  assert.equal(s.getState().settingsOpen, true);
+  s.getState().setSettingsOpen(false);
+  assert.equal(s.getState().settingsOpen, false);
+});
+test('settingsOpen is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('settingsOpen'));
+  const s = createUiStore();
+  s.getState().setSettingsOpen(true);
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('settingsOpen' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('settingsOpen' in loadUi()));
+  assert.equal(createUiStore().getState().settingsOpen, false, 'never seeded');
+});
+
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
 console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
 test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {

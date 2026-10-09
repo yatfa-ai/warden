@@ -668,6 +668,15 @@ export interface UiStoreState {
   globalSearchOpen: boolean;
   setGlobalSearchOpen: (v: boolean) => void;
   /**
+   * Whether the full-page Settings view is open (WARDEN-1671, roadmap WARDEN-1204
+   * slice 46) — "open Settings" gets ONE home. A NON-persisted session fact: NOT a
+   * STORE_PERSISTED_KEYS member, initial `false`, never seeded from disk. Written by
+   * the header gear (App), Settings' onClose and the application menu's "Settings…"
+   * push (<AppMenuBridge/>); read by App's settings ternary.
+   */
+  settingsOpen: boolean;
+  setSettingsOpen: (v: boolean) => void;
+  /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
    * now, or the chosen theme id itself. The sixth NON-persisted session fact:
@@ -1322,6 +1331,10 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // Initial false — never seeded.
     globalSearchOpen: false,
     setGlobalSearchOpen: (globalSearchOpen) => set({ globalSearchOpen }),
+    // WARDEN-1671 (slice 46): the not-persisted "Settings open" flag.
+    // Initial false — never seeded.
+    settingsOpen: false,
+    setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
     // seed — a pure mapping of the theme pref ('system' → dark placeholder that
     // App's [theme] effect overwrites on mount); never read from disk itself.
@@ -2319,6 +2332,16 @@ export function useGlobalSearchOpen(): boolean {
 /** Stable-identity action: open/close the global-search dialog. */
 export function useSetGlobalSearchOpen(): (v: boolean) => void {
   return useUiStore((s) => s.setGlobalSearchOpen);
+}
+
+/** Whether the Settings page is open (WARDEN-1671, slice 46) — NOT persisted. */
+export function useSettingsOpen(): boolean {
+  return useUiStore((s) => s.settingsOpen);
+}
+
+/** Stable-identity action: open/close the Settings page. */
+export function useSetSettingsOpen(): (v: boolean) => void {
+  return useUiStore((s) => s.setSettingsOpen);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
