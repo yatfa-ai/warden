@@ -21,7 +21,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { openExternalUrl } from '@/lib/electron';
 import { GitCompare, FileIcon, Search, X, ExternalLink } from 'lucide-react';
@@ -989,6 +989,14 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   const outList = listFor('outgoing', outgoingCommits, !!outgoingLoading, outgoingError);
   const incList = listFor('incoming', incomingCommits, !!incomingLoading, incomingError);
 
+  // WARDEN-1707: the section-header context menus copy from the SAME resolved lists the
+  // rows render; the hash/subject items are disabled while a list is loading, errored
+  // or empty so a copy never writes a partial / blank payload.
+  const listCopyDisabled = (l: { items?: GitCommit[]; loading: boolean; error: unknown }) =>
+    l.loading || !!l.error || !l.items || l.items.length === 0;
+  const hashesOf = (l: { items?: GitCommit[] }) => (l.items ?? []).map((cm) => cm.hash).join('\n');
+  const subjectsOf = (l: { items?: GitCommit[] }) => (l.items ?? []).map((cm) => cm.subject).join('\n');
+
   const fetchShow = async (hash: string) => {
     if (showCache[hash] || showLoading[hash]) return;
     setShowLoading((p) => ({ ...p, [hash]: true }));
@@ -1153,37 +1161,46 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
     <>
       {expanded && (
         <div className="flex flex-col px-1 pb-1 text-[10px]">
-          <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
-            <span className="truncate text-[10px] font-medium text-muted-foreground">
-              recent commits ·{' '}
-              {isDetached ? (
-                <>
-                  detached
-                  {sha && (shaHref ? (
-                    // WARDEN-528: deep-link the detached HEAD commit to {web}/commit/<sha>.
-                    <a href={shaHref} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()} title={`open commit ${sha} on the host`} className="font-mono text-primary underline underline-offset-2 hover:opacity-80">{` @ ${sha}`}</a>
-                  ) : (
-                    ` @ ${sha}`
-                  ))}
-                </>
-              ) : branchHref ? (
-                // WARDEN-528: deep-link the branch to {web}/tree/<branch>.
-                <a href={branchHref} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()} title={`open branch ${branch} on the host`} className="text-primary underline underline-offset-2 hover:opacity-80">{branch}</a>
-              ) : branch}
-              {aheadCount > 0 && <span className="text-amber-400"> · ↑ {aheadCount} unpushed</span>}
-            </span>
-            <IconTooltip label="refresh" disabled={loading || incomingLoading || outgoingLoading}>
-              <button
-                type="button"
-                // One ↻ refreshes ALL halves (local recent + incoming + outgoing), so a
-                // human checking for fresh commits after a remote fetch doesn't have to
-                // hunt for a second button.
-                onClick={(e) => { e.stopPropagation(); onFetch?.(); if (behindCount > 0) onFetchIncoming?.(); if (aheadCount > 0) onFetchOutgoing?.(); }}
-                className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-                disabled={loading || incomingLoading || outgoingLoading}
-              >↻</button>
-            </IconTooltip>
-          </div>
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+                <span className="truncate text-[10px] font-medium text-muted-foreground">
+                  recent commits ·{' '}
+                  {isDetached ? (
+                    <>
+                      detached
+                      {sha && (shaHref ? (
+                        // WARDEN-528: deep-link the detached HEAD commit to {web}/commit/<sha>.
+                        <a href={shaHref} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()} title={`open commit ${sha} on the host`} className="font-mono text-primary underline underline-offset-2 hover:opacity-80">{` @ ${sha}`}</a>
+                      ) : (
+                        ` @ ${sha}`
+                      ))}
+                    </>
+                  ) : branchHref ? (
+                    // WARDEN-528: deep-link the branch to {web}/tree/<branch>.
+                    <a href={branchHref} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()} title={`open branch ${branch} on the host`} className="text-primary underline underline-offset-2 hover:opacity-80">{branch}</a>
+                  ) : branch}
+                  {aheadCount > 0 && <span className="text-amber-400"> · ↑ {aheadCount} unpushed</span>}
+                </span>
+                <IconTooltip label="refresh" disabled={loading || incomingLoading || outgoingLoading}>
+                  <button
+                    type="button"
+                    // One ↻ refreshes ALL halves (local recent + incoming + outgoing), so a
+                    // human checking for fresh commits after a remote fetch doesn't have to
+                    // hunt for a second button.
+                    onClick={(e) => { e.stopPropagation(); onFetch?.(); if (behindCount > 0) onFetchIncoming?.(); if (aheadCount > 0) onFetchOutgoing?.(); }}
+                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    disabled={loading || incomingLoading || outgoingLoading}
+                  >↻</button>
+                </IconTooltip>
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem disabled={listCopyDisabled(recent)} onSelect={() => copyWithToast(hashesOf(recent))}>Copy commit hashes</ContextMenuItem>
+              <ContextMenuItem disabled={listCopyDisabled(recent)} onSelect={() => copyWithToast(subjectsOf(recent))}>Copy commit subjects</ContextMenuItem>
+              {isDetached ? (sha && <ContextMenuItem onSelect={() => copyWithToast(sha)}>Copy HEAD commit</ContextMenuItem>) : (branch && <ContextMenuItem onSelect={() => copyWithToast(branch)}>Copy branch name</ContextMenuItem>)}
+            </ContextMenuContent>
+          </ContextMenu>
           {/* WARDEN-528: the compact origin row — which source repo this checkout maps
               to. Renders ONLY when a remote was resolved (non-git / SSH-only / all-bare
               remotes render nothing, leaving the badge exactly as before). The host +
@@ -1334,27 +1351,38 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
           )}
           {aheadCount > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
-                <span className="text-[10px] font-medium text-amber-400">unpushed · ↑ {aheadCount} ahead</span>
-                {/* WARDEN-398: the net unified diff of the WHOLE unpushed set as one
-                    view — answers "what is this agent about to push?" without expanding
-                    each commit. A real <Button> (not a role=button div): it sits in the
-                    plain section header, so there's no nested-interactive issue (the chip
-                    + popover trigger are the only other buttons, neither an ancestor of
-                    this portaled content) — per WARDEN-68. Closes the popover so the
-                    DiffViewer modal takes focus. */}
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'outgoing', count: aheadCount }); }}
-                  className="text-muted-foreground hover:text-amber-300"
-                  aria-label={`view the full unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'})`}
-                  title={`view the aggregated unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'}) — net git diff @{u}..HEAD`}
-                >
-                  <GitCompare />
-                  full diff
-                </Button>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+                    <span className="text-[10px] font-medium text-amber-400">unpushed · ↑ {aheadCount} ahead</span>
+                    {/* WARDEN-398: the net unified diff of the WHOLE unpushed set as one
+                        view — answers "what is this agent about to push?" without expanding
+                        each commit. A real <Button> (not a role=button div): it sits in the
+                        plain section header, so there's no nested-interactive issue (the chip
+                        + popover trigger are the only other buttons, neither an ancestor of
+                        this portaled content) — per WARDEN-68. Closes the popover so the
+                        DiffViewer modal takes focus. */}
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'outgoing', count: aheadCount }); }}
+                      className="text-muted-foreground hover:text-amber-300"
+                      aria-label={`view the full unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'})`}
+                      title={`view the aggregated unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'}) — net git diff @{u}..HEAD`}
+                    >
+                      <GitCompare />
+                      full diff
+                    </Button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => setRangeDiff({ kind: 'outgoing', count: aheadCount })}>View full diff</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={listCopyDisabled(outList)} onSelect={() => copyWithToast(hashesOf(outList))}>Copy commit hashes</ContextMenuItem>
+                  <ContextMenuItem disabled={listCopyDisabled(outList)} onSelect={() => copyWithToast(subjectsOf(outList))}>Copy commit subjects</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(`unpushed · ↑ ${aheadCount} ahead`)}>Copy section name</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
               {outList.error ? (
                 <ListErrorRow failure={outList.error} />
               ) : outList.loading && (!outList.items || outList.items.length === 0) ? (
@@ -1392,24 +1420,35 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
           )}
           {behindCount > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
-                <span className="text-[10px] font-medium text-blue-400">incoming · ↓ {behindCount} behind</span>
-                {/* WARDEN-398: the net unified diff of the WHOLE incoming set as one
-                    view — answers "what will land if I bring this agent up to upstream?"
-                    without expanding each commit. See the outgoing affordance above for
-                    the <Button>-not-div rationale (WARDEN-68). */}
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'incoming', count: behindCount }); }}
-                  className="text-muted-foreground hover:text-blue-300"
-                  aria-label={`view the full incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'})`}
-                  title={`view the aggregated incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'}) — net git diff HEAD..@{u}`}
-                >
-                  <GitCompare />
-                  full diff
-                </Button>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+                    <span className="text-[10px] font-medium text-blue-400">incoming · ↓ {behindCount} behind</span>
+                    {/* WARDEN-398: the net unified diff of the WHOLE incoming set as one
+                        view — answers "what will land if I bring this agent up to upstream?"
+                        without expanding each commit. See the outgoing affordance above for
+                        the <Button>-not-div rationale (WARDEN-68). */}
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'incoming', count: behindCount }); }}
+                      className="text-muted-foreground hover:text-blue-300"
+                      aria-label={`view the full incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'})`}
+                      title={`view the aggregated incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'}) — net git diff HEAD..@{u}`}
+                    >
+                      <GitCompare />
+                      full diff
+                    </Button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => setRangeDiff({ kind: 'incoming', count: behindCount })}>View full diff</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={listCopyDisabled(incList)} onSelect={() => copyWithToast(hashesOf(incList))}>Copy commit hashes</ContextMenuItem>
+                  <ContextMenuItem disabled={listCopyDisabled(incList)} onSelect={() => copyWithToast(subjectsOf(incList))}>Copy commit subjects</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(`incoming · ↓ ${behindCount} behind`)}>Copy section name</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
               {incList.error ? (
                 <ListErrorRow failure={incList.error} />
               ) : incList.loading && (!incList.items || incList.items.length === 0) ? (
