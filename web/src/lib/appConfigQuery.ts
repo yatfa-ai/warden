@@ -10,7 +10,7 @@
 //
 // WARDEN-1701 (slice 51) moved the two observer lifecycle prefs here too.
 // Later slices can reuse this key with their own `select` (pollIntervalMs,
-XX
+// ...). Settings' draft editor
 // (useBackendConfig) and useNotificationPrefs are separate concerns.
 
 /** The ONE cache key for the app-level /api/config fact. */
