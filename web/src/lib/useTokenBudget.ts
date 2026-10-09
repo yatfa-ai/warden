@@ -36,7 +36,7 @@ import {
 import { fireBudgetNotification } from '@/lib/desktopAlerts';
 import { formatTokens } from '@/lib/formatTokens';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
-import { useAttentionDesktopAlerts } from '@/lib/uiStore';
+import { useAttentionDesktopAlerts, uiStore } from '@/lib/uiStore';
 
 // Match the backend accumulator's beat. The endpoint is a cheap cache read, so
 // this stays light; aligning to BUDGET_INTERVAL_MS means a poll lands soon after
@@ -51,8 +51,6 @@ const FETCH_OPTS = pollerFetchOptions(BUDGET_POLL_MS);
 export interface UseTokenBudgetArgs {
   /** Deep-link: open the All Sessions usage view (the offending session floats top). */
   onOpenSessions?: () => void;
-  /** Per-host display labels (WARDEN-490) so the offender line names the friendly host. */
-  hostLabels?: Record<string, string>;
 }
 
 export interface UseTokenBudgetResult {
@@ -62,13 +60,14 @@ export interface UseTokenBudgetResult {
 }
 
 export function useTokenBudget(
-  { onOpenSessions, hostLabels }: UseTokenBudgetArgs = {},
+  { onOpenSessions }: UseTokenBudgetArgs = {},
 ): UseTokenBudgetResult {
   // WARDEN-1408 (roadmap WARDEN-1204 slice 11): the master desktop-alert opt-in
   // is subscribed from the shared uiStore instead of arriving as an arg — the
   // notification gate + the hidden-tick relaxation below re-evaluate through the
   // subscription exactly as they did through the prop. Runtime callbacks
-  // (onOpenSessions, hostLabels) STAY explicit args — only the persisted pref moved.
+  // (onOpenSessions) STAY explicit args — only the persisted pref moved. hostLabels
+  // (WARDEN-1665, slice 45) is read from the store at alarm time inside deliver().
   const attentionDesktopAlerts = useAttentionDesktopAlerts();
   const [budget, setBudget] = useState<BudgetState>(EMPTY_BUDGET);
   const [loading, setLoading] = useState(true);
@@ -77,11 +76,6 @@ export function useTokenBudget(
   // without rebuilding the interval (which would reset the cadence).
   const onOpenSessionsRef = useRef(onOpenSessions);
   onOpenSessionsRef.current = onOpenSessions;
-  // WARDEN-490: host labels only affect the offender line's wording (not poll
-  // cadence), so — like onOpenSessions — read via a ref to avoid rebuilding the
-  // interval when a label is edited.
-  const hostLabelsRef = useRef(hostLabels);
-  hostLabelsRef.current = hostLabels;
 
   // --- Debounce state (refs — updating them never re-renders) ---
   // prevRef: the last observed snapshot, for the crossing detector.
@@ -103,7 +97,7 @@ export function useTokenBudget(
   // breach whose toast was suppressed while hidden (desktop or none) and skips
   // one already toasted while visible.
   const deliver = (b: BudgetState): boolean => {
-    const { title, body } = formatBudgetMessageWith(b, formatTokens, hostLabelsRef.current);
+    const { title, body } = formatBudgetMessageWith(b, formatTokens, uiStore.getState().hostLabels);
     const open = () => onOpenSessionsRef.current?.();
     const channel = pickBudgetChannel(
       document.visibilityState === 'visible',
