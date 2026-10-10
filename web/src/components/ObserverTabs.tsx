@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import type { IssueLinkEntry } from '@/lib/issue-links';
 import { useHostLabels, useObserverViewMode, useSetObserverViewMode, useObserverActivityFilters, useSetObserverActivityFilters, useObserverDirectiveFilters, useSetObserverDirectiveFilters, useObserverAttentionFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
@@ -12,7 +11,7 @@ import { EmptyState } from './EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
 import type { ObsUi } from '@/lib/storage';
 import { postJson } from '@/lib/api';
-import { useObserverAutoStart, useObserverSessionTimeout } from '@/lib/appConfigHooks';
+import { useMarkdownIssueEntries, useObserverAutoStart, useObserverSessionTimeout } from '@/lib/appConfigHooks';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -43,19 +42,17 @@ interface Props {
   // human opens/switches agent panes (the popover on the header badge dismisses on every
   // pane switch). Optional so the component degrades gracefully without it (no tab).
   attention?: AttentionListProps;
-  // WARDEN-1394 — the fleet-scoped tracker entries for the markdown issue-key
-  // linkifier, ambiguity-filtered upstream (App: unambiguousPrefixEntries over
-  // the normalized config mapping, gated on issueLinksEnabled). Threaded to the
-  // ObserverPanel (message bodies) and DirectiveHistory (directive text) mounts.
-  // Optional/undefined (the default while the integration is off) renders both
-  // surfaces byte-identically to before this prop existed.
-  issueEntries?: IssueLinkEntry[];
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ focusedChat, onReconnectChat, attention, issueEntries }: Props = {}) {
+export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props = {}) {
+  // WARDEN-1394 / WARDEN-1714 — the fleet-scoped tracker entries for the markdown issue-key
+  // linkifier, read from the ['app-config'] cache (ambiguity-filtered, gated on the
+  // integration toggle; [] while off). Threaded to the ObserverPanel (message bodies) and
+  // DirectiveHistory (directive text) mounts.
+  const issueEntries = useMarkdownIssueEntries();
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   // WARDEN-332 / WARDEN-1701 — the two observer lifecycle prefs come from the shared

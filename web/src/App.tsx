@@ -12,7 +12,6 @@ import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
-import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen, useSettingsOpen, useSetSettingsOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
@@ -549,24 +548,10 @@ function App() {
     try {
       // WARDEN-1696: the config body lands in the shared ['app-config'] cache, so
       // HealthPanel's useCompanionTransportEnabled live-updates on every save.
-      const cfg = await queryClient.fetchQuery({ queryKey: appConfigQueryKey(), queryFn: appConfigQueryFn, staleTime: 0 });
-      setDisplaySettings({
-        showHostTags: cfg.showHostTags ?? true,
-        showTypeBadges: cfg.showTypeBadges ?? true,
-        showStatusIndicators: cfg.showStatusIndicators ?? true,
-        showProjectBadges: cfg.showProjectBadges ?? false,
-        hideOfflineHosts: cfg.hideOfflineHosts ?? false,
-        // WARDEN-1388: issue-key link integration (server config, off by
-        // default — `=== true` keeps a missing/absent field OFF, the same
-        // strict reading the server's boolean default encodes).
-        issueLinksEnabled: cfg.issueLinksEnabled === true,
-      });
-      // WARDEN-1388: the tracker mapping is its own state (an array of
-      // structured entries, not a boolean display flag — see the state comment
-      // above), defensively re-normalized so a hand-edited config.json can't
-      // hand the matcher a malformed mapping (GET is a raw arrayOrEmpty
-      // passthrough; only PUT is sanitized server-side).
-      setIssueLinkTrackers(normalizeIssueLinkEntries(cfg.issueLinkTrackers));
+      await queryClient.fetchQuery({ queryKey: appConfigQueryKey(), queryFn: appConfigQueryFn, staleTime: 0 });
+      // WARDEN-1714 (slice 54): showHostTags / issueLinksEnabled / the tracker mapping are no
+      // longer App state: PaneTile and the two markdown mounts read them from the
+      // ['app-config'] query this fetch fills.
       // WARDEN-1701 — the observer lifecycle prefs (auto-start / session timeout) are no
       // longer App state: ObserverTabs reads them from the ['app-config'] query this fetch fills.
       // WARDEN-1709 — pollIntervalMs is no longer App state: usePollIntervalMs() reads (and
@@ -1297,40 +1282,6 @@ function App() {
   // listed. The token-budget alarm's old deep-link into that page's heaviest-
   // first view goes with it; the alarm itself (toast + desktop) still fires.
   useTokenBudget({});
-  // Display customization settings
-  const [displaySettings, setDisplaySettings] = useState({
-    showHostTags: true,
-    showTypeBadges: true,
-    showStatusIndicators: true,
-    showProjectBadges: false,
-    hideOfflineHosts: false,
-    // WARDEN-1388: the issue-key link integration rides the same bundle (one
-    // server-config fetch owns both halves — see refreshConfigPrefs).
-    issueLinksEnabled: false,
-  });
-  // WARDEN-1388: the issue-key link integration, from /api/config (server
-  // config — persisted across restarts, not a local UI pref). The toggle rides
-  // displaySettings below; the tracker mapping is its own state because it is
-  // an array of structured entries, not a boolean display flag. Both OFF/empty
-  // by default, and the entries are re-normalized defensively on every fetch
-  // (normalizeIssueLinkEntries): the server sanitizes on PUT, but a hand-edited
-  // config.json bypasses that, and GET is a raw arrayOrEmpty passthrough — the
-  // frontend filters rather than trusting.
-  const [issueLinkTrackers, setIssueLinkTrackers] = useState<IssueLinkEntry[]>([]);
-  // WARDEN-1394 (slice 2 of roadmap WARDEN-1386): the markdown issue-key
-  // linkifier's entry set, threaded to the fleet-level markdown surfaces
-  // (observer messages, directive text, transcript messages). Unlike the
-  // terminal (strict per-pane project scoping via issueEntriesForProject), the
-  // markdown path consults EVERY configured entry whose prefix is unique across
-  // the set — messages are fleet-level, so cross-project references are
-  // legitimate and the prefix→tracker mapping is human-stated config; a prefix
-  // mapped under two projects links nowhere (ambiguity is honest silence).
-  // Gated on the integration toggle so OFF (the default) yields [] — no plugin
-  // registration in MarkdownBody, byte-identical rendering. Recomputed each
-  // render (cheap; a filter over a handful of entries).
-  const markdownIssueEntries = displaySettings.issueLinksEnabled
-    ? unambiguousPrefixEntries(issueLinkTrackers)
-    : [];
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       <ReturnBanner rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} />
@@ -1424,17 +1375,12 @@ function App() {
             // in, committed arrays out), and it now subscribes to the store for
             // both under the exact local names the props used, so every drag /
             // template / equalize / reset-reorder call site below is unchanged.
-            showHostTags={displaySettings.showHostTags}
-            // WARDEN-1388: the issue-key link integration — server config
-            // fetched by refreshConfigPrefs, live-updating already-open panes.
-            issueLinksEnabled={displaySettings.issueLinksEnabled}
-            issueLinkTrackers={issueLinkTrackers}
             onReorderPanes={reorderPanes}
           />
         </section>
         <ResizableRail side="observer" className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative" handleTitle="Drag to resize observer panel">
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} issueEntries={markdownIssueEntries} />
+            <ObserverTabs focusedChat={focusedChat} onReconnectChat={handleReconnectChat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, focusedPaneKey }} />
           </ErrorBoundary>
         </ResizableRail>
         <HealthPanel
@@ -1447,7 +1393,7 @@ function App() {
       <AppearanceSync />
       <AppMenuBridge />
       <PaneActivitySync />
-      <GlobalSearchHost onOpenChat={openChat} issueEntries={markdownIssueEntries} />
+      <GlobalSearchHost onOpenChat={openChat} />
       <ConfirmDialog
         open={killTarget !== null}
         onOpenChange={(o) => { if (!o) cancelKill(); }}

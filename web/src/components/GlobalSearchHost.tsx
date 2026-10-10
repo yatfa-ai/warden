@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { SessionTranscriptViewer } from '@/components/SessionTranscriptViewer';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
-import type { IssueLinkEntry } from '@/lib/issue-links';
+import { useMarkdownIssueEntries } from '@/lib/appConfigHooks';
 import { uiStore, useGlobalSearchOpen, useSetGlobalSearchOpen } from '@/lib/uiStore';
 
 // WARDEN-1620 (client-state slice 37): the whole global-search surface, extracted
@@ -14,10 +14,11 @@ import { uiStore, useGlobalSearchOpen, useSetGlobalSearchOpen } from '@/lib/uiSt
 export interface GlobalSearchHostProps {
   /** Routes a search result to its pane (App's openChat — switches workspace if needed). */
   onOpenChat: (id: string) => void;
-  issueEntries: IssueLinkEntry[];
 }
 
-export function GlobalSearchHost({ onOpenChat, issueEntries }: GlobalSearchHostProps) {
+export function GlobalSearchHost({ onOpenChat }: GlobalSearchHostProps) {
+  // WARDEN-1714: markdown issue-key entries come from the ['app-config'] cache, not App.
+  const issueEntries = useMarkdownIssueEntries();
   const open = useGlobalSearchOpen();
   const setOpen = useSetGlobalSearchOpen();
   // The past-conversation whose read-only transcript is open from a global-search

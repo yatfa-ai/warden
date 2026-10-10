@@ -239,21 +239,26 @@ test('the a: renderer routes marked links to openExternalUrl (system browser)', 
   assert.ok(/e\.preventDefault\(\)/.test(branch), 'the branch preventDefaults the in-app navigation');
   assert.ok(/href=\{href\}/.test(branch), 'href is kept for copy-link');
 });
-test('App gates the markdown entries on the integration toggle (off by default)', () => {
+const hooksSrc = readFileSync(resolve(__dirname, 'src/lib/appConfigHooks.ts'), 'utf8');
+test('useMarkdownIssueEntries gates the markdown entries on the integration toggle (off by default)', () => {
+  // WARDEN-1714: the gate moved from App into the app-config hook.
+  const fn = hooksSrc.match(/export function useMarkdownIssueEntries\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+  assert.ok(fn, 'useMarkdownIssueEntries findable');
   assert.ok(
-    /displaySettings\.issueLinksEnabled\s*\n\s*\?\s*unambiguousPrefixEntries\(issueLinkTrackers\)/.test(appSrc),
-    'markdownIssueEntries = enabled ? unambiguousPrefixEntries(trackers) : []',
+    /enabled\s*\?\s*unambiguousPrefixEntries\(trackers\)\s*:\s*NO_ISSUE_ENTRIES/.test(fn),
+    'entries = enabled ? unambiguousPrefixEntries(trackers) : []',
   );
 });
-test('App threads markdownIssueEntries to the fleet-level mounts', () => {
+test('the fleet-level mounts read the entries via useMarkdownIssueEntries (App no longer threads them)', () => {
   // WARDEN-1422: the third mount was <OpenChatBrowserPage>, deleted with the
   // Open chat page itself. WARDEN-1620: <SessionTranscriptViewer> moved into
-  // <GlobalSearchHost>, so App threads the entries to the host instead.
-  for (const mount of ['<ObserverTabs', '<GlobalSearchHost']) {
-    const at = appSrc.indexOf(mount);
-    assert.notEqual(at, -1, `${mount} mount findable`);
-    assert.ok(/issueEntries=\{markdownIssueEntries\}/.test(appSrc.slice(at, at + 1600)), `${mount} passes issueEntries`);
+  // <GlobalSearchHost>. WARDEN-1714: both mounts now call the hook themselves.
+  for (const f of ['ObserverTabs', 'GlobalSearchHost']) {
+    const src = readFileSync(resolve(__dirname, `src/components/${f}.tsx`), 'utf8');
+    assert.ok(/const issueEntries = useMarkdownIssueEntries\(\)/.test(src), `${f} calls useMarkdownIssueEntries()`);
   }
+  assert.ok(!/markdownIssueEntries|displaySettings|issueLinkTrackers/.test(appSrc), 'App no longer references the bundle');
+  assert.ok(!/issueEntries=/.test(appSrc), 'App passes no issueEntries prop');
   const hostSrc = readFileSync(resolve(__dirname, 'src/components/GlobalSearchHost.tsx'), 'utf8');
   const viewerAt = hostSrc.indexOf('<SessionTranscriptViewer');
   assert.notEqual(viewerAt, -1, '<SessionTranscriptViewer mount findable in GlobalSearchHost.tsx');

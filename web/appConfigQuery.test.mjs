@@ -19,7 +19,7 @@ const { code } = await transformWithOxc(readFileSync(srcPath, 'utf8'), srcPath, 
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-app-config-query-test-'));
 const tmpFile = join(tmpDir, 'appConfigQuery.mjs');
 writeFileSync(tmpFile, code);
-const { APP_CONFIG_KEY, appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout, selectConfirmDestructiveActions } = await import(tmpFile);
+const { APP_CONFIG_KEY, appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectObserverAutoStart, selectObserverSessionTimeout, selectConfirmDestructiveActions, selectShowHostTags, selectIssueLinksEnabled, selectIssueLinkTrackersRaw } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 const jsonResponse = (json, status = 200) => async (url) => {
@@ -78,4 +78,31 @@ test('confirm-destructive selector: true unless explicitly false', () => {
   assert.equal(selectConfirmDestructiveActions({ confirmDestructiveActions: null }), true);
   assert.equal(selectConfirmDestructiveActions({ confirmDestructiveActions: true }), true);
   assert.equal(selectConfirmDestructiveActions({ confirmDestructiveActions: false }), false);
+});
+
+test('show-host-tags selector: true unless explicitly false', () => {
+  assert.equal(selectShowHostTags(undefined), true);
+  assert.equal(selectShowHostTags(null), true);
+  assert.equal(selectShowHostTags({}), true);
+  assert.equal(selectShowHostTags({ showHostTags: null }), true);
+  assert.equal(selectShowHostTags({ showHostTags: true }), true);
+  assert.equal(selectShowHostTags({ showHostTags: false }), false);
+});
+
+test('issue-links-enabled selector: strict === true (off by default)', () => {
+  assert.equal(selectIssueLinksEnabled(undefined), false);
+  assert.equal(selectIssueLinksEnabled(null), false);
+  assert.equal(selectIssueLinksEnabled({}), false);
+  assert.equal(selectIssueLinksEnabled({ issueLinksEnabled: false }), false);
+  assert.equal(selectIssueLinksEnabled({ issueLinksEnabled: 'true' }), false);
+  assert.equal(selectIssueLinksEnabled({ issueLinksEnabled: 1 }), false);
+  assert.equal(selectIssueLinksEnabled({ issueLinksEnabled: true }), true);
+});
+
+test('issue-link-trackers raw selector: passthrough, undefined when absent', () => {
+  const arr = [{ project: 'p', prefix: 'AB', tracker: 'x' }];
+  assert.equal(selectIssueLinkTrackersRaw(undefined), undefined);
+  assert.equal(selectIssueLinkTrackersRaw(null), undefined);
+  assert.equal(selectIssueLinkTrackersRaw({}), undefined);
+  assert.equal(selectIssueLinkTrackersRaw({ issueLinkTrackers: arr }), arr);
 });
