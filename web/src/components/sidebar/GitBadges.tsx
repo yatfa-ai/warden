@@ -997,6 +997,15 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   const hashesOf = (l: { items?: GitCommit[] }) => (l.items ?? []).map((cm) => cm.hash).join('\n');
   const subjectsOf = (l: { items?: GitCommit[] }) => (l.items ?? []).map((cm) => cm.subject).join('\n');
 
+  // WARDEN-1715: the stash / reflog / branch / uncommitted section-header menus. Same
+  // contract as above: lists are `undefined` before the first fetch, so every list copy
+  // is disabled while loading, errored or empty rather than writing a blank payload.
+  const stashCopyDisabled = stashLoading || !!stashError || !stashList || stashList.length === 0;
+  const reflogCopyDisabled = reflogLoading || !!reflogError || !reflogList || reflogList.length === 0;
+  const branchCopyDisabled = branchLoading || !!branchError || !branchList || branchList.length === 0;
+  // Mirrors DiffStatChip's guard: an all-untracked WIP (+0 −0) has nothing to copy.
+  const diffstatCopyDisabled = !diffstat || (diffstat.insertions === 0 && diffstat.deletions === 0);
+
   const fetchShow = async (hash: string) => {
     if (showCache[hash] || showLoading[hash]) return;
     setShowLoading((p) => ({ ...p, [hash]: true }));
@@ -1319,34 +1328,44 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
           )}
           {clean === false && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
-                <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400">
-                  uncommitted · ±
-                  {/* The ± magnitude (+N −M) — the SAME `git diff HEAD --shortstat` the
-                      full diff below covers, so the chip's count and the diff content are
-                      consistent by construction (WARDEN-411). Renders nothing for an
-                      all-untracked WIP (DiffStatChip's own +0−0 guard). */}
-                  <DiffStatChip diffstat={diffstat} />
-                </span>
-                {/* WARDEN-449: the ± axis's aggregated "full diff" — the net `git diff
-                    HEAD` of every uncommitted (staged+unstaged) change as one view,
-                    answering "what is this agent changing right now, in full?" without
-                    expanding each dirty file (WARDEN-151). Mirrors the ↑/↓ affordances
-                    (WARDEN-398); appears only when the tree is dirty (`clean === false`),
-                    just as those appear only when ahead/behind > 0. A real <Button>
-                    (WARDEN-68); closes the popover so the DiffViewer modal takes focus. */}
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'worktree' }); }}
-                  className="text-muted-foreground hover:text-yellow-300"
-                  aria-label="view the full uncommitted diff"
-                  title="view the aggregated uncommitted diff — net git diff HEAD"
-                >
-                  <GitCompare />
-                  full diff
-                </Button>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+                    <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400">
+                      uncommitted · ±
+                      {/* The ± magnitude (+N −M) — the SAME `git diff HEAD --shortstat` the
+                          full diff below covers, so the chip's count and the diff content are
+                          consistent by construction (WARDEN-411). Renders nothing for an
+                          all-untracked WIP (DiffStatChip's own +0−0 guard). */}
+                      <DiffStatChip diffstat={diffstat} />
+                    </span>
+                    {/* WARDEN-449: the ± axis's aggregated "full diff" — the net `git diff
+                        HEAD` of every uncommitted (staged+unstaged) change as one view,
+                        answering "what is this agent changing right now, in full?" without
+                        expanding each dirty file (WARDEN-151). Mirrors the ↑/↓ affordances
+                        (WARDEN-398); appears only when the tree is dirty (`clean === false`),
+                        just as those appear only when ahead/behind > 0. A real <Button>
+                        (WARDEN-68); closes the popover so the DiffViewer modal takes focus. */}
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'worktree' }); }}
+                      className="text-muted-foreground hover:text-yellow-300"
+                      aria-label="view the full uncommitted diff"
+                      title="view the aggregated uncommitted diff — net git diff HEAD"
+                    >
+                      <GitCompare />
+                      full diff
+                    </Button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => setRangeDiff({ kind: 'worktree' })}>View full diff</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem disabled={diffstatCopyDisabled} onSelect={() => copyWithToast(`+${diffstat?.insertions ?? 0} −${diffstat?.deletions ?? 0}`)}>Copy diff stat</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast('uncommitted')}>Copy section name</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             </div>
           )}
           {aheadCount > 0 && (
@@ -1485,17 +1504,26 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
           )}
           {stashN > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
-                <span className="truncate text-[10px] font-medium text-fuchsia-400">🗄 stashed work · {stashN}</span>
-                <IconTooltip label="refresh stashes" disabled={stashLoading}>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); fetchStash(); }}
-                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    disabled={stashLoading}
-                  >↻</button>
-                </IconTooltip>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
+                    <span className="truncate text-[10px] font-medium text-fuchsia-400">🗄 stashed work · {stashN}</span>
+                    <IconTooltip label="refresh stashes" disabled={stashLoading}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); fetchStash(); }}
+                        className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        disabled={stashLoading}
+                      >↻</button>
+                    </IconTooltip>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem disabled={stashCopyDisabled} onSelect={() => copyWithToast((stashList ?? []).map((st) => st.ref).join('\n'))}>Copy stash refs</ContextMenuItem>
+                  <ContextMenuItem disabled={stashCopyDisabled} onSelect={() => copyWithToast((stashList ?? []).map((st) => st.subject).join('\n'))}>Copy stash subjects</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(`stashed work · ${stashN}`)}>Copy section name</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
               {stashLoading && stashList === undefined ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
@@ -1572,17 +1600,26 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
               styling. Expanded-view-only; no always-on badge. */}
           {(reflogList !== undefined || reflogLoading) && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
-                <span className="truncate text-[10px] font-medium text-muted-foreground">⏱ recent operations</span>
-                <IconTooltip label="refresh operations" disabled={reflogLoading}>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); fetchReflog(); }}
-                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    disabled={reflogLoading}
-                  >↻</button>
-                </IconTooltip>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
+                    <span className="truncate text-[10px] font-medium text-muted-foreground">⏱ recent operations</span>
+                    <IconTooltip label="refresh operations" disabled={reflogLoading}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); fetchReflog(); }}
+                        className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        disabled={reflogLoading}
+                      >↻</button>
+                    </IconTooltip>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem disabled={reflogCopyDisabled} onSelect={() => copyWithToast((reflogList ?? []).map((op) => op.subject).join('\n'))}>Copy operations</ContextMenuItem>
+                  <ContextMenuItem disabled={reflogCopyDisabled} onSelect={() => copyWithToast((reflogList ?? []).map((op) => op.hash).filter(Boolean).join('\n'))}>Copy commit hashes</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast('recent operations')}>Copy section name</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
               {reflogLoading && reflogList === undefined ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
@@ -1635,17 +1672,25 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
               toggling the popover; target=_blank opens the system browser. */}
           {(branchList !== undefined || branchLoading) && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
-                <span className="truncate text-[10px] font-medium text-muted-foreground">⎇ branches · {branchList?.length ?? 0}</span>
-                <IconTooltip label="refresh branches" disabled={branchLoading}>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); fetchBranches(); }}
-                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    disabled={branchLoading}
-                  >↻</button>
-                </IconTooltip>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
+                    <span className="truncate text-[10px] font-medium text-muted-foreground">⎇ branches · {branchList?.length ?? 0}</span>
+                    <IconTooltip label="refresh branches" disabled={branchLoading}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); fetchBranches(); }}
+                        className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        disabled={branchLoading}
+                      >↻</button>
+                    </IconTooltip>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem disabled={branchCopyDisabled} onSelect={() => copyWithToast((branchList ?? []).map((b) => b.name).join('\n'))}>Copy branch names</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(`branches · ${branchList?.length ?? 0}`)}>Copy section name</ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
               {branchLoading && branchList === undefined ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
