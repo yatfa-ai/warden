@@ -54,14 +54,12 @@ export type PersistedPrefSnapshot = Required<
 export interface UseConfigPersistenceArgs {
   /** Reload chats/ssh-hosts from the disk catalog (App's chat-list refresh). */
   refresh: () => Promise<void>;
-  /** Force a fresh fetch of notification prefs + broadcast to all subscribers. */
-  reloadNotificationPrefs: () => Promise<void>;
-  /** Refresh backend-backed prefs from /api/config (display / observer / poll cadence). */
+  /** Refresh backend-backed prefs from /api/config (display / observer / poll cadence / notify* toast gates — all via the shared ['app-config'] cache). */
   refreshConfigPrefs: () => Promise<void>;
 }
 
 export interface UseConfigPersistenceResult {
-  /** Post-Settings orchestration: reload chats, re-broadcast notification prefs, refresh config. */
+  /** Post-Settings orchestration: reload chats, refresh config (incl. notification prefs). */
   handleConfigChange: () => void;
 }
 
@@ -72,8 +70,8 @@ export interface UseConfigPersistenceResult {
  *   persistUiState, honoring the "Restore workspace on startup" pref. Re-fires
  *   only when an actual pref value (or restoreOnStartup/startedEmpty) changes.
  * - Exposes handleConfigChange: the post-Settings orchestration callback that
- *   reloads chats/ssh-hosts, re-broadcasts notification prefs, and refreshes
- *   backend-backed config prefs so every toggle takes effect immediately
+ *   reloads chats/ssh-hosts and refreshes
+ *   backend-backed config prefs (incl. notification prefs) so every toggle takes effect immediately
  *   without a page reload.
  *
  * The whole snapshot is read HERE from the store, so App holds neither a
@@ -82,7 +80,6 @@ export interface UseConfigPersistenceResult {
  */
 export function useConfigPersistence({
   refresh,
-  reloadNotificationPrefs,
   refreshConfigPrefs,
 }: UseConfigPersistenceArgs): UseConfigPersistenceResult {
   // Stable for the session: true when THIS launch started in "Start empty" mode.
@@ -123,14 +120,14 @@ export function useConfigPersistence({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design: the dep set is every value of the snapshot (one per PERSISTED_PREF_KEYS entry), derived from the same type-checked source as the snapshot object. Completeness is compile-enforced (a key in the source but missing from the snapshot is a TS error) + partition-tested, not literal-enumerable — so a forgotten pref key can no longer silently drop out of the dep array (the WARDEN-442/468/500 class).
   }, [...Object.values(storePrefs), restoreOnStartup, startedEmpty]);
 
-  // Called after Settings saves: reload chats/ssh-hosts, refresh notification prefs
-  // everywhere (the shared hook broadcasts to all subscribers), and refresh config
-  // preferences — so all toggles take effect immediately without a page reload.
+  // Called after Settings saves: reload chats/ssh-hosts and refresh config
+  // preferences (the shared ['app-config'] cache — which also carries the notify*
+  // toast gates, so every subscriber updates) — so all toggles take effect
+  // immediately without a page reload.
   const handleConfigChange = useCallback(() => {
     refresh();
-    reloadNotificationPrefs();
     refreshConfigPrefs();
-  }, [refresh, reloadNotificationPrefs, refreshConfigPrefs]);
+  }, [refresh, refreshConfigPrefs]);
 
   return { handleConfigChange };
 }

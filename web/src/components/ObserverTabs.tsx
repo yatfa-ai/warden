@@ -22,7 +22,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { copyWithToast } from '@/lib/clipboardToast';
-import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { fetchBounded } from '@/lib/api';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
 import { AttentionView } from './AttentionView';

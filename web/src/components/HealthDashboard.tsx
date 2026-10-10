@@ -46,7 +46,7 @@ import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
-import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';

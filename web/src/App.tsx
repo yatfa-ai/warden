@@ -43,7 +43,7 @@ import { WatchCatchup } from '@/components/WatchCatchup';
 import { StreamStatusDot } from '@/components/StreamStatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { useConfigPersistence } from '@/lib/useConfigPersistence';
 import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
@@ -460,7 +460,7 @@ function App() {
   // then blank (host login shell). Pure client-side pref like defaultShell
   // above: persisted by the saveUi effect below, never sent to the backend.
   // (call-time read in spawnShell too, WARDEN-1600.)
-  const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
+  const { prefs } = useNotificationPrefs();
   // WARDEN-394 — the dashboard auto-refresh cadence, resolved from the persisted
   // pollIntervalMs pref. WARDEN-1709: read from the shared ['app-config'] cache
   // (60s web default until it loads); refreshConfigPrefs refreshes that cache after
@@ -563,17 +563,16 @@ function App() {
 
   // Persist the live pref snapshot to disk (honoring "Restore workspace on
   // startup") and expose handleConfigChange — the post-Settings orchestration
-  // that reloads chats/ssh-hosts, re-broadcasts notification prefs, and refreshes
-  // backend config prefs so toggles take effect without a page reload. The saveUi
+  // that reloads chats/ssh-hosts and refreshes backend config prefs (incl. the
+  // notify* toast gates, via the shared ['app-config'] cache) so toggles take effect without a page reload. The saveUi
   // WRITE effect + this callback live in useConfigPersistence (WARDEN-696);
   // since WARDEN-1471 (slice 16) the hook reads the store facts itself and, since
   // WARDEN-1526 (slice 23) moved the last App-owned fact (the workspace set), the
   // WHOLE persisted snapshot — App assembles and passes none of it. This call sits AFTER
-  // refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so the deps
+  // refresh/refreshConfigPrefs are defined so the deps
   // are initialized (no TDZ).
   const { handleConfigChange } = useConfigPersistence({
     refresh,
-    reloadNotificationPrefs,
     refreshConfigPrefs,
   });
 

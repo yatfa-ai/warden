@@ -22,7 +22,7 @@ import {
 //
 // This mirrors the 30s `setInterval(fetchHostStatuses, 30000)` + clearInterval
 // cleanup pattern already used for the agent list in ChatSidebar.tsx, and the
-// useNotificationPrefs.ts hook convention for lib/ custom hooks.
+// appConfigHooks.ts hook convention for lib/ custom hooks.
 
 export interface UseLiveTimelineOptions<T> {
   /** Endpoint path; `?limit=` is appended by the hook. Default: '/api/activity'. */
