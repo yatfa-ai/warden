@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PaneTile } from './PaneTile';
 import { FileViewer } from './FileViewer';
 import { WorkspaceSearchDialog } from './WorkspaceSearchDialog';
@@ -16,7 +16,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
-import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity, useReconnectTokens, useExternalSearchQuery } from '@/lib/uiStore';
+import { usePaneLayout, usePaneColRatios, usePaneRowRatios, useSetPaneColRatios, useSetPaneRowRatios, usePaneHost, useToggleSidebarCollapsed, useToggleObserverCollapsed, useMaximized, useFocused, usePaneActivity, useClearPaneActivity, useReconnectTokens, useExternalSearchQuery, useSetFocused, useSetMaximized, useSetOpenPanes } from '@/lib/uiStore';
+import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import {
   resolveVisibleTiles,
   gridShape,
@@ -27,6 +28,7 @@ import {
   gutterCenters,
   PANE_COL_FLOOR_REM,
   PANE_ROW_FLOOR_REM,
+  swapPanes,
 } from '@/lib/paneGrid';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { resolveActingChat } from '@/lib/actingChat';
@@ -80,9 +82,7 @@ const JUNCTION_THRESH_PX = 3;
 interface Props {
   tiles: OpenTile[];
   chats: Chat[];
-  onFocus: (id: string) => void;
   onClose: (id: string) => void;
-  onToggleMax: (id: string) => void;
   onForceKill: (id: string) => void;
   // ＋ split (WARDEN-223 → WARDEN-543): spawn a host shell pane derived from a
   // source pane (same host + cwd). WARDEN-543 moved this off the grid-toolbar
@@ -112,12 +112,6 @@ interface Props {
   //
   // WARDEN-1714 (slice 54): showHostTags / issueLinksEnabled / issueLinkTrackers no
   // longer pass through here — PaneTile reads them from the ['app-config'] cache.
-  // WARDEN-909: drag a pane header onto ANOTHER pane tile in this grid to swap
-  // the two panes' positions. App owns the mutation (swapPanes over the active
-  // workspace's openPanes via the setOpenPanes shim); PaneGrid only reports the
-  // two pane IDS — never a visible index, which can be a subset (WARDEN-108).
-  // Must be a stable useCallback in App (handler-identity discipline).
-  onReorderPanes: (dragId: string, targetId: string) => void;
   // WARDEN-1422 (QA round 5): attach-phase reports from each tile, bound
   // per-pane (the onSplitShell/onSearchWorkspace binding pattern) so App's
   // handler receives the pane id. Pure pass-through; App's handler writes a
@@ -125,7 +119,34 @@ interface Props {
   onPanePhaseChange?: (id: string, phase: PaneAttachPhase) => void;
 }
 
-export function PaneGrid({ tiles, chats, onFocus, onClose, onToggleMax, onForceKill, onSplitShell, onSpawned, onReorderPanes, onPanePhaseChange }: Props) {
+export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onSpawned, onPanePhaseChange }: Props) {
+  // WARDEN-1719 (roadmap WARDEN-1204 slice 55): the three store-pure write
+  // callbacks stopped riding App's props channel — PaneGrid subscribes to the
+  // stable store actions itself, under the exact local names the props used, so
+  // the keydown effect, the tile binding and onTileDrop are textually unchanged.
+  const onFocus = useSetFocused();
+  const setMaximized = useSetMaximized();
+  const setOpenPanes = useSetOpenPanes();
+  // WARDEN-1479 — the feature-adoption seed: each maximize/restore toggle is
+  // one use of the pane-maximize capability (counts only; the name is a
+  // closed-set literal).
+  const onToggleMax = useCallback((id: string) => {
+    getFeatureUsageSampler().sampler.recordFeatureUse('pane-maximize');
+    setMaximized((m) => (m === id ? null : id));
+  }, [setMaximized]);
+  // WARDEN-909: drag a pane header onto ANOTHER pane tile in this grid to swap
+  // the two panes' positions (swapPanes over the active workspace's openPanes via
+  // the setOpenPanes shim, which persists `workspaces`, so a reordered grid
+  // survives a reload under restoreOnStartup 'previous'). PaneGrid reports only
+  // the two pane IDS — never a visible index, which can be a subset (WARDEN-108).
+  // `focused` and `maximized` hold pane IDS and paneHost is keyed by pane id, so
+  // they follow the pane into its new slot. Column/row ratios are per-TRACK
+  // weights whose count is unchanged by a swap, so nothing jumps. swapPanes
+  // returns the SAME array on any no-op (self-drop, unknown id), which the shim's
+  // `next === w.openPanes` check turns into no state change at all.
+  const onReorderPanes = useCallback((dragId: string, targetId: string) => {
+    setOpenPanes((p) => swapPanes(p, dragId, targetId));
+  }, [setOpenPanes]);
   // WARDEN-1420 (roadmap WARDEN-1204 slice 12): the pane-arrangement pref comes
   // from the shared client-state store, keeping the exact name the Props
   // destructure used — so gridShape below (and the comment that cites it) is
