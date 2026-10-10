@@ -12,7 +12,7 @@ import { getWorkspaceShapeSampler } from '@/lib/workspaceShapeTelemetry';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import type { Chat } from '@/lib/types';
 import { paneIdOf, resumeShouldReattach, type PaneAttachPhase } from '@/lib/paneAttach';
-import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useSetMaximized, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen, useSettingsOpen, useSetSettingsOpen } from '@/lib/uiStore';
+import { useSetObserverViewMode, usePrimePaneHost, useSetObserverCollapsed, uiStore, selectActiveWorkspace, useWorkspaces, useActiveWorkspaceId, useUpdateActiveWorkspace, useSetOpenPanes, useSetFocused, useRevealPane, useDropRecentlyClosed, useMarkRecentlySaved, useBumpReconnectToken, useSetExternalSearchQuery, useSetGlobalSearchOpen, useSettingsOpen, useSetSettingsOpen } from '@/lib/uiStore';
 
 // WARDEN-1144: the catalog reads below gate the sidebar's `loading` flag (the ↻
 // spinner), so they are bounded by the shared deadline. They ride an interval
@@ -48,7 +48,6 @@ import { useConfigPersistence } from '@/lib/useConfigPersistence';
 import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
 import { WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
-import { swapPanes } from '@/lib/paneGrid';
 import { telemetryChatName } from '@/lib/telemetryChatName';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
@@ -142,7 +141,6 @@ function App() {
   const updateActiveWorkspace = useUpdateActiveWorkspace();
   const setOpenPanes = useSetOpenPanes();
   const setFocused = useSetFocused();
-  const setMaximized = useSetMaximized();
   const revealPane = useRevealPane();
   const dropRecentlyClosed = useDropRecentlyClosed();
   const markRecentlySaved = useMarkRecentlySaved();
@@ -1035,22 +1033,6 @@ function App() {
     // Killing the maximized pane restores the grid: the store's setOpenPanes shim
     // clears the maximized id (WARDEN-521).
   }, [setOpenPanes, setFocused]);
-  // WARDEN-909: drag a pane onto another pane tile → swap their positions in the
-  // active workspace's openPanes. Routed through the setOpenPanes shim with a
-  // functional update, so it always targets the CURRENTLY active workspace and
-  // `workspaces` (already in PERSISTED_PREF_KEYS) persists the new order with no
-  // extra wiring — a reordered grid survives a reload under restoreOnStartup
-  // 'previous'. Nothing else needs touching: `focused` and `maximized` hold pane
-  // IDS and paneHost is keyed by pane id, so focus, maximize and each pane's host
-  // follow the pane into its new slot rather than staying with the slot. The
-  // column/row resize ratios are per-TRACK weights whose count is unchanged by a
-  // swap, so the grid's track sizes stay exactly as the user dragged them and
-  // nothing jumps — the two panes simply exchange slots inside that layout.
-  // swapPanes returns the SAME array on any no-op (self-drop, unknown id), which
-  // the shim's `next === w.openPanes` check turns into no state change at all.
-  const reorderPanes = useCallback((dragId: string, targetId: string) => {
-    setOpenPanes((p) => swapPanes(p, dragId, targetId));
-  }, [setOpenPanes]);
   // reopen a recently-closed pane: drop it from the recovery list (it is no longer
   // closed), then open it. openChat re-primes paneHost from the live catalog entry,
   // so a remote pane re-discovers its host on reopen.
@@ -1067,13 +1049,6 @@ function App() {
     }));
     openChat(id);
   }, [updateActiveWorkspace, openChat, primePaneHost]);
-  // WARDEN-1479 — the feature-adoption seed: each maximize/restore toggle is
-  // one use of the pane-maximize capability (counts only; the name is a
-  // closed-set literal).
-  const toggleMax = useCallback((id: string) => {
-    getFeatureUsageSampler().sampler.recordFeatureUse('pane-maximize');
-    setMaximized((m) => (m === id ? null : id));
-  }, [setMaximized]);
 
   // The destructive-action gate BOTH kill machines consult. One predicate, two
   // useConfirmTarget call sites below (the close-workspace machine lives in
@@ -1351,9 +1326,7 @@ function App() {
           <PaneGrid
             tiles={tiles}
             chats={[...chats, ...tempChats]}
-            onFocus={setFocused}
             onClose={closePane}
-            onToggleMax={toggleMax}
             onForceKill={forceKill}
             onSplitShell={handleSplitShell}
             onSpawned={handlePaneSpawned}
@@ -1375,7 +1348,6 @@ function App() {
             // in, committed arrays out), and it now subscribes to the store for
             // both under the exact local names the props used, so every drag /
             // template / equalize / reset-reorder call site below is unchanged.
-            onReorderPanes={reorderPanes}
           />
         </section>
         <ResizableRail side="observer" className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative" handleTitle="Drag to resize observer panel">
