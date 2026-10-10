@@ -38,11 +38,18 @@ const itemLabels = (content) => [...content.matchAll(/>\s*([^<>{}]+?)\s*<\/Conte
 const chipMenu = between('function FieldChip', '/** One row in a tier-summary card');
 const redactionMenu = between('<ContextMenu key={`${c.path}', '</ContextMenu>');
 const payloadMenu = between('<ContextMenu>\n              <ContextMenuTrigger asChild>\n                <pre className="max-h-72', '</ContextMenu>');
+const pillMenu = between('<ContextMenu>\n                  <ContextMenuTrigger asChild>\n                    <code className="rounded bg-background', '</ContextMenu>');
+const catItems = between('function CategoryCopyItems', '/** A compact per-CATEGORY card');
+const catCard = text.slice(text.indexOf('function CategorySummaryCard'));
+const catHeaderMenu = between('<ContextMenu>\n        <ContextMenuTrigger asChild>\n          <div className="flex items-center', '</ContextMenu>', text.indexOf('function CategorySummaryCard'));
+const catSummaryMenu = between('<ContextMenu>\n        <ContextMenuTrigger asChild>\n          <p className="text-[11px] leading-relaxed', '</ContextMenu>', text.indexOf('function CategorySummaryCard'));
+const catEventMenu = between('<ContextMenu>\n            <ContextMenuTrigger asChild>\n              <code className="font-mono">{et.type}', '</ContextMenu>');
+const catFieldMenu = between('<ContextMenu>\n            <ContextMenuTrigger asChild>\n              <code className="font-mono">{f}', '</ContextMenu>');
 const sampleMenu = between('<ContextMenu>\n              <ContextMenuTrigger asChild>\n                <pre className="max-h-64', '</ContextMenu>');
 
-describe('TelemetryTransparency declares themed context menus (WARDEN-1722)', () => {
-  it('declares exactly four <ContextMenuTrigger asChild> triggers', () => {
-    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 4);
+describe('TelemetryTransparency declares themed context menus (WARDEN-1722, WARDEN-1729)', () => {
+  it('declares exactly nine <ContextMenuTrigger asChild> triggers', () => {
+    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 9);
   });
 
   it('uses copyWithToast and never a bare navigator.clipboard', () => {
@@ -83,5 +90,63 @@ describe('TelemetryTransparency declares themed context menus (WARDEN-1722)', ()
     assert.ok(triggerOf(sampleMenu).trim().startsWith('<pre '));
     assert.deepStrictEqual(itemLabels(contentOf(sampleMenu)), ['Copy sample event']);
     assert.match(contentOf(sampleMenu), /copyWithToast\(JSON\.stringify\(SAMPLE_ERROR_EVENT, null, 2\)\)/);
+  });
+
+  it('"Anonymous event types" pill wraps ONLY the <code> and copies type / fields (fields item guarded)', () => {
+    assert.ok(triggerOf(pillMenu).trim().startsWith('<code '));
+    assert.deepStrictEqual(itemLabels(contentOf(pillMenu)), ['Copy event type', 'Copy event fields']);
+    assert.match(contentOf(pillMenu), /copyWithToast\(et\.type\)/);
+    assert.match(contentOf(pillMenu), /et\.fields\.length > 0 && \(/);
+    assert.match(contentOf(pillMenu), /copyWithToast\(et\.fields\.join\(', '\)\)/);
+    // The row div (whose FieldChip children carry their own triggers) is not a trigger.
+    const rowStart = text.indexOf('<div key={et.type} className="flex flex-wrap');
+    assert.ok(rowStart !== -1);
+    assert.ok(text.slice(rowStart, rowStart + 60).indexOf('ContextMenuTrigger') === -1);
+  });
+
+  it('category header and summary share the ONE CategoryCopyItems helper', () => {
+    assert.ok(triggerOf(catHeaderMenu).trim().startsWith('<div '));
+    assert.ok(triggerOf(catSummaryMenu).trim().startsWith('<p '));
+    assert.match(triggerOf(catSummaryMenu), /\{category\.summary\}/);
+    for (const m of [catHeaderMenu, catSummaryMenu]) {
+      assert.match(m, /<CategoryCopyItems category=\{category\} \/>/);
+      assert.doesNotMatch(m, /<ContextMenuContent>/);
+    }
+    assert.strictEqual((text.match(/<CategoryCopyItems /g) || []).length, 2);
+    assert.strictEqual((text.match(/function CategoryCopyItems/g) || []).length, 1);
+  });
+
+  it('CategoryCopyItems copies name / description / event types / fields; list items conditional', () => {
+    assert.deepStrictEqual(itemLabels(catItems), [
+      'Copy category name',
+      'Copy description',
+      'Copy event types',
+      'Copy fields',
+    ]);
+    assert.match(catItems, /copyWithToast\(category\.label\)/);
+    assert.match(catItems, /copyWithToast\(category\.summary\)/);
+    assert.match(catItems, /category\.eventTypes\.length > 0 && \(/);
+    assert.match(catItems, /copyWithToast\(category\.eventTypes\.map\(\(t\) => t\.type\)\.join\(', '\)\)/);
+    assert.match(catItems, /category\.fields\.length > 0 && \(/);
+    assert.match(catItems, /copyWithToast\(category\.fields\.join\(', '\)\)/);
+  });
+
+  it('CollectsRow event-type and field <code> each wrap only the <code> with their own copy', () => {
+    assert.ok(triggerOf(catEventMenu).trim().startsWith('<code '));
+    assert.deepStrictEqual(itemLabels(contentOf(catEventMenu)), ['Copy event type']);
+    assert.match(contentOf(catEventMenu), /copyWithToast\(et\.type\)/);
+    assert.ok(triggerOf(catFieldMenu).trim().startsWith('<code '));
+    assert.deepStrictEqual(itemLabels(contentOf(catFieldMenu)), ['Copy field name']);
+    assert.match(contentOf(catFieldMenu), /copyWithToast\(f\)/);
+  });
+
+  it('no trigger wraps CollectsRow or the card root; inert note stays menu-less', () => {
+    // Card root: the first element after the function's return opens as a <div, not a ContextMenu.
+    assert.match(catCard, /return \(\n    <div\n      className="flex flex-col gap-1\.5 rounded-md border/);
+    assert.doesNotMatch(text, /<ContextMenuTrigger asChild>\s*<CollectsRow/);
+    assert.doesNotMatch(text, /<ContextMenu>\s*<CollectsRow/);
+    assert.doesNotMatch(text, /<ContextMenuTrigger asChild>\s*<div\s+className="flex flex-col gap-1\.5 rounded-md border/);
+    const inert = between('{category.inert && (', ')}', text.indexOf('{category.inert && ('));
+    assert.doesNotMatch(inert, /ContextMenu/);
   });
 });
