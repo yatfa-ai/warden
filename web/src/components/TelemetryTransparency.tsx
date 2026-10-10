@@ -18,6 +18,13 @@ import { type ReactNode, useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Check, ChevronDown, Minus, ShieldCheck } from 'lucide-react';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { cn } from '@/lib/utils';
 import {
   SCHEMA_VERSION,
@@ -82,11 +89,18 @@ const ALL_EVENT_TYPES = describeCollection(
 
 /** A small monospace field-name chip (used for event fields, identifiers, and
  *  hard-excluded content field lists). */
-function FieldChip({ children }: { children: ReactNode }) {
+function FieldChip({ children }: { children: string }) {
   return (
-    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
-      {children}
-    </code>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+          {children}
+        </code>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => void copyWithToast(children)}>Copy field name</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -138,6 +152,9 @@ export function TelemetryTransparency({ consent }: Props) {
   // cards), and the catalog for whatever combination is being previewed.
   const catalog = useMemo(() => describeCollection(consent), [consent]);
   const preview = useMemo(() => previewPayload(SAMPLE_ERROR_EVENT, previewConsent), [previewConsent]);
+  // The exact pretty-printed payload: computed ONCE and shared by the rendered
+  // <pre> and the "Copy exact payload" action so the two cannot drift.
+  const payloadPretty = useMemo(() => JSON.stringify(preview.payload, null, 2), [preview.payload]);
   // Human labels for whatever combination is being previewed.
   const enabledPreviewLabels = TELEMETRY_CATEGORIES
     .filter((c) => previewConsent[c.id] === true)
@@ -361,12 +378,22 @@ export function TelemetryTransparency({ consent }: Props) {
             {preview.changes.map((c, i) => {
               const cb = changeBadge(c);
               return (
-                <li key={`${c.path}-${c.kind}-${i}`} className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                  <Badge variant={cb.variant} className="h-4 px-1.5 text-[10px]">
-                    {cb.label}
-                  </Badge>
-                  <code className="font-mono text-foreground">{c.path}</code>
-                </li>
+                <ContextMenu key={`${c.path}-${c.kind}-${i}`}>
+                  <ContextMenuTrigger asChild>
+                    <li className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      <Badge variant={cb.variant} className="h-4 px-1.5 text-[10px]">
+                        {cb.label}
+                      </Badge>
+                      <code className="font-mono text-foreground">{c.path}</code>
+                    </li>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => void copyWithToast(c.path)}>Copy field path</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => void copyWithToast(`${cb.label} — ${c.path}`)}>
+                      Copy change
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               );
             })}
           </ul>
@@ -385,9 +412,23 @@ export function TelemetryTransparency({ consent }: Props) {
             {showPayload ? 'Hide' : 'Show'} exact transmitted payload
           </Button>
           {showPayload && (
-            <pre className="max-h-72 overflow-auto rounded-md border border-border bg-background p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
-              {JSON.stringify(preview.payload, null, 2)}
-            </pre>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <pre className="max-h-72 overflow-auto rounded-md border border-border bg-background p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
+                  {payloadPretty}
+                </pre>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ContextMenuItem onSelect={() => void copyWithToast(payloadPretty)}>Copy exact payload</ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() =>
+                    void copyWithToast(`${new TextEncoder().encode(JSON.stringify(preview.payload)).length} bytes`)
+                  }
+                >
+                  Copy payload size
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           )}
         </div>
 
@@ -404,9 +445,18 @@ export function TelemetryTransparency({ consent }: Props) {
             {showSample ? 'Hide' : 'Show'} original sample event (input)
           </Button>
           {showSample && (
-            <pre className="max-h-64 overflow-auto rounded-md border border-border bg-background p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
-              {JSON.stringify(SAMPLE_ERROR_EVENT, null, 2)}
-            </pre>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <pre className="max-h-64 overflow-auto rounded-md border border-border bg-background p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  {JSON.stringify(SAMPLE_ERROR_EVENT, null, 2)}
+                </pre>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ContextMenuItem onSelect={() => void copyWithToast(JSON.stringify(SAMPLE_ERROR_EVENT, null, 2))}>
+                  Copy sample event
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           )}
         </div>
       </div>
