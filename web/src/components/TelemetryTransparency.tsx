@@ -245,9 +245,21 @@ export function TelemetryTransparency({ consent }: Props) {
           <div className="flex flex-col gap-1">
             {ALL_EVENT_TYPES.map((et) => (
               <div key={et.type} className="flex flex-wrap items-center gap-1.5">
-                <code className="rounded bg-background px-1.5 py-0.5 font-mono text-[11px] font-semibold text-foreground ring-1 ring-border">
-                  {et.type}
-                </code>
+                <ContextMenu>
+                  <ContextMenuTrigger asChild>
+                    <code className="rounded bg-background px-1.5 py-0.5 font-mono text-[11px] font-semibold text-foreground ring-1 ring-border">
+                      {et.type}
+                    </code>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => void copyWithToast(et.type)}>Copy event type</ContextMenuItem>
+                    {et.fields.length > 0 && (
+                      <ContextMenuItem onSelect={() => void copyWithToast(et.fields.join(', '))}>
+                        Copy event fields
+                      </ContextMenuItem>
+                    )}
+                  </ContextMenuContent>
+                </ContextMenu>
                 <span className="text-[11px] text-muted-foreground/70">→</span>
                 {et.fields.map((f) => (
                   <FieldChip key={f}>{f}</FieldChip>
@@ -475,6 +487,26 @@ export function TelemetryTransparency({ consent }: Props) {
   );
 }
 
+/** The shared right-click items for a category card's header and description, so the
+ *  two triggers open the SAME menu and cannot drift. Conditional items appear only
+ *  when there is something to copy. */
+function CategoryCopyItems({ category }: { category: CategoryCollection }) {
+  return (
+    <ContextMenuContent>
+      <ContextMenuItem onSelect={() => void copyWithToast(category.label)}>Copy category name</ContextMenuItem>
+      <ContextMenuItem onSelect={() => void copyWithToast(category.summary)}>Copy description</ContextMenuItem>
+      {category.eventTypes.length > 0 && (
+        <ContextMenuItem onSelect={() => void copyWithToast(category.eventTypes.map((t) => t.type).join(', '))}>
+          Copy event types
+        </ContextMenuItem>
+      )}
+      {category.fields.length > 0 && (
+        <ContextMenuItem onSelect={() => void copyWithToast(category.fields.join(', '))}>Copy fields</ContextMenuItem>
+      )}
+    </ContextMenuContent>
+  );
+}
+
 /** A compact per-CATEGORY card: what this category collects and whether it is on. */
 function CategorySummaryCard({ category }: { category: CategoryCollection }) {
   return (
@@ -483,21 +515,46 @@ function CategorySummaryCard({ category }: { category: CategoryCollection }) {
       data-telemetry-category={category.id}
       data-telemetry-category-enabled={category.enabled ? 'yes' : 'no'}
     >
-      <div className="flex items-center gap-1.5">
-        <span className="text-xs font-semibold text-foreground">{category.label}</span>
-        <Badge variant={category.enabled ? 'secondary' : 'outline'} className="ml-auto h-4 px-1.5 text-[10px]">
-          {category.enabled ? 'on' : 'off'}
-        </Badge>
-      </div>
-      <p className="text-[11px] leading-relaxed text-muted-foreground">{category.summary}</p>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-semibold text-foreground">{category.label}</span>
+            <Badge variant={category.enabled ? 'secondary' : 'outline'} className="ml-auto h-4 px-1.5 text-[10px]">
+              {category.enabled ? 'on' : 'off'}
+            </Badge>
+          </div>
+        </ContextMenuTrigger>
+        <CategoryCopyItems category={category} />
+      </ContextMenu>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">{category.summary}</p>
+        </ContextMenuTrigger>
+        <CategoryCopyItems category={category} />
+      </ContextMenu>
       {category.eventTypes.map((et) => (
         <CollectsRow key={et.type} ok={category.enabled}>
-          <code className="font-mono">{et.type}</code> events
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <code className="font-mono">{et.type}</code>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem onSelect={() => void copyWithToast(et.type)}>Copy event type</ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>{' '}
+          events
         </CollectsRow>
       ))}
       {category.fields.map((f) => (
         <CollectsRow key={f} ok={category.enabled && !category.inert}>
-          <code className="font-mono">{f}</code>
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <code className="font-mono">{f}</code>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem onSelect={() => void copyWithToast(f)}>Copy field name</ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         </CollectsRow>
       ))}
       {category.inert && (
