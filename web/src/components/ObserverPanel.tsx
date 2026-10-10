@@ -48,7 +48,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import {
   decideFailObserverTurn,

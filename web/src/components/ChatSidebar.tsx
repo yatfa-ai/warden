@@ -29,7 +29,7 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
-import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed } from '@/lib/uiStore';
 import { useHostStatuses } from '@/lib/useHostStatuses';

@@ -11,7 +11,9 @@
 // WARDEN-1701 (slice 51) moved the two observer lifecycle prefs here too.
 // Later slices can reuse this key with their own `select` (pollIntervalMs,
 // ...). Settings' draft editor
-// (useBackendConfig) and useNotificationPrefs are separate concerns.
+// (useBackendConfig) is a separate concern. WARDEN-1724 (slice 56) moved the four
+// toast-gate notify* prefs here too (the former useNotificationPrefs module
+// singleton is gone).
 
 /** The ONE cache key for the app-level /api/config fact. */
 export const APP_CONFIG_KEY = 'app-config' as const;
@@ -94,4 +96,37 @@ export function selectIssueLinksEnabled(cfg: AppConfig | null | undefined): bool
  */
 export function selectIssueLinkTrackersRaw(cfg: AppConfig | null | undefined): unknown {
   return cfg?.issueLinkTrackers;
+}
+
+// Notification preference categories (WARDEN-1724). Each gates a distinct set of toasts:
+//   notifyChatOps  — chat operations: session kill, chat kill, resume, rename
+//   notifyErrors   — generic error toasts (fetch failures, session create errors)
+//   notifySuccess  — generic success toasts (e.g. new observer session created)
+//   notifyObserver — observer events (connection timeout)
+export interface NotificationPrefs {
+  notifyChatOps: boolean;
+  notifyErrors: boolean;
+  notifySuccess: boolean;
+  notifyObserver: boolean;
+}
+
+/** All-true: the values in force before config loads (or on a failed first fetch). */
+export const NOTIFICATION_PREF_DEFAULTS: NotificationPrefs = {
+  notifyChatOps: true,
+  notifyErrors: true,
+  notifySuccess: true,
+  notifyObserver: true,
+};
+
+/**
+ * WARDEN-1724 — the four toast-gate prefs. Each defaults TRUE (config not loaded /
+ * key absent / null); `??` not `||` so an explicit false passes through.
+ */
+export function selectNotificationPrefs(cfg: AppConfig | null | undefined): NotificationPrefs {
+  return {
+    notifyChatOps: cfg?.notifyChatOps ?? true,
+    notifyErrors: cfg?.notifyErrors ?? true,
+    notifySuccess: cfg?.notifySuccess ?? true,
+    notifyObserver: cfg?.notifyObserver ?? true,
+  };
 }

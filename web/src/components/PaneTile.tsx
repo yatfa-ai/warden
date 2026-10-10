@@ -38,7 +38,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { postJson, fetchBounded } from '@/lib/api';
-import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { CircleOffIcon, PowerIcon, RefreshCwIcon, SquareTerminalIcon, WifiOffIcon, XIcon } from 'lucide-react';
 import { toast } from 'sonner';
 

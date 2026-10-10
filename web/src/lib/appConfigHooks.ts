@@ -9,7 +9,7 @@
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectIssueLinksEnabled, selectIssueLinkTrackersRaw, selectObserverAutoStart, selectObserverSessionTimeout, selectShowHostTags } from '@/lib/appConfigQuery';
+import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectIssueLinksEnabled, selectIssueLinkTrackersRaw, selectNotificationPrefs, NOTIFICATION_PREF_DEFAULTS, type NotificationPrefs, selectObserverAutoStart, selectObserverSessionTimeout, selectShowHostTags } from '@/lib/appConfigQuery';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { fetchBounded } from '@/lib/api';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
@@ -146,4 +146,21 @@ export function useMarkdownIssueEntries(): IssueLinkEntry[] {
     () => (enabled ? unambiguousPrefixEntries(trackers) : NO_ISSUE_ENTRIES),
     [enabled, trackers],
   );
+}
+
+/**
+ * WARDEN-1724 — the four toast-gate prefs, a select over the shared ['app-config']
+ * cache (replaces the old useNotificationPrefs module singleton). All-true before
+ * config loads. React Query structurally shares select results, so `prefs` keeps a
+ * stable identity across unrelated cache updates (callbacks keyed on it don't churn).
+ * Live-updates after Settings saves via App.refreshConfigPrefs.
+ */
+export function useNotificationPrefs(): { prefs: NotificationPrefs } {
+  const { data } = useQuery({
+    queryKey: appConfigQueryKey(),
+    queryFn: appConfigQueryFn,
+    ...APP_CONFIG_QUERY_OPTIONS,
+    select: selectNotificationPrefs,
+  });
+  return { prefs: data ?? NOTIFICATION_PREF_DEFAULTS };
 }
