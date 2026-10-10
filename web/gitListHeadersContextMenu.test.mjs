@@ -43,7 +43,9 @@ const itemLabels = (content) => [...content.matchAll(/>([^<>{}]+)<\/ContextMenuI
 
 describe('GitRepoDetails commit-list section headers declare themed context menus (WARDEN-1707)', () => {
   it('declares three header triggers on top of the pre-existing five <ContextMenuTrigger asChild> row/file ones', () => {
-    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 8);
+    // 8 = 5 row/file + 3 commit-list headers (WARDEN-1707); WARDEN-1715 added 4 more
+    // section-header triggers (uncommitted / stash / reflog / branches) → 12.
+    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 12);
   });
 
   it('wraps ONLY the header div in each trigger — never the list, so CommitRow keeps its own menu', () => {
