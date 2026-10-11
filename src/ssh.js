@@ -839,6 +839,9 @@ export function whereWindows(bin, deps = {}) {
   });
 }
 
+// Upper bound on the local `claude --version` probe (WARDEN-1752).
+export const CLAUDE_PROBE_TIMEOUT_MS = 10000;
+
 // Find the `claude` binary on this machine / host → returns the full path or null.
 // claude is often in a dir added by .zshrc (e.g. ~/.local/bin), which `bash -lc`
 // (what tmux's shell runs) does NOT source — so we try zsh interactive login first.
@@ -847,9 +850,6 @@ export function whereWindows(bin, deps = {}) {
 // `runWithPool` to drive the remote candidate probes deterministically without
 // spawning real ssh — mirroring the deps seams on runWithPool/discover so the
 // WARDEN-440 concurrency (all probes in flight at once, not serial) is assertable.
-// Upper bound on the local `claude --version` probe (WARDEN-1752).
-export const CLAUDE_PROBE_TIMEOUT_MS = 10000;
-
 export async function detectClaude(host, deps = {}) {
   const run = deps.runWithPool ?? runWithPool;
   if (host === '(local)') {
