@@ -1062,6 +1062,14 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       'pasteImage.js': {
         buildSshArgv: 1, // :221 buildPasteSshArgv — the gated WARDEN-1348 site
       },
+      'claudeSessionsRoutes.js': {
+        // WARDEN-1740 — moved verbatim from server.js. The same two
+        // /api/claude-sessions call sites the server.js row used to carry:
+        // the remote leg (behind remoteClaudeSessionsDetail's unreachable
+        // pre-check; detectClaude's own routing guard is described on the
+        // server.js row below) and the LOCAL leg (no transport at all).
+        detectClaude: 2,
+      },
       // ---- class (b) + (c): server.js carries one of each -----------------
       'server.js': {
         // :1217 probeHostReachability's raw fallback — companion-routing the
@@ -1080,11 +1088,9 @@ describe('WARDEN-1412 companion-totality sweep', () => {
         // transport. Each call site is therefore the endpoint of an
         // already-routed route — the same class-(b) shape as chats.js's
         // discovery legs, with the gate above the site rather than at it.
-        detectClaude: 3,           // :1956 /api/claude-sessions remote leg
-                                   // (behind remoteClaudeSessionsDetail's
-                                   // unreachable pre-check), :1960 the same
-                                   // endpoint's LOCAL leg (no transport at
-                                   // all), :2204 resolveClaudeCmd
+        detectClaude: 1,           // resolveClaudeCmd (the /api/claude-sessions
+                                   // call sites moved to claudeSessionsRoutes.js,
+                                   // WARDEN-1740)
       },
     };
 
