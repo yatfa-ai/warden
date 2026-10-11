@@ -70,6 +70,13 @@ export const LOCAL = '(local)';
 // BEFORE its final stdout 'data' (the adversarial order the saturated loop produces)
 // must still resolve with COMPLETE stdout — a real subprocess can't reproduce that
 // order reliably on every machine. Mirrors runWithPool's `deps` injection pattern.
+// (WARDEN-1742) Upper bound for the LOCAL git / local `docker exec … git` probes.
+// runLocalCapture only arms its SIGTERM timer when given a timeout, so a hung git
+// (NFS stall, wedged docker daemon) would otherwise never resolve and stack an
+// unreaped child per poll. On timeout the result is the usual
+// { ok:false, code:-1, stdout, stderr } shape callers already treat as a git failure.
+export const LOCAL_GIT_TIMEOUT_MS = 15000;
+
 export function runLocalCapture(bin, args, { cwd, timeout, spawn: spawnFn = spawn } = {}) {
   return new Promise((resolve) => {
     const child = spawnFn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -96,7 +103,7 @@ export function runLocalCapture(bin, args, { cwd, timeout, spawn: spawnFn = spaw
 // packaged/detached app. Remote chats go through run() (ssh.js), which is already
 // async and hides. Returns { ok, code, stdout, stderr }.
 export async function runLocalGit(args, cwd) {
-  return runLocalCapture('git', args, { cwd });
+  return runLocalCapture('git', args, { cwd, timeout: LOCAL_GIT_TIMEOUT_MS });
 }
 
 
@@ -156,7 +163,7 @@ export async function runGit(chat, args, cwd, deps = {}) {
   if (chat.container) {
     if (chat.host === LOCAL) {
       const argv = buildDockerGitArgv(chat.container, cwd, args);
-      return runLocalCapture(argv[0], argv.slice(1));
+      return runLocalCapture(argv[0], argv.slice(1), { timeout: LOCAL_GIT_TIMEOUT_MS });
     }
     // REMOTE container chat. The full script (docker-exec prefix included, the
     // `2>/dev/null` suffix preserved) is assembled once and delivered by either
@@ -263,7 +270,7 @@ export async function classifyGitFailure(chat, cwd) {
 export async function runInContext(chat, script, { timeout = 8000 } = {}, deps = {}) {
   if (chat.container) {
     if (chat.host === LOCAL) {
-      return runLocalCapture('docker', ['exec', chat.container, 'bash', '-lc', script]);
+      return runLocalCapture('docker', ['exec', chat.container, 'bash', '-lc', script], { timeout });
     }
     // REMOTE container chat: the default path assembles `docker exec <c> bash -lc
     // <script>` (byte-for-byte unchanged below); the companion receives the INNER
