@@ -74,3 +74,27 @@ test('(f) App.tsx reads notify* prefs at call time in each toast-gating callback
     assert.ok(!/prefs\.notify/.test(deps), `${name} deps carry no prefs.*`);
   }
 });
+
+// WARDEN-1746 (slice 58) — ObserverTabs, ChatSidebar and HealthDashboard stopped subscribing to the
+// notify* toast-gate prefs: they read the ['app-config'] cache at call time via the stable
+// useNotificationPrefsReader().
+test('(g) ObserverTabs/ChatSidebar/HealthDashboard read notify* prefs at call time via the reader', () => {
+  const hooksRaw = read('src/lib/appConfigHooks.ts');
+  const hooks = stripComments(hooksRaw);
+  assert.ok(/export function useNotificationPrefsReader\(\)/.test(hooks), 'reader exported');
+  assert.ok(/export function useNotificationPrefs\(\)/.test(hooks), 'useNotificationPrefs stays exported');
+  for (const f of ['ObserverTabs', 'ChatSidebar', 'HealthDashboard']) {
+    const src = stripComments(read(`src/components/${f}.tsx`));
+    assert.ok(/useNotificationPrefsReader\(\)/.test(src), `${f} calls useNotificationPrefsReader()`);
+    assert.ok(/readNotificationPrefs\(\)\.notify/.test(src), `${f} reads prefs at call time`);
+    assert.ok(!/useNotificationPrefs\b(?!Reader)/.test(src), `${f} must not use the subscribing useNotificationPrefs`);
+    assert.ok(!/prefs\.notify/.test(src), `${f} must not read prefs.notify*`);
+    assert.ok(!/prefsRef/.test(src), `${f} must not keep a prefsRef mirror`);
+  }
+  const sidebar = stripComments(read('src/components/ChatSidebar.tsx'));
+  const start = sidebar.indexOf('const fetchCollections = useCallback(');
+  assert.ok(start >= 0, 'found fetchCollections');
+  const end = sidebar.indexOf('\n  }, [', start);
+  const deps = sidebar.slice(end, sidebar.indexOf(']);', end));
+  assert.ok(!/prefs/.test(deps.replace(/readNotificationPrefs/g, '')), 'fetchCollections deps carry no prefs.*');
+});

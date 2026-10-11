@@ -29,7 +29,7 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
-import { useNotificationPrefs } from '@/lib/appConfigHooks';
+import { useNotificationPrefsReader } from '@/lib/appConfigHooks';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed } from '@/lib/uiStore';
 import { useHostStatuses } from '@/lib/useHostStatuses';
@@ -151,7 +151,7 @@ export function ChatSidebar({
   const hostLabels = useHostLabels();
   const sourceControlCollapsed = useSourceControlCollapsed();
   const setSourceControlCollapsed = useSetSourceControlCollapsed();
-  const { prefs } = useNotificationPrefs();
+  const readNotificationPrefs = useNotificationPrefsReader();
 
   // Per-agent notes (WARDEN-305): keyed by chat id; load on mount, write per-key.
   const [agentNotes, setAgentNotes] = useState<Record<string, string>>({});
@@ -225,10 +225,10 @@ export function ChatSidebar({
       return list;
     } catch (error) {
       console.error('[collections] Failed:', error);
-      if (prefs.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (readNotificationPrefs().notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
       return [];
     }
-  }, [prefs.notifyErrors]);
+  }, [readNotificationPrefs]);
 
   const enterCollection = (collection: Collection) => { setView({ kind: 'collection', collection }); setSearchQuery(''); };
 

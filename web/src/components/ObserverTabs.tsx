@@ -22,7 +22,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { copyWithToast } from '@/lib/clipboardToast';
-import { useNotificationPrefs } from '@/lib/appConfigHooks';
+import { useNotificationPrefsReader } from '@/lib/appConfigHooks';
 import { fetchBounded } from '@/lib/api';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
 import { AttentionView } from './AttentionView';
@@ -136,15 +136,13 @@ export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props 
   // tick are deliberately NOT routed through this; their instant behavior is
   // unchanged.
   const [pendingCloseId, setPendingCloseId] = useState<string | null>(null);
-  const { prefs } = useNotificationPrefs();
-  // `refresh` is memoized with [] deps and drives the boot effect; reading
-  // prefs directly there would retrigger boot on every preference change. The
-  // ref always holds the latest prefs without changing callback identity.
-  const prefsRef = useRef(prefs);
-  useEffect(() => { prefsRef.current = prefs; }, [prefs]);
+  // `refresh` drives the boot effect; subscribing to prefs there would retrigger boot
+  // on every preference change. The reader is stable (never changes identity) and reads
+  // the latest prefs from the app-config cache at call time.
+  const readNotificationPrefs = useNotificationPrefsReader();
 
   // WARDEN-332 — latest snapshots read inside memoized callbacks / minimal-dep
-  // effects, mirroring the prefsRef idiom (adding these to a callback's deps
+  // effects, mirroring the call-time prefs reader (adding these to a callback's deps
   // would either retrigger boot/refresh or reschedule the idle interval on every
   // state/preference change). Each ref tracks the freshest value only.
   const sessionsRef = useRef(sessions);
@@ -190,14 +188,14 @@ export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props 
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       setError(errorMsg);
-      if (prefsRef.current.notifyErrors) toast.error(`Failed to fetch sessions: ${errorMsg}`);
+      if (readNotificationPrefs().notifyErrors) toast.error(`Failed to fetch sessions: ${errorMsg}`);
       return [];
     } finally {
       clearTimeout(timeoutId);
       setLoading(false);
       setLoadingTimeout(false);
     }
-  }, []);
+  }, [readNotificationPrefs]);
 
   const createNew = useCallback(async (chat?: Chat | null) => {
     try {
@@ -220,14 +218,14 @@ export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props 
       setSessions((p) => [s, ...p]);
       setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
       setActiveId(s.id);
-      if (prefsRef.current.notifySuccess) {
+      if (readNotificationPrefs().notifySuccess) {
         toast.success(chat ? `Observing ${chat.name || chat.key || chat.id}` : 'New observer session created');
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-      if (prefsRef.current.notifyErrors) toast.error(`Failed to create session: ${errorMsg}`);
+      if (readNotificationPrefs().notifyErrors) toast.error(`Failed to create session: ${errorMsg}`);
     }
-  }, []);
+  }, [readNotificationPrefs]);
 
   // Close = delete: removing an observer tab (× or idle-timeout) must also remove
   // the session from disk via the existing DELETE /api/sessions/:id endpoint —
@@ -240,16 +238,16 @@ export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props 
   const deleteSessionServer = useCallback((id: string) => {
     fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
       .then((r) => {
-        if (!r.ok && prefsRef.current.notifyErrors) {
+        if (!r.ok && readNotificationPrefs().notifyErrors) {
           toast.error(`Failed to delete session: HTTP ${r.status}`);
         }
       })
       .catch((err) => {
-        if (prefsRef.current.notifyErrors) {
+        if (readNotificationPrefs().notifyErrors) {
           toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`);
         }
       });
-  }, []);
+  }, [readNotificationPrefs]);
 
   // boot: load sessions, restore tabs, ensure at least one session exists & is open
   useEffect(() => {

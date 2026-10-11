@@ -47,7 +47,7 @@ import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
 import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
-import { useNotificationPrefs } from '@/lib/appConfigHooks';
+import { useNotificationPrefsReader } from '@/lib/appConfigHooks';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
@@ -705,7 +705,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   // Result-toast gating reuses the sidebar's notifyChatOps pref so a kill from
   // Fleet Health has the SAME UX contract (toast on success / partial failure) as
   // a kill from the sidebar (WARDEN-328).
-  const { prefs } = useNotificationPrefs();
+  const readNotificationPrefs = useNotificationPrefsReader();
 
   // Toggle one agent's membership; select/clear a whole group via the pure tri-
   // state reducer (so the section/host select-all checkboxes share one tested
@@ -1047,7 +1047,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
       );
       await fetchHealth();
     });
-    showFanoutToast(formatKillToast(summary), prefs.notifyChatOps);
+    showFanoutToast(formatKillToast(summary), readNotificationPrefs().notifyChatOps);
     // The kill's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;
@@ -1071,7 +1071,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
       return a ? displayName(a) : id;
     };
     const summary = await runKeySendFanout(ids, key, nameOf);
-    showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
+    showFanoutToast(formatKeySendToast(summary, key), readNotificationPrefs().notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;

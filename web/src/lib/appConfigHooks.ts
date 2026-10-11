@@ -7,9 +7,9 @@
 // runs on mount and after every Settings save (queryClient.fetchQuery with
 // staleTime: 0), so subscribers live-update without a reload.
 
-import { useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { appConfigQueryKey, fetchAppConfig, selectCompanionTransportEnabled, selectIssueLinksEnabled, selectIssueLinkTrackersRaw, selectNotificationPrefs, NOTIFICATION_PREF_DEFAULTS, type NotificationPrefs, selectObserverAutoStart, selectObserverSessionTimeout, selectShowHostTags } from '@/lib/appConfigQuery';
+import { useCallback, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { appConfigQueryKey, fetchAppConfig, type AppConfig, selectCompanionTransportEnabled, selectIssueLinksEnabled, selectIssueLinkTrackersRaw, selectNotificationPrefs, NOTIFICATION_PREF_DEFAULTS, type NotificationPrefs, selectObserverAutoStart, selectObserverSessionTimeout, selectShowHostTags } from '@/lib/appConfigQuery';
 import { normalizeIssueLinkEntries, unambiguousPrefixEntries, type IssueLinkEntry } from '@/lib/issue-links';
 import { fetchBounded } from '@/lib/api';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
@@ -163,4 +163,20 @@ export function useNotificationPrefs(): { prefs: NotificationPrefs } {
     select: selectNotificationPrefs,
   });
   return { prefs: data ?? NOTIFICATION_PREF_DEFAULTS };
+}
+
+/**
+ * WARDEN-1746 — call-time read of the four toast-gate prefs for components that only
+ * consult them inside event/async handlers. Returns a STABLE function (identity never
+ * changes, no cache subscription → no re-render on pref changes) that reads the shared
+ * ['app-config'] cache when invoked, so a Settings toggle is honored immediately
+ * (App.refreshConfigPrefs refills the cache after each save). Before the first load
+ * `selectNotificationPrefs(undefined)` is all-true, identical to the hook's default.
+ */
+export function useNotificationPrefsReader(): () => NotificationPrefs {
+  const queryClient = useQueryClient();
+  return useCallback(
+    () => selectNotificationPrefs(queryClient.getQueryData<AppConfig>(appConfigQueryKey())),
+    [queryClient],
+  );
 }
