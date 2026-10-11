@@ -43,7 +43,6 @@ import { WatchCatchup } from '@/components/WatchCatchup';
 import { StreamStatusDot } from '@/components/StreamStatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { useNotificationPrefs } from '@/lib/appConfigHooks';
 import { useConfigPersistence } from '@/lib/useConfigPersistence';
 import { useObsPersistence } from '@/lib/useObsPersistence';
 import { useConfirmTarget } from '@/lib/useConfirmTarget';
@@ -51,7 +50,7 @@ import { WEB_POLL_FLOOR_MS } from '@/lib/pollInterval';
 import { telemetryChatName } from '@/lib/telemetryChatName';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
-import { appConfigQueryKey, selectConfirmDestructiveActions, type AppConfig } from '@/lib/appConfigQuery';
+import { appConfigQueryKey, selectConfirmDestructiveActions, selectNotificationPrefs, type AppConfig } from '@/lib/appConfigQuery';
 import { appConfigQueryFn, usePollIntervalMs } from '@/lib/appConfigHooks';
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
@@ -460,7 +459,14 @@ function App() {
   // then blank (host login shell). Pure client-side pref like defaultShell
   // above: persisted by the saveUi effect below, never sent to the backend.
   // (call-time read in spawnShell too, WARDEN-1600.)
-  const { prefs } = useNotificationPrefs();
+  // WARDEN-1736 (slice 57): App never renders a notify* pref — they gate toasts inside
+  // gesture-time callbacks only — so it no longer subscribes (a Settings toggle must not
+  // re-render App). Each toast gate reads the shared ['app-config'] cache at call time via
+  // this stable reader; refreshConfigPrefs refills the cache after every Settings save.
+  const readNotificationPrefs = useCallback(
+    () => selectNotificationPrefs(queryClient.getQueryData<AppConfig>(appConfigQueryKey())),
+    [queryClient],
+  );
   // WARDEN-394 — the dashboard auto-refresh cadence, resolved from the persisted
   // pollIntervalMs pref. WARDEN-1709: read from the shared ['app-config'] cache
   // (60s web default until it loads); refreshConfigPrefs refreshes that cache after
@@ -877,7 +883,7 @@ function App() {
       ? { host, cwd, cmd, name }
       : { host, cwd, cmd });
     if (!result.ok || !result.data) {
-      if (prefs.notifyErrors) toast.error(result.error || 'Failed to start shell');
+      if (readNotificationPrefs().notifyErrors) toast.error(result.error || 'Failed to start shell');
       return false;
     }
     // WARDEN-1513 — the feature-adoption seed: a SUCCESSFUL shell spawn is one
@@ -909,7 +915,7 @@ function App() {
     primePaneHost(paneId, hostOf);
     openChat(paneId);
     return true;
-  }, [refresh, openChat, prefs.notifyErrors, primePaneHost]);
+  }, [refresh, openChat, primePaneHost, readNotificationPrefs]);
 
   // A split shell is an UNNAMED shell: temporary, never listed (WARDEN-1422).
   const handleSplitShell = useCallback(async (id?: string) => {
@@ -948,7 +954,7 @@ function App() {
   const respawnChat = useCallback(async (id: string) => {
     const result = await postJson('/api/respawn', { id });
     if (!result.ok) {
-      if (prefs.notifyErrors) toast.error(result.error || 'Failed to respawn');
+      if (readNotificationPrefs().notifyErrors) toast.error(result.error || 'Failed to respawn');
       return;
     }
     const host = chatsRef.current.find((c) => (c.key || c.id) === id)?.host;
@@ -960,8 +966,8 @@ function App() {
     // the same sequence the in-pane Re-spawn button drives. A pane that is
     // not open costs nothing (the token entry waits unused).
     bumpReconnectToken(id);
-    if (prefs.notifyChatOps) toast.success('Session respawned — a fresh process under the same name');
-  }, [discoverHost, prefs.notifyErrors, prefs.notifyChatOps, bumpReconnectToken]);
+    if (readNotificationPrefs().notifyChatOps) toast.success('Session respawned — a fresh process under the same name');
+  }, [discoverHost, bumpReconnectToken, readNotificationPrefs]);
 
   // Save a closed TEMPORARY session from the recently-closed flyout (WARDEN-1422):
   // promote it to persistent — it moves into its host's saved list, and its
@@ -969,7 +975,7 @@ function App() {
   const saveClosedSession = useCallback(async (id: string) => {
     const result = await postJson<{ chat: Chat }>('/api/save-session', { id });
     if (!result.ok || !result.data) {
-      if (prefs.notifyErrors) toast.error(result.error || 'Failed to save session');
+      if (readNotificationPrefs().notifyErrors) toast.error(result.error || 'Failed to save session');
       return;
     }
     const chat = result.data.chat;
@@ -981,8 +987,8 @@ function App() {
     markRecentlySaved(chat.key || chat.id);
     void refresh();
     if (host) void discoverHost(host).catch(() => {});
-    if (prefs.notifyChatOps) toast.success(`Saved — it is listed under ${host || 'its host'}`);
-  }, [discoverHost, markRecentlySaved, refresh, dropRecentlyClosed, prefs.notifyErrors, prefs.notifyChatOps]);
+    if (readNotificationPrefs().notifyChatOps) toast.success(`Saved — it is listed under ${host || 'its host'}`);
+  }, [discoverHost, markRecentlySaved, refresh, dropRecentlyClosed, readNotificationPrefs]);
 
   // WARDEN-372: record a closing pane in the active workspace's recently-closed
   // recovery list. Snapshots the chat's display name/host/cwd at close time so the
@@ -1070,11 +1076,11 @@ function App() {
     if (!ok) {
       // Match the prior split: a generic toast on a server error, the reason
       // appended on a network failure.
-      if (prefs.notifyChatOps) toast.error(res ? 'Failed to force-kill session' : `Failed to force-kill: ${error || ''}`);
+      if (readNotificationPrefs().notifyChatOps) toast.error(res ? 'Failed to force-kill session' : `Failed to force-kill: ${error || ''}`);
       return;
     }
-    if (prefs.notifyChatOps) toast.success('Session force-killed');
-  }, [prefs.notifyChatOps]);
+    if (readNotificationPrefs().notifyChatOps) toast.success('Session force-killed');
+  }, [readNotificationPrefs]);
 
   const {
     target: forceKillTarget,
@@ -1131,7 +1137,7 @@ function App() {
         // ROLLBACK: the server rejected the kill, so restore the row.
         rollback();
         // Generic toast on a server error, reason appended on a network failure.
-        if (prefs.notifyChatOps) toast.error(res ? 'Failed to kill chat' : `Failed to kill chat: ${error || ''}`);
+        if (readNotificationPrefs().notifyChatOps) toast.error(res ? 'Failed to kill chat' : `Failed to kill chat: ${error || ''}`);
         return;
       }
       // Success: the server confirmed the kill, so the disk catalog no longer
@@ -1142,13 +1148,13 @@ function App() {
       // discoverHost re-pulls that host's live list, confirming the kill and
       // refreshing the rest of the host's agents.
       if (host) void discoverHost(host).catch(() => {});
-      if (prefs.notifyChatOps) toast.success('Chat killed');
+      if (readNotificationPrefs().notifyChatOps) toast.success('Chat killed');
     } catch (error) {
       // ROLLBACK on a thrown error too (e.g. an unexpected exception).
       rollback();
-      if (prefs.notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
+      if (readNotificationPrefs().notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, discoverHost, removeActive, setOpenPanes, setFocused, prefs.notifyChatOps]);
+  }, [refresh, discoverHost, removeActive, setOpenPanes, setFocused, readNotificationPrefs]);
 
   const {
     target: killTarget,
@@ -1185,31 +1191,31 @@ function App() {
         // ROLLBACK: the server rejected the rename.
         rollback();
         // Generic toast on a server error, reason appended on a network failure.
-        if (prefs.notifyChatOps) toast.error(res ? 'Failed to rename chat' : `Failed to rename: ${error || ''}`);
+        if (readNotificationPrefs().notifyChatOps) toast.error(res ? 'Failed to rename chat' : `Failed to rename: ${error || ''}`);
         return;
       }
       // Success: the disk catalog now holds the new name — drop the guard.
       pendingRenamesRef.current.delete(session);
       refresh();
-      if (prefs.notifyChatOps) toast.success('Chat renamed');
+      if (readNotificationPrefs().notifyChatOps) toast.success('Chat renamed');
     } catch (error) {
       // ROLLBACK on a thrown error too.
       rollback();
-      if (prefs.notifyChatOps) toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
+      if (readNotificationPrefs().notifyChatOps) toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, prefs.notifyChatOps]);
+  }, [refresh, readNotificationPrefs]);
 
   // WARDEN-770 — surface an inline quick-reply send outcome under the SAME
-  // prefs.notifyChatOps gate as kill/rename/resume above. The QuickReply control
+  // notifyChatOps gate (read at call time) as kill/rename/resume above. The QuickReply control
   // owns the postJson send + its own inline error/retry cue; this callback is the
   // parent's toast channel. Success reads as a confirmation that the reply reached
   // the agent's tmux session without a pane switch; failure surfaces the server /
   // network reason (the control's inline error already points at the row that failed).
   const handleReplyResult = useCallback((ok: boolean, error?: string) => {
-    if (!prefs.notifyChatOps) return;
+    if (!readNotificationPrefs().notifyChatOps) return;
     if (ok) toast.success('Reply sent');
     else toast.error(error || 'Reply failed');
-  }, [prefs.notifyChatOps]);
+  }, [readNotificationPrefs]);
 
   // WARDEN-1441 (slice 15): deep-links into the Observer's Activity tab now write
   // the shared uiStore directly (the retired externalViewMode one-shot prop made

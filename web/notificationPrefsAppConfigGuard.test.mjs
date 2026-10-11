@@ -39,10 +39,11 @@ test('(c) hook is a select over the shared cache', () => {
   assert.ok(/data \?\? NOTIFICATION_PREF_DEFAULTS/.test(hooks));
 });
 
-test('(d) App does not destructure reload from useNotificationPrefs', () => {
+test('(d) App has no useNotificationPrefs subscription; toast gates read the cache at call time', () => {
   const app = stripComments(read('src/App.tsx'));
-  assert.ok(/const \{ prefs \} = useNotificationPrefs\(\)/.test(app));
-  assert.ok(!/reload\b[^\n]*=\s*useNotificationPrefs/.test(app));
+  assert.ok(!/useNotificationPrefs/.test(app), 'App must not subscribe to the notify* prefs');
+  assert.ok(!/prefs\.notify/.test(app));
+  assert.ok(/selectNotificationPrefs\(\s*queryClient\.getQueryData<AppConfig>\(appConfigQueryKey\(\)\)/.test(app));
 });
 
 test('(e) useConfigPersistence has no reload arg and handleConfigChange still refreshes config prefs', () => {
