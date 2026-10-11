@@ -61,6 +61,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // throws. Mirrors the shape src/notify.js and src/telemetry-send.js use.
 const MAX_ATTEMPTS = 3;
 
+// Per-attempt deadline for the fetch (headers AND body read). Node's global fetch
+// has no total timeout (undici headersTimeout ~300s), so without this a hung
+// endpoint holds each attempt ~5 min and the retry loop multiplies it to ~15 min.
+// Kept local to llm.js on purpose — not shared with retry.js.
+export const LLM_REQUEST_TIMEOUT_MS = 120_000;
+
 // complete({system, messages, tools, max_tokens}) -> raw Anthropic message JSON.
 export async function complete({ system, messages, tools, max_tokens = 2048 }) {
   const TOKEN = resolveToken();
@@ -87,6 +93,7 @@ export async function complete({ system, messages, tools, max_tokens = 2048 }) {
           'x-api-key': TOKEN,
         },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
       });
       const text = await res.text();
       if (res.ok) return JSON.parse(text);

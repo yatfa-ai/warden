@@ -455,6 +455,32 @@ describe('complete', () => {
     });
   });
 
+  describe('per-request timeout', () => {
+    it('exports a 120s LLM_REQUEST_TIMEOUT_MS', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      assert.strictEqual(m.LLM_REQUEST_TIMEOUT_MS, 120_000);
+    });
+
+    it('passes an AbortSignal in the fetch init so a hung endpoint cannot wait forever', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      const f = fetchSequence([{ ok: true, status: 200, json: { ok: true } }]);
+      globalThis.fetch = f;
+      await m.complete({ messages: [] });
+      assert.ok(f.calls[0].opts.signal instanceof AbortSignal, 'fetch init carries an AbortSignal');
+    });
+
+    it('rejects after MAX_ATTEMPTS when every attempt times out (TimeoutError)', async () => {
+      const m = await loadFresh({ homeDir: EMPTY_HOME, env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+      const f = fetchSequence([{ throw: new DOMException('timed out', 'TimeoutError') }]);
+      globalThis.fetch = f;
+      await assert.rejects(
+        () => m.complete({ messages: [] }),
+        (err) => err.name === 'TimeoutError',
+      );
+      assert.strictEqual(f.count(), 3, 'retried through all attempts before giving up');
+    });
+  });
+
   describe('no backoff sleep after the final attempt', () => {
     // The last attempt cannot be followed by another fetch, so a backoff sleep
     // there is pure dead wait in front of the throw. Same guard the four
