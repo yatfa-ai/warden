@@ -82,8 +82,9 @@ export function corruptBackupPath(file, text = '') {
  * fsyncs it, then renames over the target, so the target is never observed in a
  * partially-written state (a crash mid-write leaves the prior complete file).
  * Creates parent directories. Async — safe on the request path.
+ * (Unordered: callers go through the per-file queue in `atomicWrite`.)
  */
-export async function atomicWrite(file, data) {
+async function atomicWriteUnqueued(file, data) {
   const dir = path.dirname(file);
   await fsp.mkdir(dir, { recursive: true });
   const tmp = tempPath(file);
@@ -101,6 +102,40 @@ export async function atomicWrite(file, data) {
     await fsp.unlink(tmp).catch(() => {});
     throw err;
   }
+}
+
+// Per-target-file write queue. Unique temp names make each write torn-free, but
+// two OVERLAPPING writes to the same file still race on fsync timing: the call
+// that snapshotted EARLIER can rename LAST and silently revert an acknowledged
+// newer write (visible only after a restart). So writes to one path run strictly
+// in call order; different paths stay fully parallel. Same-process only — a
+// separate process (CLI vs server) is out of scope, as documented in config.js.
+// Value = the tail promise of that file's chain; entry is deleted once the tail
+// settles so the map stays bounded by in-flight files.
+const writeQueues = new Map();
+
+/** Number of files with a write queued or in flight (diagnostics / tests). */
+export function pendingWriteCount() {
+  return writeQueues.size;
+}
+
+/**
+ * Atomically write `data` (a string) to `file`; see `atomicWriteUnqueued` for the
+ * torn-free mechanics. Overlapping calls for the SAME file are serialized in call
+ * order (last-issued wins on disk). A failed write rejects for its own caller
+ * only — it never poisons later writers to the same path.
+ */
+export function atomicWrite(file, data) {
+  const key = path.resolve(file);
+  const prev = writeQueues.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(() => atomicWriteUnqueued(file, data));
+  // The tail swallows rejection so the chain (and the map cleanup) never produces
+  // an unhandled rejection; `run` itself still rejects for the caller.
+  const tail = run.catch(() => {}).then(() => {
+    if (writeQueues.get(key) === tail) writeQueues.delete(key);
+  });
+  writeQueues.set(key, tail);
+  return run;
 }
 
 /**

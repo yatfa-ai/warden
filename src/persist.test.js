@@ -1,10 +1,11 @@
-import { describe, it, before, after, afterEach } from 'node:test';
+import { describe, it, before, after, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
 import {
+  pendingWriteCount,
   atomicWrite,
   atomicWriteJson,
   atomicAppend,
@@ -64,6 +65,73 @@ describe('atomicWrite', () => {
     await atomicWrite(p, 'x');
     const leftovers = fs.readdirSync(ROOT).filter((n) => n.endsWith('.tmp'));
     assert.deepStrictEqual(leftovers, []);
+  });
+});
+
+describe('atomicWrite per-file ordering', () => {
+  it('last-issued overlapping write wins on disk (8 writers x 25 trials)', async () => {
+    for (let trial = 0; trial < 25; trial++) {
+      const p = file(`order-${trial}.json`);
+      const writes = [];
+      for (let n = 1; n <= 8; n++) {
+        // Alternate raw and JSON writers; both go through the same queue.
+        writes.push(n % 2 ? atomicWriteJson(p, { n }) : atomicWrite(p, JSON.stringify({ n }, null, 2) + '\n'));
+      }
+      await Promise.all(writes);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(p, 'utf8')), { n: 8 }, `trial ${trial}`);
+    }
+  });
+
+  it('a rejected write rejects for its caller and does not poison later writes', async () => {
+    const blocker = file('iamafile');
+    fs.writeFileSync(blocker, 'x');
+    const bad = path.join(blocker, 'child.json'); // parent is a file -> mkdir fails
+    const p1 = atomicWrite(bad, 'a');
+    const p2 = atomicWrite(bad, 'b');
+    await assert.rejects(p1);
+    await assert.rejects(p2);
+    // Same path (now made writable) still accepts a write after the failures.
+    fs.rmSync(blocker);
+    await atomicWrite(bad, 'ok');
+    assert.strictEqual(fs.readFileSync(bad, 'utf8'), 'ok');
+    // A failure queued between two good writes does not block the follow-up.
+    const q = file('mixed.json');
+    const w1 = atomicWrite(q, '1');
+    const failing = atomicWrite(q, { toString() { throw new Error('boom'); } });
+    const w3 = atomicWrite(q, '3');
+    await w1;
+    await assert.rejects(failing).catch(() => {});
+    await w3;
+    assert.strictEqual(fs.readFileSync(q, 'utf8'), '3');
+  });
+
+  it('different files are not serialized against each other; queue entries are cleaned up', async () => {
+    const slow = file('slow.json');
+    const fast = file('fast.json');
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const realOpen = fs.promises.open;
+    const m = mock.method(fs.promises, 'open', async (p, ...rest) => {
+      if (String(p).includes('slow.json')) await gate; // deliberately slow first writer
+      return realOpen.call(fs.promises, p, ...rest);
+    });
+    try {
+      const slowP = atomicWrite(slow, 'slow');
+      const fastP = atomicWrite(fast, 'fast');
+      await fastP; // must resolve while slow is still blocked
+      assert.strictEqual(fs.readFileSync(fast, 'utf8'), 'fast');
+      assert.strictEqual(fs.existsSync(slow), false);
+      await new Promise((r) => setImmediate(r)); // let fast's queue entry clean up
+      assert.strictEqual(pendingWriteCount(), 1); // only slow still tracked
+      release();
+      await slowP;
+      assert.strictEqual(fs.readFileSync(slow, 'utf8'), 'slow');
+    } finally {
+      release();
+      m.mock.restore();
+    }
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(pendingWriteCount(), 0);
   });
 });
 
