@@ -30,6 +30,13 @@ import { buildCwdReachableScript } from './git.js';
 export const LOCAL = '(local)';
 
 
+// (WARDEN-1742) Upper bound for the LOCAL git / local `docker exec … git` probes.
+// runLocalCapture only arms its SIGTERM timer when given a timeout, so a hung git
+// (NFS stall, wedged docker daemon) would otherwise never resolve and stack an
+// unreaped child per poll. On timeout the result is the usual
+// { ok:false, code:-1, stdout, stderr } shape callers already treat as a git failure.
+export const LOCAL_GIT_TIMEOUT_MS = 15000;
+
 // Run a command LOCALLY without blocking the event loop — the async, spawn-based
 // twin of the spawnSync calls that previously froze the whole server for the
 // duration of every local git / docker-exec / rg / grep on a request path
@@ -70,13 +77,6 @@ export const LOCAL = '(local)';
 // BEFORE its final stdout 'data' (the adversarial order the saturated loop produces)
 // must still resolve with COMPLETE stdout — a real subprocess can't reproduce that
 // order reliably on every machine. Mirrors runWithPool's `deps` injection pattern.
-// (WARDEN-1742) Upper bound for the LOCAL git / local `docker exec … git` probes.
-// runLocalCapture only arms its SIGTERM timer when given a timeout, so a hung git
-// (NFS stall, wedged docker daemon) would otherwise never resolve and stack an
-// unreaped child per poll. On timeout the result is the usual
-// { ok:false, code:-1, stdout, stderr } shape callers already treat as a git failure.
-export const LOCAL_GIT_TIMEOUT_MS = 15000;
-
 export function runLocalCapture(bin, args, { cwd, timeout, spawn: spawnFn = spawn } = {}) {
   return new Promise((resolve) => {
     const child = spawnFn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
