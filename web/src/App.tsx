@@ -31,6 +31,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
 import { GlobalSearchHost } from '@/components/GlobalSearchHost';
 import { HealthPanel } from '@/components/HealthPanel';
+import { AppHeaderMenu } from '@/components/AppHeaderMenu';
 import { PanelToggleButtons } from '@/components/PanelToggleButtons';
 import { PanelLayoutSync } from '@/components/PanelLayoutSync';
 import { AppearanceSync } from '@/components/AppearanceSync';
@@ -1284,7 +1285,7 @@ function App() {
         />
       ) : (
         <>
-      <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
+      <AppHeaderMenu>
         <PanelToggleButtons panel="sidebar" />
         <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{openPanes.length} open</span>
@@ -1305,7 +1306,7 @@ function App() {
           <PanelToggleButtons panel="observer" />
           <IconTooltip label="settings" side="bottom"><button onClick={() => { getFeatureUsageSampler().sampler.recordFeatureUse('settings'); setSettingsOpen(true); }} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
         </div>
-      </header>
+      </AppHeaderMenu>
       <main className="flex flex-1 min-h-0">
         <ResizableRail side="sidebar" className="chat-sidebar border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative" handleTitle="Drag to resize sidebar">
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
