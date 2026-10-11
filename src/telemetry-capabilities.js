@@ -17,6 +17,8 @@
 // VERIFIED one, and a verification is only honest at the moment it is made. So it
 // stays a live, on-demand probe, recomputed on every click.
 
+import { REQUEST_TIMEOUT_MS } from './retry.js';
+
 // The client's telemetry schema version — the SAME value as the canonical
 // web/src/lib/telemetry/schema.ts SCHEMA_VERSION (and the vendored copy in the
 // warden-telemetry receiver repo). It is INLINED here rather than imported across
@@ -230,7 +232,7 @@ export async function probeReceiverCapabilities({
   let status = null;
   let body = null;
   try {
-    const res = await fetchImpl(origin + CAPABILITIES_PATH, { method: 'GET', headers });
+    const res = await fetchImpl(origin + CAPABILITIES_PATH, { method: 'GET', headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     status = res.status;
     try {
       body = await res.json();

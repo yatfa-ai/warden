@@ -34,7 +34,7 @@ import { randomUUID } from 'node:crypto';
 // module: the live consent re-check (WARDEN-585), the 415 schema-drift
 // circuit-break (WARDEN-631) and the `replayable` exhaustion result (WARDEN-671)
 // are this transport's alone and are deliberately not shared.
-import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog } from './retry.js';
+import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog, REQUEST_TIMEOUT_MS } from './retry.js';
 
 // Build the wire payload for a batch — the pure, network-free seam. Split out so
 // the header/body contract (schema-version handshake + JSON body of the events) is
@@ -207,7 +207,7 @@ export async function send({
     try {
       // Destination is EXACTLY endpointUrl — never rewritten, never a hardcoded
       // host. A misconfigured/invalid URL simply throws here → network-error path.
-      res = await fetchImpl(endpointUrl, { method: 'POST', headers, body });
+      res = await fetchImpl(endpointUrl, { method: 'POST', headers, body, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (e) {
       // Network blip (DNS, refused, reset, timeout, bad URL) — transient. Back off
       // and retry unless this was the final attempt; otherwise drop (no throw).

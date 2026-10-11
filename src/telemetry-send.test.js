@@ -349,6 +349,24 @@ describe('(d) transient failure → retried ≤ cap with backoff then dropped; n
     assert.strictEqual(sleep.count(), _INTERNALS.MAX_ATTEMPTS - 1);
   });
 
+  it('WARDEN-1737: every POST carries an AbortSignal (per-request timeout, no ~300s hang)', async () => {
+    const fetchImpl = fetchSeq([{ ok: true, status: 200 }]);
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl });
+    assert.ok(fetchImpl.calls[0].opts.signal instanceof AbortSignal, 'init carries an AbortSignal');
+  });
+
+  it('WARDEN-1737: a TimeoutError (hung receiver aborted by the signal) takes the transient path → retried then dropped', async () => {
+    const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    const fetchImpl = fetchSeq([{ throw: timeout }]);
+    const sleep = sleepRec();
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleep.fn });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.dropped, true);
+    assert.strictEqual(r.status, null);
+    assert.strictEqual(r.attempts, _INTERNALS.MAX_ATTEMPTS);
+    assert.strictEqual(fetchImpl.count(), _INTERNALS.MAX_ATTEMPTS);
+  });
+
   it('recovers after a transient then succeeds (503 → 200): backoff once, two attempts', async () => {
     const fetchImpl = fetchSeq([
       { ok: false, status: 503 },
