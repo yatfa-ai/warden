@@ -840,7 +840,7 @@ export function whereWindows(bin, deps = {}) {
 }
 
 // Upper bound on the local `claude --version` probe (WARDEN-1752).
-export const CLAUDE_PROBE_TIMEOUT_MS = 10000;
+const CLAUDE_PROBE_TIMEOUT_MS = 10000;
 
 // Find the `claude` binary on this machine / host → returns the full path or null.
 // claude is often in a dir added by .zshrc (e.g. ~/.local/bin), which `bash -lc`
