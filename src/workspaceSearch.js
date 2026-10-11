@@ -13,6 +13,9 @@ import { runLocalCapture } from './gitTransport.js';
 // against — it is shellQuoted and preceded by `--`, output is bounded, and
 // binaries are skipped (-I).
 const SEARCH_MAX_RESULTS = 30;
+// Upper bound on one local streamed search (WARDEN-1752); a recursive session
+// grep can legitimately be slow, so this is generous.
+export const SEARCH_STREAM_TIMEOUT_MS = 60000;
 const SEARCH_MAX_LINE_LEN = 300; // display cap applied by parseSearchOutput
 // Per-line transfer cap — the local/remote single source of truth for "how much
 // of one matched line we move before stopping". The remote script's `cut -c1-…`
@@ -117,6 +120,7 @@ async function hasBinary(bin) {
 export function streamBoundedSearch(bin, args, cwd, opts = {}) {
   const maxResults = opts.maxResults ?? SEARCH_MAX_RESULTS;
   const transferLen = opts.transferLen ?? SEARCH_TRANSFER_LINE_LEN;
+  const timeout = opts.timeout ?? SEARCH_STREAM_TIMEOUT_MS;
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
       cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
@@ -127,8 +131,15 @@ export function streamBoundedSearch(bin, args, cwd, opts = {}) {
     let stopped = false;
     let settled = false;
     const cap = (s) => (s.length > transferLen ? s.slice(0, transferLen) : s);
-    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+    let timer = null;
+    const done = (val) => {
+      if (!settled) { settled = true; if (timer) clearTimeout(timer); resolve(val); }
+    };
     const stop = () => { stopped = true; try { child.kill('SIGTERM'); } catch {} };
+    // WARDEN-1752: a hung child may never close its pipes, so on expiry we stop()
+    // it and settle IMMEDIATELY with the partial lines gathered so far rather
+    // than waiting on 'close'.
+    if (timeout > 0) timer = setTimeout(() => { stop(); done(lines.join('\n')); }, timeout);
 
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {

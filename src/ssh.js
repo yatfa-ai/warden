@@ -839,6 +839,9 @@ export function whereWindows(bin, deps = {}) {
   });
 }
 
+// Upper bound on the local `claude --version` probe (WARDEN-1752).
+const CLAUDE_PROBE_TIMEOUT_MS = 10000;
+
 // Find the `claude` binary on this machine / host → returns the full path or null.
 // claude is often in a dir added by .zshrc (e.g. ~/.local/bin), which `bash -lc`
 // (what tmux's shell runs) does NOT source — so we try zsh interactive login first.
@@ -866,10 +869,23 @@ export async function detectClaude(host, deps = {}) {
     // ASYNC spawn (WARDEN-440): `claude --version` is a Node CLI cold-start; a
     // synchronous spawnSync here held the event loop for its duration on every
     // /api/claude-sessions hit. stdio is ignored — we only care about exit status.
+    // WARDEN-1752: bound the probe. A wedged `claude` (hung auth/update check)
+    // never exits, which left this promise pending forever and wedged every
+    // /api/claude-sessions hit and bare-claude spawn/resume. On expiry we SIGTERM
+    // the child and resolve false — the same "not found" -> null result callers
+    // already handle.
+    const probeTimeout = deps.claudeProbeTimeoutMs ?? CLAUDE_PROBE_TIMEOUT_MS;
     const ok = await new Promise((resolve) => {
+      let timer = null;
+      const settle = (v) => { if (timer) { clearTimeout(timer); timer = null; } resolve(v); };
       const child = spawn('claude', ['--version'], { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'] });
-      child.on('error', () => resolve(false));
-      child.on('exit', (code) => resolve(code === 0));
+      timer = setTimeout(() => {
+        timer = null;
+        try { child.kill('SIGTERM'); } catch { /* noop */ }
+        resolve(false);
+      }, probeTimeout);
+      child.on('error', () => settle(false));
+      child.on('exit', (code) => settle(code === 0));
     });
     return ok ? 'claude' : null;
   }
