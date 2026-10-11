@@ -28,7 +28,7 @@ export function createUserDataRouter({ cfg, chatCatalog }) {
   // POST /api/collections - Create new collection
   router.post('/api/collections', async (req, res) => {
     try {
-      const { name, criteria, metadata } = req.body;
+      const { name, criteria, metadata } = req.body ?? {};
       if (!name || typeof name !== 'string') {
         return res.status(400).json({ error: 'name is required (string)' });
       }
@@ -95,7 +95,7 @@ export function createUserDataRouter({ cfg, chatCatalog }) {
 
   // PUT /api/pins — update the pinned chat id list and persist
   router.put('/api/pins', async (req, res) => {
-    const { pins } = req.body;
+    const { pins } = req.body ?? {};
     if (!Array.isArray(pins)) return res.status(400).json({ error: 'pins must be an array' });
     cfg.pins = pins;
     await save(cfg);
@@ -108,7 +108,7 @@ export function createUserDataRouter({ cfg, chatCatalog }) {
   // for yatfa chats). WARDEN-89: validate input, never 500 on bad shapes.
   router.get('/api/agent-notes', (_req, res) => res.json({ notes: cfg.agentNotes || {} }));
   router.put('/api/agent-notes', async (req, res) => {
-    const { id, note } = req.body;
+    const { id, note } = req.body ?? {};
     if (typeof id !== 'string' || !id.trim()) return res.status(400).json({ error: 'id must be a non-empty string' });
     if (typeof note !== 'string') return res.status(400).json({ error: 'note must be a string' });
     const value = note.trim().slice(0, 200); // mirror rename/collection name caps
@@ -127,7 +127,7 @@ export function createUserDataRouter({ cfg, chatCatalog }) {
   // (same leniency cfg.pins/cfg.agentNotes already imply for vanished chats).
   router.get('/api/session-tags', (_req, res) => res.json({ sessionTags: cfg.sessionTags || {} }));
   router.put('/api/session-tags', async (req, res) => {
-    const { id, tags } = req.body;
+    const { id, tags } = req.body ?? {};
     if (typeof id !== 'string' || !id.trim()) return res.status(400).json({ error: 'id must be a non-empty string' });
     if (!Array.isArray(tags)) return res.status(400).json({ error: 'tags must be an array' });
     // Coerce to trimmed strings, cap per-tag length, drop empties + duplicates, cap
