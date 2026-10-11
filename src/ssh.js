@@ -704,8 +704,11 @@ export function toMsysPath(p) {
 // `spawnSync` anywhere on it froze the ENTIRE server (every HTTP request, WS
 // frame, and timer queued behind it) for the child's duration — see WARDEN-88
 // Anti-Pattern 1B. `opts.timeout` (ms) reproduces spawnSync's bounded behavior:
-// we SIGTERM the child when the budget is exceeded (only armed for a positive
-// finite timeout, so an absent timeout never fires a 0ms kill). Shape mirrors
+// we SIGTERM the child when the budget is exceeded. An absent timeout takes the
+// 30s default (WARDEN-1743), matching the remote `run()`, so a wedged local tmux
+// child can never hang the pane monitor / alive-sweep / preflight forever. An
+// explicit finite 0/negative value still arms no timer (opt-out preserved) — so
+// a timer is only ever armed for a positive budget, never a 0ms kill. Shape mirrors
 // the remote `run()` path so runTmux's local and remote branches stay symmetric.
 export function runLocalTmux(args, opts = {}) {
   // Native local Windows (WARDEN-922): the same tmux argv is executed against the
@@ -714,15 +717,15 @@ export function runLocalTmux(args, opts = {}) {
   if (isNativeLocal()) return runNative(args, opts);
   return new Promise((resolve) => {
     const child = spawn(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    const ms = Number.isFinite(opts.timeout) ? opts.timeout : null;
+    const ms = Number.isFinite(opts.timeout) ? opts.timeout : 30000;
     const timer = ms && ms > 0 ? setTimeout(() => child.kill('SIGTERM'), ms) : null;
     // The stdout/stderr accumulation + 'close'-not-'exit' settlement is the shared
     // core — see captureAndSettle (childCapture.js). It matters especially here:
     // this is the pane-capture transport, and `capture-pane -p -e` output is full
     // of multibyte box drawing while /api/pane-export captures 5000 lines (hundreds
     // of KB), so the read arrives in many chunks and both the utf8 decoder state
-    // and the full drain are load-bearing. `timer` is null when no finite positive
-    // timeout was given, which captureAndSettle tolerates.
+    // and the full drain are load-bearing. `timer` is null when an explicit
+    // non-positive timeout was given, which captureAndSettle tolerates.
     captureAndSettle(child, resolve, {
       timer,
       onSpawnError: (err, stdout, stderr) => ({ ok: false, code: -1, stdout, stderr: stderr + String(err) }),
