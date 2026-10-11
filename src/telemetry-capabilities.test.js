@@ -319,6 +319,20 @@ test('probe: 200 + matching schema → connected, probes origin + /capabilities 
   assert.equal(fetchImpl.calls[0].init.method, 'GET');
 });
 
+test('probe: WARDEN-1737 the GET carries an AbortSignal (per-request timeout, no ~300s hang)', async () => {
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } });
+  await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', fetchImpl });
+  assert.ok(fetchImpl.calls[0].init.signal instanceof AbortSignal);
+});
+
+test('probe: WARDEN-1737 a TimeoutError from a hung receiver → no-receiver verdict', async () => {
+  const throwErr = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  const fetchImpl = fakeFetch({ throwErr });
+  const v = await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', fetchImpl });
+  assert.equal(v.kind, 'no-receiver');
+  assert.equal(v.ok, false);
+});
+
 test('probe: a draft token is sent as Authorization: Bearer', async () => {
   const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } });
   await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', token: 'draft-tok', fetchImpl });

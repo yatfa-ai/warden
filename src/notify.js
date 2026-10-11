@@ -38,7 +38,7 @@
 // primitives src/telemetry-send.js uses. Only the RETRY LOOP below is local to
 // this module; it deliberately does NOT share telemetry-send's consent re-check,
 // schema-drift circuit-break, or replayable exhaustion result.
-import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog } from './retry.js';
+import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog, REQUEST_TIMEOUT_MS } from './retry.js';
 
 // The result returned when the gate is closed (disabled or no URL). `dropped` is
 // deliberately false: nothing was attempted OR discarded, the gate was simply
@@ -139,7 +139,7 @@ export async function sendWebhook({
     try {
       // Destination is EXACTLY url — never rewritten, never a hardcoded host. A
       // misconfigured/invalid URL simply throws here → network-error path.
-      res = await fetchImpl(url, { method: 'POST', headers, body });
+      res = await fetchImpl(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (e) {
       // Network blip (DNS, refused, reset, timeout, bad URL) — transient. Back
       // off and retry unless this was the final attempt; otherwise drop.

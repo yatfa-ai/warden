@@ -55,6 +55,13 @@ export function backoffMs(attempt) {
   return Math.max(0, Math.round(base + jitter));
 }
 
+// Per-request timeout for outbound fetches (WARDEN-1737). Node's global fetch has
+// no total timeout (undici's headersTimeout is ~300s), so a receiver that accepts
+// the TCP connection and never replies would hold each attempt for minutes. The
+// resulting TimeoutError lands in each call site's existing catch (network-error
+// path: retry, or the no-receiver verdict for the capabilities probe).
+export const REQUEST_TIMEOUT_MS = 10_000;
+
 // Default for the injectable `log` seam — transports are fire-and-forget and must
 // stay silent unless the caller supplies a logger.
 export const noopLog = () => {};
