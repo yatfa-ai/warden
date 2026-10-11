@@ -16,6 +16,7 @@ import {
   summarizeProjectHosts,
   resourceTone,
   summarizeHostLoad,
+  formatFleetSummaryText,
   type HealthStateValue,
   type HostHealthGroup,
   type ProjectHealthGroup,
@@ -1143,9 +1144,39 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
     }
   };
 
+  // ONE shared menu body for the two bare chrome surfaces — the title row and the
+  // summary bar (WARDEN-1739) — so the two triggers cannot drift. Agent rows and
+  // group headers keep their own menus; nothing here touches those blocks.
+  const fleetChromeMenu = (
+    <ContextMenuContent>
+      <ContextMenuItem
+        disabled={loading || fleetGit.loading}
+        onSelect={() => { void fetchHealth(); fleetGit.refresh(); }}
+      >
+        Refresh
+      </ContextMenuItem>
+      {groupBy !== 'host' && <ContextMenuItem onSelect={() => setGroupBy('host')}>Group by Host</ContextMenuItem>}
+      {groupBy !== 'project' && <ContextMenuItem onSelect={() => setGroupBy('project')}>Group by Project</ContextMenuItem>}
+      {groupBy !== 'health' && <ContextMenuItem onSelect={() => setGroupBy('health')}>Group by Health</ContextMenuItem>}
+      <ContextMenuItem
+        disabled={!healthData}
+        onSelect={() => {
+          if (!healthData) return;
+          copyWithToast(formatFleetSummaryText({ summary: healthData.summary, axes: FLEET_GIT_AXES, git: fleetGit, errorCount: fleetGit.errorCount }));
+        }}
+      >
+        Copy fleet summary
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={onClose}>Close panel</ContextMenuItem>
+    </ContextMenuContent>
+  );
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Header */}
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
       <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
         <span className="font-semibold tracking-wide text-sm">Fleet Health</span>
         <div className="ml-auto flex items-center gap-1.5">
@@ -1214,9 +1245,14 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
           </button>
         </div>
       </div>
+      </ContextMenuTrigger>
+      {fleetChromeMenu}
+      </ContextMenu>
 
       {/* Summary Bar */}
       {healthData && (
+        <ContextMenu>
+        <ContextMenuTrigger asChild>
         <div className="px-3 py-2 border-b bg-muted/30">
           {/* flex-wrap, not a single line (WARDEN-1068): this panel is pinned to a
               fixed HEALTH_WIDTH (320px, web/src/lib/layout.ts) inside an
@@ -1268,6 +1304,9 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
             )}
           </div>
         </div>
+        </ContextMenuTrigger>
+        {fleetChromeMenu}
+        </ContextMenu>
       )}
 
       {/* Error State */}

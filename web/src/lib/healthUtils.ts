@@ -639,3 +639,45 @@ export function summarizeHostLoad(agents: Chat[]): HostLoadSummary {
     memPct: memMax,
   };
 }
+
+// ---- Fleet summary text (WARDEN-1739) ----------------------------------------
+
+/** The minimal slice of a FleetGitAxis the summary text needs (count field + label). */
+export interface FleetSummaryAxis<K extends string = string> {
+  count: K;
+  label: string;
+}
+
+export interface FleetSummaryInput<K extends string = string> {
+  summary: { total: number; healthy: number; warning: number; critical: number; idle: number; closed: number; unknown: number };
+  /** The ordered git axes (HealthDashboard's FLEET_GIT_AXES) — passed in, not duplicated. */
+  axes: ReadonlyArray<FleetSummaryAxis<K>>;
+  /** The fleet git counts keyed by each axis's `count` field. */
+  git: Record<K, number>;
+  errorCount: number;
+}
+
+/**
+ * Plain-text twin of the Fleet Health summary bar, for "Copy fleet summary":
+ * `N agents · X healthy · … · M unknown`, then each NON-ZERO git axis
+ * `· n label` (axes order), then `· k unreachable` when errorCount > 0.
+ * Mirrors exactly the segments the bar renders.
+ */
+export function formatFleetSummaryText<K extends string>(input: FleetSummaryInput<K>): string {
+  const { summary, axes, git, errorCount } = input;
+  const parts: string[] = [
+    `${summary.total} agents`,
+    `${summary.healthy} healthy`,
+    `${summary.warning} warning`,
+    `${summary.critical} critical`,
+    `${summary.idle} idle`,
+    `${summary.closed} closed`,
+    `${summary.unknown} unknown`,
+  ];
+  for (const axis of axes) {
+    const n = git[axis.count];
+    if (n > 0) parts.push(`${n} ${axis.label}`);
+  }
+  if (errorCount > 0) parts.push(`${errorCount} unreachable`);
+  return parts.join(' · ');
+}
