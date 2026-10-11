@@ -58,3 +58,19 @@ test('(e) pollIntervalMs is a hook read, not App state or a prop chain', () => {
   assert.ok(/usePollIntervalMs\(\)/.test(stripComments(read('src/components/FileViewer.tsx'))));
   assert.ok(!/^\s*import\s/m.test(query), 'appConfigQuery.ts stays import-free');
 });
+
+// WARDEN-1736 (slice 57) — App stopped subscribing to the four notify* toast-gate prefs: each
+// gesture-time callback reads the ['app-config'] cache at call time.
+test('(f) App.tsx reads notify* prefs at call time in each toast-gating callback', () => {
+  assert.ok(!/useNotificationPrefs|prefs\.notify/.test(app), 'App.tsx must not subscribe to notify* prefs');
+  assert.ok(/selectNotificationPrefs\(\s*queryClient\.getQueryData<AppConfig>\(appConfigQueryKey\(\)\)/.test(app));
+  for (const name of ['spawnShell', 'respawnChat', 'saveClosedSession', 'performForceKill', 'performKill', 'renameChat', 'handleReplyResult']) {
+    const start = app.indexOf(`const ${name} = useCallback(`);
+    assert.ok(start >= 0, `found ${name}`);
+    const end = app.indexOf('\n  }, [', start);
+    const body = app.slice(start, end);
+    const deps = app.slice(end, app.indexOf(']);', end));
+    assert.ok(/readNotificationPrefs\(\)\.notify/.test(body), `${name} reads prefs at call time`);
+    assert.ok(!/prefs\.notify/.test(deps), `${name} deps carry no prefs.*`);
+  }
+});
