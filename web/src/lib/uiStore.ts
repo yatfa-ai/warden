@@ -677,6 +677,32 @@ export interface UiStoreState {
   settingsOpen: boolean;
   setSettingsOpen: (v: boolean) => void;
   /**
+   * The host ChatSidebar is drilled into (WARDEN-1756, roadmap WARDEN-1204
+   * slice 59) — null = the sidebar's root host list. A NON-persisted session
+   * fact: NOT a STORE_PERSISTED_KEYS member, initial `null`, never seeded from
+   * disk, never cleared by the store. Written by ChatSidebar's enterHost (and
+   * cleared by goBack); read by ChatSidebar's derived SidebarView (the
+   * collection drill-down stays a ChatSidebar-local cell that takes
+   * precedence — it is a snapshot of a server-fetched Collection, the
+   * WARDEN-396/553 staleness class). Survives the Settings round trip
+   * (ChatSidebar unmounts under SettingsPage and remounts fresh); a restart
+   * legitimately opens at root.
+   */
+  sidebarHost: string | null;
+  setSidebarHost: (v: string | null) => void;
+  /**
+   * ChatSidebar's ONE live search field (WARDEN-1756, roadmap WARDEN-1204
+   * slice 59) — at root it is the cross-host saved search; on a host or
+   * collection view it is scoped to that view. A NON-persisted session fact:
+   * NOT a STORE_PERSISTED_KEYS member, initial `''`, never seeded from disk.
+   * Written by ChatSidebar (the header input, every navigation's clear, the
+   * "clear the search" affordances, and the collection view's own lifetime —
+   * leaving a collection view clears it so root never carries a stale
+   * collection-scoped filter); read by the sidebar's three view renderers.
+   */
+  sidebarQuery: string;
+  setSidebarQuery: (v: string) => void;
+  /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
    * now, or the chosen theme id itself. The sixth NON-persisted session fact:
@@ -1335,6 +1361,14 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // Initial false — never seeded.
     settingsOpen: false,
     setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+    // WARDEN-1756 (slice 59): the not-persisted sidebar session facts — the
+    // host drill-down and ChatSidebar's ONE live search field. Initial
+    // null/'' — never seeded. The collection drill-down stays ChatSidebar-
+    // local (a snapshot of a server-fetched Collection, not a store fact).
+    sidebarHost: null,
+    setSidebarHost: (sidebarHost) => set({ sidebarHost }),
+    sidebarQuery: '',
+    setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
     // seed — a pure mapping of the theme pref ('system' → dark placeholder that
     // App's [theme] effect overwrites on mount); never read from disk itself.
@@ -2342,6 +2376,26 @@ export function useSettingsOpen(): boolean {
 /** Stable-identity action: open/close the Settings page. */
 export function useSetSettingsOpen(): (v: boolean) => void {
   return useUiStore((s) => s.setSettingsOpen);
+}
+
+/** The host ChatSidebar is drilled into (WARDEN-1756, slice 59) — NOT persisted. */
+export function useSidebarHost(): string | null {
+  return useUiStore((s) => s.sidebarHost);
+}
+
+/** Stable-identity action: drill ChatSidebar into a host (null = back to root). */
+export function useSetSidebarHost(): (v: string | null) => void {
+  return useUiStore((s) => s.setSidebarHost);
+}
+
+/** ChatSidebar's ONE live search field (WARDEN-1756, slice 59) — NOT persisted. */
+export function useSidebarQuery(): string {
+  return useUiStore((s) => s.sidebarQuery);
+}
+
+/** Stable-identity action: set/clear ChatSidebar's search field. */
+export function useSetSidebarQuery(): (v: string) => void {
+  return useUiStore((s) => s.setSidebarQuery);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
