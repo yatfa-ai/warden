@@ -703,6 +703,23 @@ export interface UiStoreState {
   sidebarQuery: string;
   setSidebarQuery: (v: string) => void;
   /**
+   * The Activity feed's "Last N" row limit (WARDEN-1760, roadmap WARDEN-1204
+   * slice 60). A NON-persisted session fact: NOT a STORE_PERSISTED_KEYS
+   * member, not in ObsUi/storage.ts, initial 100, never seeded from disk.
+   * Written by ActivityTimeline's LiveFeedChrome picker; read by it for
+   * `useLiveTimeline(limit)`. Survives tab switches and the Settings round
+   * trip (the feed unmounts in both); a restart legitimately reopens at 100.
+   */
+  observerActivityLimit: number;
+  setObserverActivityLimit: (v: number) => void;
+  /**
+   * The Directives feed's "Last N" row limit (WARDEN-1760, slice 60) — the
+   * independent twin of `observerActivityLimit` (the two feeds own independent
+   * selections). Same NON-persisted contract: initial 100, never seeded.
+   */
+  observerDirectiveLimit: number;
+  setObserverDirectiveLimit: (v: number) => void;
+  /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
    * now, or the chosen theme id itself. The sixth NON-persisted session fact:
@@ -1369,6 +1386,12 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setSidebarHost: (sidebarHost) => set({ sidebarHost }),
     sidebarQuery: '',
     setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
+    // WARDEN-1760 (slice 60): the not-persisted Observer feed row limits — two
+    // independent facts, initial 100, never seeded.
+    observerActivityLimit: 100,
+    setObserverActivityLimit: (observerActivityLimit) => set({ observerActivityLimit }),
+    observerDirectiveLimit: 100,
+    setObserverDirectiveLimit: (observerDirectiveLimit) => set({ observerDirectiveLimit }),
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
     // seed — a pure mapping of the theme pref ('system' → dark placeholder that
     // App's [theme] effect overwrites on mount); never read from disk itself.
@@ -2396,6 +2419,26 @@ export function useSidebarQuery(): string {
 /** Stable-identity action: set/clear ChatSidebar's search field. */
 export function useSetSidebarQuery(): (v: string) => void {
   return useUiStore((s) => s.setSidebarQuery);
+}
+
+/** The Activity feed's "Last N" row limit (WARDEN-1760, slice 60) — NOT persisted. */
+export function useObserverActivityLimit(): number {
+  return useUiStore((s) => s.observerActivityLimit);
+}
+
+/** Stable-identity action: set the Activity feed's row limit. */
+export function useSetObserverActivityLimit(): (v: number) => void {
+  return useUiStore((s) => s.setObserverActivityLimit);
+}
+
+/** The Directives feed's "Last N" row limit (WARDEN-1760, slice 60) — NOT persisted. */
+export function useObserverDirectiveLimit(): number {
+  return useUiStore((s) => s.observerDirectiveLimit);
+}
+
+/** Stable-identity action: set the Directives feed's row limit. */
+export function useSetObserverDirectiveLimit(): (v: number) => void {
+  return useUiStore((s) => s.setObserverDirectiveLimit);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {

@@ -3658,6 +3658,71 @@ test('source-shape guard: ChatSidebar holds no useState for the host drill-down 
   assert.ok(!/const \[searchQuery/.test(src), 'ChatSidebar must not hold a local searchQuery cell — the ONE search field lives on the uiStore as sidebarQuery');
 });
 
+// ─── observerActivityLimit + observerDirectiveLimit (WARDEN-1760, roadmap WARDEN-1204 slice 60): NON-persisted feed row limits ───
+console.log('\ncreateUiStore — observerActivityLimit / observerDirectiveLimit (not persisted; Observer feed session facts)');
+test('both Observer feed limits start at 100', () => {
+  reset();
+  const s = createUiStore();
+  assert.equal(s.getState().observerActivityLimit, 100);
+  assert.equal(s.getState().observerDirectiveLimit, 100);
+});
+test('setObserverActivityLimit / setObserverDirectiveLimit store the chosen limits', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setObserverActivityLimit(500);
+  assert.equal(s.getState().observerActivityLimit, 500);
+  s.getState().setObserverDirectiveLimit(1000);
+  assert.equal(s.getState().observerDirectiveLimit, 1000);
+});
+test('the two limits are independent — writing one does not disturb the other', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setObserverActivityLimit(500);
+  assert.equal(s.getState().observerDirectiveLimit, 100);
+  s.getState().setObserverDirectiveLimit(50);
+  assert.equal(s.getState().observerActivityLimit, 500);
+});
+test('factory isolation — two stores do not share the feed limits, and the singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const beforeA = uiStore.getState().observerActivityLimit;
+  const beforeD = uiStore.getState().observerDirectiveLimit;
+  a.getState().setObserverActivityLimit(500);
+  a.getState().setObserverDirectiveLimit(1000);
+  assert.equal(b.getState().observerActivityLimit, 100);
+  assert.equal(b.getState().observerDirectiveLimit, 100);
+  assert.equal(uiStore.getState().observerActivityLimit, beforeA, 'a test store\'s write must never leak into the app store');
+  assert.equal(uiStore.getState().observerDirectiveLimit, beforeD, 'a test store\'s write must never leak into the app store');
+});
+test('feed limits are NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes both; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('observerActivityLimit'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('observerDirectiveLimit'));
+  const s = createUiStore();
+  s.getState().setObserverActivityLimit(500);
+  s.getState().setObserverDirectiveLimit(1000);
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('observerActivityLimit' in picked));
+  assert.ok(!('observerDirectiveLimit' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('observerActivityLimit' in loadUi()));
+  assert.ok(!('observerDirectiveLimit' in loadUi()));
+  const fresh = createUiStore();
+  assert.equal(fresh.getState().observerActivityLimit, 100, 'never seeded');
+  assert.equal(fresh.getState().observerDirectiveLimit, 100, 'never seeded');
+});
+test('source-shape guard: ActivityTimeline and DirectiveHistory hold no local useState(100) limit cell (WARDEN-1760)', () => {
+  // A restored local cell would silently reintroduce the tab-switch / Settings
+  // round-trip reset this slice fixes (both feeds are mounted conditionally).
+  for (const f of ['ActivityTimeline.tsx', 'DirectiveHistory.tsx']) {
+    const src = readFileSync(join(__dirname, 'src', 'components', f), 'utf8');
+    assert.ok(!/useState\(100\)/.test(src), f + ' must not hold useState(100) — the "Last N" limit lives on the uiStore');
+  }
+});
+
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
 console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
 test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {
