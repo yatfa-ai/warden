@@ -23,6 +23,8 @@ import { TriangleAlert, CheckCircle2 } from 'lucide-react';
 import { rollupSeverity, filterAttentionRollup, attentionFilterOptions } from '@/lib/attentionRollup';
 import { AttentionList, severityToneClass, type AttentionListProps } from '@/components/AttentionList';
 import { EmptyState } from '@/components/EmptyState';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
@@ -88,9 +90,20 @@ export function AttentionView({
   const { onlyDone } = rollupSeverity(rollup);
   const tone = severityToneClass(rollup);
   const { total, done } = rollup;
+  // ONE string shared by the visible header <span> and the "Copy summary line" menu
+  // item so they cannot drift (same shape as `statsLine` in LiveFeedChrome, WARDEN-1759).
+  const summaryText = onlyDone ? `${done.length} finished` : `${total} need attention`;
+  const filtersActive = hostFilter !== 'all' || agentFilter !== 'all';
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      {/* Summary header + filter row share ONE themed right-click menu trigger
+          (WARDEN-1762, roadmap WARDEN-362): asChild = zero extra DOM, the rundown /
+          EmptyState below stay OUTSIDE it (their rows carry their own menus). Items
+          call the same handlers/values as the visible controls; no own onContextMenu. */}
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
+      <div className="shrink-0">
       {/* Slim summary header — mirrors the badge popover's header (icon + tone + count)
           so the pane reads as the same attention system. The tab strip above already
           labels the view; this carries the glanceable count + severity tone. */}
@@ -98,9 +111,7 @@ export function AttentionView({
         {onlyDone
           ? <CheckCircle2 className={cn('size-3.5', tone)} />
           : <TriangleAlert className={cn('size-3.5', tone)} />}
-        <span className="text-sm font-semibold">
-          {onlyDone ? `${done.length} finished` : `${total} need attention`}
-        </span>
+        <span className="text-sm font-semibold">{summaryText}</span>
       </div>
       {/* Filters (WARDEN-971) — the same markup/sizing as the Activity + Directives tabs
           so the three peer views read as one system. `shrink-0` keeps the row pinned
@@ -136,6 +147,30 @@ export function AttentionView({
           </Select>
         </div>
       )}
+      </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        {showFilters && (
+          <>
+            <ContextMenuItem disabled={!filtersActive} onSelect={() => clearFilters()}>
+              Clear filters
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+          </>
+        )}
+        <ContextMenuItem onSelect={() => copyWithToast(summaryText)}>Copy summary line</ContextMenuItem>
+        {showFilters && (
+          <>
+            <ContextMenuItem onSelect={() => copyWithToast(hostFilter === 'all' ? 'All Hosts' : hostFilter)}>
+              Copy host filter
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => copyWithToast(agentFilter === 'all' ? 'All Agents' : agentFilter)}>
+              Copy agent filter
+            </ContextMenuItem>
+          </>
+        )}
+      </ContextMenuContent>
+      </ContextMenu>
       {/* The shared ranked rundown, filling the pane and scrolling in-panel (the badge
           caps the same list at max-h-72 inside its popover). The callout stays pinned
           above the scroll; the rundown fills the rest. */}
