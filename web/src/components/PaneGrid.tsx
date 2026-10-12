@@ -12,6 +12,7 @@ import {
   DialogFooter,
   DialogClose,
 } from '@/components/ui/dialog';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
@@ -719,8 +720,10 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
   };
 
   // Double-click a gutter → reset that whole axis (cols or rows) to equal split.
-  const resetAxis = (axis: DragAxis) => (e: React.MouseEvent<HTMLDivElement>) => {
-    e.stopPropagation();
+  // WARDEN-1770: the reset logic is split from the event wrapper so the gutter
+  // context menu's onSelect (no event) and the double-click handler (which keeps
+  // its stopPropagation) share ONE path that commits + persists the ratios.
+  const applyResetAxis = (axis: DragAxis) => {
     if (axis === 'col') {
       const eq = equalRatios(cols);
       pushedRef.current.col = eq;
@@ -733,6 +736,10 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
       onPaneRowRatiosChange(eq);
     }
   };
+  const resetAxis = (axis: DragAxis) => (e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    applyResetAxis(axis);
+  };
 
   // Double-click a crossing pad → reset BOTH axes to equal. A pad sits on both a
   // col and a row gutter, so committing to a single axis would be arbitrary;
@@ -740,8 +747,7 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
   // symmetric counterpart to the single-axis strips (a col strip resets cols, a
   // row strip resets rows). Same pushedRef + commit pattern as resetAxis so the
   // reset survives the sync effect and reload.
-  const resetBothAxes = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.stopPropagation();
+  const applyResetBothAxes = () => {
     const eqCol = equalRatios(cols);
     const eqRow = equalRatios(rows);
     pushedRef.current.col = eqCol;
@@ -750,6 +756,10 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
     setRowRatios(eqRow);
     onPaneColRatiosChange(eqCol);
     onPaneRowRatiosChange(eqRow);
+  };
+  const resetBothAxes = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    applyResetBothAxes();
   };
 
   // WARDEN-660: ref callback for the gutter overlay. On mount it stashes the
@@ -855,7 +865,9 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
             {showGutters && (colCenters.length > 0 || rowCenters.length > 0) && (
               <div ref={setOverlayRef} className="absolute inset-0 pointer-events-none z-10">
                 {colCenters.map((left, g) => (
-                  <div key={`cg${g}`} role="separator" aria-orientation="vertical"
+                  <ContextMenu key={`cg${g}`}>
+                  <ContextMenuTrigger asChild>
+                  <div role="separator" aria-orientation="vertical"
                     aria-label="Resize columns"
                     onPointerDown={beginDrag('col', g)} onPointerMove={onHandlePointerMove}
                     onPointerUp={onHandlePointerUp} onDoubleClick={resetAxis('col')}
@@ -863,9 +875,16 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
                     style={{ left: left - HANDLE_HALF_PX, width: HANDLE_W_PX, touchAction: 'none' }}>
                     <div className="absolute left-1/2 top-0 bottom-0 w-px -translate-x-1/2 bg-border opacity-0 transition-opacity duration-100 group-hover/gutter:opacity-100" />
                   </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => applyResetAxis('col')}>Reset column sizes</ContextMenuItem>
+                  </ContextMenuContent>
+                  </ContextMenu>
                 ))}
                 {rowCenters.map((top, g) => (
-                  <div key={`rg${g}`} role="separator" aria-orientation="horizontal"
+                  <ContextMenu key={`rg${g}`}>
+                  <ContextMenuTrigger asChild>
+                  <div role="separator" aria-orientation="horizontal"
                     aria-label="Resize rows"
                     onPointerDown={beginDrag('row', g)} onPointerMove={onHandlePointerMove}
                     onPointerUp={onHandlePointerUp} onDoubleClick={resetAxis('row')}
@@ -873,6 +892,11 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
                     style={{ top: top - HANDLE_HALF_PX, height: HANDLE_W_PX, touchAction: 'none' }}>
                     <div className="absolute top-1/2 left-0 right-0 h-px -translate-y-1/2 bg-border opacity-0 transition-opacity duration-100 group-hover/gutter:opacity-100" />
                   </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => applyResetAxis('row')}>Reset row sizes</ContextMenuItem>
+                  </ContextMenuContent>
+                  </ContextMenu>
                 ))}
                 {/* WARDEN-660 crossing pads: one per col-gutter × row-gutter
                     intersection, rendered LAST so each sits above BOTH strips at
@@ -888,7 +912,9 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
                     the square) signalling "drag either way", distinct from a
                     lone strip's single line; double-click resets both axes. */}
                 {colCenters.map((left, gCol) => rowCenters.map((top, gRow) => (
-                  <div key={`x${gCol}-${gRow}`} role="separator"
+                  <ContextMenu key={`x${gCol}-${gRow}`}>
+                  <ContextMenuTrigger asChild>
+                  <div role="separator"
                     aria-label="Resize columns or rows"
                     onPointerDown={beginJunctionDrag(gCol, gRow)}
                     onPointerMove={onHandlePointerMove}
@@ -903,6 +929,13 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
                       className="absolute top-1/2 h-px -translate-y-1/2 bg-border opacity-0 transition-opacity duration-100 group-hover/gutter:opacity-100"
                       style={{ left: -HANDLE_HALF_PX, right: -HANDLE_HALF_PX }} />
                   </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => applyResetAxis('col')}>Reset column sizes</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => applyResetAxis('row')}>Reset row sizes</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => applyResetBothAxes()}>Reset both</ContextMenuItem>
+                  </ContextMenuContent>
+                  </ContextMenu>
                 )))}
               </div>
             )}
