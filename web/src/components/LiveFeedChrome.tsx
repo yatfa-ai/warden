@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { formatUpdatedAgo } from '@/lib/timelinePacing';
 
 /**
@@ -124,9 +126,23 @@ export function LiveFeedChrome({
   totalCount,
   extraFilters,
 }: LiveFeedChromeProps) {
+  // The stats line, built ONCE and used by both the visible div and the
+  // "Copy stats line" menu item so they cannot drift (WARDEN-1759).
+  const statsLine =
+    `Showing ${filteredCount} of ${totalCount} ${noun}` +
+    (!isLive
+      ? ' · Paused'
+      : lastUpdated
+        ? ` · Updated ${formatUpdatedAgo(now, lastUpdated)}`
+        : '');
   return (
     <>
-      {/* Header with filters */}
+      {/* Header with filters. Wrapped in the themed right-click menu
+          (WARDEN-1759, roadmap WARDEN-362): asChild = zero extra DOM, and the
+          failure strip below stays a sibling OUTSIDE the trigger. Items call the
+          same handlers as the visible controls; no own onContextMenu handler. */}
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
       <div className="flex-shrink-0 p-3 border-b space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold">{title}</h2>
@@ -196,15 +212,26 @@ export function LiveFeedChrome({
         </div>
 
         {/* Stats */}
-        <div className="text-xs text-muted-foreground">
-          Showing {filteredCount} of {totalCount} {noun}
-          {!isLive
-            ? ' · Paused'
-            : lastUpdated
-              ? ` · Updated ${formatUpdatedAgo(now, lastUpdated)}`
-              : ''}
-        </div>
+        <div className="text-xs text-muted-foreground">{statsLine}</div>
       </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => setIsLive((v) => !v)}>
+          {isLive ? 'Pause live updates' : 'Resume live updates'}
+        </ContextMenuItem>
+        <ContextMenuItem disabled={loading || refreshing} onSelect={() => refresh()}>
+          Refresh now
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => copyWithToast(hostFilter === 'all' ? 'All Hosts' : hostFilter)}>
+          Copy host filter
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(agentFilter === 'all' ? 'All Agents' : agentFilter)}>
+          Copy agent filter
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(statsLine)}>Copy stats line</ContextMenuItem>
+      </ContextMenuContent>
+      </ContextMenu>
 
       {/* Fetch-failure strip. The hook RETAINS stale rows on a failed poll (its
           catch clause keeps the previous rows in place — useLiveTimeline.ts) —

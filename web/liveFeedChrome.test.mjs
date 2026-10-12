@@ -68,11 +68,16 @@ try {
 
   writeFileSync(join(tmpDir, 'button.mjs'), aliasCn(await emit('src/components/ui/button.tsx')));
   writeFileSync(join(tmpDir, 'select.mjs'), aliasCn(await emit('src/components/ui/select.tsx')));
+  writeFileSync(join(tmpDir, 'context-menu.mjs'), aliasCn(await emit('src/components/ui/context-menu.tsx')));
+  // clipboardToast pulls in sonner; the SSR render never invokes a copy, so a stub suffices.
+  writeFileSync(join(tmpDir, 'clipboardToast.mjs'), 'export async function copyWithToast() { return true; }\n');
   writeFileSync(join(tmpDir, 'timelinePacing.mjs'), await emit('src/lib/timelinePacing.ts'));
 
   const chromeCode = (await emit('src/components/LiveFeedChrome.tsx'))
     .replace(/from ['"]@\/components\/ui\/button['"]/, `from './button.mjs'`)
     .replace(/from ['"]@\/components\/ui\/select['"]/, `from './select.mjs'`)
+    .replace(/from ['"]@\/components\/ui\/context-menu['"]/, `from './context-menu.mjs'`)
+    .replace(/from ['"]@\/lib\/clipboardToast['"]/, `from './clipboardToast.mjs'`)
     .replace(/from ['"]@\/lib\/timelinePacing['"]/, `from './timelinePacing.mjs'`);
   // The rewrites are ASSERTED, not assumed: an unrewritten `@/` specifier would
   // fail to resolve loudly, but a PARTIAL rewrite could silently load a
