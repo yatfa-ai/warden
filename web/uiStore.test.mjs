@@ -3723,6 +3723,79 @@ test('source-shape guard: ActivityTimeline and DirectiveHistory hold no local us
   }
 });
 
+// ─── healthClosedExpanded + fleetPanelOpen (WARDEN-1768, roadmap WARDEN-1204 slice 61): NON-persisted Fleet Health collapse facts ───
+console.log('\ncreateUiStore — healthClosedExpanded / fleetPanelOpen (not persisted; Fleet Health session facts)');
+test('Fleet Health facts start at today\'s defaults: closed-expanded false, every panel open', () => {
+  reset();
+  const s = createUiStore();
+  assert.equal(s.getState().healthClosedExpanded, false);
+  assert.deepEqual(s.getState().fleetPanelOpen, { activity: true, state: true, commits: true });
+});
+test('setHealthClosedExpanded / toggleFleetPanel store the choices', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setHealthClosedExpanded(true);
+  assert.equal(s.getState().healthClosedExpanded, true);
+  s.getState().toggleFleetPanel('commits');
+  assert.equal(s.getState().fleetPanelOpen.commits, false);
+  s.getState().toggleFleetPanel('commits');
+  assert.equal(s.getState().fleetPanelOpen.commits, true);
+});
+test('the two FleetMatrixPanel instances (activity / state) and commits are independent', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().toggleFleetPanel('activity');
+  assert.equal(s.getState().fleetPanelOpen.activity, false);
+  assert.equal(s.getState().fleetPanelOpen.state, true);
+  assert.equal(s.getState().fleetPanelOpen.commits, true);
+  assert.equal(s.getState().healthClosedExpanded, false);
+});
+test('factory isolation — two stores do not share the Fleet Health facts, and the singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().fleetPanelOpen;
+  a.getState().toggleFleetPanel('state');
+  a.getState().setHealthClosedExpanded(true);
+  assert.deepEqual(b.getState().fleetPanelOpen, { activity: true, state: true, commits: true });
+  assert.equal(b.getState().healthClosedExpanded, false);
+  assert.equal(uiStore.getState().fleetPanelOpen, before, 'a test store\'s write must never leak into the app store');
+  assert.equal(uiStore.getState().healthClosedExpanded, false);
+});
+test('Fleet Health facts are NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes them; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('healthClosedExpanded'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('fleetPanelOpen'));
+  const s = createUiStore();
+  s.getState().setHealthClosedExpanded(true);
+  s.getState().toggleFleetPanel('activity');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('healthClosedExpanded' in picked));
+  assert.ok(!('fleetPanelOpen' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('healthClosedExpanded' in loadUi()));
+  assert.ok(!('fleetPanelOpen' in loadUi()));
+  const fresh = createUiStore();
+  assert.equal(fresh.getState().healthClosedExpanded, false, 'never seeded');
+  assert.deepEqual(fresh.getState().fleetPanelOpen, { activity: true, state: true, commits: true }, 'never seeded');
+});
+test('source-shape guard: the four Fleet Health files hold no local collapse/expand cell (WARDEN-1768)', () => {
+  // A restored local cell would silently reintroduce the Settings round-trip
+  // reset this slice fixes (App.tsx unmounts HealthPanel while Settings is open).
+  for (const f of ['FleetMatrixPanel.tsx', 'FleetRecentCommits.tsx']) {
+    const src = readFileSync(join(__dirname, 'src', 'components', f), 'utf8');
+    assert.ok(!/useState\((true|false)\)/.test(src), f + ' must not hold a local boolean useState — the collapse flag lives on the uiStore');
+  }
+  const hd = readFileSync(join(__dirname, 'src', 'components', 'HealthDashboard.tsx'), 'utf8');
+  assert.ok(!/closedExpanded, setClosedExpanded\] = useState/.test(hd), 'HealthDashboard must not hold a local closedExpanded cell');
+  for (const f of ['FleetActivityHeatmap.tsx', 'FleetStateTimeline.tsx']) {
+    const src = readFileSync(join(__dirname, 'src', 'components', f), 'utf8');
+    assert.match(src, /panelId="(activity|state)"/, f + ' must pass its own panelId to the shared scaffold');
+  }
+});
+
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
 console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
 test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {

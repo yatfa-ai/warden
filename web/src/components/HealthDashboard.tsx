@@ -52,7 +52,7 @@ import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
-import { useHostLabels, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
+import { useHealthClosedExpanded, useSetHealthClosedExpanded, useHostLabels, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
 import { cn } from '@/lib/utils';
 import { Trash2 } from 'lucide-react';
 
@@ -657,7 +657,10 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   // Closed-section expansion (WARDEN-245): collapsed shows the 5 most-recent dead
   // sessions; expanded shows up to 20. The true total is always surfaced so the
   // cap is never silent.
-  const [closedExpanded, setClosedExpanded] = useState(false);
+  // WARDEN-1768 (slice 61): lives on the uiStore (NOT persisted) so it survives the
+  // Settings round trip (HealthDashboard unmounts while Settings is open).
+  const closedExpanded = useHealthClosedExpanded();
+  const setClosedExpanded = useSetHealthClosedExpanded();
   // Shared /api/hosts/status poll (singleton) — fuses per-host connectivity into
   // each host section's summary line.
   const hostStatuses = useHostStatuses();
@@ -1454,7 +1457,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
                     {showToggle && (
                       <button
                         type="button"
-                        onClick={() => setClosedExpanded(v => !v)}
+                        onClick={() => setClosedExpanded(!closedExpanded)}
                         className="self-start px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
                         aria-expanded={closedExpanded}
                       >

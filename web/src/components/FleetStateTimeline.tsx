@@ -56,7 +56,7 @@ import {
  * never paints a red/blue/sky agent-state claim a substring match cannot
  * substantiate.
  *
- * Collapse state is LOCAL React state (deliberately NOT a persisted /api/config
+ * Collapse state lives on the uiStore (WARDEN-1768, session-only; deliberately NOT a persisted /api/config
  * pref — avoids the dead-pref trap, same as the heatmap) and lives in the
  * scaffold. Defaults OPEN.
  */
@@ -116,6 +116,7 @@ export function FleetStateTimeline({ series, agents, loading, error, onOpenChat 
 
   return (
     <FleetMatrixPanel<StateCell>
+      panelId="state"
       sectionAriaLabel="Fleet agent state over the last 24 hours"
       headerLabel="Fleet state · 24h"
       rows={matrix.rows}

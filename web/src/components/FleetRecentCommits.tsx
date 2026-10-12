@@ -15,6 +15,7 @@ import {
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
 import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
+import { useFleetPanelOpen, useToggleFleetPanel } from '@/lib/uiStore';
 import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile } from './sidebar/types';
@@ -87,9 +88,12 @@ const FLEET_RECENT_LIMIT = 25;
 type ShowCache = Record<string, { files?: GitFile[]; message?: string; error?: string | null }>;
 
 export function FleetRecentCommits({ agents, onOpenFile }: Props) {
-  // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
-  // trap). Defaults open so the fleet's recent shipments are glanceable on entry.
-  const [open, setOpen] = useState(true);
+  // Collapse state lives on the uiStore (WARDEN-1768, slice 61): still NOT
+  // persisted (never serialized to /api/config — avoids the dead-pref trap) but
+  // survives unmount within a session. Defaults open so the fleet's recent
+  // shipments are glanceable on entry.
+  const open = useFleetPanelOpen('commits');
+  const toggleOpen = useToggleFleetPanel();
 
   // The searchable fleet: active project agents, keyed & deduped by key, in
   // catalog order. Memoized on `agents` — a CHEAP filter, fine to recompute. NOTE:
@@ -118,7 +122,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
   eligibleRef.current = eligible;
 
   const [result, setResult] = useState<FleetRecentCommitsResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState<boolean>(false);
   // Bumped by the manual refresh button to force a refetch (fetch-on-mount otherwise).
   const [refreshTick, setRefreshTick] = useState(0);
 
@@ -294,7 +298,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
           stopPropagation workaround go away. */}
       <CollapsibleSectionHeader
         open={open}
-        onToggle={() => setOpen((v) => !v)}
+        onToggle={() => toggleOpen('commits')}
         label="Recent commits"
         meta={hasEligible ? `${fleetN} agent${fleetN === 1 ? '' : 's'}` : ''}
         actions={
