@@ -31,7 +31,7 @@ import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefsReader } from '@/lib/appConfigHooks';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed } from '@/lib/uiStore';
+import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed, useSidebarHost, useSetSidebarHost, useSidebarQuery, useSetSidebarQuery } from '@/lib/uiStore';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
@@ -137,12 +137,34 @@ export function ChatSidebar({
   // active workspace's just-closed pane snapshots (accident-insurance flyout).
   const focused = useFocused();
   const recentlyClosed = useRecentlyClosed();
-  const [view, setView] = useState<SidebarView>({ kind: 'root' });
+  // Sidebar host drill-down + ONE live search (WARDEN-1756, roadmap
+  // WARDEN-1204 slice 59): session facts on the uiStore, NOT persisted — they
+  // survive the Settings round trip (this component unmounts under
+  // SettingsPage and remounts fresh) while a restart legitimately opens at
+  // root. The store owns them, so the search field keeps the local names it
+  // is read by below.
+  const sidebarHost = useSidebarHost();
+  const setSidebarHost = useSetSidebarHost();
+  const searchQuery = useSidebarQuery();
+  const setSearchQuery = useSetSidebarQuery();
+  // The collection drill-down stays a LOCAL cell (out of the store on
+  // purpose): `view.collection` is a snapshot of a server-fetched Collection
+  // (the WARDEN-396/553 staleness class — synced below via
+  // handleCollectionChange), which the roadmap forbids holding a copy of. It
+  // takes precedence over the store-derived host/root kinds; a collection is
+  // entered only from root, so the two can never legitimately coexist.
+  const [collectionView, setCollectionView] = useState<Collection | null>(null);
+  // The derived SidebarView every reader below keys on — same shape as the
+  // pre-slice useState cell, now derived from the store + local facts.
+  const view: SidebarView = collectionView
+    ? { kind: 'collection', collection: collectionView }
+    : sidebarHost
+      ? { kind: 'host', host: sidebarHost }
+      : { kind: 'root' };
   const [flyoutOpen, setFlyoutOpen] = useState(false);
   // ONE live search per the design: the header field IS the filter, on every
   // view (root = cross-host saved search; host/collection = scoped to the view).
   // No second box anywhere.
-  const [searchQuery, setSearchQuery] = useState('');
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   // The host whose discover is in flight after entering it — gates the
@@ -230,7 +252,21 @@ export function ChatSidebar({
     }
   }, [readNotificationPrefs]);
 
-  const enterCollection = (collection: Collection) => { setView({ kind: 'collection', collection }); setSearchQuery(''); };
+  const enterCollection = (collection: Collection) => { setCollectionView(collection); setSearchQuery(''); };
+
+  // WARDEN-1756 invariant: leaving a collection view — by goBack, by the
+  // collection being deleted under you, or by the Settings unmount — must
+  // never land at root (or remount) carrying a stale collection-scoped
+  // filter. sidebarQuery outlives this component, so the collection view's
+  // OWN lifetime clears it: the cleanup fires whenever the view closes,
+  // however it closes. Keyed on the boolean (not the collection identity) so
+  // an in-place edit's snapshot refresh does NOT clear the query — only
+  // actually leaving does.
+  const inCollectionView = collectionView != null;
+  useEffect(() => {
+    if (!inCollectionView) return;
+    return () => { setSearchQuery(''); };
+  }, [inCollectionView, setSearchQuery]);
 
   const handleCreateCollection = () => { setCreateDialogOpen(true); void fetchCollections(); };
 
@@ -243,15 +279,15 @@ export function ChatSidebar({
   // mutates from CollectionsSection's own menu; refresh the open view's
   // snapshot when the edited collection is the one open.
   const handleCollectionChange = useCallback(async (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => {
-    if (change.type === 'delete' && view.kind === 'collection' && view.collection.id === change.id) {
-      setView({ kind: 'root' });
+    if (change.type === 'delete' && collectionView && collectionView.id === change.id) {
+      setCollectionView(null);
     }
     const fresh = await fetchCollections();
-    if (change.type === 'edit' && view.kind === 'collection' && view.collection.id === change.id) {
+    if (change.type === 'edit' && collectionView && collectionView.id === change.id) {
       const updated = fresh.find((c) => c.id === change.id);
-      setView(updated ? { kind: 'collection', collection: updated } : { kind: 'root' });
+      setCollectionView(updated || null);
     }
-  }, [view, fetchCollections]);
+  }, [collectionView, fetchCollections]);
 
   useEffect(() => {
     void fetchCollections();
@@ -260,7 +296,8 @@ export function ChatSidebar({
 
   // ---- navigation ----
   const enterHost = (host: string) => {
-    setView({ kind: 'host', host });
+    setCollectionView(null);
+    setSidebarHost(host);
     setSearchQuery('');
     // Opening a host is a visit: refresh its live working/stopped split.
     setEnteringHost(host);
@@ -268,7 +305,7 @@ export function ChatSidebar({
       setEnteringHost((h) => (h === host ? null : h));
     });
   };
-  const goBack = () => { setView({ kind: 'root' }); setSearchQuery(''); };
+  const goBack = () => { setCollectionView(null); setSidebarHost(null); setSearchQuery(''); };
 
   // ---- derived data ----
   // The recently-closed flyout lists CLOSED TEMPORARY sessions: a pane whose

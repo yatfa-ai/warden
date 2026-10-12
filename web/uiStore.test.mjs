@@ -3584,6 +3584,80 @@ test('settingsOpen is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes 
   assert.equal(createUiStore().getState().settingsOpen, false, 'never seeded');
 });
 
+// ─── sidebarHost + sidebarQuery (WARDEN-1756, roadmap WARDEN-1204 slice 59): NON-persisted sidebar session facts ───
+console.log('\ncreateUiStore — sidebarHost / sidebarQuery (not persisted; ChatSidebar session facts)');
+test('sidebarHost starts null and sidebarQuery starts empty', () => {
+  reset();
+  const s = createUiStore();
+  assert.equal(s.getState().sidebarHost, null);
+  assert.equal(s.getState().sidebarQuery, '');
+});
+test('setSidebarHost stores a host then null; setSidebarQuery stores the query then clears', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSidebarHost('build-01');
+  assert.equal(s.getState().sidebarHost, 'build-01');
+  s.getState().setSidebarHost(null);
+  assert.equal(s.getState().sidebarHost, null);
+  s.getState().setSidebarQuery('deploy');
+  assert.equal(s.getState().sidebarQuery, 'deploy');
+  s.getState().setSidebarQuery('');
+  assert.equal(s.getState().sidebarQuery, '');
+});
+test('the two facts are independent — writing one does not disturb the other', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSidebarHost('build-01');
+  s.getState().setSidebarQuery('deploy');
+  s.getState().setSidebarHost(null);
+  assert.equal(s.getState().sidebarQuery, 'deploy');
+  s.getState().setSidebarQuery('');
+  assert.equal(s.getState().sidebarHost, null);
+});
+test('factory isolation — two stores do not share the sidebar session facts, and the singleton is untouched', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setSidebarHost('build-01');
+  a.getState().setSidebarQuery('deploy');
+  assert.equal(b.getState().sidebarHost, null);
+  assert.equal(b.getState().sidebarQuery, '');
+  const beforeHost = uiStore.getState().sidebarHost;
+  const beforeQuery = uiStore.getState().sidebarQuery;
+  assert.equal(uiStore.getState().sidebarHost, beforeHost, 'a test store\'s write must never leak into the app store');
+  assert.equal(uiStore.getState().sidebarQuery, beforeQuery, 'a test store\'s write must never leak into the app store');
+});
+test('sidebarHost/sidebarQuery are NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes both; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarHost'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarQuery'));
+  const s = createUiStore();
+  s.getState().setSidebarHost('build-01');
+  s.getState().setSidebarQuery('deploy');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('sidebarHost' in picked));
+  assert.ok(!('sidebarQuery' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('sidebarHost' in loadUi()));
+  assert.ok(!('sidebarQuery' in loadUi()));
+  const fresh = createUiStore();
+  assert.equal(fresh.getState().sidebarHost, null, 'never seeded');
+  assert.equal(fresh.getState().sidebarQuery, '', 'never seeded');
+});
+test('source-shape guard: ChatSidebar holds no useState for the host drill-down or the search field (WARDEN-1756)', () => {
+  // The two cells this slice migrated must not come back: a restored local
+  // cell would silently reintroduce the Settings-round-trip reset this slice
+  // fixes (ChatSidebar unmounts under SettingsPage and remounts fresh). Same
+  // readFileSync precedent as appConfigReadGuard.test.mjs — no React/DOM
+  // runner in this repo. The collection drill-down legitimately keeps a local
+  // cell; the greps name exactly the two retired shapes.
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
+  assert.ok(!/useState<SidebarView>/.test(src), 'ChatSidebar must not hold useState<SidebarView> — the host/root view derives from the uiStore sidebarHost');
+  assert.ok(!/const \[searchQuery/.test(src), 'ChatSidebar must not hold a local searchQuery cell — the ONE search field lives on the uiStore as sidebarQuery');
+});
+
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
 console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
 test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {
