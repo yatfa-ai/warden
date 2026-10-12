@@ -107,6 +107,9 @@ import type { Density } from '@/lib/density';
  */
 export type ValueOrUpdater<T> = T | ((prev: T) => T);
 
+/** Ids of Fleet Health's collapsible panels (WARDEN-1768, slice 61). */
+export type FleetPanelId = 'activity' | 'state' | 'commits';
+
 /**
  * The shared client-state slice. One field + its setter per migrated pref.
  *
@@ -719,6 +722,24 @@ export interface UiStoreState {
    */
   observerDirectiveLimit: number;
   setObserverDirectiveLimit: (v: number) => void;
+  /**
+   * Fleet Health's Closed-sessions "show more" expansion (WARDEN-1768, roadmap
+   * WARDEN-1204 slice 61). A NON-persisted session fact: NOT a
+   * STORE_PERSISTED_KEYS member, initial `false`, never seeded from disk.
+   * HealthDashboard unmounts whenever Settings opens, so a local cell reset on
+   * return; the store keeps it for the session (a restart reopens collapsed).
+   */
+  healthClosedExpanded: boolean;
+  setHealthClosedExpanded: (v: boolean) => void;
+  /**
+   * Open/closed flag of each collapsible Fleet Health panel (WARDEN-1768, slice
+   * 61), keyed by panel id: the two FleetMatrixPanel instances ('activity' =
+   * Fleet activity, 'state' = Fleet state — independent flags over ONE shared
+   * scaffold) and 'commits' (Recent commits). NON-persisted: initial all `true`
+   * (open), never seeded from disk; survives the Settings round trip.
+   */
+  fleetPanelOpen: Record<FleetPanelId, boolean>;
+  toggleFleetPanel: (id: FleetPanelId) => void;
   /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
@@ -1392,6 +1413,13 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setObserverActivityLimit: (observerActivityLimit) => set({ observerActivityLimit }),
     observerDirectiveLimit: 100,
     setObserverDirectiveLimit: (observerDirectiveLimit) => set({ observerDirectiveLimit }),
+    // WARDEN-1768 (slice 61): the not-persisted Fleet Health collapse/expand
+    // facts — Closed "show more" starts collapsed; every panel starts open.
+    healthClosedExpanded: false,
+    setHealthClosedExpanded: (healthClosedExpanded) => set({ healthClosedExpanded }),
+    fleetPanelOpen: { activity: true, state: true, commits: true },
+    toggleFleetPanel: (id) =>
+      set((s) => ({ fleetPanelOpen: { ...s.fleetPanelOpen, [id]: !s.fleetPanelOpen[id] } })),
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
     // seed — a pure mapping of the theme pref ('system' → dark placeholder that
     // App's [theme] effect overwrites on mount); never read from disk itself.
@@ -2439,6 +2467,26 @@ export function useObserverDirectiveLimit(): number {
 /** Stable-identity action: set the Directives feed's row limit. */
 export function useSetObserverDirectiveLimit(): (v: number) => void {
   return useUiStore((s) => s.setObserverDirectiveLimit);
+}
+
+/** Fleet Health Closed-sessions "show more" expansion (WARDEN-1768, slice 61) — NOT persisted. */
+export function useHealthClosedExpanded(): boolean {
+  return useUiStore((s) => s.healthClosedExpanded);
+}
+
+/** Stable-identity action: set the Closed-sessions expansion. */
+export function useSetHealthClosedExpanded(): (v: boolean) => void {
+  return useUiStore((s) => s.setHealthClosedExpanded);
+}
+
+/** Whether one Fleet Health panel is open (WARDEN-1768, slice 61) — NOT persisted. */
+export function useFleetPanelOpen(id: FleetPanelId): boolean {
+  return useUiStore((s) => s.fleetPanelOpen[id]);
+}
+
+/** Stable-identity action: toggle one Fleet Health panel's open flag. */
+export function useToggleFleetPanel(): (id: FleetPanelId) => void {
+  return useUiStore((s) => s.toggleFleetPanel);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {

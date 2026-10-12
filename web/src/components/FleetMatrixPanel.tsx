@@ -1,7 +1,7 @@
-import { useState, useMemo, type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import type { Chat } from '@/lib/types';
 import { formatTimestamp } from '@/lib/formatTimestamp';
-import { useTimestampFormat } from '@/lib/uiStore';
+import { useTimestampFormat, useFleetPanelOpen, useToggleFleetPanel } from '@/lib/uiStore';
 import { displayName } from '@/lib/chatDisplay';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
@@ -47,9 +47,10 @@ import { bucketLabelIndices } from '@/lib/heatmap';
  * casts, no widening: `StateRow`/`HeatmapRow` are already structurally
  * `MatrixRow<TCell>`.
  *
- * Collapse state is LOCAL React state (deliberately NOT a persisted /api/config
- * pref — avoids the dead-pref trap), owned here on behalf of both panels.
- * Defaults OPEN.
+ * Collapse state lives on the uiStore (WARDEN-1768, slice 61), keyed by the
+ * required `panelId` so the two instances stay independent. It is deliberately
+ * NOT a persisted /api/config pref (avoids the dead-pref trap) but survives
+ * unmount within a session (e.g. the Settings round trip). Defaults OPEN.
  */
 
 /**
@@ -78,6 +79,9 @@ export interface MatrixCellContext<TCell> {
 }
 
 export interface FleetMatrixPanelProps<TCell> {
+  /** Which uiStore collapse flag this instance owns ('activity' | 'state'), so
+   *  the two panels sharing this scaffold collapse independently (WARDEN-1768). */
+  panelId: 'activity' | 'state';
   /** `aria-label` on the outer `<section>` (e.g. "Fleet activity over the last 24 hours"). */
   sectionAriaLabel: string;
   /** Visible title in the collapsible header (e.g. "Fleet activity · 24h"). */
@@ -132,6 +136,7 @@ const LABEL_STEP = 6;
 export const MATRIX_CELL_SIZE = 'h-3 compact:h-2.5';
 
 export function FleetMatrixPanel<TCell>({
+  panelId,
   sectionAriaLabel,
   headerLabel,
   rows,
@@ -149,9 +154,13 @@ export function FleetMatrixPanel<TCell>({
   legend,
   onOpenChat,
 }: FleetMatrixPanelProps<TCell>) {
-  // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
-  // trap). Defaults open so the fleet pattern is glanceable on entry.
-  const [open, setOpen] = useState(true);
+  // Collapse state lives on the uiStore (WARDEN-1768, slice 61), keyed by
+  // `panelId` so the two instances of this scaffold stay independent. Still NOT
+  // persisted (never serialized to /api/config — avoids the dead-pref trap), but
+  // it survives unmount within a session (the Settings round trip). Defaults
+  // open so the fleet pattern is glanceable on entry.
+  const open = useFleetPanelOpen(panelId);
+  const toggleOpen = useToggleFleetPanel();
 
   // Resolve each agent's display name by container (the matrix rows carry only
   // the container; the name is a render concern). Keyed by container — unique
@@ -197,7 +206,7 @@ export function FleetMatrixPanel<TCell>({
           with the sibling Fleet Health panels (WARDEN-1050). */}
       <CollapsibleSectionHeader
         open={open}
-        onToggle={() => setOpen((v) => !v)}
+        onToggle={() => toggleOpen(panelId)}
         label={headerLabel}
         meta={hasRows ? `${rows.length} agent${rows.length === 1 ? '' : 's'}` : ''}
       />

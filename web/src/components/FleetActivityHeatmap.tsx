@@ -48,7 +48,7 @@ import {
  * Sparkline already use (theme-aware across all 8 themes); only the opacity — a
  * scalar, not a color — is computed.
  *
- * Collapse state is LOCAL React state (deliberately NOT a persisted /api/config
+ * Collapse state lives on the uiStore (WARDEN-1768, session-only; deliberately NOT a persisted /api/config
  * pref — avoids the dead-pref trap) and lives in the scaffold. Defaults OPEN so a
  * returning human scans the fleet pattern at a glance on opening Fleet Health.
  */
@@ -88,6 +88,7 @@ export function FleetActivityHeatmap({ series, agents, loading, error, onOpenCha
 
   return (
     <FleetMatrixPanel<HeatmapCell>
+      panelId="activity"
       sectionAriaLabel="Fleet activity over the last 24 hours"
       headerLabel="Fleet activity · 24h"
       rows={matrix.rows}
