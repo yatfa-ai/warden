@@ -1,7 +1,6 @@
-import { useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import type { IssueLinkEntry } from '@/lib/issue-links';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, useObserverDirectiveLimit, useSetObserverDirectiveLimit } from '@/lib/uiStore';
 import type { Directive } from '@/lib/types';
 import {
   ContextMenu,
@@ -68,7 +67,10 @@ export function DirectiveHistory({
   // byte-identically to before this prop existed.
   issueEntries?: IssueLinkEntry[];
 }) {
-  const [limit, setLimit] = useState(100);
+  // WARDEN-1760 (slice 60): the "Last N" choice lives on the uiStore (NOT
+  // persisted) so it survives tab switches and the Settings round trip.
+  const limit = useObserverDirectiveLimit();
+  const setLimit = useSetObserverDirectiveLimit();
   // Re-render once per second so the "Updated Ns ago" label stays fresh. ONE
   // ticker per feed (WARDEN-1419): this same `now` is passed to LiveFeedChrome,
   // so the header label and the row grouping below read the same instant.

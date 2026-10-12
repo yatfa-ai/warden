@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, useObserverActivityLimit, useSetObserverActivityLimit } from '@/lib/uiStore';
 import type { ActivityEvent } from '@/lib/types';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { LiveFeedChrome } from './LiveFeedChrome';
@@ -59,7 +59,10 @@ export function ActivityTimeline({
   // WARDEN-1342 (slice 4): subscribes to the shared pref instead of taking it
   // as a prop from ObserverTabs (a proven-zero-use carrier).
   const timestampFormat = useTimestampFormat();
-  const [limit, setLimit] = useState(100);
+  // WARDEN-1760 (slice 60): the "Last N" choice lives on the uiStore (NOT
+  // persisted) so it survives tab switches and the Settings round trip.
+  const limit = useObserverActivityLimit();
+  const setLimit = useSetObserverActivityLimit();
   // Re-render once per second so the "Updated Ns ago" label stays fresh. ONE
   // ticker per feed (WARDEN-1419): this same `now` is passed to LiveFeedChrome,
   // so the header label and the row grouping below read the same instant.
