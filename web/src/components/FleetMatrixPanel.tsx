@@ -47,9 +47,10 @@ import { bucketLabelIndices } from '@/lib/heatmap';
  * casts, no widening: `StateRow`/`HeatmapRow` are already structurally
  * `MatrixRow<TCell>`.
  *
- * Collapse state is LOCAL React state (deliberately NOT a persisted /api/config
- * pref — avoids the dead-pref trap), owned here on behalf of both panels.
- * Defaults OPEN.
+ * Collapse state lives on the uiStore (WARDEN-1768, slice 61), keyed by the
+ * required `panelId` so the two instances stay independent. It is deliberately
+ * NOT a persisted /api/config pref (avoids the dead-pref trap) but survives
+ * unmount within a session (e.g. the Settings round trip). Defaults OPEN.
  */
 
 /**
