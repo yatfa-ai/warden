@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useObserverViewMode, useSetObserverViewMode, useObserverActivityFilters, useSetObserverActivityFilters, useObserverDirectiveFilters, useSetObserverDirectiveFilters, useObserverAttentionFilters, useSetObserverAttentionFilters } from '@/lib/uiStore';
+import { useHostLabels, useObserverViewMode, useSetObserverViewMode, useObserverActivityFilters, useSetObserverActivityFilters, useObserverDirectiveFilters, useSetObserverDirectiveFilters, useObserverAttentionFilters, useSetObserverAttentionFilters, useMarkObserverReconnected } from '@/lib/uiStore';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
@@ -312,16 +312,17 @@ export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props 
   // reconnect to that chat (open its pane on the right host) exactly once. This
   // is the cross-host resumption promised by the stored chat context — the user
   // no longer has to remember which host the agent was on.
-  const reconnectedRef = useRef<Set<string>>(new Set());
+  // The once-guard lives on the uiStore (WARDEN-1772): App unmounts this
+  // component while Settings is open, which emptied a local ref and re-fired
+  // the reconnect on return. The store's atomic mark survives the round trip.
+  const markReconnected = useMarkObserverReconnected();
   useEffect(() => {
     if (!booted || !onReconnectChat || !activeId) return;
-    if (reconnectedRef.current.has(activeId)) return;
     const session = sessions.find((s) => s.id === activeId);
-    if (session?.chatKey) {
-      reconnectedRef.current.add(activeId);
+    if (session?.chatKey && markReconnected(activeId)) {
       onReconnectChat(session.chatKey, session.host);
     }
-  }, [booted, activeId, sessions, onReconnectChat]);
+  }, [booted, activeId, sessions, onReconnectChat, markReconnected]);
 
   // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
   // When observerAutoStart is on and a chat becomes focused, spawn+open a bound

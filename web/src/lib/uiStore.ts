@@ -741,6 +741,23 @@ export interface UiStoreState {
   fleetPanelOpen: Record<FleetPanelId, boolean>;
   toggleFleetPanel: (id: FleetPanelId) => void;
   /**
+   * Observer session ids whose "seamless resume" reconnect already fired this
+   * app session (WARDEN-1772, roadmap WARDEN-1204 slice 62). A NON-persisted
+   * session fact: NOT a STORE_PERSISTED_KEYS member, initial empty, never
+   * seeded from disk. ObserverTabs unmounts whenever Settings opens, so the
+   * old component-local ref reset on return and re-fired `onReconnectChat`
+   * (re-opening a closed pane, stealing focus); the store keeps it for the
+   * session. A full app restart legitimately resets it, so the first mount
+   * after launch still resumes.
+   */
+  observerReconnected: Record<string, true>;
+  /**
+   * ATOMIC check-and-mark: records `id` and returns `true` iff it was NOT
+   * already recorded (the caller should reconnect), `false` otherwise. One
+   * synchronous read-modify-write, so the effect has no read-then-write race.
+   */
+  markObserverReconnected: (id: string) => boolean;
+  /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
    * now, or the chosen theme id itself. The sixth NON-persisted session fact:
@@ -1420,6 +1437,14 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     fleetPanelOpen: { activity: true, state: true, commits: true },
     toggleFleetPanel: (id) =>
       set((s) => ({ fleetPanelOpen: { ...s.fleetPanelOpen, [id]: !s.fleetPanelOpen[id] } })),
+    // WARDEN-1772 (slice 62): the not-persisted once-per-session reconnect
+    // record — starts empty; the atomic mark returns whether `id` is new.
+    observerReconnected: {},
+    markObserverReconnected: (id) => {
+      if (get().observerReconnected[id]) return false;
+      set((s) => ({ observerReconnected: { ...s.observerReconnected, [id]: true } }));
+      return true;
+    },
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
     // seed — a pure mapping of the theme pref ('system' → dark placeholder that
     // App's [theme] effect overwrites on mount); never read from disk itself.
@@ -2487,6 +2512,11 @@ export function useFleetPanelOpen(id: FleetPanelId): boolean {
 /** Stable-identity action: toggle one Fleet Health panel's open flag. */
 export function useToggleFleetPanel(): (id: FleetPanelId) => void {
   return useUiStore((s) => s.toggleFleetPanel);
+}
+
+/** Stable-identity atomic action: mark an observer session reconnected; true iff newly marked (WARDEN-1772, slice 62) — NOT persisted. */
+export function useMarkObserverReconnected(): (id: string) => boolean {
+  return useUiStore((s) => s.markObserverReconnected);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
