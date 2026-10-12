@@ -3796,6 +3796,50 @@ test('source-shape guard: the four Fleet Health files hold no local collapse/exp
   }
 });
 
+// ─── observerReconnected (WARDEN-1772, roadmap WARDEN-1204 slice 62): NON-persisted once-per-session reconnect record ───
+console.log('\ncreateUiStore — observerReconnected / markObserverReconnected (not persisted; session fact)');
+test('observerReconnected starts empty', () => {
+  reset();
+  assert.deepEqual(createUiStore().getState().observerReconnected, {});
+});
+test('markObserverReconnected is an atomic check-and-mark: true the first time, false after, per id', () => {
+  reset();
+  const s = createUiStore();
+  assert.equal(s.getState().markObserverReconnected('a'), true);
+  assert.equal(s.getState().markObserverReconnected('a'), false);
+  assert.equal(s.getState().markObserverReconnected('b'), true, 'ids are independent');
+  assert.equal(s.getState().markObserverReconnected('b'), false);
+  assert.deepEqual(s.getState().observerReconnected, { a: true, b: true });
+});
+test('factory isolation — a test store\'s marks never leak into the app store or a sibling store', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().observerReconnected;
+  a.getState().markObserverReconnected('x');
+  assert.equal(b.getState().markObserverReconnected('x'), true);
+  assert.equal(uiStore.getState().observerReconnected, before);
+  assert.deepEqual(uiStore.getState().observerReconnected, {});
+});
+test('observerReconnected is NOT persisted: absent from STORE_PERSISTED_KEYS, the picked prefs and loadUi/loadObs; never seeded', () => {
+  reset();
+  assert.ok(!STORE_PERSISTED_KEYS.includes('observerReconnected'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('markObserverReconnected'));
+  const s = createUiStore();
+  s.getState().markObserverReconnected('a');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.ok(!('observerReconnected' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('observerReconnected' in loadUi()));
+  assert.ok(!('observerReconnected' in loadObs()));
+  assert.deepEqual(createUiStore().getState().observerReconnected, {}, 'never seeded');
+});
+test('source-shape guard: ObserverTabs holds no local reconnect ref and uses the store\'s atomic mark (WARDEN-1772)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ObserverTabs.tsx'), 'utf8');
+  assert.ok(!/reconnectedRef/.test(src), 'a restored local ref would reintroduce the Settings round-trip re-fire');
+  assert.match(src, /useMarkObserverReconnected\(\)/);
+});
+
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
 console.log('\ncreateUiStore — resolvedThemeId / selectTerminalThemeId (not persisted; DOM-free seed)');
 test('selectTerminalThemeId: dark/light overrides win regardless of resolved theme; auto follows the resolved id', () => {
