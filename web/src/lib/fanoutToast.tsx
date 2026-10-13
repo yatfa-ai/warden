@@ -2,11 +2,11 @@ import { toast } from 'sonner';
 import type { FanoutToast } from './fanout';
 
 /**
- * Render the result toast for a fan-out operation (bulk kill / broadcast /
+ * Render the result toast for a fan-out operation (bulk kill /
  * key-send) — the single render seam for every `format*Toast` output.
  *
  * The pure seam was already shared (summarizeFanout + the three formatters in
- * ./fanout, ./kill, ./broadcast, ./keysend); this is the render half, which was
+ * ./fanout, ./kill, ./keysend); this is the render half, which was
  * hand-copied at five call sites across ChatSidebar and HealthDashboard until
  * WARDEN-935 collapsed them here.
  *

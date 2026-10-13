@@ -1,5 +1,5 @@
 // The shared target-agent list for the fleet-action confirmation dialogs
-// (BroadcastDialog / KillDialog / KeySendDialog). WARDEN-1274 retired a fourth,
+// (KillDialog / KeySendDialog). WARDEN-1274 retired a fourth,
 // SnoozeDialog, along with the alert channel its snooze silenced.
 //
 // Each of those dialogs is a SAFETY GATE: it shows the FULL target list
@@ -13,13 +13,13 @@
 // nothing enforcing consistency. Two copies (KeySendDialog and the since-retired
 // SnoozeDialog) had silently dropped the `useHostLabels` import and called
 // hostTagOf with one arg — rendering the raw SSH hostname where their siblings
-// (BroadcastDialog, KillDialog) rendered the friendly label (WARDEN-735). Calling
+// (KillDialog) rendered the friendly label (WARDEN-735). Calling
 // useHostLabels() ONCE here and passing it to hostTagOf in the 2-arg
 // (label-resolving) form means every dialog renders the same host per target by
 // construction, and a future copy cannot drift again.
 //
 // Each caller keeps its OWN outer label span — the label text legitimately
-// differs ("Recipients" for Broadcast, "Targets" for the others) — so this
+// differs ("Targets" today, but a future dialog may differ) — so this
 // component renders only the bordered, scrollable list body. `targets` is a
 // Chat[] in display order, identical to the prop each dialog already receives.
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';

@@ -261,7 +261,7 @@ export function HostsSection({
 
       {/* Per-host display labels (WARDEN-490) — a friendly name for each
           host shown wherever a host tag appears (sidebar rows, pane
-          header, Kill/Collision/Broadcast dialogs, Health dashboard,
+          header, Kill/Collision dialogs, Health dashboard,
           token-budget offender line, etc.). Pure client-side: never
           sent to the backend (it's a UiState pref, not config). Leave a
           host blank to show its raw name. Covers this machine plus every

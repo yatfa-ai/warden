@@ -122,7 +122,7 @@ export type FleetPanelId = 'activity' | 'state' | 'commits';
 export interface UiStoreState {
   /**
    * The user-authored instruction library (WARDEN-323). Read by the pane
-   * context menu, the broadcast picker, the watch catch-up quick reply, and
+   * context menu, the watch catch-up quick reply, and
    * Settings' CRUD section. Written only by Settings (add/rename/edit/delete)
    * and by the "Reset appearance & UI preferences" action.
    */

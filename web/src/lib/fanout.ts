@@ -1,6 +1,6 @@
 // Generic helpers for a Promise.allSettled fan-out over a per-agent API
-// (WARDEN-328). The broadcast-send reducer (WARDEN-292) and the batch-kill
-// reducer share the EXACT same accounting — a result counts as a success only
+// (WARDEN-328). The batch-kill and batch key-send
+// reducers share the EXACT same accounting — a result counts as a success only
 // when its promise fulfilled AND carried `{ok:true}`; anything else (a rejected
 // promise, or a fulfilled `{ok:false}` carrying an error) is a per-agent
 // failure — so the logic lives once here instead of being duplicated.
@@ -43,7 +43,7 @@ export type FanoutToastVariant = 'success' | 'error';
 
 /**
  * The shape every fan-out result formatter returns (formatKillToast /
- * formatBroadcastToast / formatKeySendToast). The three used to declare three
+ * formatKeySendToast). The three used to declare three
  * structurally identical interfaces; they now alias this one so the single
  * renderer (showFanoutToast in ./fanoutToast) has one type to accept.
  *
@@ -118,7 +118,7 @@ export interface FanoutToastPhrases {
 /**
  * Shape the result toast for a fan-out summary — the ONE place the three-branch
  * structure, the `\n`-joined failure list, the variant and the pluralization
- * live. formatKillToast / formatBroadcastToast / formatKeySendToast are thin
+ * live. formatKillToast / formatKeySendToast are thin
  * delegating wrappers over this (WARDEN-1034); they had three byte-identical
  * copies of the body, which survived two prior extractions of their neighbours
  * (5b944e5 folded the toast RENDERS into showFanoutToast, 716ec6f folded the

@@ -6,7 +6,7 @@
 // list (name · type · host · role — so a kind/host mismatch is visible before
 // the stop), a live count, and a clear warning that this stops each agent's
 // tmux session. Nothing is stopped until the explicit destructive "Stop N"
-// Confirm — the dialog is ALWAYS shown (no opt-out), matching the broadcast
+// Confirm — the dialog is ALWAYS shown (no opt-out), matching the KeySend
 // precedent and the WARDEN-68 destructive-action bar.
 //
 // The dialog is presentational + owns its killing state; the actual fan-out

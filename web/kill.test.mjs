@@ -11,7 +11,7 @@
 // kill.ts has one runtime value import (summarizeFanout from ./fanout), and
 // fanout.ts is `import type`-free at runtime — so Vite's OXC transform emits
 // clean ESM JS for both, and the same transpile-to-temp-`.mjs` + dynamic
-// `import()` harness used by broadcast.test.mjs loads the REAL modules (kill +
+// `import()` harness used by keysend.test.mjs loads the REAL modules (kill +
 // its fanout dependency) rather than a hand-rolled re-implementation.
 //
 // Run: node kill.test.mjs   (from web/)

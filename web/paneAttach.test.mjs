@@ -23,7 +23,7 @@
 // paneAttach.ts carries only an `import type { Chat }`, which Vite's OXC
 // transform erases entirely (never reaches the emitted JS), so the same
 // transpile-to-temp-`.mjs` + dynamic-`import()` harness used by
-// chatDisplay.test.mjs / broadcast.test.mjs loads the REAL module.
+// chatDisplay.test.mjs / kill.test.mjs loads the REAL module.
 //
 // Run: node paneAttach.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';

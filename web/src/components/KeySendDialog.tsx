@@ -6,7 +6,7 @@
 // the FULL target list (name · type · host · role — so a kind/host mismatch is
 // visible before the send), a live count, a key selector, and clear
 // NON-DESTRUCTIVE framing. Nothing is sent until the explicit "Interrupt N"
-// Confirm — the dialog is ALWAYS shown (no opt-out), matching the broadcast/kill
+// Confirm — the dialog is ALWAYS shown (no opt-out), matching the kill
 // precedent and the WARDEN-68 quality bar.
 //
 // Interrupt is deliberately framed apart from Kill (KillDialog): sending Ctrl-C
@@ -19,7 +19,7 @@
 // driven by the parent via `onSend`, which returns the per-agent summary so the
 // parent can surface the result toast and clear the selection. Keeping the
 // network + toast logic in the parent matches where the other chat-op fetches
-// live (broadcast/kill); keeping the key-pick state here keeps it out of the
+// live (kill); keeping the key-pick state here keeps it out of the
 // parent's already-large state surface.
 import { useState, useEffect } from 'react';
 import {
@@ -97,7 +97,7 @@ export function KeySendDialog({ open, onOpenChange, targets, onSend }: Props) {
     <Dialog open={open} onOpenChange={guardOpenChange}>
       <DialogContent
         className="sm:max-w-md"
-        // ⌘/Ctrl+Enter confirms — matches BroadcastDialog's confirm intent (a
+        // ⌘/Ctrl+Enter confirms — matches KillDialog's confirm intent (a
         // keyboard path to the footer button) without a mouse trip. Only the
         // chord (not bare Enter) so it never collides with the Select's own
         // Enter-to-open behavior.
@@ -122,7 +122,7 @@ export function KeySendDialog({ open, onOpenChange, targets, onSend }: Props) {
 
           {/* The key selector — the only input. Bounded to KEY_OPTIONS
               (C-c / Escape); the Select can offer nothing /api/key would refuse.
-              The pattern mirrors the snippet picker in BroadcastDialog. */}
+              */}
           <div className="flex flex-col gap-1">
             <label htmlFor="keysend-key" className="text-xs text-muted-foreground">Key</label>
             <Select value={key} onValueChange={setKey} disabled={sending}>

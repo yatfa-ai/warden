@@ -1841,7 +1841,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
           selected. "All" selects every agent currently rendered in the dashboard
           (renderedIds — respects the Closed-section bounding + host collapse);
           "Clear" empties the selection; "Kill N…" opens the confirm gate.
-          Broadcast (Send) is omitted — out of scope for this slice. shrink-0 so
+          There is no Send action. shrink-0 so
           it pins at the bottom while the fleet list scrolls above it, mirroring
           the sidebar's bar. */}
       {selectedIds.size > 0 && (
