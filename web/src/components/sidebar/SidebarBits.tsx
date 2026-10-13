@@ -40,8 +40,8 @@ export function UpdatedAgo({ at }: { at?: number | null }) {
  * `onInterrupt` (control-key send) and `onWatch` (watch/unwatch, immediate) are
  * BOTH OPTIONAL: a surface without one simply omits it and the matching button is
  * not rendered. Fleet Health (WARDEN-371) reuses this bar for batch-kill plus
- * interrupt and omits watch. The sidebar passes both, so its bar exposes the full
- * set. (The WARDEN-292 "Send to N…" broadcast action was removed with its dialog.)
+ * interrupt and omits watch; it is the bar's only caller today (it passes
+ * `onInterrupt` and `onKill`, not `onWatch`/`watchMode`). (The WARDEN-292 "Send to N…" broadcast action was removed with its dialog.)
  *
  * WARDEN-581 watch label: the button reads "Watch N" when the action will ADD
  * watches (some selected agent isn't watched yet), else "Unwatch N" (every

@@ -121,8 +121,7 @@ export function KeySendDialog({ open, onOpenChange, targets, onSend }: Props) {
           </div>
 
           {/* The key selector — the only input. Bounded to KEY_OPTIONS
-              (C-c / Escape); the Select can offer nothing /api/key would refuse.
-              */}
+              (C-c / Escape); the Select can offer nothing /api/key would refuse. */}
           <div className="flex flex-col gap-1">
             <label htmlFor="keysend-key" className="text-xs text-muted-foreground">Key</label>
             <Select value={key} onValueChange={setKey} disabled={sending}>
