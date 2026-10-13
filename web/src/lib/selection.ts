@@ -19,7 +19,7 @@
  * keep it honest. toggleGroupSelection still does the right thing on click for a
  * partial selection: fill-to-all when not-all-selected, clear when all-selected.)
  */
-export function isSelectedAll(selected: Set<string>, ids: string[]): boolean {
+export function isSelectedAll(selected: ReadonlySet<string>, ids: string[]): boolean {
   return ids.length > 0 && ids.every((id) => selected.has(id));
 }
 
@@ -32,7 +32,7 @@ export function isSelectedAll(selected: Set<string>, ids: string[]): boolean {
  * Returns a NEW Set (the input is never mutated), so it composes safely as React
  * state (`setSelectedIds(prev => toggleGroupSelection(prev, ids))`).
  */
-export function toggleGroupSelection(selected: Set<string>, ids: string[]): Set<string> {
+export function toggleGroupSelection(selected: ReadonlySet<string>, ids: string[]): Set<string> {
   const next = new Set(selected);
   if (isSelectedAll(selected, ids)) {
     for (const id of ids) next.delete(id);

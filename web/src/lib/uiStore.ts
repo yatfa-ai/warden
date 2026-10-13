@@ -86,6 +86,7 @@ import {
   type WorkspacePaneSet,
 } from '@/lib/storage';
 import { clampLayoutWidths } from '@/lib/layout';
+import { toggleGroupSelection } from '@/lib/selection';
 import { bumpReconnectToken as bumpReconnectTokenIn } from '@/lib/paneAttach';
 import type { PaneLayout, RestoreOnStartup, ObsUi, RecentlyClosedEntry } from '@/lib/storage';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
@@ -740,6 +741,26 @@ export interface UiStoreState {
    */
   fleetPanelOpen: Record<FleetPanelId, boolean>;
   toggleFleetPanel: (id: FleetPanelId) => void;
+  /**
+   * Fleet Health's multi-select set (WARDEN-1778, roadmap WARDEN-1204 slice 63)
+   * — the agent ids ticked for the batch Interrupt / Kill action. A
+   * NON-persisted session fact: NOT a STORE_PERSISTED_KEYS member, NOT an
+   * OBS_STORE_KEYS member, initial empty, never seeded from disk (a persisted
+   * kill-selection would be a hazard). HealthDashboard unmounts whenever
+   * Settings opens, so the old component-local Set was lost on return; the
+   * store keeps it for the session (a restart starts with nothing selected).
+   * Immutable updates only (a fresh Set per change), modelled on
+   * `recentlySavedIds`.
+   */
+  healthSelectedIds: ReadonlySet<string>;
+  /** Toggle one agent's membership. */
+  toggleHealthSelected: (id: string) => void;
+  /** Tri-state group toggle via the pure `toggleGroupSelection` reducer. */
+  toggleHealthGroup: (ids: string[]) => void;
+  /** Replace the whole selection. */
+  setHealthSelected: (ids: Iterable<string>) => void;
+  /** Empty the selection. */
+  clearHealthSelected: () => void;
   /**
    * Observer session ids whose "seamless resume" reconnect already fired this
    * app session (WARDEN-1772, roadmap WARDEN-1204 slice 62). A NON-persisted
@@ -1437,6 +1458,20 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     fleetPanelOpen: { activity: true, state: true, commits: true },
     toggleFleetPanel: (id) =>
       set((s) => ({ fleetPanelOpen: { ...s.fleetPanelOpen, [id]: !s.fleetPanelOpen[id] } })),
+    // WARDEN-1778 (slice 63): the not-persisted Fleet Health multi-select set.
+    // Initial empty — never seeded; every update builds a fresh Set.
+    healthSelectedIds: new Set<string>(),
+    toggleHealthSelected: (id) =>
+      set((s) => {
+        const n = new Set(s.healthSelectedIds);
+        if (n.has(id)) n.delete(id); else n.add(id);
+        return { healthSelectedIds: n };
+      }),
+    toggleHealthGroup: (ids) =>
+      set((s) => ({ healthSelectedIds: toggleGroupSelection(s.healthSelectedIds, ids) })),
+    setHealthSelected: (ids) => set({ healthSelectedIds: new Set(ids) }),
+    clearHealthSelected: () =>
+      set((s) => (s.healthSelectedIds.size === 0 ? s : { healthSelectedIds: new Set<string>() })),
     // WARDEN-1772 (slice 62): the not-persisted once-per-session reconnect
     // record — starts empty; the atomic mark returns whether `id` is new.
     observerReconnected: {},
@@ -2512,6 +2547,31 @@ export function useFleetPanelOpen(id: FleetPanelId): boolean {
 /** Stable-identity action: toggle one Fleet Health panel's open flag. */
 export function useToggleFleetPanel(): (id: FleetPanelId) => void {
   return useUiStore((s) => s.toggleFleetPanel);
+}
+
+/** Fleet Health's multi-select set (WARDEN-1778, slice 63) — NOT persisted. */
+export function useHealthSelectedIds(): ReadonlySet<string> {
+  return useUiStore((s) => s.healthSelectedIds);
+}
+
+/** Stable-identity action: toggle one Fleet Health agent's selection. */
+export function useToggleHealthSelected(): (id: string) => void {
+  return useUiStore((s) => s.toggleHealthSelected);
+}
+
+/** Stable-identity action: tri-state toggle a group of Fleet Health agents. */
+export function useToggleHealthGroup(): (ids: string[]) => void {
+  return useUiStore((s) => s.toggleHealthGroup);
+}
+
+/** Stable-identity action: replace the Fleet Health selection. */
+export function useSetHealthSelected(): (ids: Iterable<string>) => void {
+  return useUiStore((s) => s.setHealthSelected);
+}
+
+/** Stable-identity action: clear the Fleet Health selection. */
+export function useClearHealthSelected(): () => void {
+  return useUiStore((s) => s.clearHealthSelected);
 }
 
 /** Stable-identity atomic action: mark an observer session reconnected; true iff newly marked (WARDEN-1772, slice 62) — NOT persisted. */
