@@ -658,10 +658,17 @@ export interface UiStoreState {
    * slice 30). The fifth NON-persisted session fact: NOT a STORE_PERSISTED_KEYS
    * member, initial `null`, never seeded from disk, never cleared by the store.
    * Each set stores the passed object AS-IS (fresh reference per call, no equality
-   * short-circuit); PaneTile's effect keys on the derived query STRING.
+   * short-circuit); PaneTile's effect keys on the command OBJECT and hands it back
+   * via `consumeExternalSearchQuery` after acting (WARDEN-1790, slice 65).
    */
   externalSearchQuery: Readonly<{ paneId: string; query: string }> | null;
   setExternalSearchQuery: (v: { paneId: string; query: string } | null) => void;
+  /**
+   * Compare-and-clear (WARDEN-1790): null the command only if the stored value is
+   * the SAME reference as `cmd`; a newer jump (or an already-null store) is left
+   * untouched so a late consume can never eat a fresh command.
+   */
+  consumeExternalSearchQuery: (cmd: Readonly<{ paneId: string; query: string }>) => void;
   /**
    * Whether the global-search dialog is open (WARDEN-1620, roadmap WARDEN-1204
    * slice 37) — the "open global search" command's ONE home. A NON-persisted
@@ -1442,6 +1449,8 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // null — never seeded; the setter stores the passed object as-is.
     externalSearchQuery: null,
     setExternalSearchQuery: (externalSearchQuery) => set({ externalSearchQuery }),
+    consumeExternalSearchQuery: (cmd) =>
+      set((s) => (s.externalSearchQuery === cmd ? { externalSearchQuery: null } : s)),
     // WARDEN-1620 (slice 37): the not-persisted "global search open" flag.
     // Initial false — never seeded.
     globalSearchOpen: false,
@@ -2486,6 +2495,11 @@ export function useSetResolvedThemeId(): (v: ThemeId) => void {
 /** Stable-identity action: raise (or clear with null) the search-jump command. */
 export function useSetExternalSearchQuery(): (v: { paneId: string; query: string } | null) => void {
   return useUiStore((s) => s.setExternalSearchQuery);
+}
+
+/** Stable-identity action: compare-and-clear the search-jump command (WARDEN-1790). */
+export function useConsumeExternalSearchQuery(): (cmd: Readonly<{ paneId: string; query: string }>) => void {
+  return useUiStore((s) => s.consumeExternalSearchQuery);
 }
 
 /** Whether the global-search dialog is open (WARDEN-1620, slice 37) — NOT persisted. */

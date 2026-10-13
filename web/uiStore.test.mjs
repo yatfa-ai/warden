@@ -3529,6 +3529,51 @@ test('externalSearchQuery is NOT persisted: STORE_PERSISTED_KEYS stays 39 and ex
   assert.equal(createUiStore().getState().externalSearchQuery, null, 'never seeded');
 });
 
+// ─── consumeExternalSearchQuery (WARDEN-1790, slice 65): compare-and-clear of the one-shot command ───
+console.log('\ncreateUiStore — consumeExternalSearchQuery (compare-and-clear by reference)');
+test('consume with the stored reference clears to null', () => {
+  reset();
+  const s = createUiStore();
+  const v = { paneId: 'p1', query: 'needle' };
+  s.getState().setExternalSearchQuery(v);
+  s.getState().consumeExternalSearchQuery(v);
+  assert.equal(s.getState().externalSearchQuery, null);
+});
+test('consume with a different equal-valued object leaves the newer command untouched', () => {
+  reset();
+  const s = createUiStore();
+  const older = { paneId: 'p1', query: 'q' };
+  const newer = { paneId: 'p1', query: 'q' };
+  s.getState().setExternalSearchQuery(older);
+  s.getState().setExternalSearchQuery(newer);
+  s.getState().consumeExternalSearchQuery(older);
+  assert.equal(s.getState().externalSearchQuery, newer, 'newer jump must not be eaten');
+});
+test('consume when already null is a no-op', () => {
+  reset();
+  const s = createUiStore();
+  const before = s.getState();
+  s.getState().consumeExternalSearchQuery({ paneId: 'p1', query: 'q' });
+  assert.equal(s.getState().externalSearchQuery, null);
+  assert.equal(s.getState(), before, 'state object untouched');
+});
+test('consumeExternalSearchQuery is an action, not persisted: STORE_PERSISTED_KEYS stays 39 and excludes it', () => {
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('consumeExternalSearchQuery'));
+});
+test('source shape: PaneTile consumes inside the external-search effect; PaneGrid passes the object, not .query', () => {
+  const tile = readFileSync(new URL('./src/components/PaneTile.tsx', import.meta.url), 'utf8');
+  const grid = readFileSync(new URL('./src/components/PaneGrid.tsx', import.meta.url), 'utf8');
+  const i = tile.indexOf('if (externalSearch && searchRef.current)');
+  assert.ok(i > 0, 'effect keyed on the command object');
+  const body = tile.slice(i, tile.indexOf('}, [externalSearch', i));
+  assert.ok(body.includes('consumeExternalSearchQuery(externalSearch)'));
+  assert.ok(body.indexOf('consumeExternalSearchQuery(externalSearch)') < body.length, 'consume is inside the effect');
+  assert.ok(body.includes('const q = externalSearch.query'), 'query captured for the timeout');
+  assert.ok(!grid.includes('externalSearchQuery.query'), 'PaneGrid no longer flattens to the string');
+  assert.ok(grid.includes('externalSearch={externalSearchQuery?.paneId === t.id ? externalSearchQuery : undefined}'));
+});
+
 // ─── globalSearchOpen (WARDEN-1620, roadmap WARDEN-1204 slice 37): NON-persisted "open global search" command ───
 console.log('\ncreateUiStore — globalSearchOpen (not persisted; "open global search" session fact)');
 test('globalSearchOpen starts false', () => {
