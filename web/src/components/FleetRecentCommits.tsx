@@ -15,7 +15,7 @@ import {
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
 import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
-import { useFleetPanelOpen, useToggleFleetPanel } from '@/lib/uiStore';
+import { useFleetPanelOpen, useToggleFleetPanel, useFleetCommitsExpandedRow, useSetFleetCommitsExpandedRow } from '@/lib/uiStore';
 import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile } from './sidebar/types';
@@ -127,8 +127,11 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
   const [refreshTick, setRefreshTick] = useState(0);
 
   // Click-through expand state: the `${key}:${hash}` of the one expanded commit row
-  // (single-open, mirroring GitBadges' expandedHash). Null = all collapsed.
-  const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  // (single-open, mirroring GitBadges' expandedHash). Null = all collapsed. Lives on
+  // the uiStore (WARDEN-1783, slice 64) so it survives the Settings round trip; the
+  // file-list cache below stays local and is re-fetched for the restored row.
+  const expandedRow = useFleetCommitsExpandedRow();
+  const setExpandedRow = useSetFleetCommitsExpandedRow();
   const [showCache, setShowCache] = useState<ShowCache>({});
   const [showLoading, setShowLoading] = useState<Record<string, boolean>>({});
 
@@ -258,8 +261,22 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
   const toggleRow = (key: string, hash: string) => {
     const cacheKey = `${key}:${hash}`;
     if (expandedRow !== cacheKey) fetchShow(key, hash);
-    setExpandedRow((cur) => (cur === cacheKey ? null : cacheKey));
+    setExpandedRow(expandedRow === cacheKey ? null : cacheKey);
   };
+
+  // WARDEN-1783: a row restored from the store after a Settings round trip has an
+  // empty local `showCache`, which would render a false "no files". Once the result
+  // loads, re-fetch the restored row's files exactly once. Keyed on `result` only
+  // (fetchShow itself no-ops when cached/loading), so it cannot loop. Match by the
+  // full `${key}:${hash}` id — never split on ':' (agent keys can contain one).
+  useEffect(() => {
+    if (!result || !expandedRow) return;
+    if (showCache[expandedRow] || showLoading[expandedRow]) return;
+    const match = result.rows.slice(0, FLEET_RECENT_LIMIT).find((r) => `${r.key}:${r.commit.hash}` === expandedRow);
+    if (match) fetchShow(match.key, match.commit.hash);
+    // Deliberately keyed on the loaded `result` alone: a one-shot restore fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- not a reaction to cache churn
+  }, [result]);
 
   const refresh = () => {
     setExpandedRow(null);
@@ -413,7 +430,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                       // resolves against the right repo (git-show's id = the agent key).
                       <div className="pb-1 pl-1">
                         <CommitMessage message={shown?.message} />
-                        {showLoading[cacheKey] && !shown ? (
+                        {!shown ? (
                           <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
                         ) : files.length > 0 ? (
                           <div className="flex flex-col gap-0.5">
