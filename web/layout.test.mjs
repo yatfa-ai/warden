@@ -58,10 +58,11 @@ const emit = async (relPath, outName, rewrite = (c) => c) => {
 };
 await emit('src/lib/layout.ts', 'layout.mjs');
 await emit('src/lib/paneAttach.ts', 'paneAttach.mjs');
+await emit('src/lib/selection.ts', 'selection.mjs');
 await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) =>
-  c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/themes', './themes.mjs'));
+  c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/selection', './selection.mjs').replaceAll('@/lib/themes', './themes.mjs'));
 const {
   clampLayoutWidths,
   clampSidebarWidth,

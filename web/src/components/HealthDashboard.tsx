@@ -42,7 +42,7 @@ import { DiffStatChip } from './sidebar/DiffStatChip';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { showFanoutToast } from '@/lib/fanoutToast';
-import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
+import { isSelectedAll } from '@/lib/selection';
 import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
 import { fetchBounded, pollerFetchOptions } from '@/lib/api';
@@ -52,7 +52,7 @@ import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
-import { useHealthClosedExpanded, useSetHealthClosedExpanded, useHostLabels, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
+import { useHealthSelectedIds, useToggleHealthSelected, useToggleHealthGroup, useSetHealthSelected, useClearHealthSelected, useHealthClosedExpanded, useSetHealthClosedExpanded, useHostLabels, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
 import { cn } from '@/lib/utils';
 import { Trash2 } from 'lucide-react';
 
@@ -687,9 +687,14 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   // Multi-select batch-kill (WARDEN-371): the set of selected agent ids, held at
   // the dashboard level so it can span every health/host section. Mirrors the
   // sidebar's WARDEN-328 surface (selectedIds Set keyed by `key || id`). Selection
-  // is ephemeral React state — no persistence/serialization boundary touched —
-  // exactly like the sidebar's selectedIds.
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // is a NON-persisted uiStore session fact (WARDEN-1778, slice 63) — no
+  // persistence/serialization boundary touched, but it survives the Settings
+  // round trip that unmounts this dashboard. A restart starts empty.
+  const selectedIds = useHealthSelectedIds();
+  const toggleSelect = useToggleHealthSelected();
+  const toggleGroup = useToggleHealthGroup();
+  const setHealthSelected = useSetHealthSelected();
+  const clearSelection = useClearHealthSelected();
   const [killOpen, setKillOpen] = useState(false);
   const [interruptOpen, setInterruptOpen] = useState(false);
   // Fleet-recent-commits FileViewer target (WARDEN-757). Set by the feed's
@@ -714,13 +719,6 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   // state reducer (so the section/host select-all checkboxes share one tested
   // helper). clearSelection empties the set (the action bar's "Clear" + the
   // post-kill reset).
-  const toggleSelect = (id: string) => setSelectedIds((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-  const toggleGroup = (ids: string[]) => setSelectedIds((prev) => toggleGroupSelection(prev, ids));
-  const clearSelection = () => setSelectedIds(new Set());
 
   const fetchHealth = async () => {
     setLoading(true);
@@ -1052,7 +1050,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
     });
     showFanoutToast(formatKillToast(summary), readNotificationPrefs().notifyChatOps);
     // The kill's intent is discharged — clear the selection regardless of outcome.
-    setSelectedIds(new Set());
+    clearSelection();
     return summary;
   };
 
@@ -1076,7 +1074,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
     const summary = await runKeySendFanout(ids, key, nameOf);
     showFanoutToast(formatKeySendToast(summary, key), readNotificationPrefs().notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of outcome.
-    setSelectedIds(new Set());
+    clearSelection();
     return summary;
   };
 
@@ -1849,7 +1847,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
       {selectedIds.size > 0 && (
         <SelectionActionBar
           count={selectedIds.size}
-          onSelectAll={() => setSelectedIds(new Set(renderedIds))}
+          onSelectAll={() => setHealthSelected(renderedIds)}
           onClear={clearSelection}
           onInterrupt={() => setInterruptOpen(true)}
           onKill={() => setKillOpen(true)}

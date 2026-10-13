@@ -62,7 +62,8 @@ await emit('src/lib/themes.ts', 'themes.mjs');
 await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
 await emit('src/lib/layout.ts', 'layout.mjs');
 await emit('src/lib/paneAttach.ts', 'paneAttach.mjs');
-await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/themes', './themes.mjs'));
+await emit('src/lib/selection.ts', 'selection.mjs');
+await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/selection', './selection.mjs').replaceAll('@/lib/themes', './themes.mjs'));
 // WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
 // erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
@@ -3838,6 +3839,97 @@ test('source-shape guard: ObserverTabs holds no local reconnect ref and uses the
   const src = readFileSync(join(__dirname, 'src', 'components', 'ObserverTabs.tsx'), 'utf8');
   assert.ok(!/reconnectedRef/.test(src), 'a restored local ref would reintroduce the Settings round-trip re-fire');
   assert.match(src, /useMarkObserverReconnected\(\)/);
+});
+
+// ─── healthSelectedIds (WARDEN-1778, roadmap WARDEN-1204 slice 63): NON-persisted Fleet Health multi-select ───
+console.log('\ncreateUiStore — healthSelectedIds (not persisted; session fact)');
+test('healthSelectedIds starts empty', () => {
+  reset();
+  assert.equal(createUiStore().getState().healthSelectedIds.size, 0);
+});
+test('toggleHealthSelected adds then removes an id', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().toggleHealthSelected('a');
+  s.getState().toggleHealthSelected('b');
+  assert.deepEqual([...s.getState().healthSelectedIds].sort(), ['a', 'b']);
+  s.getState().toggleHealthSelected('a');
+  assert.deepEqual([...s.getState().healthSelectedIds], ['b']);
+});
+test('toggleHealthGroup fills a partial selection to all, then deselects exactly the group (selection.test.mjs semantics)', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().toggleHealthSelected('x'); // outside the group
+  s.getState().toggleHealthSelected('a'); // partial
+  s.getState().toggleHealthGroup(['a', 'b', 'c']);
+  assert.deepEqual([...s.getState().healthSelectedIds].sort(), ['a', 'b', 'c', 'x']);
+  s.getState().toggleHealthGroup(['a', 'b', 'c']);
+  assert.deepEqual([...s.getState().healthSelectedIds], ['x'], 'only the group is deselected');
+});
+test('setHealthSelected replaces the whole set (accepts any iterable)', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().toggleHealthSelected('old');
+  s.getState().setHealthSelected(new Set(['a', 'b']));
+  assert.deepEqual([...s.getState().healthSelectedIds].sort(), ['a', 'b']);
+  s.getState().setHealthSelected(['c']);
+  assert.deepEqual([...s.getState().healthSelectedIds], ['c']);
+});
+test('clearHealthSelected empties the set', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setHealthSelected(['a', 'b']);
+  s.getState().clearHealthSelected();
+  assert.equal(s.getState().healthSelectedIds.size, 0);
+  s.getState().clearHealthSelected(); // no-op on empty
+  assert.equal(s.getState().healthSelectedIds.size, 0);
+});
+test('updates are immutable — a prior Set instance is never mutated', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setHealthSelected(['a']);
+  const before = s.getState().healthSelectedIds;
+  s.getState().toggleHealthSelected('b');
+  const afterToggle = s.getState().healthSelectedIds;
+  s.getState().toggleHealthGroup(['c']);
+  const afterGroup = s.getState().healthSelectedIds;
+  s.getState().setHealthSelected(['z']);
+  s.getState().clearHealthSelected();
+  assert.notEqual(before, afterToggle);
+  assert.notEqual(afterToggle, afterGroup);
+  assert.deepEqual([...before], ['a']);
+  assert.deepEqual([...afterToggle].sort(), ['a', 'b']);
+  assert.deepEqual([...afterGroup].sort(), ['a', 'b', 'c']);
+});
+test('factory isolation — a test store\'s selection never leaks into the app store or a sibling store', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().healthSelectedIds;
+  a.getState().setHealthSelected(['x']);
+  assert.equal(b.getState().healthSelectedIds.size, 0);
+  assert.equal(uiStore.getState().healthSelectedIds, before);
+  assert.equal(uiStore.getState().healthSelectedIds.size, 0);
+});
+test('healthSelectedIds is NOT persisted: absent from STORE_PERSISTED_KEYS, OBS_STORE_KEYS and both picked pref bags; never seeded', () => {
+  reset();
+  for (const k of ['healthSelectedIds', 'toggleHealthSelected', 'toggleHealthGroup', 'setHealthSelected', 'clearHealthSelected']) {
+    assert.ok(!STORE_PERSISTED_KEYS.includes(k), k + ' must not be a STORE_PERSISTED_KEYS member');
+    assert.ok(!OBS_STORE_KEYS.includes(k), k + ' must not be an OBS_STORE_KEYS member');
+  }
+  const s = createUiStore();
+  s.getState().setHealthSelected(['a']);
+  assert.ok(!Object.keys(selectPersistedStorePrefs(s.getState())).includes('healthSelectedIds'));
+  assert.ok(!Object.keys(selectPersistedObsPrefs(s.getState())).includes('healthSelectedIds'));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...selectPersistedStorePrefs(s.getState()) }));
+  assert.ok(!('healthSelectedIds' in loadUi()));
+  assert.ok(!('healthSelectedIds' in loadObs()));
+  assert.equal(createUiStore().getState().healthSelectedIds.size, 0, 'never seeded');
+});
+test('source-shape guard: HealthDashboard holds no local selectedIds cell and reads the store (WARDEN-1778)', () => {
+  const hd = readFileSync(join(__dirname, 'src', 'components', 'HealthDashboard.tsx'), 'utf8');
+  assert.ok(!/setSelectedIds/.test(hd), 'a restored local cell would reintroduce the Settings round-trip loss');
+  assert.match(hd, /const selectedIds = useHealthSelectedIds\(\)/);
 });
 
 // ─── resolvedThemeId (WARDEN-1574, roadmap WARDEN-1204 slice 31): sixth NON-persisted shared fact ───
