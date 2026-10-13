@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import type { ActivitySeries, Chat } from '@/lib/types';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { cn } from '@/lib/utils';
-import { FleetMatrixPanel, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
+import { FleetMatrixPanel, FleetMatrixCellMenu, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
 import {
   selectStateCells,
   stateGlyph,
@@ -131,16 +131,18 @@ export function FleetStateTimeline({ series, agents, loading, error, onOpenChat 
       emptyText="No agent state history in the last 24 hours."
       matrixAriaLabel={matrixStateAriaLabel}
       rowAriaLabel={rowStateAriaLabel}
-      renderCell={({ cell, index, agentName, bucket }) => {
+      renderCell={({ cell, index, agentName, bucket, chat, onOpenChat: openChat }) => {
         const label = stateLabel(cell.state);
         const glyph = stateGlyph(cell.state);
         const bucketTime = formatTimestamp(bucket, 'absolute');
+        // Built once: the tooltip AND the menu's Copy cell summary share it.
+        const summary = `${agentName} · ${bucketTime}: ${label}`;
         return (
+          <FleetMatrixCellMenu key={index} summary={summary} bucket={bucket} chat={chat} onOpenChat={openChat}>
           <div
-            key={index}
             role="gridcell"
             aria-label={label}
-            title={`${agentName} · ${bucketTime}: ${label}`}
+            title={summary}
             className={cn(
               MATRIX_CELL_SIZE,
               'rounded-[2px] min-w-0 flex items-center justify-center',
@@ -156,6 +158,7 @@ export function FleetStateTimeline({ series, agents, loading, error, onOpenChat 
               </span>
             )}
           </div>
+          </FleetMatrixCellMenu>
         );
       }}
       legend={

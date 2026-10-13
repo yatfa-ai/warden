@@ -1,7 +1,7 @@
 import type { ActivitySeries, Chat } from '@/lib/types';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { cn } from '@/lib/utils';
-import { FleetMatrixPanel, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
+import { FleetMatrixPanel, FleetMatrixCellMenu, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
 import { useMemo } from 'react';
 import {
   selectHeatmapCells,
@@ -103,16 +103,18 @@ export function FleetActivityHeatmap({ series, agents, loading, error, onOpenCha
       emptyText="No agent activity in the last 24 hours."
       matrixAriaLabel={matrixAriaLabel}
       rowAriaLabel={rowAriaLabel}
-      renderCell={({ cell, index, agentName, bucket }) => {
+      renderCell={({ cell, index, agentName, bucket, chat, onOpenChat: openChat }) => {
         const hadError = cellHasError(cell.error);
         const bucketTime = formatTimestamp(bucket, 'absolute');
         const cellAria = `${cell.total} event${cell.total === 1 ? '' : 's'}${hadError ? `, ${cell.error} error${cell.error === 1 ? '' : 's'}` : ''}`;
+        // Built once: the tooltip AND the menu's Copy cell summary share it.
+        const summary = `${agentName} · ${bucketTime}: ${cellAria}`;
         return (
+          <FleetMatrixCellMenu key={index} summary={summary} bucket={bucket} chat={chat} onOpenChat={openChat}>
           <div
-            key={index}
             role="gridcell"
             aria-label={cellAria}
-            title={`${agentName} · ${bucketTime}: ${cellAria}`}
+            title={summary}
             // bg token (theme-safe) + computed opacity (the only
             // non-token value, and it is a scalar not a color).
             className={cn(
@@ -122,6 +124,7 @@ export function FleetActivityHeatmap({ series, agents, loading, error, onOpenCha
             )}
             style={{ opacity: intensityOpacity(cell.intensity) }}
           />
+          </FleetMatrixCellMenu>
         );
       }}
       legend={
