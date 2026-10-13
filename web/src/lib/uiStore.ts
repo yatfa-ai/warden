@@ -733,6 +733,19 @@ export interface UiStoreState {
   healthClosedExpanded: boolean;
   setHealthClosedExpanded: (v: boolean) => void;
   /**
+   * Fleet Health Recent-commits expanded row (WARDEN-1783, roadmap WARDEN-1204
+   * slice 64): the `${agentKey}:${commitHash}` of the one expanded commit row, or
+   * null when all are collapsed. A NON-persisted session fact: NOT a
+   * STORE_PERSISTED_KEYS / OBS_STORE_KEYS member, initial `null`, never seeded
+   * from disk. FleetRecentCommits unmounts whenever Settings opens; the store
+   * keeps the row for the session (a restart starts collapsed). The fetched
+   * file-list cache stays LOCAL to the component (server data is not mirrored
+   * here) and is re-fetched for the restored row on return.
+   */
+  fleetCommitsExpandedRow: string | null;
+  /** Accepts a value or a functional updater (computed inside `set`). */
+  setFleetCommitsExpandedRow: (v: string | null | ((cur: string | null) => string | null)) => void;
+  /**
    * Open/closed flag of each collapsible Fleet Health panel (WARDEN-1768, slice
    * 61), keyed by panel id: the two FleetMatrixPanel instances ('activity' =
    * Fleet activity, 'state' = Fleet state — independent flags over ONE shared
@@ -1455,6 +1468,12 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     // facts — Closed "show more" starts collapsed; every panel starts open.
     healthClosedExpanded: false,
     setHealthClosedExpanded: (healthClosedExpanded) => set({ healthClosedExpanded }),
+    // WARDEN-1783 (slice 64): the not-persisted Recent-commits expanded row.
+    fleetCommitsExpandedRow: null,
+    setFleetCommitsExpandedRow: (v) =>
+      set((s) => ({
+        fleetCommitsExpandedRow: typeof v === 'function' ? v(s.fleetCommitsExpandedRow) : v,
+      })),
     fleetPanelOpen: { activity: true, state: true, commits: true },
     toggleFleetPanel: (id) =>
       set((s) => ({ fleetPanelOpen: { ...s.fleetPanelOpen, [id]: !s.fleetPanelOpen[id] } })),
@@ -2537,6 +2556,16 @@ export function useHealthClosedExpanded(): boolean {
 /** Stable-identity action: set the Closed-sessions expansion. */
 export function useSetHealthClosedExpanded(): (v: boolean) => void {
   return useUiStore((s) => s.setHealthClosedExpanded);
+}
+
+/** Fleet Health Recent-commits expanded row key (WARDEN-1783, slice 64) — NOT persisted. */
+export function useFleetCommitsExpandedRow(): string | null {
+  return useUiStore((s) => s.fleetCommitsExpandedRow);
+}
+
+/** Stable-identity action: set (or clear) the expanded Recent-commits row. */
+export function useSetFleetCommitsExpandedRow(): (v: string | null | ((cur: string | null) => string | null)) => void {
+  return useUiStore((s) => s.setFleetCommitsExpandedRow);
 }
 
 /** Whether one Fleet Health panel is open (WARDEN-1768, slice 61) — NOT persisted. */

@@ -3841,6 +3841,55 @@ test('source-shape guard: ObserverTabs holds no local reconnect ref and uses the
   assert.match(src, /useMarkObserverReconnected\(\)/);
 });
 
+// ─── fleetCommitsExpandedRow (WARDEN-1783/1784, roadmap WARDEN-1204 slice 64): NON-persisted Recent-commits expanded row ───
+console.log('\ncreateUiStore — fleetCommitsExpandedRow (not persisted; session fact)');
+test('fleetCommitsExpandedRow starts null', () => {
+  reset();
+  assert.equal(createUiStore().getState().fleetCommitsExpandedRow, null);
+});
+test('setFleetCommitsExpandedRow sets, replaces and clears (value and functional updater)', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setFleetCommitsExpandedRow('agent:one:abc123');
+  assert.equal(s.getState().fleetCommitsExpandedRow, 'agent:one:abc123', 'keys containing ":" are stored verbatim');
+  s.getState().setFleetCommitsExpandedRow('b:def');
+  assert.equal(s.getState().fleetCommitsExpandedRow, 'b:def');
+  s.getState().setFleetCommitsExpandedRow((cur) => (cur === 'b:def' ? null : 'b:def'));
+  assert.equal(s.getState().fleetCommitsExpandedRow, null);
+  s.getState().setFleetCommitsExpandedRow(null);
+  assert.equal(s.getState().fleetCommitsExpandedRow, null);
+});
+test('factory isolation — a test store\'s expanded row never leaks into the app store or a sibling store', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setFleetCommitsExpandedRow('x:y');
+  assert.equal(b.getState().fleetCommitsExpandedRow, null);
+  assert.equal(uiStore.getState().fleetCommitsExpandedRow, null);
+});
+test('fleetCommitsExpandedRow is NOT persisted: absent from STORE_PERSISTED_KEYS, OBS_STORE_KEYS and both picked pref bags; never seeded', () => {
+  reset();
+  for (const k of ['fleetCommitsExpandedRow', 'setFleetCommitsExpandedRow']) {
+    assert.ok(!STORE_PERSISTED_KEYS.includes(k), k + ' must not be a STORE_PERSISTED_KEYS member');
+    assert.ok(!OBS_STORE_KEYS.includes(k), k + ' must not be an OBS_STORE_KEYS member');
+  }
+  const s = createUiStore();
+  s.getState().setFleetCommitsExpandedRow('a:b');
+  assert.ok(!Object.keys(selectPersistedStorePrefs(s.getState())).includes('fleetCommitsExpandedRow'));
+  assert.ok(!Object.keys(selectPersistedObsPrefs(s.getState())).includes('fleetCommitsExpandedRow'));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...selectPersistedStorePrefs(s.getState()) }));
+  assert.ok(!('fleetCommitsExpandedRow' in loadUi()));
+  assert.ok(!('fleetCommitsExpandedRow' in loadObs()));
+  assert.equal(createUiStore().getState().fleetCommitsExpandedRow, null, 'never seeded');
+});
+test('source-shape guard: FleetRecentCommits holds no local expandedRow cell, reads the store, and re-fetches the restored row (WARDEN-1783)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'FleetRecentCommits.tsx'), 'utf8');
+  assert.ok(!/useState<string \| null>\(null\)/.test(src), 'a restored local cell would reintroduce the Settings round-trip reset');
+  assert.match(src, /const expandedRow = useFleetCommitsExpandedRow\(\)/);
+  assert.match(src, /useSetFleetCommitsExpandedRow/);
+  assert.match(src, /=== expandedRow\)/, 'restored row is matched by the full key, never split on ":"');
+});
+
 // ─── healthSelectedIds (WARDEN-1778, roadmap WARDEN-1204 slice 63): NON-persisted Fleet Health multi-select ───
 console.log('\ncreateUiStore — healthSelectedIds (not persisted; session fact)');
 test('healthSelectedIds starts empty', () => {
