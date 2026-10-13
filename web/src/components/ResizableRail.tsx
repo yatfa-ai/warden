@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { clampSidebarWidth, clampObserverWidth } from '@/lib/layout';
+import { DEFAULT_UI } from '@/lib/storage';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import {
   uiStore,
   useSidebarWidth,
@@ -8,6 +16,8 @@ import {
   useObserverCollapsed,
   useSetSidebarWidth,
   useSetObserverWidth,
+  useToggleSidebarCollapsed,
+  useToggleObserverCollapsed,
 } from '@/lib/uiStore';
 
 // WARDEN-1628 (client-state slice 39): a resizable side rail extracted from App.tsx.
@@ -37,6 +47,8 @@ export function ResizableRail({ side, className, handleTitle, children }: Resiza
   const observerCollapsed = useObserverCollapsed();
   const setSidebarWidth = useSetSidebarWidth();
   const setObserverWidth = useSetObserverWidth();
+  const toggleSidebarCollapsed = useToggleSidebarCollapsed();
+  const toggleObserverCollapsed = useToggleObserverCollapsed();
   // Only this rail's own width/collapse are used for render; the neighbour's values
   // are read at mousedown (see header). Hooks cannot be conditional, so both pairs
   // are subscribed — a neighbour change re-renders just this small rail, never App.
@@ -52,7 +64,30 @@ export function ResizableRail({ side, className, handleTitle, children }: Resiza
   const dragOtherWidth = useRef<number>(0);
   const dragHealthCollapsed = useRef<boolean>(true);
 
+  // WARDEN-1774: context-menu "Reset width". Routes the default through the same clamp
+  // helper the drag uses, with the neighbour width read imperatively (0 when collapsed)
+  // and the same ctx shape as handleMouseDown.
+  // DEFAULT_UI's width fields are optional in the type; fall back to the current width
+  // (a no-op reset) rather than a literal.
+  const defaultWidth = (isSidebar ? DEFAULT_UI.sidebarWidth : DEFAULT_UI.observerWidth) ?? width;
+  const label = isSidebar ? 'sidebar' : 'observer';
+  const handleResetWidth = () => {
+    const s = uiStore.getState();
+    const otherWidth = isSidebar
+      ? (s.observerCollapsed ? 0 : s.observerWidth)
+      : (s.sidebarCollapsed ? 0 : s.sidebarWidth);
+    const ctx = { windowWidth: window.innerWidth, healthCollapsed: s.healthCollapsed };
+    if (isSidebar) {
+      const target = DEFAULT_UI.sidebarWidth ?? s.sidebarWidth;
+      setSidebarWidth(clampSidebarWidth(target, otherWidth, ctx));
+    } else {
+      const target = DEFAULT_UI.observerWidth ?? s.observerWidth;
+      setObserverWidth(clampObserverWidth(target, otherWidth, ctx));
+    }
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
     const s = uiStore.getState();
     dragStartX.current = e.clientX;
     dragStartWidth.current = isSidebar ? s.sidebarWidth : s.observerWidth;
@@ -91,11 +126,24 @@ export function ResizableRail({ side, className, handleTitle, children }: Resiza
     <section
       className={className}
       style={{ width: collapsed ? 0 : width, flexShrink: 0, opacity: collapsed ? 0 : 1 }}>
-      <div
-        className={`absolute top-0 ${isSidebar ? 'right-0' : 'left-0'} bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10`}
-        onMouseDown={handleMouseDown}
-        title={handleTitle}
-      />
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            className={`absolute top-0 ${isSidebar ? 'right-0' : 'left-0'} bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10`}
+            onMouseDown={handleMouseDown}
+            title={handleTitle}
+          />
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem disabled={width === defaultWidth} onSelect={handleResetWidth}>
+            Reset {label} width
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={isSidebar ? toggleSidebarCollapsed : toggleObserverCollapsed}>
+            Collapse {label}
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {children}
     </section>
   );

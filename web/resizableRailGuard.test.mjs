@@ -54,3 +54,35 @@ test('(c) the rail calls both clamp helpers with the neighbour width captured at
   assert.ok(/Collapsed \? 0 :/.test(down), 'collapsed neighbour reserves 0');
   assert.ok(/uiStore\.getState\(\)/.test(down), 'captured imperatively from the store');
 });
+
+// WARDEN-1774 (d) — themed right-click menu on the handle + primary-button-only drag start.
+// Comments are stripped so prose cannot satisfy a pattern.
+const railCode = railSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+
+export function checkMenuGuard(code) {
+  const errs = [];
+  if (!/<ContextMenuTrigger asChild>\s*<div\b[^>]*?onMouseDown=\{handleMouseDown\}/.test(code)) errs.push('trigger must wrap the handle div');
+  if (/onContextMenu/.test(code)) errs.push('no native onContextMenu listeners');
+  const reset = code.slice(code.indexOf('const handleResetWidth'), code.indexOf('const handleMouseDown'));
+  if (!/DEFAULT_UI\.sidebarWidth/.test(reset) || !/DEFAULT_UI\.observerWidth/.test(reset)) errs.push('reset must read DEFAULT_UI widths');
+  if (!/clampSidebarWidth\(target, otherWidth, ctx\)/.test(reset)) errs.push('sidebar reset must route through clampSidebarWidth');
+  if (!/clampObserverWidth\(target, otherWidth, ctx\)/.test(reset)) errs.push('observer reset must route through clampObserverWidth');
+  if (!/Collapsed \? 0 :/.test(reset) || !/uiStore\.getState\(\)/.test(reset)) errs.push('reset must capture neighbour as 0 when collapsed from the store');
+  if (/\b(220|380)\b/.test(code)) errs.push('no literal default widths');
+  const down = code.slice(code.indexOf('const handleMouseDown'));
+  const guardAt = down.indexOf('if (e.button !== 0) return;');
+  if (guardAt < 0 || guardAt > down.indexOf('setIsResizing(true)') || guardAt > down.indexOf('preventDefault')) errs.push('mousedown must return on non-primary button before setIsResizing/preventDefault');
+  return errs;
+}
+
+test('(d) rail handle: themed menu (Reset width / Collapse) + primary-button-only drag', () => {
+  assert.deepStrictEqual(checkMenuGuard(railCode), []);
+  assert.ok(/Reset \{label\} width/.test(railCode) && /Collapse \{label\}/.test(railCode));
+  assert.ok(/<ContextMenuSeparator \/>/.test(railCode));
+});
+
+test('(d) negative control: removing the button guard / trigger makes the check fail', () => {
+  assert.ok(checkMenuGuard(railCode.replace('if (e.button !== 0) return;', '')).length > 0);
+  assert.ok(checkMenuGuard(railCode.replace('<ContextMenuTrigger asChild>', '<div>')).length > 0);
+  assert.ok(checkMenuGuard(railCode.replace('clampSidebarWidth(target,', 'setX(target,')).length > 0);
+});
