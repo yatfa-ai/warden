@@ -76,6 +76,51 @@ export interface MatrixCellContext<TCell> {
   agentName: string;
   /** Epoch-ms start of this cell's bucket. */
   bucket: number;
+  /** The Chat behind this row (the scaffold's own `chatByContainer` lookup —
+   *  panels must not re-derive it). Undefined only if a selector ever broke the
+   *  row→agent invariant; the cell menu then drops its Open item. */
+  chat?: Chat;
+  /** The host's open-chat callback, threaded for the cell menu's Open item. */
+  onOpenChat?: (id: string) => void;
+}
+
+/**
+ * Themed right-click menu for ONE matrix gridcell (WARDEN-1780). Both panels
+ * wrap the gridcell element they build in this; `asChild` merges the pointer
+ * handlers onto that element so role / aria-label / title / className / style
+ * survive and no DOM is added. Defined OUTSIDE `FleetMatrixPanel` on purpose:
+ * the rowheader trigger must stay the first ContextMenuTrigger inside the
+ * scaffold function (fleetMatrixContextMenu.test.mjs).
+ *
+ * `summary` is the SAME string the panel passes as the cell's `title`, so the
+ * copied text cannot drift from the tooltip. Everything is derived from props at
+ * render time, so the menu content is never stale.
+ */
+export function FleetMatrixCellMenu({
+  summary,
+  bucket,
+  chat,
+  onOpenChat,
+  children,
+}: {
+  summary: string;
+  bucket: number;
+  chat?: Chat;
+  onOpenChat?: (id: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent>
+        {onOpenChat && chat && (
+          <ContextMenuItem onSelect={() => onOpenChat(chat.key || chat.id)}>Open agent</ContextMenuItem>
+        )}
+        <ContextMenuItem onSelect={() => copyWithToast(summary)}>Copy cell summary</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(formatTimestamp(bucket, 'absolute'))}>Copy hour</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
 export interface FleetMatrixPanelProps<TCell> {
@@ -309,7 +354,7 @@ export function FleetMatrixPanel<TCell>({
                       </ContextMenuContent>
                     </ContextMenu>
                     {row.cells.map((cell, i) =>
-                      renderCell({ cell, index: i, agentName: name, bucket: buckets[i] }),
+                      renderCell({ cell, index: i, agentName: name, bucket: buckets[i], chat, onOpenChat }),
                     )}
                   </div>
                 );
