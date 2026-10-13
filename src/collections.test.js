@@ -130,6 +130,32 @@ describe('createCollection — name validation + persistence', () => {
   });
 });
 
+// ------------------- createCollection — criteria/metadata shape (WARDEN-1777) ---------------
+describe('createCollection — rejects non-object criteria/metadata like updateCollection', () => {
+  const bad = [['string', 'worker'], ['array', []], ['number', 42]];
+
+  for (const [label, value] of bad) {
+    it(`rejects ${label} criteria and leaves collections.json untouched`, async () => {
+      await assert.rejects(() => mod.createCollection('c', value), /^Error: Collection criteria must be an object$/);
+      assert.strictEqual(fs.existsSync(collectionsPath), false);
+    });
+    it(`rejects ${label} metadata and leaves collections.json untouched`, async () => {
+      await assert.rejects(() => mod.createCollection('m', {}, value), /^Error: Collection metadata must be an object$/);
+      assert.strictEqual(fs.existsSync(collectionsPath), false);
+    });
+  }
+
+  it('accepts undefined / null / {} for criteria and metadata (normalised to {})', async () => {
+    const a = await mod.createCollection('a');
+    const b = await mod.createCollection('b', null, null);
+    const c = await mod.createCollection('c', {}, {});
+    for (const x of [a, b, c]) {
+      assert.deepStrictEqual(x.criteria, {});
+      assert.deepStrictEqual(x.metadata, {});
+    }
+  });
+});
+
 // ----------------------------- updateCollection ------------------------------
 describe('updateCollection — identity preservation + uniqueness', () => {
   it('throws "Collection not found" when the id does not exist', async () => {

@@ -119,6 +119,19 @@ describe('/api/collections routes (createUserDataRouter)', () => {
     assert.deepStrictEqual(r.json, { error: 'Collection name is required' });
   });
 
+  it('POST non-object criteria / metadata returns 400 with the module message and persists nothing', async () => {
+    const before = (await list()).length;
+    const crit = await call('POST', '/api/collections', { name: 'post-bad-criteria', criteria: 'worker' });
+    assert.strictEqual(crit.status, 400);
+    assert.deepStrictEqual(crit.json, { error: 'Collection criteria must be an object' });
+
+    const meta = await call('POST', '/api/collections', { name: 'post-bad-metadata', metadata: [] });
+    assert.strictEqual(meta.status, 400);
+    assert.deepStrictEqual(meta.json, { error: 'Collection metadata must be an object' });
+
+    assert.strictEqual((await list()).length, before);
+  });
+
   it('PATCH rename returns 200 { collection } with the same id and the new name', async () => {
     const c = await create('to-rename');
     const r = await call('PATCH', `/api/collections/${c.id}`, { name: 'renamed' });

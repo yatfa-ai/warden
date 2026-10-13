@@ -63,19 +63,25 @@ function generateId() {
   return `coll-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
 /**
  * Create a new collection.
  * @param {string} name - Collection name (required, max 60 chars)
  * @param {object} criteria - Matching criteria { role?, project?, host?, custom?[] }
  * @param {object} metadata - Optional metadata { description?, color? }
  * @returns {object} The created collection
- * @throws {Error} If name is invalid or duplicate
+ * @throws {Error} If name is invalid or duplicate, or criteria/metadata is not a plain object
  */
 export async function createCollection(name, criteria = {}, metadata = {}) {
   const trimmedName = String(name || '').trim().slice(0, 60);
   if (!trimmedName) {
     throw new Error('Collection name is required');
   }
+  // Same shape rules as updateCollection; null/undefined fall back to {}. Messages must
+  // not contain "not found" (the route maps that to 404; everything else → 400).
+  if (criteria != null && !isPlainObject(criteria)) throw new Error('Collection criteria must be an object');
+  if (metadata != null && !isPlainObject(metadata)) throw new Error('Collection metadata must be an object');
 
   let newCollection;
   await mutateCollections((collections) => {
@@ -110,7 +116,6 @@ export async function updateCollection(id, updates = {}) {
   // request body is ignored. A null/non-object body is treated as {}.
   const src = updates && typeof updates === 'object' && !Array.isArray(updates) ? updates : {};
   const has = (key) => Object.prototype.hasOwnProperty.call(src, key);
-  const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
   // Validate BEFORE touching storage so rejected input never reaches disk. Messages
   // must not contain "not found" (the route maps that to 404; everything else → 400).
