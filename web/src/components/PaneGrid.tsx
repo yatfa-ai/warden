@@ -843,7 +843,7 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
                     hasNew={newActivity.has(t.id)} onClearNew={() => clearPaneActivity(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
                     onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} onBrowseFiles={() => openBrowseFor(t.id)} chat={chat} host={paneHost[t.id]}
-                    externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
+                    externalSearch={externalSearchQuery?.paneId === t.id ? externalSearchQuery : undefined}
                     onSpawned={onSpawned}
                     reconnectToken={reconnectTokens[t.id]}
                     onPhaseChange={onPanePhaseChange ? (phase) => onPanePhaseChange(t.id, phase) : undefined}

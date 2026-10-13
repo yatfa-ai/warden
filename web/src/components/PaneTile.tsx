@@ -21,6 +21,7 @@ import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/pane
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type Snippet } from '@/lib/storage';
 import {
   useSnippets,
+  useConsumeExternalSearchQuery,
   useTerminalFontSize,
   useSetTerminalFontSize,
   useTerminalScrollback,
@@ -212,7 +213,9 @@ interface Props {
   onBrowseFiles: () => void;
   chat?: Chat | null;     // chat metadata for export
   host?: string;          // host hint for restore (which host to discover)
-  externalSearchQuery?: string;  // external search trigger from global search
+  // One-shot search-jump command from global search / attention anchors (WARDEN-1790):
+  // the tile acts on it, then hands it back via consumeExternalSearchQuery.
+  externalSearch?: Readonly<{ paneId: string; query: string }>;
   // WARDEN-1322 (roadmap WARDEN-1204 slice 3): the six shared terminal prefs
   // (fontSize/onFontSizeChange, scrollback, fontFamily, terminalCursorStyle,
   // copyOnSelect, onExitBehavior) left this Props block — PaneTile SUBSCRIBES
@@ -249,7 +252,7 @@ interface Props {
 // it may probe again (see existsFailedAtRef).
 const EXISTS_FAILURE_COOLDOWN_MS = 15_000;
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, onSpawned, reconnectToken, onPhaseChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearch, onSpawned, reconnectToken, onPhaseChange }: Props) {
   // Show the host tag in the pane header (WARDEN-290; pref WARDEN-37) and the issue-key
   // link integration (WARDEN-1388) are read straight from the shared ['app-config']
   // cache (WARDEN-1714, slice 54) — a Settings save live-updates open panes with no prop
@@ -270,6 +273,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const terminalCursorStyle = useTerminalCursorStyle();
   const copyOnSelect = useCopyOnSelect();
   const onExitBehavior = useOnExitBehavior();
+  const consumeExternalSearchQuery = useConsumeExternalSearchQuery();
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
@@ -1228,12 +1232,16 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
 
   // external search trigger from global search
   useEffect(() => {
-    if (externalSearchQuery && searchRef.current) {
-      setSearchQuery(externalSearchQuery);
+    if (externalSearch && searchRef.current) {
+      const q = externalSearch.query;
+      setSearchQuery(q);
       setShowSearch(true);
-      setTimeout(() => searchRef.current?.findNext(externalSearchQuery), 100);
+      setTimeout(() => searchRef.current?.findNext(q), 100);
+      // Hand the command back synchronously (before the timeout) so a remount
+      // inside the 100ms window — or a later Settings round trip — cannot replay it.
+      consumeExternalSearchQuery(externalSearch);
     }
-  }, [externalSearchQuery]);
+  }, [externalSearch, consumeExternalSearchQuery]);
 
   // search
   const doSearch = (dir: 'next' | 'prev') => {
