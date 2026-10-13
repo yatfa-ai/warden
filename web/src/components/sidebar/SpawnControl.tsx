@@ -16,6 +16,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, Plus, Server } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { hostLabelFor, THIS_MACHINE } from '@/lib/chatDisplay';
 import { useHostLabels, useDefaultNewChatCwd, useDefaultNewChatCwdByHost } from '@/lib/uiStore';
 import { cn } from '@/lib/utils';
@@ -135,39 +137,55 @@ export function SpawnControl({ hosts, host, onSpawn, disabled }: SpawnControlPro
       </div>
     </div>
   ) : (
-    <div className="flex flex-none flex-wrap items-center gap-[5px] border-b border-border/50 px-2 py-1.5">
-      <button
-        className="flex h-6 min-w-0 max-w-[48%] flex-none items-center gap-1 overflow-hidden whitespace-nowrap rounded-md border border-border bg-background px-1.5 text-[10.5px] text-foreground hover:border-foreground/40"
-        onClick={() => setExpanded(true)}
-        aria-label={`spawn host: ${label} — open spawn options`}
-        data-testid="spawn-collapsed-host"
-      >
-        <Server aria-hidden="true" className="size-2.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 truncate">{label}</span>
-        <ChevronDown aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
-      </button>
-      <div className="flex h-6 min-w-[5.25rem] flex-1 items-center overflow-hidden whitespace-nowrap rounded-md border border-border bg-background px-1.5 text-[10.5px] text-muted-foreground" title={cwd || 'home directory'}>
-        <button
-          className="min-w-0 flex-1 truncate text-left hover:text-foreground"
-          onClick={() => setExpanded(true)}
-          aria-label="directory — open spawn options"
-        >
-          {cwd || '~'}
-        </button>
-      </div>
-      <IconTooltip label="start a shell here">
-        <button
-          className={cn(
-            'flex h-6 flex-none items-center gap-1 rounded-md border border-border bg-accent px-[7px] text-[10.5px] text-foreground hover:border-green-600 disabled:opacity-50',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
-          )}
-          onClick={() => void spawn()}
-          disabled={busy || disabled}
-        >
-          <Plus aria-hidden="true" className="size-3" />
-          {busy ? '…' : 'shell'}
-        </button>
-      </IconTooltip>
-    </div>
+    // Themed right-click menu on the COLLAPSED one-liner only (WARDEN-1786). The
+    // expanded form is deliberately menu-free: it holds native <select>/<input>
+    // fields, and intercepting right-click there would clobber native
+    // Cut/Copy/Paste (WARDEN-926 / withdrawn WARDEN-495).
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="flex flex-none flex-wrap items-center gap-[5px] border-b border-border/50 px-2 py-1.5">
+          <button
+            className="flex h-6 min-w-0 max-w-[48%] flex-none items-center gap-1 overflow-hidden whitespace-nowrap rounded-md border border-border bg-background px-1.5 text-[10.5px] text-foreground hover:border-foreground/40"
+            onClick={() => setExpanded(true)}
+            aria-label={`spawn host: ${label} — open spawn options`}
+            data-testid="spawn-collapsed-host"
+          >
+            <Server aria-hidden="true" className="size-2.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 truncate">{label}</span>
+            <ChevronDown aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+          </button>
+          <div className="flex h-6 min-w-[5.25rem] flex-1 items-center overflow-hidden whitespace-nowrap rounded-md border border-border bg-background px-1.5 text-[10.5px] text-muted-foreground" title={cwd || 'home directory'}>
+            <button
+              className="min-w-0 flex-1 truncate text-left hover:text-foreground"
+              onClick={() => setExpanded(true)}
+              aria-label="directory — open spawn options"
+            >
+              {cwd || '~'}
+            </button>
+          </div>
+          <IconTooltip label="start a shell here">
+            <button
+              className={cn(
+                'flex h-6 flex-none items-center gap-1 rounded-md border border-border bg-accent px-[7px] text-[10.5px] text-foreground hover:border-green-600 disabled:opacity-50',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+              )}
+              onClick={() => void spawn()}
+              disabled={busy || disabled}
+            >
+              <Plus aria-hidden="true" className="size-3" />
+              {busy ? '…' : 'shell'}
+            </button>
+          </IconTooltip>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem disabled={busy || disabled} onSelect={() => { void spawn(); }}>Start a shell here</ContextMenuItem>
+        <ContextMenuItem onSelect={() => setExpanded(true)}>Spawn options…</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => copyWithToast(label)}>Copy host name</ContextMenuItem>
+        {selectedHost !== THIS_MACHINE && <ContextMenuItem onSelect={() => copyWithToast(`ssh ${selectedHost}`)}>Copy SSH address</ContextMenuItem>}
+        {cwd && <ContextMenuItem onSelect={() => copyWithToast(cwd)}>Copy directory</ContextMenuItem>}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
