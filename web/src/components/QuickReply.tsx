@@ -11,10 +11,10 @@
 //                           the pervasive "press enter to continue" waiting pattern)
 // Both go through the shared postJson helper (web/src/lib/api.ts) — never raw fetch.
 //
-// SAFETY GATE (mirrors BroadcastDialog's WARDEN-292 "nothing is sent until you confirm"):
+// SAFETY GATE (mirrors the removed BroadcastDialog's WARDEN-292 "nothing is sent until you confirm"):
 //  - Bare Enter in the textarea inserts a newline — it does NOT send. (The popover is
 //    transient/clickable, so send-on-Enter would fire by accident; bare Enter must be
-//    safe to press.) ⌘/Ctrl+Enter confirms typed text — matches BroadcastDialog.
+//    safe to press.) ⌘/Ctrl+Enter confirms typed text — matches the fleet dialogs.
 //  - The Send button is disabled until the text is non-empty (canSendReply) and no send
 //    is in flight.
 //  - The "↵ Continue" press-Enter action is a deliberately one-click button: the click
@@ -101,7 +101,7 @@ export function QuickReply({
     if (res.ok) {
       onReplyResult?.(true);
       // Collapse + reset on success so a second reply starts clean (no stale text to
-      // re-send by accident — mirrors BroadcastDialog's reset-on-open discipline).
+      // re-send by accident — reset-on-open discipline as the fleet dialogs).
       setMsg('');
       onDismiss();
     } else {
@@ -130,7 +130,7 @@ export function QuickReply({
     }
   };
 
-  // ⌘/Ctrl+Enter confirms typed text (matches BroadcastDialog); Esc dismisses without
+  // ⌘/Ctrl+Enter confirms typed text (matches the fleet dialogs); Esc dismisses without
   // sending (only when idle — never abandon an in-flight send). Bare Enter is left alone
   // so it inserts a newline (the no-accidental-send rule above).
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

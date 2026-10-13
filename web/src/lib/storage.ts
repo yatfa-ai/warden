@@ -305,7 +305,7 @@ function parseRecentlyClosed(raw: unknown): RecentlyClosedEntry[] {
 }
 
 // A user-defined instruction snippet: a named, reusable instruction the human
-// can insert at an intervention point (the Broadcast dialog + a focused pane's
+// can insert at an intervention point (the quick reply + a focused pane's
 // context menu) instead of retyping common guidance ("run the tests", "pull
 // latest", "commit your work"). Mirrors CustomPreset's {name, cmd} shape but
 // holds free-form instruction text rather than a spawn command. Pure client-
@@ -651,7 +651,7 @@ export interface UiState {
   // Pure client-side pref; never sent to the backend.
   customPresets?: CustomPreset[];
   // User-defined instruction snippets (named, reusable intervention text —
-  // "run the tests", "pull latest", etc.) surfaced at the Broadcast dialog and
+  // "run the tests", "pull latest", etc.) surfaced at the quick reply and
   // a focused pane's context menu. Global (one flat list, not host-keyed).
   // Validated on load by parseSnippets: entries missing a name/text are dropped,
   // names/text are bounded and de-duplicated (case-insensitive), and the count
@@ -678,7 +678,7 @@ export interface UiState {
   // WARDEN-490 — per-host display labels (friendly names). Keys are the raw host
   // strings ('(local)' for this machine, the SSH host name for remote); values
   // are the human's label, which replaces the raw host in every host-tag display
-  // surface (sidebar rows, pane header, Kill/Collision/Broadcast dialogs, Open
+  // surface (sidebar rows, pane header, Kill/Collision dialogs, Open
   // Chat Browser, Activity timeline, Directive history, Observer tabs, Health
   // dashboard, token-budget offender line, SessionTranscriptViewer). A host with
   // no entry (or an empty/whitespace value, dropped on load by parseLabelsByHost)

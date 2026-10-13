@@ -4,11 +4,11 @@
 //   runFanout       — the impure POST-per-agent request loop (WARDEN-974)
 //   summarizeFanout — the pure reducer over its Promise.allSettled output
 //
-// summarizeFanout is the SINGLE reducer behind all three fleet-wide operations —
-// broadcast Send (summarizeBroadcast), batch Kill (summarizeKill) and batch
+// summarizeFanout is the SINGLE reducer behind both fleet-wide operations —
+// batch Kill (summarizeKill) and batch
 // Interrupt (summarizeKeySend) — so it is the accounting for every "N succeeded,
 // M failed" toast a human sees when acting on multiple agents at once. It had no
-// direct coverage: broadcast.test.mjs / kill.test.mjs / keysend.test.mjs load it
+// direct coverage: kill.test.mjs / keysend.test.mjs load it
 // only as a transpiled DEPENDENCY of the wrappers they test, and three of their
 // comments (kill.test.mjs:246, kill.test.mjs:257, keysend.test.mjs:295)
 // explicitly DEFER the defaultError + orphan-name fallbacks to "summarizeFanout"
@@ -27,7 +27,7 @@
 //
 // fanout.ts has NO runtime imports at all (its header notes only erased `import
 // type`s), so the harness is the same transpile-to-temp-`.mjs` + dynamic
-// `import()` pattern as broadcast.test.mjs — minus the dependency rewrite those
+// `import()` pattern as kill.test.mjs — minus the dependency rewrite those
 // files need for their `./fanout` specifier. The REAL module is loaded, not a
 // hand-rolled re-implementation.
 //
@@ -265,7 +265,7 @@ console.log('\nformatFanoutToast — shared result-toast shape');
 // ---------------------------------------------------------------------------
 // formatFanoutToast is the THIRD shared half of the fan-out (WARDEN-1034): the
 // 3-branch title/description/variant shape that formatKillToast,
-// formatBroadcastToast and formatKeySendToast had each hand-copied. Those three
+// and formatKeySendToast had each hand-copied. Those
 // are now thin wrappers that only supply their two copy phrases, so the branch
 // logic, the `\n` failure-list join, the variant and the pluralization are
 // asserted HERE once, at the seam, instead of three times over.
@@ -304,7 +304,7 @@ test('a partial is an ERROR even though most agents succeeded (success = ALL suc
 // --- Pluralization: asymmetric ON PURPOSE, copied verbatim from all three ---
 // The three branches pluralize off THREE different things. This asymmetry is
 // the quirk WARDEN-1034 was required to preserve, not repair — uniformizing it
-// turns kill/broadcast/keysend .test.mjs red. Each branch is pinned separately.
+// turns kill/keysend .test.mjs red. Each branch is pinned separately.
 test('success branch pluralizes on the SUCCESS count: n=1 → singular "agent"', () => {
   const t = formatFanoutToast({ total: 1, succeeded: 1, failed: [] }, KILL);
   assert.equal(t.title, 'Stopped 1 agent');

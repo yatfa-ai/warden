@@ -2,7 +2,7 @@
 // (WARDEN-492, surfaced in the sidebar + Fleet Health).
 //
 // Interrupt is the non-destructive third fleet operation — the safe middle ground
-// between batch Send (WARDEN-292, broadcast text) and batch Kill (WARDEN-328,
+// between the (removed) batch Send (WARDEN-292) and batch Kill (WARDEN-328,
 // `kill-session` destroys the chat's tmux session + scrollback). It sends a
 // CONTROL KEY (Ctrl-C / Esc) to each selected agent's tmux session via the
 // existing `POST /api/key` route (server.js → sendKey). The key signals only the
@@ -12,8 +12,7 @@
 //
 // The PURE seam (summarizeKeySend → summarizeFanout, formatKeySendToast) is the
 // testable part: reducing the allSettled outcomes into a per-agent summary and
-// shaping the result-toast line. The accounting is shared with broadcast-send
-// and batch-kill via summarizeFanout (the allSettled→summary reducer); only the
+// shaping the result-toast line. The accounting is shared with batch-kill via summarizeFanout (the allSettled→summary reducer); only the
 // keysend-specific copy + the "key send failed" fallback live here.
 //
 // The IMPURE seam (runKeySendFanout) is the shared fan-out itself: one POST to
@@ -29,7 +28,7 @@
 //
 // `import type` only below (besides runFanout + summarizeFanout) — erased by
 // OXC, so this module loads under the same transpile-to-temp-`.mjs` +
-// dynamic-`import()` harness as broadcast.ts / kill.ts (see keysend.test.mjs).
+// dynamic-`import()` harness as kill.ts (see keysend.test.mjs).
 
 import { formatFanoutToast, runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 

@@ -24,7 +24,7 @@ const libDir = resolve(__dirname, 'src/lib');
 // the OXC transform Vite bundles). path-links imports maskUrls from ./url-links
 // (WARDEN-1256 URL precedence), so transpile BOTH and rewrite path-links's
 // source import to point at the transpiled url-links.mjs in the temp dir —
-// the same two-module harness broadcast.test.mjs uses for ./fanout.
+// the same two-module harness kill.test.mjs uses for ./fanout.
 const urlSrc = readFileSync(join(libDir, 'url-links.ts'), 'utf8');
 const { code: urlCode } = await transformWithOxc(urlSrc, join(libDir, 'url-links.ts'), {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-pathlinks-test-'));

@@ -163,7 +163,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     setLoading(true);
     let cancelled = false;
     (async () => {
-      // Promise.allSettled (the fleet convention, ChatSidebar.tsx handleBroadcast /
+      // Promise.allSettled (the fleet convention, ChatSidebar.tsx
       // handleKillSelected + useFleetGitStatus): one unreachable / non-git agent never
       // rejects the whole; a per-agent failure is counted and surfaced as an honest
       // "(N unreachable)" note (WARDEN-89 — never let a failure masquerade as a barren

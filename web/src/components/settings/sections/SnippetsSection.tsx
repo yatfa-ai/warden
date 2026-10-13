@@ -10,7 +10,7 @@
 // re-renders App (which subscribes for its PersistedPrefSnapshot) and the ONE
 // compile-locked saveUi effect writes localStorage, exactly as before. That is
 // what makes this section's edits still appear instantly in the pane context
-// menu, the broadcast picker and the quick-reply fills — those surfaces now
+// menu and the quick-reply fills — those surfaces now
 // subscribe to the same store rather than waiting on a prop from App.
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -148,7 +148,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     <>
     <SettingsSection title="Instruction snippets" className={hidden ? 'hidden' : undefined}>
       <p className="text-xs text-muted-foreground">
-        Save instructions you send often ("run the tests", "pull latest", "commit your work") and reuse them from the Broadcast dialog or a pane's right-click menu. New installs start with a few examples you can edit or delete.
+        Save instructions you send often ("run the tests", "pull latest", "commit your work") and reuse them from a pane's right-click menu or the quick reply. New installs start with a few examples you can edit or delete.
       </p>
       <div className="flex flex-col gap-2">
         {snippets.length === 0 ? (
@@ -207,7 +207,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          Snippets appear in the Broadcast dialog (insert into the message, then confirm Send) and in a pane's right-click menu (one-click send to that agent). Names must be unique.
+          Snippets appear in a pane's right-click menu (one-click send to that agent) and as quick-reply fills (insert into the message, then confirm Send). Names must be unique.
         </p>
       </div>
     </SettingsSection>
@@ -223,7 +223,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
       open={pendingDelete !== null}
       onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
       title={`Delete snippet "${pendingDelete ?? ''}"?`}
-      description={`The instruction text for ${pendingDelete ?? 'this snippet'} is deleted from this device immediately and can't be recovered — there is no undo. It disappears from the Broadcast dialog and from every pane's right-click menu. You can add it again from this page if you still have the text.`}
+      description={`The instruction text for ${pendingDelete ?? 'this snippet'} is deleted from this device immediately and can't be recovered — there is no undo. It disappears from the quick reply and from every pane's right-click menu. You can add it again from this page if you still have the text.`}
       confirmLabel="Delete snippet"
       destructive
       onConfirm={() => {

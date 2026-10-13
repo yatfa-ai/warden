@@ -421,7 +421,7 @@ function App() {
   // localStorage. The store seeds itself from loadUi() at module load, the same
   // persisted read the useState lazy initializers did.
   // Saved instruction snippets (WARDEN-323): a named, reusable intervention
-  // library surfaced at the Broadcast dialog (insert-only) and a focused pane's
+  // library surfaced at the quick reply (insert-only) and a focused pane's
   // context menu (one-click send). Pure client-side localStorage pref like the
   // spawn presets above: persisted by the saveUi effect below, never sent to the
   // backend as anything but the literal `text` over the existing /api/send path.
@@ -429,7 +429,7 @@ function App() {
   //
   // WARDEN-1271 — the first fact migrated off App-owned useState + prop-drilling
   // onto the shared client-state store (lib/uiStore.ts; the WARDEN-832 row-2
-  // instrument). The reading surfaces (pane context menu, broadcast picker,
+  // instrument). The reading surfaces (pane context menu,
   // watch-catchup quick reply, Settings CRUD) now SUBSCRIBE to the store
   // directly instead of receiving this list through their ancestors, so the
   // pure pass-through hops between App and each of them are gone.

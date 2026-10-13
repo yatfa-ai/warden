@@ -3,7 +3,7 @@
 //
 // The PURE seam (summarizeKill → summarizeFanout, formatKillToast) is the
 // testable part: reducing the allSettled outcomes into a per-agent summary and
-// shaping the result-toast line. The accounting is shared with broadcast-send
+// shaping the result-toast line. The accounting is shared with batch key-send
 // via summarizeFanout (the allSettled→summary reducer); only the kill-specific
 // copy + the "kill failed" fallback live here.
 //
@@ -17,7 +17,7 @@
 //
 // `import type` only below (besides runFanout + summarizeFanout) — erased by
 // OXC, so this module loads under the same transpile-to-temp-`.mjs` +
-// dynamic-`import()` harness as broadcast.ts (see kill.test.mjs).
+// dynamic-`import()` harness as keysend.ts (see kill.test.mjs).
 
 import { formatFanoutToast, runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 

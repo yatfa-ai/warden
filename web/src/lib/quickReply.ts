@@ -55,7 +55,7 @@ export function canReply(state: string): boolean {
  * Trims surrounding whitespace (a trailing newline from the textarea, leading spaces
  * from a paste) and returns `null` for an empty OR whitespace-only input — so a blank
  * textarea or an accidental space-bar press can NEVER reach /api/send. This is the pure
- * core of the WARDEN-292 confirm gate (mirrored from BroadcastDialog): nothing is sent
+ * core of the WARDEN-292 confirm gate (mirrored from the since-removed BroadcastDialog): nothing is sent
  * until the human confirms with non-empty content. `canSendReply` composes this with the
  * in-flight `sending` flag.
  *
@@ -73,7 +73,7 @@ export function sanitizeReplyText(text: string): string | null {
  * (non-whitespace) text to send AND no send is already in flight.
  *
  * Composes `sanitizeReplyText` (the empty/whitespace guard) with the `sending` flag
- * (the double-send guard), matching BroadcastDialog's `canSend = count > 0 &&
+ * (the double-send guard), matching the removed BroadcastDialog's `canSend = count > 0 &&
  * trimmed.length > 0 && !sending` (WARDEN-292) — adapted to the single-target reply
  * (no recipient count; the target is the one row the affordance hangs off). Pure so the
  * gate's contract is unit-tested directly: empty → false, whitespace → false, sending →
@@ -94,7 +94,7 @@ export function canSendReply({ text, sending }: { text: string; sending: boolean
  * row: a flat list of every saved snippet would overflow the narrow (w-72) popover, so
  * only the first few are surfaced as chips. Picking a chip INSERTS its text into the
  * textarea (insert-only — it does NOT auto-send; the WARDEN-292 confirm gate still
- * governs), mirroring BroadcastDialog's snippet picker. Centralized here so every reply
+ * governs), mirroring the removed BroadcastDialog's snippet picker. Centralized here so every reply
  * surface shows the same slice of the library.
  */
 export const QUICK_REPLY_SNIPPET_PREVIEW = 4;

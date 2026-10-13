@@ -1,5 +1,5 @@
 // useAsyncConfirm — the async-confirm state machine shared by the fleet-action
-// dialogs (BroadcastDialog / KeySendDialog / KillDialog), WARDEN-1017.
+// dialogs (KeySendDialog / KillDialog), WARDEN-1017.
 //
 // All three are the same machine: a `busy` flag, a reset-on-open, a guarded
 // try/finally confirm that closes on resolve, and a dismissal guard that blocks
@@ -29,7 +29,7 @@ export interface AsyncConfirm {
   busy: boolean;
   /**
    * The guarded confirm body. No-ops unless `enabled` (each dialog keeps its own
-   * `canX` predicate — Broadcast's also requires non-empty text). Otherwise marks
+   * `canX` predicate). Otherwise marks
    * busy, awaits `action`, and closes the dialog on resolve.
    *
    * `action` is expected to RESOLVE rather than reject even on partial failure:
@@ -50,9 +50,8 @@ export interface AsyncConfirm {
  * uses of the SAME prop, so binding it once here is what stops the two from
  * drifting apart at a call site — the whole point of the extraction.
  *
- * The reset-on-open is deliberately scoped to `busy` only. BroadcastDialog and
- * KeySendDialog keep their own `[open]` effects for their extra fields (msg /
- * picked / key); two effects on the same dep are fine — they touch disjoint
+ * The reset-on-open is deliberately scoped to `busy` only. KeySendDialog keeps its own `[open]` effect for its extra field (key);
+ * two effects on the same dep are fine — they touch disjoint
  * state, so ordering is irrelevant. KillDialog reset nothing else, so its effect
  * is fully absorbed.
  */

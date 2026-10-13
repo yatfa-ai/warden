@@ -437,13 +437,13 @@ export const SETTINGS_SECTIONS = [
   {
     id: 'snippets',
     label: 'Instruction snippets',
-    description: 'Manage reusable instruction snippets for broadcasts and pane sends.',
+    description: 'Manage reusable instruction snippets for pane sends and quick replies.',
     // Rows — SnippetsSection.tsx (fields are placeholder/aria-labelled)
     rows: [
       { anchorId: 'newSnippetName', terms: ['Add snippet'] },
       { anchorId: 'newSnippetName', terms: ['New snippet name'] },
       { anchorId: 'newSnippetText', terms: ['New snippet instruction text'] },
-      { terms: ['reusable', 'broadcast', 'pane send', 'macro', 'template'] },
+      { terms: ['reusable', 'pane send', 'quick reply', 'macro', 'template'] },
     ],
   },
   {

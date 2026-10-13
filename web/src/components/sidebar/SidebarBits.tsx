@@ -23,11 +23,11 @@ export function UpdatedAgo({ at }: { at?: number | null }) {
 }
 
 /**
- * The contextual action bar for multi-select (WARDEN-292 broadcast + WARDEN-328
+ * The contextual action bar for multi-select (WARDEN-328
  * batch kill + WARDEN-492 batch interrupt + WARDEN-581 bulk watch). Appears at the
  * foot of a fleet view only when ≥1 agent is selected, showing the live count and
  * the selection actions in a destructiveness gradient: select-all (within the
- * current visible list), clear, "Send to N…" (confirm-and-send), "Interrupt N…"
+ * current visible list), clear, "Interrupt N…"
  * (confirm-and-signal, non-destructive), "Watch N"/"Unwatch N" (immediate, local
  * state), and "Kill N…" (confirm-and-stop, destructive). Built on shadcn <Button>
  * per the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
@@ -37,12 +37,11 @@ export function UpdatedAgo({ at }: { at?: number | null }) {
  * bulk-silenced the fleet attention alert, and it went with that channel — with
  * nothing left to interrupt the human, there is nothing left to silence.
  *
- * `onSend` (broadcast), `onInterrupt` (control-key send), and `onWatch`
- * (watch/unwatch, immediate) are ALL OPTIONAL: a surface without one simply omits
- * it and the matching button is not rendered. Fleet Health (WARDEN-371) reuses
- * this bar for batch-kill only — broadcast, interrupt, and watch are deliberately
- * out of scope there — so it passes none of them. The sidebar passes all three,
- * so its bar exposes the full set.
+ * `onInterrupt` (control-key send) and `onWatch` (watch/unwatch, immediate) are
+ * BOTH OPTIONAL: a surface without one simply omits it and the matching button is
+ * not rendered. Fleet Health (WARDEN-371) reuses this bar for batch-kill plus
+ * interrupt and omits watch; it is the bar's only caller today (it passes
+ * `onInterrupt` and `onKill`, not `onWatch`/`watchMode`). (The WARDEN-292 "Send to N…" broadcast action was removed with its dialog.)
  *
  * WARDEN-581 watch label: the button reads "Watch N" when the action will ADD
  * watches (some selected agent isn't watched yet), else "Unwatch N" (every
@@ -51,11 +50,10 @@ export function UpdatedAgo({ at }: { at?: number | null }) {
  * stays a dumb presentational component; it only renders the watch button when
  * `onWatch` is present.
  */
-export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInterrupt, onWatch, watchMode, onKill }: {
+export function SelectionActionBar({ count, onSelectAll, onClear, onInterrupt, onWatch, watchMode, onKill }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
-  onSend?: () => void;
   onInterrupt?: () => void;
   onWatch?: () => void;
   watchMode?: 'watch' | 'unwatch';
@@ -67,7 +65,6 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInte
       <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
         <Button variant="ghost" size="xs" onClick={onSelectAll} title="select every agent in this list">All</Button>
         <Button variant="ghost" size="xs" onClick={onClear} title="clear the selection">Clear</Button>
-        {onSend && <Button size="xs" onClick={onSend}>Send to {count}…</Button>}
         {onInterrupt && (
           <Button
             variant="outline"
@@ -82,8 +79,7 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInte
           WARDEN-581 — bulk watch. Immediate (no dialog), so its label carries no
           ellipsis. A local-state op (no tmux fan-out, no per-agent failure), the
           non-destructive end of the bar's gradient. outline variant matches
-          Interrupt (a quiet, reversible action) rather than the default Send or
-          the destructive Kill.
+          Interrupt (a quiet, reversible action) rather than the destructive Kill.
         */}
         {onWatch && (
           <Button
