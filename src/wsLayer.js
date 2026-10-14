@@ -246,7 +246,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
       } catch { /* subscriptions are a pure optimization; the poll path still works */ }
     };
 
-    ws.on('message', async (data) => {
+    const onFrame = async (data) => {
       let m;
       try { m = JSON.parse(data.toString()); } catch { return; }
       if (!m || typeof m !== 'object') return;
@@ -422,6 +422,12 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           try { paneInputTelemetry?.dropPending(String(m.id)); } catch { /* noop */ }
         }
       }
+    };
+    // ws does not await listener promises: a throw in onFrame (e.g. a hostile
+    // coercion like id:{toString:null}) would be an unhandledRejection that kills
+    // the process, so drop the frame instead.
+    ws.on('message', (data) => {
+      onFrame(data).catch((e) => console.warn('[wsLayer] stream frame failed:', e?.message || e));
     });
 
     ws.on('close', () => {
