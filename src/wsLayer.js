@@ -70,6 +70,10 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
   const wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', async (ws, req) => {
+    // WARDEN-1804: the ws receiver emits 'error' (invalid UTF-8, RSV1) before any message
+    // handler runs; with no listener Node throws it as an uncaught exception and the
+    // server dies. Log and continue — ws closes the socket itself, close handler tears down.
+    ws.on('error', (e) => console.warn('[wsLayer] observe socket error:', e?.message || e));
     if (!hasCredentials()) {
       ws.send(JSON.stringify({ type: 'error', error: 'no LLM credentials (ANTHROPIC_AUTH_TOKEN missing in the server environment)' }));
       return;
@@ -179,6 +183,8 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     else socket.destroy();
   });
   streamWss.on('connection', (ws) => {
+    // WARDEN-1804: see the observe handler — a protocol-violating frame must not kill the process.
+    ws.on('error', (e) => console.warn('[wsLayer] stream socket error:', e?.message || e));
     const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
     const attaches = new Map(); // id -> { pty, chat }
     const monitors = new Set(); // chat keys
