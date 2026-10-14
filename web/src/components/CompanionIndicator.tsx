@@ -79,13 +79,35 @@ function companionOpsShort(ops: CompanionStatus['ops']): string | null {
   return `${total} op${total === 1 ? '' : 's'}`;
 }
 
+const EXCLUDED_LABEL = 'Companion excluded for this host by the "Companion excluded hosts" setting (Settings → Performance) — operations here ride the default SSH path';
+
+/**
+ * The indicator's full status text — exactly what the StatusDot carries as its
+ * accessible label / hover title (WARDEN-1806: hoisted so the Fleet Health host
+ * header menu can copy the same string). Returns null in exactly the cases the
+ * component renders nothing (absent companion, plain/unknown-reason inactive).
+ */
+export function companionStatusText(companion?: CompanionStatus): string | null {
+  if (!companion) return null;
+  if (companion.state === 'inactive') {
+    return companion.reason === 'excluded-by-setting' ? EXCLUDED_LABEL : null;
+  }
+  const opsSummary = companionOpsSummary(companion.ops);
+  return (companion.state === 'active'
+    ? `Companion active${companion.version ? ` (v${companion.version})` : ''}`
+    : companion.state === 'bootstrapping'
+      ? 'Companion bootstrapping'
+      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`)
+    + (opsSummary ? ` — ${opsSummary}` : '');
+}
+
 export function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
   // WARDEN-1390: an excluded host is inactive ON PURPOSE — render the muted
   // "excluded by setting" indicator so the host row says WHY the channel is
   // dark instead of looking broken. Same layout budget as the error case:
   // short visible text, full story in the accessible label.
   if (companion?.state === 'inactive' && companion.reason === 'excluded-by-setting') {
-    const excludedLabel = 'Companion excluded for this host by the "Companion excluded hosts" setting (Settings → Performance) — operations here ride the default SSH path';
+    const excludedLabel = EXCLUDED_LABEL;
     return (
       <span className="inline-flex min-w-0 items-center gap-1">
         <StatusDot
@@ -107,14 +129,8 @@ export function CompanionIndicator({ companion }: { companion?: CompanionStatus 
   const variant = companion.state === 'active' ? 'solid'
     : companion.state === 'bootstrapping' ? 'pulse'
     : 'square'; // error
-  const opsSummary = companionOpsSummary(companion.ops);
   const opsShort = companionOpsShort(companion.ops);
-  const label = (companion.state === 'active'
-    ? `Companion active${companion.version ? ` (v${companion.version})` : ''}`
-    : companion.state === 'bootstrapping'
-      ? 'Companion bootstrapping'
-      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`)
-    + (opsSummary ? ` — ${opsSummary}` : '');
+  const label = companionStatusText(companion) ?? '';
   return (
     <span className="inline-flex min-w-0 items-center gap-1">
       <StatusDot

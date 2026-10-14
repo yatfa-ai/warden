@@ -70,6 +70,17 @@ describe('Fleet Health host header declares a themed context menu (WARDEN-1667)'
     assert.match(content, /<ContextMenuItem variant="destructive" onSelect=\{\(\) => setRemoveCompanionHost\(group\.host\)\}>\s*Remove companion…/);
   });
 
+  it('has a Copy companion status item copying companionStatusText(status?.companion) behind a non-null check (WARDEN-1806)', () => {
+    assert.match(block, /const companionText = companionStatusText\(status\?\.companion\)/);
+    assert.match(
+      content,
+      /companionText !== null && \(\s*<ContextMenuItem onSelect=\{\(\) => copyWithToast\(companionText\)\}>Copy companion status<\/ContextMenuItem>/,
+    );
+    // Sits after Copy SSH address and before the Remove-companion group.
+    assert.ok(content.indexOf('Copy SSH address') < content.indexOf('Copy companion status'));
+    assert.ok(content.indexOf('Copy companion status') < content.indexOf('Remove companion…'));
+  });
+
   it('never deletes directly — routes through the existing ConfirmDialog state', () => {
     assert.ok(!/removeCompanion\(/.test(content), 'menu must not call a delete directly');
     assert.match(text, /removeCompanionHost/);
