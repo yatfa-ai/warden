@@ -17,7 +17,7 @@
 // sessions are never listed, and the sidebar's session list is short by
 // construction because only named-and-saved sessions appear in it.
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
 import { Bookmark, History } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -31,7 +31,7 @@ import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefsReader } from '@/lib/appConfigHooks';
 import { THIS_MACHINE, hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed, useSidebarHost, useSetSidebarHost, useSidebarQuery, useSetSidebarQuery } from '@/lib/uiStore';
+import { useHostLabels, useSourceControlCollapsed, useSetSourceControlCollapsed, useRecentlySavedIds, useFocused, useRecentlyClosed, useSidebarHost, useSetSidebarHost, useSidebarCollectionId, useSetSidebarCollectionId, useSidebarQuery, useSetSidebarQuery } from '@/lib/uiStore';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
 import { chatMatchesCriteria } from '@/lib/collections';
@@ -147,15 +147,30 @@ export function ChatSidebar({
   const setSidebarHost = useSetSidebarHost();
   const searchQuery = useSidebarQuery();
   const setSearchQuery = useSetSidebarQuery();
-  // The collection drill-down stays a LOCAL cell (out of the store on
-  // purpose): `view.collection` is a snapshot of a server-fetched Collection
-  // (the WARDEN-396/553 staleness class — synced below via
-  // handleCollectionChange), which the roadmap forbids holding a copy of. It
-  // takes precedence over the store-derived host/root kinds; a collection is
-  // entered only from root, so the two can never legitimately coexist.
-  const [collectionView, setCollectionView] = useState<Collection | null>(null);
+  // The collection drill-down (WARDEN-1812, slice 68) stores only the
+  // collection's ID — a REFERENCE — on the uiStore, so it too survives the
+  // Settings round trip. The Collection OBJECT is never stored (the
+  // WARDEN-396/553 staleness class): it is derived below from the fetched
+  // `collections` list, so an edit/refetch refreshes the open view with no
+  // snapshot to sync. It takes precedence over the host/root kinds; a
+  // collection is entered only from root, so the two never legitimately
+  // coexist.
+  const sidebarCollectionId = useSidebarCollectionId();
+  const setSidebarCollectionId = useSetSidebarCollectionId();
+  const [collections, setCollections] = useState<Collection[]>([]);
+  // Whether `collections` can be trusted to answer "does this ID still
+  // exist?": 'pending' until the first fetch settles, 'ok' after any
+  // successful fetch, 'failed' if the first fetch(es) failed (fetchCollections
+  // swallows errors into []; a failure must never read as "deleted").
+  const [collectionsStatus, setCollectionsStatus] = useState<'pending' | 'ok' | 'failed'>('pending');
+  const collectionView: Collection | null = sidebarCollectionId
+    ? collections.find((c) => c.id === sidebarCollectionId) ?? null
+    : null;
+  // An ID restored after the Settings round trip whose first fetch has not
+  // settled: render nothing (no root flash, no premature "deleted" verdict).
+  const collectionPending = sidebarCollectionId != null && collectionView == null && collectionsStatus === 'pending';
   // The derived SidebarView every reader below keys on — same shape as the
-  // pre-slice useState cell, now derived from the store + local facts.
+  // pre-slice useState cell, now derived from the store + fetched facts.
   const view: SidebarView = collectionView
     ? { kind: 'collection', collection: collectionView }
     : sidebarHost
@@ -166,7 +181,6 @@ export function ChatSidebar({
   // view (root = cross-host saved search; host/collection = scoped to the view).
   // No second box anywhere.
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [collections, setCollections] = useState<Collection[]>([]);
   // The host whose discover is in flight after entering it — gates the
   // loading skeletons in the host view.
   const [enteringHost, setEnteringHost] = useState<string | null>(null);
@@ -244,50 +258,82 @@ export function ChatSidebar({
       const j = await r.json();
       const list = j.collections || [];
       setCollections(list);
+      setCollectionsStatus('ok');
       return list;
     } catch (error) {
       console.error('[collections] Failed:', error);
+      // A failed fetch settles the pending state but never overrides a good one,
+      // and never clears a restored ID (see the unresolved-ID effect below).
+      setCollectionsStatus((s) => (s === 'ok' ? s : 'failed'));
       if (readNotificationPrefs().notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
       return [];
     }
   }, [readNotificationPrefs]);
 
-  const enterCollection = (collection: Collection) => { setCollectionView(collection); setSearchQuery(''); };
+  // The passed collection is upserted into `collections` in the same batch as
+  // the ID is set, so the click always resolves: CollectionsSection keeps its
+  // own list (own fetch + ↻), so a card can name a collection this component's
+  // list does not yet contain (e.g. created in another window) — without the
+  // upsert the unresolved-ID effect below would clear the ID and the click
+  // would silently no-op.
+  const enterCollection = (collection: Collection) => {
+    setCollections((prev) => (prev.some((c) => c.id === collection.id) ? prev : [...prev, collection]));
+    setSidebarCollectionId(collection.id);
+    setSearchQuery('');
+  };
+
+  // An ID that no longer resolves once a fetch has SUCCEEDED (the collection
+  // was deleted elsewhere / while in Settings) is cleared, so the view falls
+  // back to root. Only a successful settle may clear: a failed fetch leaves a
+  // restored ID alone (it resolves on a later successful refetch; meanwhile
+  // the view falls back to root without losing the reference).
+  // DELIBERATE TRADE-OFF (WARDEN-1812 review): after a FAILED first fetch the
+  // ID is kept but the view renders root, so a restored sidebarQuery filters
+  // root until the next successful fetch (which then re-enters the collection
+  // with its search term). We accept that over wiping a valid reference on a
+  // transient network error; clearing the query too would lose the term the
+  // restore is meant to preserve.
+  useEffect(() => {
+    if (sidebarCollectionId && collectionsStatus === 'ok' && !collections.some((c) => c.id === sidebarCollectionId)) {
+      setSidebarCollectionId(null);
+    }
+  }, [sidebarCollectionId, collectionsStatus, collections, setSidebarCollectionId]);
 
   // WARDEN-1756 invariant: leaving a collection view — by goBack, by the
-  // collection being deleted under you, or by the Settings unmount — must
-  // never land at root (or remount) carrying a stale collection-scoped
-  // filter. sidebarQuery outlives this component, so the collection view's
-  // OWN lifetime clears it: the cleanup fires whenever the view closes,
-  // however it closes. Keyed on the boolean (not the collection identity) so
-  // an in-place edit's snapshot refresh does NOT clear the query — only
-  // actually leaving does.
-  const inCollectionView = collectionView != null;
+  // collection being deleted under you (live or while in Settings) — must
+  // never land at root carrying a stale collection-scoped filter. sidebarQuery
+  // outlives this component, so the clear keys on the ID going non-null → null
+  // WHILE MOUNTED. A Settings unmount is deliberately NOT a "leave": the ID
+  // and its search term are restored together on return (the ref seeds from the
+  // mount-time ID, so a restore never fires the clear). Keyed on the ID, not
+  // the derived object, so a not-yet-resolved restore does not fire it either.
+  const prevCollectionIdRef = useRef(sidebarCollectionId);
   useEffect(() => {
-    if (!inCollectionView) return;
-    return () => { setSearchQuery(''); };
-  }, [inCollectionView, setSearchQuery]);
+    if (prevCollectionIdRef.current != null && sidebarCollectionId == null) setSearchQuery('');
+    prevCollectionIdRef.current = sidebarCollectionId;
+  }, [sidebarCollectionId, setSearchQuery]);
 
   const handleCreateCollection = () => { setCreateDialogOpen(true); void fetchCollections(); };
 
-  const handleCollectionCreated = (collection: Collection) => {
-    void fetchCollections();
+  const handleCollectionCreated = async (collection: Collection) => {
+    // The new ID must resolve against `collections` before it is set, or the
+    // unresolved-ID effect would clear it: refetch first, then upsert the
+    // created object if the refetch failed or raced. (WARDEN-762/763: land in
+    // the new collection.) enterCollection upserts the created object, which
+    // covers a failed or raced refetch.
+    await fetchCollections();
     enterCollection(collection);
   };
 
-  // WARDEN-396/553 (carried over): sync derived collection state when a card
-  // mutates from CollectionsSection's own menu; refresh the open view's
-  // snapshot when the edited collection is the one open.
+  // WARDEN-396/553 (carried over): when a card mutates from CollectionsSection's
+  // own menu, refetch. Deleting the open collection clears the ID; an edit needs
+  // no snapshot sync — the derived object follows the refetched list.
   const handleCollectionChange = useCallback(async (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => {
-    if (change.type === 'delete' && collectionView && collectionView.id === change.id) {
-      setCollectionView(null);
+    if (change.type === 'delete' && sidebarCollectionId === change.id) {
+      setSidebarCollectionId(null);
     }
-    const fresh = await fetchCollections();
-    if (change.type === 'edit' && collectionView && collectionView.id === change.id) {
-      const updated = fresh.find((c) => c.id === change.id);
-      setCollectionView(updated || null);
-    }
-  }, [collectionView, fetchCollections]);
+    await fetchCollections();
+  }, [sidebarCollectionId, setSidebarCollectionId, fetchCollections]);
 
   useEffect(() => {
     void fetchCollections();
@@ -296,7 +342,7 @@ export function ChatSidebar({
 
   // ---- navigation ----
   const enterHost = (host: string) => {
-    setCollectionView(null);
+    setSidebarCollectionId(null);
     setSidebarHost(host);
     setSearchQuery('');
     // Opening a host is a visit: refresh its live working/stopped split.
@@ -305,7 +351,7 @@ export function ChatSidebar({
       setEnteringHost((h) => (h === host ? null : h));
     });
   };
-  const goBack = () => { setCollectionView(null); setSidebarHost(null); setSearchQuery(''); };
+  const goBack = () => { setSidebarCollectionId(null); setSidebarHost(null); setSearchQuery(''); };
 
   // ---- derived data ----
   // The recently-closed flyout lists CLOSED TEMPORARY sessions: a pane whose
@@ -697,12 +743,12 @@ export function ChatSidebar({
         onSave={(id) => { setFlyoutOpen(false); onSaveSession(id); }}
       />
 
-      {view.kind === 'root' ? renderRootView() : view.kind === 'host' ? renderHostView(view.host) : renderCollectionView(view.collection)}
+      {collectionPending ? null : view.kind === 'root' ? renderRootView() : view.kind === 'host' ? renderHostView(view.host) : renderCollectionView(view.collection)}
 
       <CreateCollectionDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        onCreated={handleCollectionCreated}
+        onCreated={(c) => { void handleCollectionCreated(c); }}
         existingCollections={collections}
       />
       <DiffViewer

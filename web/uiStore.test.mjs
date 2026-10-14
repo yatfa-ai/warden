@@ -3697,11 +3697,89 @@ test('source-shape guard: ChatSidebar holds no useState for the host drill-down 
   // cell would silently reintroduce the Settings-round-trip reset this slice
   // fixes (ChatSidebar unmounts under SettingsPage and remounts fresh). Same
   // readFileSync precedent as appConfigReadGuard.test.mjs — no React/DOM
-  // runner in this repo. The collection drill-down legitimately keeps a local
-  // cell; the greps name exactly the two retired shapes.
+  // runner in this repo. (The collection drill-down moved to the store in
+  // WARDEN-1812 — its own guard is below.) The greps name exactly the two
+  // retired shapes.
   const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
   assert.ok(!/useState<SidebarView>/.test(src), 'ChatSidebar must not hold useState<SidebarView> — the host/root view derives from the uiStore sidebarHost');
   assert.ok(!/const \[searchQuery/.test(src), 'ChatSidebar must not hold a local searchQuery cell — the ONE search field lives on the uiStore as sidebarQuery');
+});
+
+// ─── sidebarCollectionId (WARDEN-1812, roadmap WARDEN-1204 slice 68): NON-persisted collection drill-down reference ───
+console.log('\ncreateUiStore — sidebarCollectionId (not persisted; ChatSidebar collection drill-down reference)');
+test('sidebarCollectionId starts null', () => {
+  reset();
+  assert.equal(createUiStore().getState().sidebarCollectionId, null);
+});
+test('setSidebarCollectionId stores an ID then clears it with null', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSidebarCollectionId('col-1');
+  assert.equal(s.getState().sidebarCollectionId, 'col-1');
+  s.getState().setSidebarCollectionId(null);
+  assert.equal(s.getState().sidebarCollectionId, null);
+});
+test('sidebarCollectionId is independent of sidebarHost and sidebarQuery', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSidebarCollectionId('col-1');
+  s.getState().setSidebarQuery('deploy');
+  s.getState().setSidebarHost('build-01');
+  s.getState().setSidebarHost(null);
+  s.getState().setSidebarQuery('');
+  assert.equal(s.getState().sidebarCollectionId, 'col-1');
+  s.getState().setSidebarCollectionId(null);
+  s.getState().setSidebarHost('build-01');
+  s.getState().setSidebarQuery('x');
+  assert.equal(s.getState().sidebarHost, 'build-01');
+  assert.equal(s.getState().sidebarQuery, 'x');
+});
+test('factory isolation — a test store\'s sidebarCollectionId never leaks into another store or the singleton', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().sidebarCollectionId;
+  a.getState().setSidebarCollectionId('col-1');
+  assert.equal(b.getState().sidebarCollectionId, null);
+  assert.equal(uiStore.getState().sidebarCollectionId, before, 'a test store\'s write must never leak into the app store');
+});
+test('sidebarCollectionId is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarCollectionId'));
+  const s = createUiStore();
+  s.getState().setSidebarCollectionId('col-1');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('sidebarCollectionId' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('sidebarCollectionId' in loadUi()));
+  assert.equal(createUiStore().getState().sidebarCollectionId, null, 'never seeded');
+});
+test('source-shape guard: ChatSidebar holds no local Collection cell and no snapshot-replacement branch (WARDEN-1812)', () => {
+  // The collection drill-down stores only an ID; the Collection object is
+  // derived from the fetched list. A restored local cell would reintroduce the
+  // Settings-round-trip reset and the WARDEN-396/553 stale-snapshot class.
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
+  assert.ok(!/useState<Collection \| null>/.test(src), 'ChatSidebar must not hold a useState<Collection | null> cell — the drill-down is the uiStore sidebarCollectionId');
+  assert.ok(!/setCollectionView/.test(src), 'no setCollectionView — nothing sets a local snapshot');
+  assert.ok(/useSidebarCollectionId\(\)/.test(src), 'ChatSidebar reads the drill-down ID from the uiStore');
+  assert.ok(/collections\.find\(\(c\) => c\.id === sidebarCollectionId\)/.test(src), 'the Collection object is derived from the fetched list');
+  assert.ok(!/change\.type === 'edit'/.test(src), 'no edit snapshot-replacement branch in handleCollectionChange');
+});
+test('source-shape guard: the unmount-vs-leave / pending / failed-fetch semantics are pinned (WARDEN-1812)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
+  // Mount-seeded ref: a Settings unmount/restore never fires the query clear;
+  // only a non-null → null transition while mounted does.
+  assert.ok(/useRef\(sidebarCollectionId\)/.test(src), 'prev-ID ref is seeded from the mount-time ID');
+  assert.ok(/prevCollectionIdRef\.current != null && sidebarCollectionId == null\) setSearchQuery\(''\)/.test(src), 'query clears only on non-null → null while mounted');
+  // A failed fetch must never wipe a restored ID: clear only on a successful settle.
+  assert.ok(/sidebarCollectionId && collectionsStatus === 'ok' && !collections\.some/.test(src), "unresolved-ID clear is gated on collectionsStatus === 'ok'");
+  // No root flash while the first fetch is unsettled.
+  assert.ok(/const collectionPending = sidebarCollectionId != null && collectionView == null && collectionsStatus === 'pending'/.test(src), 'collectionPending is defined on the unsettled first fetch');
+  assert.ok(/collectionPending \? null : view\.kind === 'root'/.test(src), 'the view render is gated on collectionPending');
+  // enterCollection upserts so a card absent from the sidebar list still resolves.
+  assert.ok(/const enterCollection = [^]*?setCollections\(\(prev\) => \(prev\.some\(\(c\) => c\.id === collection\.id\)/.test(src), 'enterCollection upserts the collection into the list');
 });
 
 // ─── observerActivityLimit + observerDirectiveLimit (WARDEN-1760, roadmap WARDEN-1204 slice 60): NON-persisted feed row limits ───

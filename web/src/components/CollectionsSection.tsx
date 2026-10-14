@@ -28,9 +28,9 @@ interface Props {
   // derived state: refresh its duplicate-name list (CreateCollectionDialog) and,
   // on delete, reset the live view if the deleted collection was open. The
   // card list itself is refreshed inside CollectionsSection via fetchCollections.
-  // WARDEN-553: 'edit' also lets the host refresh the open-view snapshot when
-  // the edited collection is the one currently open (otherwise its membership
-  // list would render stale criteria while the card count updates).
+  // WARDEN-553: 'edit' signals the host to refetch. Since WARDEN-1812 the open
+  // view is derived from the host's fetched list by ID (no snapshot to
+  // replace), so the refetch alone refreshes the open collection's criteria.
   onCollectionChange?: (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => void;
 }
 
