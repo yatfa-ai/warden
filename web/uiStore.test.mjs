@@ -3935,6 +3935,70 @@ test('source-shape guard: FleetRecentCommits holds no local expandedRow cell, re
   assert.match(src, /=== expandedRow\)/, 'restored row is matched by the full key, never split on ":"');
 });
 
+// ─── sourceControlView (WARDEN-1798, roadmap WARDEN-1204 slice 66): NON-persisted Source Control open commit + search term, keyed by chatId ───
+console.log('\ncreateUiStore — sourceControlView (not persisted; session fact keyed by chatId)');
+test('sourceControlView starts null', () => {
+  reset();
+  assert.equal(createUiStore().getState().sourceControlView, null);
+});
+test('set / clear expanded hash and grep term', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSourceControlExpandedHash('chat-1', 'abc123');
+  s.getState().setSourceControlGrepInput('chat-1', 'fix');
+  assert.deepEqual(s.getState().sourceControlView, { chatId: 'chat-1', expandedHash: 'abc123', grepInput: 'fix' });
+  s.getState().setSourceControlExpandedHash('chat-1', null);
+  assert.deepEqual(s.getState().sourceControlView, { chatId: 'chat-1', expandedHash: null, grepInput: 'fix' });
+  s.getState().setSourceControlGrepInput('chat-1', '');
+  assert.equal(s.getState().sourceControlView, null, 'nothing left to remember collapses to null');
+});
+test('a write for another chat replaces the slot; a no-op clear for another chat never clobbers it', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSourceControlExpandedHash('chat-1', 'abc');
+  s.getState().setSourceControlGrepInput('chat-2', '');
+  assert.deepEqual(s.getState().sourceControlView, { chatId: 'chat-1', expandedHash: 'abc', grepInput: '' });
+  s.getState().setSourceControlGrepInput('chat-2', 'term');
+  assert.deepEqual(s.getState().sourceControlView, { chatId: 'chat-2', expandedHash: null, grepInput: 'term' });
+});
+test('mismatched chatId reads null / \'\' via the hook selectors (source-shape)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'lib', 'uiStore.ts'), 'utf8');
+  assert.match(src, /sourceControlView\?\.chatId === chatId \? s\.sourceControlView\.expandedHash : null/);
+  assert.match(src, /sourceControlView\?\.chatId === chatId \? s\.sourceControlView\.grepInput : ''/);
+});
+test('factory isolation — a test store\'s Source Control view never leaks into the app store or a sibling store', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  a.getState().setSourceControlExpandedHash('c', 'h');
+  assert.equal(b.getState().sourceControlView, null);
+  assert.equal(uiStore.getState().sourceControlView, null);
+});
+test('sourceControlView is NOT persisted: absent from STORE_PERSISTED_KEYS, OBS_STORE_KEYS and both picked pref bags; never seeded', () => {
+  reset();
+  for (const k of ['sourceControlView', 'setSourceControlExpandedHash', 'setSourceControlGrepInput']) {
+    assert.ok(!STORE_PERSISTED_KEYS.includes(k), k + ' must not be a STORE_PERSISTED_KEYS member');
+    assert.ok(!OBS_STORE_KEYS.includes(k), k + ' must not be an OBS_STORE_KEYS member');
+  }
+  const s = createUiStore();
+  s.getState().setSourceControlExpandedHash('c', 'h');
+  assert.ok(!Object.keys(selectPersistedStorePrefs(s.getState())).includes('sourceControlView'));
+  assert.ok(!Object.keys(selectPersistedObsPrefs(s.getState())).includes('sourceControlView'));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...selectPersistedStorePrefs(s.getState()) }));
+  assert.ok(!('sourceControlView' in loadUi()));
+  assert.ok(!('sourceControlView' in loadObs()));
+  assert.equal(createUiStore().getState().sourceControlView, null, 'never seeded');
+});
+test('source-shape guard: GitBadges no longer declares useState for expandedHash/grepInput, restores via fetchShow, and leaves the stash cell local (WARDEN-1798)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'sidebar', 'GitBadges.tsx'), 'utf8');
+  assert.ok(!/const \[expandedHash, setExpandedHash\] = useState/.test(src), 'a restored local cell would reintroduce the Settings round-trip reset');
+  assert.ok(!/const \[grepInput, setGrepInput\] = useState/.test(src), 'a restored local cell would reintroduce the Settings round-trip reset');
+  assert.match(src, /const expandedHash = useSourceControlExpandedHash\(chatId\)/);
+  assert.match(src, /const grepInput = useSourceControlGrepInput\(chatId\)/);
+  assert.match(src, /if \(expanded && expandedHash && !showCache\[expandedHash\]\) fetchShow\(expandedHash\)/);
+  assert.match(src, /const \[expandedStashRef, setExpandedStashRef\] = useState<string \| null>\(null\)/, 'stash cell stays local');
+});
+
 // ─── healthSelectedIds (WARDEN-1778, roadmap WARDEN-1204 slice 63): NON-persisted Fleet Health multi-select ───
 console.log('\ncreateUiStore — healthSelectedIds (not persisted; session fact)');
 test('healthSelectedIds starts empty', () => {
