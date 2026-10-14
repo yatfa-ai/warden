@@ -24,7 +24,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-diff-test-'));
 const tmpFile = join(tmpDir, 'diff.mjs');
 writeFileSync(tmpFile, code);
 const { classifyDiffLine } = await import(tmpFile);
-const { collectChangeRegions } = await import(tmpFile);
+const { collectChangeRegions, addedLinesOf, removedLinesOf } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -174,6 +174,35 @@ test('a diff with only context + meta (no add/remove) yields []', () => {
 test('a single-region diff (one run) yields exactly one entry', () => {
   const diff = ['@@ -1,2 +1,2 @@', ' ctx', '-old', '+new'].join('\n');
   assert.deepEqual(collectChangeRegions(diff), [2]);
+});
+
+console.log('\naddedLinesOf / removedLinesOf extract only +/- body lines (WARDEN-1800)');
+const FULL_DIFF = [
+  'diff --git a/f b/f', 'index 1..2 100644', '--- a/f', '+++ b/f',
+  '@@ -1,3 +1,3 @@', ' ctx', '-old one', '+new one', '-old two', '+new two', '',
+].join('\n');
+test('addedLinesOf returns added lines with the "+" stripped, joined by newline', () => {
+  assert.equal(addedLinesOf(FULL_DIFF), 'new one\nnew two');
+});
+test('removedLinesOf returns removed lines with the "-" stripped, joined by newline', () => {
+  assert.equal(removedLinesOf(FULL_DIFF), 'old one\nold two');
+});
+test('+++ / --- file headers are excluded from both helpers', () => {
+  assert.ok(!addedLinesOf(FULL_DIFF).includes('b/f'));
+  assert.ok(!removedLinesOf(FULL_DIFF).includes('a/f'));
+});
+test('only ONE leading marker is stripped (content starting with + or - survives)', () => {
+  assert.equal(addedLinesOf('+++x\n++y'), '+y');
+  assert.equal(removedLinesOf('--- a/f\n--z'), '-z');
+});
+test('an empty diff yields empty strings', () => {
+  assert.equal(addedLinesOf(''), '');
+  assert.equal(removedLinesOf(''), '');
+});
+test('a diff with no added (or no removed) lines yields "" for that helper', () => {
+  assert.equal(addedLinesOf('@@ -1 +0,0 @@\n-gone'), '');
+  assert.equal(removedLinesOf('@@ -0,0 +1 @@\n+fresh'), '');
+  assert.equal(addedLinesOf('+only'), 'only');
 });
 
 console.log(`\n✓ DIFF TESTS PASS (${passed})`);
