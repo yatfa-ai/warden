@@ -818,6 +818,22 @@ export interface UiStoreState {
    */
   markObserverReconnected: (id: string) => boolean;
   /**
+   * Observer chatKeys whose Auto-start Observer attempt already ran this app
+   * session (WARDEN-1802, roadmap WARDEN-1204 slice 67). A NON-persisted
+   * session fact: NOT a STORE_PERSISTED_KEYS member, initial empty, never
+   * seeded from disk. ObserverTabs unmounts whenever Settings opens, so the
+   * old component-local ref reset on return and re-spawned an observer the
+   * user had just closed (or the idle sweep had reaped); the store keeps it
+   * for the session. A full app restart legitimately resets it.
+   */
+  observerAutoStarted: Record<string, true>;
+  /**
+   * ATOMIC check-and-mark: records `chatKey` and returns `true` iff it was NOT
+   * already recorded (the caller may auto-start), `false` otherwise. One
+   * synchronous read-modify-write, so the effect has no read-then-write race.
+   */
+  markObserverAutoStarted: (chatKey: string) => boolean;
+  /**
    * The concrete theme id the app theme currently resolves to (roadmap
    * WARDEN-1204 slice 31, WARDEN-1574) — what "System" maps to on this OS right
    * now, or the chosen theme id itself. The sixth NON-persisted session fact:
@@ -1547,6 +1563,14 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     markObserverReconnected: (id) => {
       if (get().observerReconnected[id]) return false;
       set((s) => ({ observerReconnected: { ...s.observerReconnected, [id]: true } }));
+      return true;
+    },
+    // WARDEN-1802 (slice 67): the not-persisted once-per-session auto-start
+    // record — starts empty; the atomic mark returns whether `chatKey` is new.
+    observerAutoStarted: {},
+    markObserverAutoStarted: (chatKey) => {
+      if (get().observerAutoStarted[chatKey]) return false;
+      set((s) => ({ observerAutoStarted: { ...s.observerAutoStarted, [chatKey]: true } }));
       return true;
     },
     // WARDEN-1574 (slice 31): the not-persisted OS-resolved theme id. DOM-free
@@ -2681,6 +2705,11 @@ export function useClearHealthSelected(): () => void {
 /** Stable-identity atomic action: mark an observer session reconnected; true iff newly marked (WARDEN-1772, slice 62) — NOT persisted. */
 export function useMarkObserverReconnected(): (id: string) => boolean {
   return useUiStore((s) => s.markObserverReconnected);
+}
+
+/** Stable-identity atomic action: mark a chatKey auto-started; true iff newly marked (WARDEN-1802, slice 67) — NOT persisted. */
+export function useMarkObserverAutoStarted(): (chatKey: string) => boolean {
+  return useUiStore((s) => s.markObserverAutoStarted);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {

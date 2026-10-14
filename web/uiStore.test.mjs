@@ -3886,6 +3886,53 @@ test('source-shape guard: ObserverTabs holds no local reconnect ref and uses the
   assert.match(src, /useMarkObserverReconnected\(\)/);
 });
 
+// ─── observerAutoStarted (WARDEN-1802, roadmap WARDEN-1204 slice 67): NON-persisted once-per-session auto-start record ───
+console.log('\ncreateUiStore — observerAutoStarted / markObserverAutoStarted (not persisted; session fact)');
+test('observerAutoStarted starts empty', () => {
+  reset();
+  assert.deepEqual(createUiStore().getState().observerAutoStarted, {});
+});
+test('markObserverAutoStarted is an atomic check-and-mark: true the first time, false after, per chatKey', () => {
+  reset();
+  const s = createUiStore();
+  assert.equal(s.getState().markObserverAutoStarted('a'), true);
+  assert.equal(s.getState().markObserverAutoStarted('a'), false);
+  assert.equal(s.getState().markObserverAutoStarted('b'), true, 'keys are independent');
+  assert.equal(s.getState().markObserverAutoStarted('b'), false);
+  assert.deepEqual(s.getState().observerAutoStarted, { a: true, b: true });
+});
+test('observerAutoStarted factory isolation — a test store\'s marks never leak into the app store or a sibling store', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().observerAutoStarted;
+  a.getState().markObserverAutoStarted('x');
+  assert.equal(b.getState().markObserverAutoStarted('x'), true);
+  assert.equal(uiStore.getState().observerAutoStarted, before);
+  assert.deepEqual(uiStore.getState().observerAutoStarted, {});
+});
+test('observerAutoStarted is NOT persisted: absent from STORE_PERSISTED_KEYS, the picked prefs and loadUi/loadObs; never seeded', () => {
+  reset();
+  assert.ok(!STORE_PERSISTED_KEYS.includes('observerAutoStarted'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('markObserverAutoStarted'));
+  const s = createUiStore();
+  s.getState().markObserverAutoStarted('a');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.ok(!('observerAutoStarted' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('observerAutoStarted' in loadUi()));
+  assert.ok(!('observerAutoStarted' in loadObs()));
+  assert.deepEqual(createUiStore().getState().observerAutoStarted, {}, 'never seeded');
+});
+test('source-shape guard: ObserverTabs holds no local auto-start ref and uses the store\'s atomic mark (WARDEN-1802)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ObserverTabs.tsx'), 'utf8');
+  assert.ok(!/autoStartedRef/.test(src), 'a restored local ref would reintroduce the Settings round-trip re-spawn');
+  assert.match(src, /useMarkObserverAutoStarted\(\)/);
+  assert.match(src, /markAutoStarted\(focusedKey\)/);
+  const store = readFileSync(join(__dirname, 'src', 'lib', 'uiStore.ts'), 'utf8');
+  assert.match(store, /markObserverAutoStarted/);
+});
+
 // ─── fleetCommitsExpandedRow (WARDEN-1783/1784, roadmap WARDEN-1204 slice 64): NON-persisted Recent-commits expanded row ───
 console.log('\ncreateUiStore — fleetCommitsExpandedRow (not persisted; session fact)');
 test('fleetCommitsExpandedRow starts null', () => {

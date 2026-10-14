@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
-import { useHostLabels, useObserverViewMode, useSetObserverViewMode, useObserverActivityFilters, useSetObserverActivityFilters, useObserverDirectiveFilters, useSetObserverDirectiveFilters, useObserverAttentionFilters, useSetObserverAttentionFilters, useMarkObserverReconnected } from '@/lib/uiStore';
+import { useHostLabels, useObserverViewMode, useSetObserverViewMode, useObserverActivityFilters, useSetObserverActivityFilters, useObserverDirectiveFilters, useSetObserverDirectiveFilters, useObserverAttentionFilters, useSetObserverAttentionFilters, useMarkObserverReconnected, useMarkObserverAutoStarted } from '@/lib/uiStore';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
@@ -330,25 +330,26 @@ export function ObserverTabs({ focusedChat, onReconnectChat, attention }: Props 
   //  - booted (sessions loaded so dedup is meaningful);
   //  - observerAutoStart (off ⇒ today's fully-manual behavior, unchanged);
   //  - a focused chat with a usable key;
-  //  - autoStartedRef: each chatKey is attempted AT MOST ONCE per mount, so this
-  //    never re-fires on re-renders or when the pref is toggled back on;
+  //  - the auto-start once-guard: each chatKey is attempted AT MOST ONCE per app session (the
+  //    mark lives on the uiStore, WARDEN-1802: App unmounts this component while
+  //    Settings is open, so a local ref would re-spawn a closed observer on
+  //    return), so this never re-fires on re-renders, remounts or pref toggles;
   //  - hasBoundSession: skip (still mark attempted) if a session is already bound
   //    to this chatKey — covers a manual binding made before auto-start.
   // The effect keys on `focusedKey` identity (not the chat object, which is
   // recreated on every poll) so it only fires when the focused chat actually
   // changes; observerAutoStart is a dep so flipping it on while a chat is focused
   // spawns for it. focusedChat is read through a ref to avoid stale closures.
-  const autoStartedRef = useRef<Set<string>>(new Set());
+  const markAutoStarted = useMarkObserverAutoStarted();
   const focusedChatRef = useRef(focusedChat);
   useEffect(() => { focusedChatRef.current = focusedChat; }, [focusedChat]);
   const focusedKey = focusedChat?.key || focusedChat?.id || null;
   useEffect(() => {
     if (!booted || !observerAutoStart || !focusedKey) return;
-    if (autoStartedRef.current.has(focusedKey)) return;
-    autoStartedRef.current.add(focusedKey);
+    if (!markAutoStarted(focusedKey)) return;
     if (hasBoundSession(sessionsRef.current, focusedKey)) return;
     void createNew(focusedChatRef.current);
-  }, [booted, observerAutoStart, focusedKey, createNew]);
+  }, [booted, observerAutoStart, focusedKey, createNew, markAutoStarted]);
 
   // WARDEN-332 — Behavior 2a: seed every open tab with a last-activity timestamp
   // so the idle selector always has a signal. A tab with no timestamp is treated
