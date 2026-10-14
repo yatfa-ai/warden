@@ -270,13 +270,29 @@ export function ChatSidebar({
     }
   }, [readNotificationPrefs]);
 
-  const enterCollection = (collection: Collection) => { setSidebarCollectionId(collection.id); setSearchQuery(''); };
+  // The passed collection is upserted into `collections` in the same batch as
+  // the ID is set, so the click always resolves: CollectionsSection keeps its
+  // own list (own fetch + ↻), so a card can name a collection this component's
+  // list does not yet contain (e.g. created in another window) — without the
+  // upsert the unresolved-ID effect below would clear the ID and the click
+  // would silently no-op.
+  const enterCollection = (collection: Collection) => {
+    setCollections((prev) => (prev.some((c) => c.id === collection.id) ? prev : [...prev, collection]));
+    setSidebarCollectionId(collection.id);
+    setSearchQuery('');
+  };
 
   // An ID that no longer resolves once a fetch has SUCCEEDED (the collection
   // was deleted elsewhere / while in Settings) is cleared, so the view falls
   // back to root. Only a successful settle may clear: a failed fetch leaves a
   // restored ID alone (it resolves on a later successful refetch; meanwhile
   // the view falls back to root without losing the reference).
+  // DELIBERATE TRADE-OFF (WARDEN-1812 review): after a FAILED first fetch the
+  // ID is kept but the view renders root, so a restored sidebarQuery filters
+  // root until the next successful fetch (which then re-enters the collection
+  // with its search term). We accept that over wiping a valid reference on a
+  // transient network error; clearing the query too would lose the term the
+  // restore is meant to preserve.
   useEffect(() => {
     if (sidebarCollectionId && collectionsStatus === 'ok' && !collections.some((c) => c.id === sidebarCollectionId)) {
       setSidebarCollectionId(null);
@@ -303,9 +319,9 @@ export function ChatSidebar({
     // The new ID must resolve against `collections` before it is set, or the
     // unresolved-ID effect would clear it: refetch first, then upsert the
     // created object if the refetch failed or raced. (WARDEN-762/763: land in
-    // the new collection.)
+    // the new collection.) enterCollection upserts the created object, which
+    // covers a failed or raced refetch.
     await fetchCollections();
-    setCollections((prev) => (prev.some((c) => c.id === collection.id) ? prev : [...prev, collection]));
     enterCollection(collection);
   };
 

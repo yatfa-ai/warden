@@ -3767,6 +3767,20 @@ test('source-shape guard: ChatSidebar holds no local Collection cell and no snap
   assert.ok(/collections\.find\(\(c\) => c\.id === sidebarCollectionId\)/.test(src), 'the Collection object is derived from the fetched list');
   assert.ok(!/change\.type === 'edit'/.test(src), 'no edit snapshot-replacement branch in handleCollectionChange');
 });
+test('source-shape guard: the unmount-vs-leave / pending / failed-fetch semantics are pinned (WARDEN-1812)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
+  // Mount-seeded ref: a Settings unmount/restore never fires the query clear;
+  // only a non-null → null transition while mounted does.
+  assert.ok(/useRef\(sidebarCollectionId\)/.test(src), 'prev-ID ref is seeded from the mount-time ID');
+  assert.ok(/prevCollectionIdRef\.current != null && sidebarCollectionId == null\) setSearchQuery\(''\)/.test(src), 'query clears only on non-null → null while mounted');
+  // A failed fetch must never wipe a restored ID: clear only on a successful settle.
+  assert.ok(/sidebarCollectionId && collectionsStatus === 'ok' && !collections\.some/.test(src), "unresolved-ID clear is gated on collectionsStatus === 'ok'");
+  // No root flash while the first fetch is unsettled.
+  assert.ok(/const collectionPending = sidebarCollectionId != null && collectionView == null && collectionsStatus === 'pending'/.test(src), 'collectionPending is defined on the unsettled first fetch');
+  assert.ok(/collectionPending \? null : view\.kind === 'root'/.test(src), 'the view render is gated on collectionPending');
+  // enterCollection upserts so a card absent from the sidebar list still resolves.
+  assert.ok(/const enterCollection = [^]*?setCollections\(\(prev\) => \(prev\.some\(\(c\) => c\.id === collection\.id\)/.test(src), 'enterCollection upserts the collection into the list');
+});
 
 // ─── observerActivityLimit + observerDirectiveLimit (WARDEN-1760, roadmap WARDEN-1204 slice 60): NON-persisted feed row limits ───
 console.log('\ncreateUiStore — observerActivityLimit / observerDirectiveLimit (not persisted; Observer feed session facts)');
