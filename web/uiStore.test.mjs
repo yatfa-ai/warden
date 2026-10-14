@@ -3697,11 +3697,75 @@ test('source-shape guard: ChatSidebar holds no useState for the host drill-down 
   // cell would silently reintroduce the Settings-round-trip reset this slice
   // fixes (ChatSidebar unmounts under SettingsPage and remounts fresh). Same
   // readFileSync precedent as appConfigReadGuard.test.mjs — no React/DOM
-  // runner in this repo. The collection drill-down legitimately keeps a local
-  // cell; the greps name exactly the two retired shapes.
+  // runner in this repo. (The collection drill-down moved to the store in
+  // WARDEN-1812 — its own guard is below.) The greps name exactly the two
+  // retired shapes.
   const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
   assert.ok(!/useState<SidebarView>/.test(src), 'ChatSidebar must not hold useState<SidebarView> — the host/root view derives from the uiStore sidebarHost');
   assert.ok(!/const \[searchQuery/.test(src), 'ChatSidebar must not hold a local searchQuery cell — the ONE search field lives on the uiStore as sidebarQuery');
+});
+
+// ─── sidebarCollectionId (WARDEN-1812, roadmap WARDEN-1204 slice 68): NON-persisted collection drill-down reference ───
+console.log('\ncreateUiStore — sidebarCollectionId (not persisted; ChatSidebar collection drill-down reference)');
+test('sidebarCollectionId starts null', () => {
+  reset();
+  assert.equal(createUiStore().getState().sidebarCollectionId, null);
+});
+test('setSidebarCollectionId stores an ID then clears it with null', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSidebarCollectionId('col-1');
+  assert.equal(s.getState().sidebarCollectionId, 'col-1');
+  s.getState().setSidebarCollectionId(null);
+  assert.equal(s.getState().sidebarCollectionId, null);
+});
+test('sidebarCollectionId is independent of sidebarHost and sidebarQuery', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().setSidebarCollectionId('col-1');
+  s.getState().setSidebarQuery('deploy');
+  s.getState().setSidebarHost('build-01');
+  s.getState().setSidebarHost(null);
+  s.getState().setSidebarQuery('');
+  assert.equal(s.getState().sidebarCollectionId, 'col-1');
+  s.getState().setSidebarCollectionId(null);
+  s.getState().setSidebarHost('build-01');
+  s.getState().setSidebarQuery('x');
+  assert.equal(s.getState().sidebarHost, 'build-01');
+  assert.equal(s.getState().sidebarQuery, 'x');
+});
+test('factory isolation — a test store\'s sidebarCollectionId never leaks into another store or the singleton', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().sidebarCollectionId;
+  a.getState().setSidebarCollectionId('col-1');
+  assert.equal(b.getState().sidebarCollectionId, null);
+  assert.equal(uiStore.getState().sidebarCollectionId, before, 'a test store\'s write must never leak into the app store');
+});
+test('sidebarCollectionId is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+  reset();
+  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarCollectionId'));
+  const s = createUiStore();
+  s.getState().setSidebarCollectionId('col-1');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.equal(Object.keys(picked).length, 39);
+  assert.ok(!('sidebarCollectionId' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('sidebarCollectionId' in loadUi()));
+  assert.equal(createUiStore().getState().sidebarCollectionId, null, 'never seeded');
+});
+test('source-shape guard: ChatSidebar holds no local Collection cell and no snapshot-replacement branch (WARDEN-1812)', () => {
+  // The collection drill-down stores only an ID; the Collection object is
+  // derived from the fetched list. A restored local cell would reintroduce the
+  // Settings-round-trip reset and the WARDEN-396/553 stale-snapshot class.
+  const src = readFileSync(join(__dirname, 'src', 'components', 'ChatSidebar.tsx'), 'utf8');
+  assert.ok(!/useState<Collection \| null>/.test(src), 'ChatSidebar must not hold a useState<Collection | null> cell — the drill-down is the uiStore sidebarCollectionId');
+  assert.ok(!/setCollectionView/.test(src), 'no setCollectionView — nothing sets a local snapshot');
+  assert.ok(/useSidebarCollectionId\(\)/.test(src), 'ChatSidebar reads the drill-down ID from the uiStore');
+  assert.ok(/collections\.find\(\(c\) => c\.id === sidebarCollectionId\)/.test(src), 'the Collection object is derived from the fetched list');
+  assert.ok(!/change\.type === 'edit'/.test(src), 'no edit snapshot-replacement branch in handleCollectionChange');
 });
 
 // ─── observerActivityLimit + observerDirectiveLimit (WARDEN-1760, roadmap WARDEN-1204 slice 60): NON-persisted feed row limits ───

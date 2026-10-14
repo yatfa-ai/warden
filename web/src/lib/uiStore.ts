@@ -693,14 +693,28 @@ export interface UiStoreState {
    * fact: NOT a STORE_PERSISTED_KEYS member, initial `null`, never seeded from
    * disk, never cleared by the store. Written by ChatSidebar's enterHost (and
    * cleared by goBack); read by ChatSidebar's derived SidebarView (the
-   * collection drill-down stays a ChatSidebar-local cell that takes
-   * precedence — it is a snapshot of a server-fetched Collection, the
-   * WARDEN-396/553 staleness class). Survives the Settings round trip
+   * collection drill-down is the sibling `sidebarCollectionId`, which takes
+   * precedence). Survives the Settings round trip
    * (ChatSidebar unmounts under SettingsPage and remounts fresh); a restart
    * legitimately opens at root.
    */
   sidebarHost: string | null;
   setSidebarHost: (v: string | null) => void;
+  /**
+   * The ID of the collection ChatSidebar is drilled into (WARDEN-1812, roadmap
+   * WARDEN-1204 slice 68) — the collection twin of `sidebarHost`. A
+   * NON-persisted session fact: NOT a STORE_PERSISTED_KEYS member, initial
+   * `null`, never seeded from disk. It holds ONLY the reference, never the
+   * server-fetched Collection object (the WARDEN-396/553 staleness class):
+   * ChatSidebar derives the object at render from its fetched `collections`
+   * list, so an edit refreshes the open view with no snapshot to sync. Survives
+   * the Settings round trip (ChatSidebar unmounts under SettingsPage and
+   * remounts fresh); a restart legitimately opens at root. An ID that no
+   * longer resolves once the first fetch has succeeded (collection deleted
+   * while away) is cleared by ChatSidebar.
+   */
+  sidebarCollectionId: string | null;
+  setSidebarCollectionId: (v: string | null) => void;
   /**
    * ChatSidebar's ONE live search field (WARDEN-1756, roadmap WARDEN-1204
    * slice 59) — at root it is the cross-host saved search; on a host or
@@ -1496,10 +1510,14 @@ export function createUiStore(seed: UiStoreSeed = {}) {
     setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
     // WARDEN-1756 (slice 59): the not-persisted sidebar session facts — the
     // host drill-down and ChatSidebar's ONE live search field. Initial
-    // null/'' — never seeded. The collection drill-down stays ChatSidebar-
-    // local (a snapshot of a server-fetched Collection, not a store fact).
+    // null/'' — never seeded. The collection drill-down's ID follows below
+    // (WARDEN-1812); the Collection object itself is never stored.
     sidebarHost: null,
     setSidebarHost: (sidebarHost) => set({ sidebarHost }),
+    // WARDEN-1812 (slice 68): the collection drill-down's ID — reference only,
+    // the Collection object is derived from ChatSidebar's fetched list.
+    sidebarCollectionId: null,
+    setSidebarCollectionId: (sidebarCollectionId) => set({ sidebarCollectionId }),
     sidebarQuery: '',
     setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
     // WARDEN-1760 (slice 60): the not-persisted Observer feed row limits — two
@@ -2595,6 +2613,16 @@ export function useSidebarHost(): string | null {
 /** Stable-identity action: drill ChatSidebar into a host (null = back to root). */
 export function useSetSidebarHost(): (v: string | null) => void {
   return useUiStore((s) => s.setSidebarHost);
+}
+
+/** The ID of the collection ChatSidebar is drilled into (WARDEN-1812, slice 68) — NOT persisted. */
+export function useSidebarCollectionId(): string | null {
+  return useUiStore((s) => s.sidebarCollectionId);
+}
+
+/** Stable-identity action: drill ChatSidebar into a collection by ID (null = leave it). */
+export function useSetSidebarCollectionId(): (v: string | null) => void {
+  return useUiStore((s) => s.setSidebarCollectionId);
 }
 
 /** ChatSidebar's ONE live search field (WARDEN-1756, slice 59) — NOT persisted. */
