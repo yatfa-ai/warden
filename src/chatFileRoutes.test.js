@@ -351,11 +351,11 @@ describe('POST /api/search-files', () => {
   });
 
   it('a transport that throws → 200 generic "search failed", no internals leaked', async () => {
-    chats.set('t', { host: Symbol('secret-host'), cwd: '/srv/proj' });
+    chats.set('t', { host: 'secret\0host', cwd: '/srv/proj' });
     const r = await post('/api/search-files', { id: 't', query: 'hello' });
     assert.equal(r.status, 200);
     assert.deepEqual(r.body, { results: [], query: 'hello', error: 'search failed' });
-    assert.doesNotMatch(JSON.stringify(r.body), /secret-host|Symbol|TypeError/);
+    assert.doesNotMatch(JSON.stringify(r.body), /secret|TypeError|ERR_INVALID/);
   });
 });
 
