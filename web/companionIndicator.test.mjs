@@ -44,13 +44,20 @@ try {
     .replace(/from ['"]@\/lib\/utils['"]/, `from './cn-stub.mjs'`);
   writeFileSync(join(tmpDir, 'StatusDot.mjs'), dotCode);
 
+  const txtPath = resolve(__dirname, 'src/lib/companionStatusText.ts');
+  const txtCode = (await transformWithOxc(readFileSync(txtPath, 'utf8'), txtPath, {})).code;
+  writeFileSync(join(tmpDir, 'companionStatusText.mjs'), txtCode);
+
   const indPath = resolve(__dirname, 'src/components/CompanionIndicator.tsx');
   const indCode = (await transformWithOxc(readFileSync(indPath, 'utf8'), indPath, {})).code
-    .replace(/from ['"]@\/components\/StatusDot['"]/, `from './StatusDot.mjs'`);
+    .replace(/from ['"]@\/components\/StatusDot['"]/, `from './StatusDot.mjs'`)
+    .replace(/from ['"]@\/lib\/companionStatusText['"]/, `from './companionStatusText.mjs'`);
   writeFileSync(join(tmpDir, 'CompanionIndicator.mjs'), indCode);
 
   const { CompanionIndicator } = await import(
     `${tmpDir}/CompanionIndicator.mjs?t=${Date.now()}`);
+  const { companionStatusText } = await import(
+    `${tmpDir}/companionStatusText.mjs?t=${Date.now()}`);
 
   let passed = 0;
   const test = (name, fn) => {
@@ -170,6 +177,35 @@ try {
     const html = render({ state: 'error', lastError: 'ssh refused', ops: HEAVY });
     assert.equal(ariaLabel(html), 'Companion error: ssh refused — 60 ops · send 19 · unsubscribePanes 15 · discover 13 · 2 failed');
     assert.ok(html.includes('bg-red-500'));
+  });
+
+  console.log('\ncompanionStatusText helper (WARDEN-1806)');
+  test('error with lastError → exactly "Companion error: <lastError>"; ops append the summary', () => {
+    assert.equal(companionStatusText({ state: 'error', lastError: 'ssh refused' }), 'Companion error: ssh refused');
+    assert.equal(companionStatusText({ state: 'error', lastError: 'ssh refused', ops: HEAVY }),
+      'Companion error: ssh refused — 60 ops · send 19 · unsubscribePanes 15 · discover 13 · 2 failed');
+  });
+  test('active with version + ops contains v<version> and "N ops"', () => {
+    const t = companionStatusText({ state: 'active', version: '1.2.3', ops: HEAVY });
+    assert.ok(t.includes('v1.2.3'));
+    assert.ok(t.includes('60 ops'));
+  });
+  test('excluded-by-setting → "Companion excluded"', () => {
+    assert.ok(companionStatusText({ state: 'inactive', reason: 'excluded-by-setting' }).includes('Companion excluded'));
+  });
+  test('absent / plain-inactive / unknown-reason inactive → null (exactly when nothing renders)', () => {
+    assert.equal(companionStatusText(undefined), null);
+    assert.equal(companionStatusText({ state: 'inactive' }), null);
+    assert.equal(companionStatusText({ state: 'inactive', reason: 'something-else' }), null);
+    assert.equal(render({ state: 'inactive', reason: 'something-else' }), '');
+  });
+  test('helper output equals the rendered aria-label (byte-identical to the dot)', () => {
+    for (const c of [
+      { state: 'error', lastError: 'x', ops: HEAVY },
+      { state: 'active', version: '9' },
+      { state: 'bootstrapping' },
+      { state: 'inactive', reason: 'excluded-by-setting' },
+    ]) assert.equal(ariaLabel(render(c)).replaceAll('&quot;', '"'), companionStatusText(c));
   });
 
   console.log(`\n${passed} passed`);

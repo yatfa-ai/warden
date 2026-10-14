@@ -23,6 +23,7 @@ import {
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { CompanionIndicator } from './CompanionIndicator';
+import { companionStatusText } from '@/lib/companionStatusText';
 import { Sparkline } from '@/components/Sparkline';
 import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
 import { FleetStateTimeline } from '@/components/FleetStateTimeline';
@@ -1624,6 +1625,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
               ) : (
                 hostGroups.map(group => {
                   const status = hostStatuses[group.host];
+                  const companionText = companionStatusText(status?.companion);
                   const collapsed = !!collapsedHosts[group.host];
                   const dist = HEALTH_SECTION_ORDER.filter(s => group.counts[s] > 0);
                   const hostLabel = hostTagOf(group.host, hostLabels);
@@ -1810,6 +1812,9 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
                         <ContextMenuItem onSelect={() => copyWithToast(group.host)}>Copy host name</ContextMenuItem>
                         {group.host !== THIS_MACHINE && (
                           <ContextMenuItem onSelect={() => copyWithToast(`ssh ${group.host}`)}>Copy SSH address</ContextMenuItem>
+                        )}
+                        {companionText !== null && (
+                          <ContextMenuItem onSelect={() => copyWithToast(companionText)}>Copy companion status</ContextMenuItem>
                         )}
                         {companionTransportEnabled && group.host !== THIS_MACHINE && (
                           <>
