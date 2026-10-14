@@ -753,6 +753,25 @@ export interface UiStoreState {
   /** Accepts a value or a functional updater (computed inside `set`). */
   setFleetCommitsExpandedRow: (v: string | null | ((cur: string | null) => string | null)) => void;
   /**
+   * Source Control's open-commit + commit-message search term (WARDEN-1798,
+   * roadmap WARDEN-1204 slice 66), keyed by the chat the sidebar section speaks
+   * for. A NON-persisted session fact: NOT a STORE_PERSISTED_KEYS /
+   * OBS_STORE_KEYS member, initial `null`, never seeded from disk. App's Settings
+   * ternary unmounts the whole sidebar subtree, so the two component-local cells
+   * in GitRepoDetails reset on return; the store keeps them for the session. It
+   * is ONE slot keyed by `chatId` (never global): the read hooks return the value
+   * only when `view.chatId === chatId`, so GitRepoDetails' `key={chatId}`
+   * pane-switch reset is preserved. The per-hash file cache stays LOCAL (server
+   * data is not mirrored here) and is re-fetched for the restored hash.
+   * `expandedStashRef` is deliberately NOT part of this fact (stash refs are
+   * reflog selectors that shift on push/pop).
+   */
+  sourceControlView: { chatId: string; expandedHash: string | null; grepInput: string } | null;
+  /** Set (or clear with null) the expanded commit for `chatId`. */
+  setSourceControlExpandedHash: (chatId: string, hash: string | null) => void;
+  /** Set (or clear with '') the commit-message search term for `chatId`. */
+  setSourceControlGrepInput: (chatId: string, text: string) => void;
+  /**
    * Open/closed flag of each collapsible Fleet Health panel (WARDEN-1768, slice
    * 61), keyed by panel id: the two FleetMatrixPanel instances ('activity' =
    * Fleet activity, 'state' = Fleet state — independent flags over ONE shared
@@ -1483,6 +1502,28 @@ export function createUiStore(seed: UiStoreSeed = {}) {
       set((s) => ({
         fleetCommitsExpandedRow: typeof v === 'function' ? v(s.fleetCommitsExpandedRow) : v,
       })),
+    // WARDEN-1798 (slice 66): the not-persisted Source Control open-commit +
+    // search term, one slot keyed by chatId. A write for a DIFFERENT chat
+    // replaces the slot (the other chat's pane is the one that was reset); a
+    // clearing write that leaves nothing to remember collapses back to null.
+    sourceControlView: null,
+    setSourceControlExpandedHash: (chatId, hash) =>
+      set((s) => {
+        const cur = s.sourceControlView?.chatId === chatId ? s.sourceControlView : null;
+        const grepInput = cur?.grepInput ?? '';
+        if (hash === null && grepInput === '') return { sourceControlView: null };
+        return { sourceControlView: { chatId, expandedHash: hash, grepInput } };
+      }),
+    setSourceControlGrepInput: (chatId, text) =>
+      set((s) => {
+        const cur = s.sourceControlView?.chatId === chatId ? s.sourceControlView : null;
+        const expandedHash = cur?.expandedHash ?? null;
+        if (expandedHash === null && text === '') {
+          // Nothing to remember; never clobber ANOTHER chat's slot with a no-op clear.
+          return cur ? { sourceControlView: null } : {};
+        }
+        return { sourceControlView: { chatId, expandedHash, grepInput: text } };
+      }),
     fleetPanelOpen: { activity: true, state: true, commits: true },
     toggleFleetPanel: (id) =>
       set((s) => ({ fleetPanelOpen: { ...s.fleetPanelOpen, [id]: !s.fleetPanelOpen[id] } })),
@@ -2580,6 +2621,26 @@ export function useFleetCommitsExpandedRow(): string | null {
 /** Stable-identity action: set (or clear) the expanded Recent-commits row. */
 export function useSetFleetCommitsExpandedRow(): (v: string | null | ((cur: string | null) => string | null)) => void {
   return useUiStore((s) => s.setFleetCommitsExpandedRow);
+}
+
+/** Source Control's expanded commit hash for `chatId` (WARDEN-1798, slice 66) — NOT persisted; null for any other chat. */
+export function useSourceControlExpandedHash(chatId: string): string | null {
+  return useUiStore((s) => (s.sourceControlView?.chatId === chatId ? s.sourceControlView.expandedHash : null));
+}
+
+/** Source Control's commit-message search term for `chatId` (WARDEN-1798, slice 66) — NOT persisted; '' for any other chat. */
+export function useSourceControlGrepInput(chatId: string): string {
+  return useUiStore((s) => (s.sourceControlView?.chatId === chatId ? s.sourceControlView.grepInput : ''));
+}
+
+/** Stable-identity action: set/clear the expanded Source Control commit for a chat. */
+export function useSetSourceControlExpandedHash(): (chatId: string, hash: string | null) => void {
+  return useUiStore((s) => s.setSourceControlExpandedHash);
+}
+
+/** Stable-identity action: set/clear the Source Control commit-message search term for a chat. */
+export function useSetSourceControlGrepInput(): (chatId: string, text: string) => void {
+  return useUiStore((s) => s.setSourceControlGrepInput);
 }
 
 /** Whether one Fleet Health panel is open (WARDEN-1768, slice 61) — NOT persisted. */

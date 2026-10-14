@@ -30,7 +30,7 @@ import { DiffViewer } from '@/components/DiffViewer';
 import { cn } from '@/lib/utils';
 import { basename } from '@/lib/chatDisplay';
 import { formatTimestamp, formatAbsoluteFull } from '@/lib/formatTimestamp';
-import { useTimestampFormat } from '@/lib/uiStore';
+import { useTimestampFormat, useSourceControlExpandedHash, useSetSourceControlExpandedHash, useSourceControlGrepInput, useSetSourceControlGrepInput } from '@/lib/uiStore';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 import { fetchBounded, readListBody, readListResponse } from '@/lib/api';
@@ -406,14 +406,13 @@ export function CommitMessage({ message }: { message?: string }) {
  *  Module-level by requirement, matching the DiffInspectRow/CommitFile precedent:
  *  declaring it inside GitRepoDetails would make it a fresh component type every
  *  render, remounting the subtree and dropping the expanded row's state and focus. */
-function CommitRow({ cm, hashClass, title, expandedHash, toggleCommit, showCache, showLoading, chatId, onOpenFile }: {
+function CommitRow({ cm, hashClass, title, expandedHash, toggleCommit, showCache, chatId, onOpenFile }: {
   cm: GitCommit;
   hashClass: string;
   title: string;
   expandedHash: string | null;
   toggleCommit: (hash: string) => void;
   showCache: Record<string, { files?: GitFile[]; message?: string; error?: string | null }>;
-  showLoading: Record<string, boolean>;
   chatId: string;
   onOpenFile?: (path: string) => void;
 }) {
@@ -477,7 +476,7 @@ function CommitRow({ cm, hashClass, title, expandedHash, toggleCommit, showCache
       {expandedHash === cm.hash && (
         <div className="pb-1 pl-1">
           <CommitMessage message={showCache[cm.hash]?.message} />
-          {showLoading[cm.hash] && !showCache[cm.hash] ? (
+          {!showCache[cm.hash] ? (
             <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
           ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
             <div className="flex flex-col gap-0.5">
@@ -814,7 +813,15 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   // Per-commit expand state + the /api/git-show files cache (keyed by hash) so a
   // repeat expansion is instant. This component owns the interaction, so the state
   // lives here rather than being prop-drilled through the section/ChatSidebar.
-  const [expandedHash, setExpandedHash] = useState<string | null>(null);
+  //
+  // WARDEN-1798 (slice 66): `expandedHash` (and the search term, `grepInput`, below) live
+  // on the uiStore keyed by chatId, NOT in component-local cells — App's Settings ternary
+  // unmounts this whole subtree, so local cells reset on return. `showCache`/`showLoading`
+  // stay LOCAL (server data is not mirrored into the store), so a restored `expandedHash`
+  // has no cache after remount; the restore effect below re-fetches it.
+  const expandedHash = useSourceControlExpandedHash(chatId);
+  const setExpandedHashFor = useSetSourceControlExpandedHash();
+  const setExpandedHash = (hash: string | null) => setExpandedHashFor(chatId, hash);
   const [showCache, setShowCache] = useState<Record<string, { files?: GitFile[]; message?: string; error?: string | null }>>({});
   const [showLoading, setShowLoading] = useState<Record<string, boolean>>({});
 
@@ -866,6 +873,10 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   // stash is INDEPENDENT of expanding a commit (and vice versa). Mirrors the
   // commit-inspect pattern exactly; the only divergence is `ref=` instead of
   // `hash=` (a stash is addressed by its reflog selector stash@{n}). (WARDEN-340)
+  // WARDEN-1798 deliberate exclusion: this stays LOCAL (not on the uiStore like expandedHash).
+  // Stash refs are reflog selectors that shift on push/pop, and fetchStash's onBeforeFetch
+  // (resetStashDetail) clears the expanded stash on every (re)fetch — which fires on remount —
+  // so a restored ref would be cleared immediately or could show the wrong stash.
   const [expandedStashRef, setExpandedStashRef] = useState<string | null>(null);
   const [stashShowCache, setStashShowCache] = useState<Record<string, { files?: GitFile[]; error?: string | null }>>({});
   const [stashShowLoading, setStashShowLoading] = useState<Record<string, boolean>>({});
@@ -886,7 +897,11 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   // section reverts to its cached list (no refetch). The list RENDERING is unchanged —
   // only each section's data source swaps (see listFor below), so matches drill down via
   // the existing expand→changed-files→DiffBlock path with no new row type.
-  const [grepInput, setGrepInput] = useState('');
+  // WARDEN-1798: store-backed (see expandedHash above); the debounced search effect below
+  // re-runs on mount with the restored term and refetches the results.
+  const grepInput = useSourceControlGrepInput(chatId);
+  const setGrepInputFor = useSetSourceControlGrepInput();
+  const setGrepInput = (text: string) => setGrepInputFor(chatId, text);
   // searchResults is keyed by range: '' (recent), 'outgoing', 'incoming'. A key's value
   // is `undefined` while that range's fetch is pending (or not yet started for this
   // term); `{ status: 'ok', commits }` once it resolved (possibly empty); or
@@ -1121,6 +1136,15 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   const upstreamHref = !isDetached && upstream && originWeb && upstreamBranch
     ? `${originWeb}/tree/${encodeTreeRef(upstreamBranch)}` : null;
 
+  // WARDEN-1798 restore trap: after a Settings round trip `expandedHash` is restored from the
+  // store but the per-hash `showCache` is local and empty. Fetch the restored commit's files
+  // once (fetchShow dedups on cache/loading); CommitRow treats an absent cache entry as
+  // "loading files…" so no false "no files" flashes in the meantime.
+  useEffect(() => {
+    if (expanded && expandedHash && !showCache[expandedHash]) fetchShow(expandedHash);
+    // Deps are the gate values only (fetchShow closes over the freshest state and dedups).
+  }, [expanded, expandedHash]);
+
   const toggleCommit = (hash: string) => {
     if (expandedHash === hash) {
       setExpandedHash(null);
@@ -1317,7 +1341,6 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                   expandedHash={expandedHash}
                   toggleCommit={toggleCommit}
                   showCache={showCache}
-                  showLoading={showLoading}
                   chatId={chatId}
                   onOpenFile={onOpenFile}
                 />
@@ -1426,7 +1449,6 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                       expandedHash={expandedHash}
                       toggleCommit={toggleCommit}
                       showCache={showCache}
-                      showLoading={showLoading}
                       chatId={chatId}
                       onOpenFile={onOpenFile}
                     />
@@ -1491,7 +1513,6 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                       expandedHash={expandedHash}
                       toggleCommit={toggleCommit}
                       showCache={showCache}
-                      showLoading={showLoading}
                       chatId={chatId}
                       onOpenFile={onOpenFile}
                     />
