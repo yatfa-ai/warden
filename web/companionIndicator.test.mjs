@@ -44,13 +44,20 @@ try {
     .replace(/from ['"]@\/lib\/utils['"]/, `from './cn-stub.mjs'`);
   writeFileSync(join(tmpDir, 'StatusDot.mjs'), dotCode);
 
+  const txtPath = resolve(__dirname, 'src/lib/companionStatusText.ts');
+  const txtCode = (await transformWithOxc(readFileSync(txtPath, 'utf8'), txtPath, {})).code;
+  writeFileSync(join(tmpDir, 'companionStatusText.mjs'), txtCode);
+
   const indPath = resolve(__dirname, 'src/components/CompanionIndicator.tsx');
   const indCode = (await transformWithOxc(readFileSync(indPath, 'utf8'), indPath, {})).code
-    .replace(/from ['"]@\/components\/StatusDot['"]/, `from './StatusDot.mjs'`);
+    .replace(/from ['"]@\/components\/StatusDot['"]/, `from './StatusDot.mjs'`)
+    .replace(/from ['"]@\/lib\/companionStatusText['"]/, `from './companionStatusText.mjs'`);
   writeFileSync(join(tmpDir, 'CompanionIndicator.mjs'), indCode);
 
-  const { CompanionIndicator, companionStatusText } = await import(
+  const { CompanionIndicator } = await import(
     `${tmpDir}/CompanionIndicator.mjs?t=${Date.now()}`);
+  const { companionStatusText } = await import(
+    `${tmpDir}/companionStatusText.mjs?t=${Date.now()}`);
 
   let passed = 0;
   const test = (name, fn) => {

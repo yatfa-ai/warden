@@ -22,7 +22,8 @@ import {
   type ProjectHealthGroup,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
-import { CompanionIndicator, companionStatusText } from './CompanionIndicator';
+import { CompanionIndicator } from './CompanionIndicator';
+import { companionStatusText } from '@/lib/companionStatusText';
 import { Sparkline } from '@/components/Sparkline';
 import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
 import { FleetStateTimeline } from '@/components/FleetStateTimeline';
