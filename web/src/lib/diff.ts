@@ -36,6 +36,28 @@ export function classifyDiffLine(line: string): DiffLineKind {
   return 'context';
 }
 
+// Extract only the lines of one kind from a unified diff with the single leading
+// diff marker ('+' / '-') stripped, joined by '\n' (WARDEN-1800: DiffBlock's
+// "Copy added lines" / "Copy removed lines"). Built on classifyDiffLine so the
+// +++/--- file headers (classified 'meta') are excluded by construction. Pure (no
+// React) so it is node-unit-testable like classifyDiffLine. Empty string when the
+// diff has no lines of that kind (callers disable the menu item then).
+function linesOfKind(diff: string, kind: 'add' | 'remove'): string {
+  return diff
+    .split('\n')
+    .filter(line => classifyDiffLine(line) === kind)
+    .map(line => line.slice(1))
+    .join('\n');
+}
+
+export function addedLinesOf(diff: string): string {
+  return linesOfKind(diff, 'add');
+}
+
+export function removedLinesOf(diff: string): string {
+  return linesOfKind(diff, 'remove');
+}
+
 // Collect the indices of changed regions in a unified diff for prev/next nav
 // (WARDEN-663). A "changed region" is a maximal RUN of consecutive added/removed
 // lines; the jump target is the FIRST line of each run, so the position indicator
