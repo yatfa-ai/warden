@@ -1,11 +1,14 @@
-import { useState, type ReactNode } from 'react';
+import { createContext, useContext, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { PluggableList } from 'unified';
+import type { Components, ExtraProps } from 'react-markdown';
 import { Button } from '@/components/ui/button';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
 import { CheckIcon, CopyIcon } from 'lucide-react';
 import { resolveDocRelative } from '@/lib/docLinks';
 import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { openExternalUrl } from '@/lib/electron';
 import { remarkIssueLinks, ISSUE_LINK_MARKER } from '@/lib/remarkIssueLinks';
 import type { IssueLinkEntry } from '@/lib/issue-links';
@@ -21,23 +24,68 @@ function CodeBlock({ language, children }: { language?: string; children: string
     setTimeout(() => setCopied(false), 1500);
   };
   return (
-    <div className="overflow-hidden rounded-lg border bg-muted/40">
-      <div className="flex items-center justify-between border-b bg-muted/60 px-2 py-1">
-        <span className="text-xs text-muted-foreground">{language || 'code'}</span>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          onClick={copy}
-          aria-label="Copy code"
-          title="Copy code"
-        >
-          {copied ? <CheckIcon className="text-green-500" /> : <CopyIcon />}
-        </Button>
-      </div>
-      <pre className="overflow-x-auto p-3 text-xs leading-relaxed">
-        <code className="font-mono whitespace-pre">{children}</code>
-      </pre>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="overflow-hidden rounded-lg border bg-muted/40">
+          <div className="flex items-center justify-between border-b bg-muted/60 px-2 py-1">
+            <span className="text-xs text-muted-foreground">{language || 'code'}</span>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={copy}
+              aria-label="Copy code"
+              title="Copy code"
+            >
+              {copied ? <CheckIcon className="text-green-500" /> : <CopyIcon />}
+            </Button>
+          </div>
+          <pre className="overflow-x-auto p-3 text-xs leading-relaxed">
+            <code className="font-mono whitespace-pre">{children}</code>
+          </pre>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => void copyWithToast(children)}>Copy code</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+// Link context (WARDEN-1794): the per-MarkdownBody inputs the `a` renderer needs
+// (doc-relative resolution) flow through React context so the `a` renderer — and
+// the whole `components` map — can be MODULE-LEVEL and therefore a stable
+// component identity across re-renders. An inline `components` map would mint a
+// new `a` component type every render (ObserverMarkdown re-renders while a reply
+// streams), remounting the anchor subtree and dismissing an open Radix menu.
+const MarkdownLinkContext = createContext<{
+  baseFilePath?: string;
+  onOpenPath?: (resolvedPath: string) => void;
+}>({});
+
+// Themed right-click menu for one rendered link. Kit ContextMenu only; the
+// anchor is the single-root trigger (no stopPropagation/preventDefault here, so
+// right-clicking plain text still reaches the consumer's outer whole-text menu).
+function LinkMenu({
+  anchor,
+  openLabel,
+  onOpen,
+  copyLabel,
+  copyValue,
+}: {
+  anchor: ReactNode;
+  openLabel: string;
+  onOpen: () => void;
+  copyLabel: string;
+  copyValue: string;
+}) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{anchor}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onOpen}>{openLabel}</ContextMenuItem>
+        <ContextMenuItem onSelect={() => void copyWithToast(copyValue)}>{copyLabel}</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -53,7 +101,10 @@ function CodeBlock({ language, children }: { language?: string; children: string
 // `[setup](./INSTALL.md)` or `[utils](../lib/utils.ts)` is resolved against the
 // doc's directory and rendered as an in-app link that swaps the viewer in place
 // via `onOpenPath(resolved)`. A real `href` (the resolved repo-relative path) is
-// kept so the browser's context-menu (copy link / open in new tab) still works.
+// kept on the anchor. Links and fenced code blocks carry their own themed
+// right-click menus (WARDEN-1794: Open link / Copy link address — "Open file" /
+// "Copy file path" for resolved doc links — and Copy code); the native browser
+// menu is gone since the themed-menu cutover.
 // When neither prop is passed — or the resolver returns null for a non-relative
 // href (http(s), mailto, anchors, …) — links render exactly as before:
 // `target="_blank" rel="noreferrer noopener"`. ObserverMarkdown and
@@ -83,111 +134,144 @@ export function MarkdownBody({
   const remarkPlugins: PluggableList = issueEntries?.length
     ? [remarkGfm, [remarkIssueLinks, issueEntries]]
     : [remarkGfm];
+  const linkContext = useMemo(() => ({ baseFilePath, onOpenPath }), [baseFilePath, onOpenPath]);
   return (
-    <Markdown
-      remarkPlugins={remarkPlugins}
-      components={{
-        h1: ({ children }) => <h1 className="text-base font-semibold">{children}</h1>,
-        h2: ({ children }) => <h2 className="text-base font-semibold">{children}</h2>,
-        h3: ({ children }) => <h3 className="text-sm font-semibold">{children}</h3>,
-        h4: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
-        h5: ({ children }) => <h5 className="text-xs font-semibold">{children}</h5>,
-        h6: ({ children }) => <h6 className="text-xs font-semibold text-muted-foreground">{children}</h6>,
-        p: ({ children }) => <p className="m-0">{children}</p>,
-        a: ({ children, href, node }) => {
-          // Issue-key links (WARDEN-1394): only links the remarkIssueLinks
-          // plugin minted carry the data-issue-link marker — a hand-written
-          // markdown link to the same tracker URL never does, so it keeps the
-          // plain-`<a>` behavior below. Click contract: openExternalUrl (the
-          // system browser — never an internal Electron window), preventDefault
-          // so the browser does not ALSO navigate; href kept for copy-link.
-          if (href && node?.properties && ISSUE_LINK_MARKER in node.properties) {
-            return (
-              <a
-                href={href}
-                data-issue-link={String(node.properties[ISSUE_LINK_MARKER] ?? '')}
-                onClick={(e) => {
-                  e.preventDefault();
-                  void openExternalUrl(href);
-                }}
-                className="text-primary underline underline-offset-2"
-              >
-                {children}
-              </a>
-            );
-          }
-          // Resolve relative file refs (./x, ../y, dir/z.md) against the doc's
-          // dir ONLY when both opt-in props are present; null otherwise (every
-          // non-relative href, or no-resolver contexts like ObserverMarkdown).
-          const resolved =
-            href && onOpenPath && baseFilePath ? resolveDocRelative(baseFilePath, href) : null;
-          if (resolved !== null && onOpenPath) {
-            // In-app nav: swap the viewer in place. preventDefault so the real
-            // href (the resolved repo-relative path, kept for copy-link/open-in-
-            // new-tab) does not also navigate the browser.
-            return (
-              <a
-                href={resolved}
-                onClick={(e) => {
-                  e.preventDefault();
-                  onOpenPath(resolved);
-                }}
-                className="text-primary underline underline-offset-2"
-              >
-                {children}
-              </a>
-            );
-          }
-          return (
-            <a href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline underline-offset-2">
-              {children}
-            </a>
-          );
-        },
-        strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-        em: ({ children }) => <em className="italic">{children}</em>,
-        ul: ({ children }) => <ul className="m-0 list-disc space-y-1 pl-5">{children}</ul>,
-        ol: ({ children }) => <ol className="m-0 list-decimal space-y-1 pl-5">{children}</ol>,
-        li: ({ children }) => {
-          // Tighten nested paragraphs inside list items.
-          const compacted = unwrapSingleParagraph(children);
-          return <li className="marker:text-muted-foreground">{compacted}</li>;
-        },
-        blockquote: ({ children }) => (
-          <blockquote className="border-l-2 border-border pl-3 italic text-muted-foreground">
-            {children}
-          </blockquote>
-        ),
-        hr: () => <hr className="border-border" />,
-        table: ({ children }) => (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-xs">{children}</table>
-          </div>
-        ),
-        thead: ({ children }) => <thead className="bg-muted/60">{children}</thead>,
-        th: ({ children }) => (
-          <th className="border border-border px-2 py-1 text-left font-medium">{children}</th>
-        ),
-        td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
-        // Fenced code blocks: react-markdown renders <pre><code class="language-x">.
-        // We intercept <pre> and promote it to a styled CodeBlock with a copy
-        // button. Inline `code` (no language, single line) stays a plain code tag.
-        pre: ({ children }) => {
-          const code = onlyElement(children);
-          const className: string = code?.props?.className || '';
-          const match = /language-(\w+)/.exec(className);
-          const raw = String(code?.props?.children ?? '').replace(/\n$/, '');
-          return <CodeBlock language={match?.[1]}>{raw}</CodeBlock>;
-        },
-        code: ({ children }) => (
-          <code className="rounded bg-muted px-1 py-0.5 font-mono">{children}</code>
-        ),
-      }}
-    >
-      {children}
-    </Markdown>
+    <MarkdownLinkContext.Provider value={linkContext}>
+      <Markdown remarkPlugins={remarkPlugins} components={MARKDOWN_COMPONENTS}>
+        {children}
+      </Markdown>
+    </MarkdownLinkContext.Provider>
   );
 }
+
+// The `a` renderer (module-level => stable identity; see MarkdownLinkContext).
+// Three shapes, click contracts unchanged (WARDEN-805 / WARDEN-1394); each is
+// wrapped in the LinkMenu (WARDEN-1794). An anchor with no href renders plain —
+// there is nothing to open or copy.
+function MarkdownLink({ children, href, node }: ComponentProps<'a'> & ExtraProps) {
+  const { baseFilePath, onOpenPath } = useContext(MarkdownLinkContext);
+  if (!href) {
+    return <a className="text-primary underline underline-offset-2">{children}</a>;
+  }
+  // Issue-key links (WARDEN-1394): only links the remarkIssueLinks plugin minted
+  // carry the data-issue-link marker — a hand-written markdown link to the same
+  // tracker URL never does, so it keeps the plain-`<a>` behavior below. Click
+  // contract: openExternalUrl (the system browser — never an internal Electron
+  // window), preventDefault so the browser does not ALSO navigate; href kept.
+  if (node?.properties && ISSUE_LINK_MARKER in node.properties) {
+    return (
+      <LinkMenu
+        openLabel="Open link"
+        onOpen={() => void openExternalUrl(href)}
+        copyLabel="Copy link address"
+        copyValue={href}
+        anchor={
+          <a
+            href={href}
+            data-issue-link={String(node.properties[ISSUE_LINK_MARKER] ?? '')}
+            onClick={(e) => {
+              e.preventDefault();
+              void openExternalUrl(href);
+            }}
+            className="text-primary underline underline-offset-2"
+          >
+            {children}
+          </a>
+        }
+      />
+    );
+  }
+  // Resolve relative file refs (./x, ../y, dir/z.md) against the doc's dir ONLY
+  // when both opt-in props are present; null otherwise.
+  const resolved = onOpenPath && baseFilePath ? resolveDocRelative(baseFilePath, href) : null;
+  if (resolved !== null && onOpenPath) {
+    // In-app nav: swap the viewer in place. preventDefault so the real href (the
+    // resolved repo-relative path) does not also navigate the browser.
+    return (
+      <LinkMenu
+        openLabel="Open file"
+        onOpen={() => onOpenPath(resolved)}
+        copyLabel="Copy file path"
+        copyValue={resolved}
+        anchor={
+          <a
+            href={resolved}
+            onClick={(e) => {
+              e.preventDefault();
+              onOpenPath(resolved);
+            }}
+            className="text-primary underline underline-offset-2"
+          >
+            {children}
+          </a>
+        }
+      />
+    );
+  }
+  return (
+    <LinkMenu
+      openLabel="Open link"
+      onOpen={() => void openExternalUrl(href)}
+      copyLabel="Copy link address"
+      copyValue={href}
+      anchor={
+        <a href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline underline-offset-2">
+          {children}
+        </a>
+      }
+    />
+  );
+}
+
+// Module-level so every component type is stable across renders (WARDEN-1794).
+const MARKDOWN_COMPONENTS: Components = {
+    h1: ({ children }) => <h1 className="text-base font-semibold">{children}</h1>,
+    h2: ({ children }) => <h2 className="text-base font-semibold">{children}</h2>,
+    h3: ({ children }) => <h3 className="text-sm font-semibold">{children}</h3>,
+    h4: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
+    h5: ({ children }) => <h5 className="text-xs font-semibold">{children}</h5>,
+    h6: ({ children }) => <h6 className="text-xs font-semibold text-muted-foreground">{children}</h6>,
+    p: ({ children }) => <p className="m-0">{children}</p>,
+    a: MarkdownLink,
+    strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+    em: ({ children }) => <em className="italic">{children}</em>,
+    ul: ({ children }) => <ul className="m-0 list-disc space-y-1 pl-5">{children}</ul>,
+    ol: ({ children }) => <ol className="m-0 list-decimal space-y-1 pl-5">{children}</ol>,
+    li: ({ children }) => {
+      // Tighten nested paragraphs inside list items.
+      const compacted = unwrapSingleParagraph(children);
+      return <li className="marker:text-muted-foreground">{compacted}</li>;
+    },
+    blockquote: ({ children }) => (
+      <blockquote className="border-l-2 border-border pl-3 italic text-muted-foreground">
+        {children}
+      </blockquote>
+    ),
+    hr: () => <hr className="border-border" />,
+    table: ({ children }) => (
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-xs">{children}</table>
+      </div>
+    ),
+    thead: ({ children }) => <thead className="bg-muted/60">{children}</thead>,
+    th: ({ children }) => (
+      <th className="border border-border px-2 py-1 text-left font-medium">{children}</th>
+    ),
+    td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
+    // Fenced code blocks: react-markdown renders <pre><code class="language-x">.
+    // We intercept <pre> and promote it to a styled CodeBlock with a copy
+    // button. Inline `code` (no language, single line) stays a plain code tag.
+    pre: ({ children }) => {
+      const code = onlyElement(children);
+      const className: string = code?.props?.className || '';
+      const match = /language-(\w+)/.exec(className);
+      const raw = String(code?.props?.children ?? '').replace(/\n$/, '');
+      return <CodeBlock language={match?.[1]}>{raw}</CodeBlock>;
+    },
+    code: ({ children }) => (
+      <code className="rounded bg-muted px-1 py-0.5 font-mono">{children}</code>
+    ),
+};
 
 // react-markdown wraps loose list-item text in <p>; collapse a single-child <p>
 // so list rows aren't double-spaced. Passes anything else through untouched.
