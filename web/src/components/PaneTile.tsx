@@ -12,7 +12,7 @@ import { findUrlCandidates, maskUrls, maskSpans } from '@/lib/url-links';
 import { useIssueLinksEnabled, useIssueLinkTrackers, useShowHostTags } from '@/lib/appConfigHooks';
 import { findIssueCandidates, issueTrackerUrl, paneIssueEntryFor, shouldResolvePaneProject, type IssueLinkEntry } from '@/lib/issue-links';
 import { hostTagOf } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/uiStore';
+import { useHostLabels, usePaneAgentExit, useMarkPaneAgentLive, useMarkPaneAgentExited } from '@/lib/uiStore';
 import { handleOsc52, copyText } from '@/lib/clipboard';
 import { readClipboardImage, deliverImagePaste, shouldRouteNativePasteToTerminal } from '@/lib/pasteImage';
 import { shouldRouteNativeCutToTerminal, TERMINAL_SELECT_ALL_EVENT } from '@/lib/terminalEdit';
@@ -402,9 +402,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // would mis-close a pane that is merely re-attaching. chat.active flips on the
   // next poll tick (auto-refresh is 60s, visibility-gated) — the documented
   // trade-off for correctness. active===null (undiscovered/lazy) is NOT an exit.
-  const wasEverActiveRef = useRef(false);   // has this pane's agent ever been active:true?
-  const exitHandledRef = useRef(false);     // one-shot: the exit action fires once per live→exited transition
-  const [agentExited, setAgentExited] = useState(false);   // true after a live→exited transition: 'dim' shows the overlay, 'keep' shows an honest StatusDot only
+  // WARDEN-1820: the live/exited phase is a non-persisted uiStore session fact
+  // (paneAgentExit), not component-local — PaneTile remounts on every Settings
+  // round trip / un-maximize / workspace switch, which used to reset it.
+  const agentExited = usePaneAgentExit(id) === 'exited';   // true after a live→exited transition: 'dim' shows the overlay, 'keep' shows an honest StatusDot only
+  const markAgentLive = useMarkPaneAgentLive();
+  const markAgentExited = useMarkPaneAgentExited();   // atomic one-shot: true iff the phase was 'live'
   // WARDEN-365: this pane's resolved host key — the chat's host ('(local)' or an
   // SSH alias), falling back to the restore hint then '(local)'. Derived via
   // hostKeyOf (the shared, unit-tested seam) and read at send-time only — it and
@@ -1196,37 +1199,31 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   }, [terminalCursorStyle]);
 
   // WARDEN-248: react to the agent process exiting per the "pane on agent exit"
-  // pref. Fires only on a genuine live→exited transition (see wasEverActiveRef
-  // above). Keyed on chat?.active so a restart (active returns true) resets the
-  // dim overlay and re-arms the one-shot so a future exit can fire again.
-  // onExitBehavior is in the deps so a Settings change is honored on the next
-  // transition; the one-shot guard (exitHandledRef) means a mid-dead pref flip
-  // never retroactively closes an already-handled pane.
+  // pref. Fires only on a genuine live→exited transition (the store's
+  // `markPaneAgentExited` returns true iff the phase was 'live'). Keyed on
+  // chat?.active so a restart (active returns true) clears the dim overlay and
+  // re-arms the one-shot so a future exit can fire again. onExitBehavior is in
+  // the deps so a Settings change is honored on the next transition; the atomic
+  // mark means a mid-dead pref flip never retroactively closes a handled pane.
   useEffect(() => {
-    const isActive = chat?.active === true;
-    if (isActive) {
-      wasEverActiveRef.current = true;
-      // Agent is (re)started — clear prior exit state so a restarted agent reads
-      // as live again: the dim overlay clears and a future exit can re-fire.
-      exitHandledRef.current = false;
-      setAgentExited(false);
+    if (chat?.active === true) {
+      // Agent is (re)started — records 'live': the dim overlay clears and a
+      // future exit can re-fire.
+      markAgentLive(id);
       return;
     }
     // active === false of a previously-live pane = genuine exit. null (lazy) is not.
-    if (chat?.active === false && wasEverActiveRef.current && !exitHandledRef.current) {
-      exitHandledRef.current = true;
+    if (chat?.active === false && markAgentExited(id)) {
       if (onExitBehavior === 'auto-close') {
         onClose();
-      } else {
-        // 'dim' AND 'keep': the agent has genuinely exited. dim also dims the
-        // body (gated separately on `dimmed` below); keep stays full-brightness —
-        // only the StatusDot becomes honest (WARDEN-759).
-        setAgentExited(true);
       }
+      // 'dim' AND 'keep': the exited phase (read via usePaneAgentExit) drives the
+      // honest StatusDot; dim also dims the body (gated separately on `dimmed`
+      // below); keep stays full-brightness (WARDEN-759).
     }
     // onClose is intentionally omitted from deps: it is an inline callback whose
     // identity changes every render (matching the onClearNew effect above); the
-    // one-shot ref makes the call idempotent regardless.
+    // atomic one-shot mark makes the call idempotent regardless.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat?.active, onExitBehavior]);
 

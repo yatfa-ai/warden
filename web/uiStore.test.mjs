@@ -3927,6 +3927,109 @@ test('source-shape guard: ObserverTabs holds no local auto-start ref and uses th
   assert.match(store, /markObserverAutoStarted/);
 });
 
+// ─── paneAgentExit (WARDEN-1820, roadmap WARDEN-1204 slice 70): NON-persisted per-pane agent-exit phase ───
+console.log('\ncreateUiStore — paneAgentExit / markPaneAgentLive / markPaneAgentExited (not persisted; session fact)');
+test('paneAgentExit starts empty', () => {
+  reset();
+  assert.deepEqual(createUiStore().getState().paneAgentExit, {});
+});
+test('markPaneAgentExited is true exactly once after markPaneAgentLive, false on repeat', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().markPaneAgentLive('p1');
+  assert.equal(s.getState().markPaneAgentExited('p1'), true);
+  assert.equal(s.getState().paneAgentExit.p1, 'exited');
+  assert.equal(s.getState().markPaneAgentExited('p1'), false);
+  assert.equal(s.getState().paneAgentExit.p1, 'exited');
+});
+test('markPaneAgentExited is false for a never-live id and records nothing', () => {
+  reset();
+  const s = createUiStore();
+  assert.equal(s.getState().markPaneAgentExited('ghost'), false);
+  assert.deepEqual(s.getState().paneAgentExit, {});
+});
+test('markPaneAgentLive after exit re-arms the one-shot; repeated live is identity-preserving', () => {
+  reset();
+  const s = createUiStore();
+  s.getState().markPaneAgentLive('p1');
+  const before = s.getState().paneAgentExit;
+  s.getState().markPaneAgentLive('p1');
+  assert.equal(s.getState().paneAgentExit, before, 'already live → same object');
+  assert.equal(s.getState().markPaneAgentExited('p1'), true);
+  s.getState().markPaneAgentLive('p1');
+  assert.equal(s.getState().paneAgentExit.p1, 'live');
+  assert.equal(s.getState().markPaneAgentExited('p1'), true, 'a restarted agent can exit again');
+});
+test('removing a pane id from EVERY workspace drops its entry (closed-then-reopened dead pane cannot auto-close)', () => {
+  reset();
+  const s = createUiStore({ workspaces: [ws('a', ['p1', 'p2'], 'p1')], activeWorkspaceId: 'a' });
+  s.getState().markPaneAgentLive('p1');
+  s.getState().markPaneAgentLive('p2');
+  s.getState().markPaneAgentExited('p1');
+  s.getState().setOpenPanes((p) => p.filter((x) => x !== 'p1'));
+  assert.deepEqual(s.getState().paneAgentExit, { p2: 'live' });
+  s.getState().setOpenPanes((p) => [...p, 'p1']);
+  assert.equal(s.getState().markPaneAgentExited('p1'), false, 'reopened dead pane starts with no history');
+});
+test('a no-op / reorder setOpenPanes keeps the entries (same object)', () => {
+  reset();
+  const s = createUiStore({ workspaces: [ws('a', ['p1', 'p2'], 'p1')], activeWorkspaceId: 'a' });
+  s.getState().markPaneAgentLive('p1');
+  const before = s.getState().paneAgentExit;
+  s.getState().setOpenPanes(['p2', 'p1']);
+  assert.equal(s.getState().paneAgentExit, before);
+});
+test('moving a pane between workspaces keeps its entry', () => {
+  reset();
+  const s = createUiStore({ workspaces: [ws('a', ['p1'], 'p1'), ws('b')], activeWorkspaceId: 'a' });
+  s.getState().markPaneAgentLive('p1');
+  s.getState().markPaneAgentExited('p1');
+  s.getState().movePaneToWorkspace('p1', 'b');
+  assert.equal(s.getState().paneAgentExit.p1, 'exited');
+  s.getState().movePaneToNewWorkspace('p1');
+  assert.equal(s.getState().paneAgentExit.p1, 'exited');
+});
+test('closeWorkspace drops entries for panes absent from every remaining workspace, keeps moved/shared ones', () => {
+  reset();
+  const s = createUiStore({ workspaces: [ws('a', ['p1', 'p3'], 'p1'), ws('b', ['p2', 'p3'], 'p2')], activeWorkspaceId: 'a' });
+  for (const id of ['p1', 'p2', 'p3']) s.getState().markPaneAgentLive(id);
+  s.getState().closeWorkspace('b');
+  assert.deepEqual(Object.keys(s.getState().paneAgentExit).sort(), ['p1', 'p3']);
+});
+test('paneAgentExit factory isolation — marks never leak into the app store or a sibling', () => {
+  reset();
+  const a = createUiStore();
+  const b = createUiStore();
+  const before = uiStore.getState().paneAgentExit;
+  a.getState().markPaneAgentLive('x');
+  assert.deepEqual(b.getState().paneAgentExit, {});
+  assert.equal(uiStore.getState().paneAgentExit, before);
+});
+test('paneAgentExit is NOT persisted: absent from STORE_PERSISTED_KEYS, the picked prefs and loadUi/loadObs; never seeded', () => {
+  reset();
+  assert.ok(!STORE_PERSISTED_KEYS.includes('paneAgentExit'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('markPaneAgentLive'));
+  assert.ok(!STORE_PERSISTED_KEYS.includes('markPaneAgentExited'));
+  const s = createUiStore();
+  s.getState().markPaneAgentLive('a');
+  const picked = selectPersistedStorePrefs(s.getState());
+  assert.ok(!('paneAgentExit' in picked));
+  saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
+  assert.ok(!('paneAgentExit' in loadUi()));
+  assert.ok(!('paneAgentExit' in loadObs()));
+  assert.deepEqual(createUiStore().getState().paneAgentExit, {}, 'never seeded');
+});
+test('source-shape guard: PaneTile holds no local exit cells, gates auto-close on the atomic mark, keeps onExitBehavior in deps (WARDEN-1820)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'PaneTile.tsx'), 'utf8');
+  assert.ok(!/wasEverActiveRef|exitHandledRef/.test(src), 'restored local refs would reintroduce the remount reset');
+  assert.ok(!/setAgentExited/.test(src), 'no local useState for agentExited');
+  assert.match(src, /usePaneAgentExit\(id\)/);
+  assert.match(src, /markAgentExited\(id\)/);
+  assert.match(src, /chat\?\.active === false && markAgentExited\(id\)\) \{\s*if \(onExitBehavior === 'auto-close'\) \{\s*onClose\(\);/);
+  assert.match(src, /\}, \[chat\?\.active, onExitBehavior\]\);/);
+  assert.match(src, /eslint-disable-next-line react-hooks\/exhaustive-deps/);
+});
+
 // ─── fleetCommitsExpandedRow (WARDEN-1783/1784, roadmap WARDEN-1204 slice 64): NON-persisted Recent-commits expanded row ───
 console.log('\ncreateUiStore — fleetCommitsExpandedRow (not persisted; session fact)');
 test('fleetCommitsExpandedRow starts null', () => {
