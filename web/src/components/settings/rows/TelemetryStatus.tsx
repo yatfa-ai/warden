@@ -3,8 +3,50 @@
 // SettingsPage (WARDEN-664); behavior is unchanged. A row file rather than a
 // section because neither is a `<SettingsSection>` body — they render inline
 // inside the Telemetry section above the endpoint field.
+import { useRef } from 'react';
 import { AlertTriangle, Send } from 'lucide-react';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
+
+/**
+ * WARDEN-1818 — the themed right-click menu shared by the status banners below.
+ * `useBannerMessage` hands back a ref for the banner's root element plus a
+ * `message()` that reads the plain text the user actually SEES (the element's own
+ * text, whitespace-normalised) — so the copied sentence can never drift from the
+ * rendered one. Only the host-only `destination` label (the section's existing
+ * disclosure level) is ever offered for copy: never the auth token, never the full
+ * endpoint URL.
+ */
+function useBannerMessage() {
+  const ref = useRef<HTMLDivElement>(null);
+  const message = () => (ref.current?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  return { ref, message };
+}
+
+function BannerMenuContent({
+  message,
+  destination,
+}: {
+  message: () => string;
+  destination?: string;
+}) {
+  return (
+    <ContextMenuContent>
+      <ContextMenuItem onSelect={() => copyWithToast(message())}>Copy status message</ContextMenuItem>
+      {destination && <ContextMenuSeparator />}
+      {destination && (
+        <ContextMenuItem onSelect={() => copyWithToast(destination)}>Copy receiver host</ContextMenuItem>
+      )}
+    </ContextMenuContent>
+  );
+}
 
 /**
  * WARDEN-557 — the honest "is signal actually flowing?" status for the
@@ -36,6 +78,7 @@ export function TelemetrySendingStatus({
   endpoint: string;
 }) {
   const status = deriveTelemetrySendingStatus({ collecting, endpoint });
+  const { ref, message } = useBannerMessage();
   if (status.kind === 'off') return null;
   if (status.kind === 'unconfigured') {
     return (
@@ -43,17 +86,23 @@ export function TelemetrySendingStatus({
       // slice is that the status updates live as the user toggles a consent
       // category or edits the endpoint. The unconfigured notice is the state change most
       // worth announcing — "you opted in, but nothing is being sent yet."
-      <div
-        role="status"
-        className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
-      >
-        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-        <p className="text-amber-800 dark:text-amber-200">
-          <span className="font-medium">Enabled, but nothing is being sent.</span>{' '}
-          No receiver endpoint is configured, so events buffer in memory and are
-          dropped. Add a receiver URL below for signal to flow.
-        </p>
-      </div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={ref}
+            role="status"
+            className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <p className="text-amber-800 dark:text-amber-200">
+              <span className="font-medium">Enabled, but nothing is being sent.</span>{' '}
+              No receiver endpoint is configured, so events buffer in memory and are
+              dropped. Add a receiver URL below for signal to flow.
+            </p>
+          </div>
+        </ContextMenuTrigger>
+        <BannerMenuContent message={message} />
+      </ContextMenu>
     );
   }
   if (status.kind === 'needs-scheme') {
@@ -62,39 +111,51 @@ export function TelemetrySendingStatus({
     // never rewrites it), but the cause — and the fix — is different, so it gets
     // its own amber banner: not "no endpoint" but "add the scheme".
     return (
-      <div
-        role="status"
-        className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
-      >
-        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-        <p className="text-amber-800 dark:text-amber-200">
-          <span className="font-medium">
-            Enabled, but nothing is being sent — the endpoint is missing its scheme.
-          </span>{' '}
-          Warden sends to the endpoint exactly as configured, so{' '}
-          <span className="font-medium">{status.destination}</span> cannot receive
-          events without it. Add <span className="font-medium">https://</span> to the
-          endpoint below for signal to flow.
-        </p>
-      </div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={ref}
+            role="status"
+            className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <p className="text-amber-800 dark:text-amber-200">
+              <span className="font-medium">
+                Enabled, but nothing is being sent — the endpoint is missing its scheme.
+              </span>{' '}
+              Warden sends to the endpoint exactly as configured, so{' '}
+              <span className="font-medium">{status.destination}</span> cannot receive
+              events without it. Add <span className="font-medium">https://</span> to the
+              endpoint below for signal to flow.
+            </p>
+          </div>
+        </ContextMenuTrigger>
+        <BannerMenuContent message={message} destination={status.destination} />
+      </ContextMenu>
     );
   }
   return (
     // role="status": a live region so the transition INTO "configured" (user
     // pastes a receiver URL) is announced alongside the unconfigured notice above.
-    <div
-      role="status"
-      className="flex items-start gap-2 rounded-md border border-green-500/30 bg-green-500/5 px-3 py-2 text-xs"
-    >
-      <Send className="mt-0.5 size-3.5 shrink-0 text-green-600 dark:text-green-400" aria-hidden />
-      <p className="text-muted-foreground">
-        <span className="font-medium text-foreground">
-          Configured — events will go to {status.destination}.
-        </span>{' '}
-        That is the receiver host above; warden does not verify whether the
-        receiver is reachable or accepts events.
-      </p>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          ref={ref}
+          role="status"
+          className="flex items-start gap-2 rounded-md border border-green-500/30 bg-green-500/5 px-3 py-2 text-xs"
+        >
+          <Send className="mt-0.5 size-3.5 shrink-0 text-green-600 dark:text-green-400" aria-hidden />
+          <p className="text-muted-foreground">
+            <span className="font-medium text-foreground">
+              Configured — events will go to {status.destination}.
+            </span>{' '}
+            That is the receiver host above; warden does not verify whether the
+            receiver is reachable or accepts events.
+          </p>
+        </div>
+      </ContextMenuTrigger>
+      <BannerMenuContent message={message} destination={status.destination} />
+    </ContextMenu>
   );
 }
 
@@ -113,27 +174,34 @@ export function TelemetrySendingStatus({
  * Settings — turning a silent permanent loss into a visible, actionable state.
  */
 export function TelemetryRuntimeDriftStatus({ destination }: { destination: string }) {
+  const { ref, message } = useBannerMessage();
   return (
     // role="status" (an aria-live=polite region), mirroring TelemetrySendingStatus:
     // the status appears the moment a 415 arms (the bridge pushes on arm/clear),
     // without reopening Settings — turning a silent permanent loss into a visible,
     // announced state. Polite (not alert) because the warning persists until the
     // mismatch resolves; an assertive alert would re-announce on every re-render.
-    <div
-      role="status"
-      data-telemetry-runtime-status="schema-drift"
-      className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
-    >
-      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-      <p className="text-amber-800 dark:text-amber-200">
-        <span className="font-medium">Schema mismatch — events are not being delivered.</span>{' '}
-        Telemetry is on, but{destination ? <> your receiver at{' '}
-        <span className="font-medium">{destination}</span></> : ' your receiver'} rejected it as a
-        schema-version mismatch. Further sends to this endpoint are paused to avoid
-        losing every event. Update the client or the receiver so the schema versions
-        agree, then click Test connection below to confirm and resume delivery.
-      </p>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          ref={ref}
+          role="status"
+          data-telemetry-runtime-status="schema-drift"
+          className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+          <p className="text-amber-800 dark:text-amber-200">
+            <span className="font-medium">Schema mismatch — events are not being delivered.</span>{' '}
+            Telemetry is on, but{destination ? <> your receiver at{' '}
+            <span className="font-medium">{destination}</span></> : ' your receiver'} rejected it as a
+            schema-version mismatch. Further sends to this endpoint are paused to avoid
+            losing every event. Update the client or the receiver so the schema versions
+            agree, then click Test connection below to confirm and resume delivery.
+          </p>
+        </div>
+      </ContextMenuTrigger>
+      <BannerMenuContent message={message} destination={destination} />
+    </ContextMenu>
   );
 }
 
@@ -156,26 +224,33 @@ export function TelemetryRuntimeDriftStatus({ destination }: { destination: stri
  * because "events will go to X" is misleading while X is refusing every send.
  */
 export function TelemetryRuntimeDeliveryFailingStatus({ destination }: { destination: string }) {
+  const { ref, message } = useBannerMessage();
   return (
     // role="status" (an aria-live=polite region), mirroring the schema-drift banner:
     // the status appears the moment a sustained drop run arms (the bridge pushes on
     // arm/clear) and disappears the moment the next send lands, without reopening
     // Settings. Polite (not alert): the warning persists until delivery recovers, and
     // an assertive alert would re-announce on every re-render.
-    <div
-      role="status"
-      data-telemetry-runtime-status="delivery-failing"
-      className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
-    >
-      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-      <p className="text-amber-800 dark:text-amber-200">
-        <span className="font-medium">Events are not being delivered.</span>{' '}
-        Telemetry is on, but{destination ? <> your receiver at{' '}
-        <span className="font-medium">{destination}</span></> : ' your receiver'} has not
-        accepted the last several sends. Warden keeps retrying — delivery resumes
-        automatically the moment the receiver accepts an event again. Check that the
-        receiver is running and reachable.
-      </p>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          ref={ref}
+          role="status"
+          data-telemetry-runtime-status="delivery-failing"
+          className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+          <p className="text-amber-800 dark:text-amber-200">
+            <span className="font-medium">Events are not being delivered.</span>{' '}
+            Telemetry is on, but{destination ? <> your receiver at{' '}
+            <span className="font-medium">{destination}</span></> : ' your receiver'} has not
+            accepted the last several sends. Warden keeps retrying — delivery resumes
+            automatically the moment the receiver accepts an event again. Check that the
+            receiver is running and reachable.
+          </p>
+        </div>
+      </ContextMenuTrigger>
+      <BannerMenuContent message={message} destination={destination} />
+    </ContextMenu>
   );
 }

@@ -11,6 +11,14 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { TelemetryTransparency } from '@/components/TelemetryTransparency';
 import { describeTelemetryTestVerdict, type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import { deriveTelemetryRuntimeStatus } from '@/lib/telemetry/runtimeStatus';
@@ -227,19 +235,37 @@ export function TelemetrySection({
         </div>
         {telemetryTestVerdict && (() => {
           const { tone, label } = describeTelemetryTestVerdict(telemetryTestVerdict);
+          // WARDEN-1818 — right-click menu. The copied text is exactly what the panel
+          // shows (label + message); the receiver is the host-only label, never the
+          // full endpoint URL or the auth token.
+          const verdictText = `${label}\n${telemetryTestVerdict.message}`;
+          const receiverHost = telemetryDestinationLabel(config.telemetryEndpoint);
+          const testDisabled = telemetryTestLoading || !config.telemetryEndpoint.trim();
           return (
-            <div
-              className={
-                tone === 'positive'
-                  ? 'rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400'
-                  : 'rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400'
-              }
-              data-telemetry-test-verdict={telemetryTestVerdict.kind}
-              role={tone === 'positive' ? 'status' : 'alert'}
-            >
-              <p className="font-medium">{label}</p>
-              <p>{telemetryTestVerdict.message}</p>
-            </div>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <div
+                  className={
+                    tone === 'positive'
+                      ? 'rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400'
+                      : 'rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400'
+                  }
+                  data-telemetry-test-verdict={telemetryTestVerdict.kind}
+                  role={tone === 'positive' ? 'status' : 'alert'}
+                >
+                  <p className="font-medium">{label}</p>
+                  <p>{telemetryTestVerdict.message}</p>
+                </div>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ContextMenuItem onSelect={() => copyWithToast(verdictText)}>Copy test result</ContextMenuItem>
+                {receiverHost && (
+                  <ContextMenuItem onSelect={() => copyWithToast(receiverHost)}>Copy receiver host</ContextMenuItem>
+                )}
+                <ContextMenuSeparator />
+                <ContextMenuItem disabled={testDisabled} onSelect={sendTestConnection}>Test again</ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           );
         })()}
       </div>
