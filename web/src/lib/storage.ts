@@ -378,7 +378,7 @@ export function validatePatternName(
  * Human message for a non-null pattern-name validation issue. Lives here beside
  * the contract it renders (rather than inside PatternsSection) so it is covered
  * by storage.test.mjs — this repo has no React test runner, so a pure function
-// trapped in a component is a pure function nothing can test.
+ * trapped in a component is a pure function nothing can test.
  */
 export function patternNameErrorMessage(name: string, issue: PatternNameIssue): string {
   return nameIssueMessage('Pattern', WATCH_PATTERN_NAME_MAX, name, issue);
@@ -557,8 +557,8 @@ export interface UiState {
   defaultShell?: string;
   // Per-host default-shell overrides (WARDEN-429 — mirrors the
   // defaultNewChatCwdByHost shape from WARDEN-336). Keys are the host strings —
-  // '(local)' for local, the SSH host name for remote (matching
-  // defaultNewChatHost); values are shell names. A host with no entry (or one
+  // '(local)' for local, the SSH host name for remote (the same
+  // host keys as hostLabels); values are shell names. A host with no entry (or one
   // whose value is empty/whitespace, dropped on load by parseShellByHost) falls
   // through to defaultShell, then blank (host login shell) — identical to the
   // single-host behavior. Pure client-side pref; never sent to the backend /
