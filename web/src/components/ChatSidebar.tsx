@@ -24,6 +24,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
@@ -432,6 +434,8 @@ export function ChatSidebar({
     const hostChats = chats.filter((c) => c.host === H);
     const offline = hostStatuses[H]?.status === 'offline';
     const unreachable = offline || !!discoverErrors[H];
+    // One string feeds both the callout text and "Copy error" so they cannot drift.
+    const errText = discoverErrors[H] || 'the host is not responding';
     const discovering = enteringHost === H || (hostChats.length > 0 && hostChats.every((c) => c.active == null));
     // WARDEN-1422 round-2 review: only a temp the probe POSITIVELY answered
     // stopped (`active === false`) may not claim to be "running" in copy. An
@@ -459,10 +463,21 @@ export function ChatSidebar({
             {unreachable ? (
               // UNKNOWN, NOT EMPTY: a host we cannot reach has no readable saved
               // list — showing nothing would claim its sessions are absent.
-              <div className="mx-2 my-2 wrap-anywhere rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-2 text-[11px] leading-snug text-red-400" data-testid="host-unreachable">
-                Could not reach {hostLabel(H)} — {discoverErrors[H] || 'the host is not responding'}. Its saved sessions are unknown, not absent.{' '}
-                <button className="underline hover:text-foreground" onClick={() => onDiscoverHost(H)}>retry</button>
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div className="mx-2 my-2 wrap-anywhere rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-2 text-[11px] leading-snug text-red-400" data-testid="host-unreachable">
+                    Could not reach {hostLabel(H)} — {errText}. Its saved sessions are unknown, not absent.{' '}
+                    <button className="underline hover:text-foreground" onClick={() => onDiscoverHost(H)}>retry</button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onSelect={() => onDiscoverHost(H)}>Retry</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => copyWithToast(errText)}>Copy error</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => copyWithToast(hostLabel(H))}>Copy host name</ContextMenuItem>
+                  {H !== THIS_MACHINE && <ContextMenuItem onSelect={() => copyWithToast(`ssh ${H}`)}>Copy SSH address</ContextMenuItem>}
+                </ContextMenuContent>
+              </ContextMenu>
             ) : discovering ? (
               <>
                 {renderSubnote('Loading saved sessions…')}
