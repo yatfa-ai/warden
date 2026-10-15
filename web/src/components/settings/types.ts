@@ -203,7 +203,8 @@ import type { HostLabels } from '@/lib/chatDisplay';
 
 // NOTE (WARDEN-1383, roadmap WARDEN-1204 slice 8): there is no `NewChatsPrefs`
 // group here any more. The new-chats spawn family (default agent type / host /
-// cwd / shell, their per-host maps, and customPresets) was the last pref group
+// cwd / shell and their per-host maps; WARDEN-1816 later retired the dead
+// agent-type / host / custom-preset half) was the last pref group
 // with a SECOND read channel — NewChatForm did a private lazy-useState read of
 // loadUi while this bag threaded the writer's values — so it migrated onto
 // the shared client-state store (lib/uiStore.ts): NewChatsSection and

@@ -4,7 +4,7 @@
 // Settings shipped exactly two revert paths, and both are all-or-nothing:
 // the footer Cancel (whole SECTION, backend sections only) and the two
 // Reset-everything buttons in the danger zone, whose collateral WARDEN-956/957
-// had to spell out (the client reset wipes presets/snippets/host labels; the
+// had to spell out (the client reset wipes snippets/host labels; the
 // backend reset deletes watch patterns and hosts). A user who wants ONE
 // preference back to its default has no path that does not cost everything
 // else. This module is the comparator behind the per-row "reset to default"
@@ -76,7 +76,7 @@ export function clientPrefDefault<K extends ResettableKey>(key: K): ResetUiDefau
  * whether the per-row restore affordance should render on that row.
  *
  * Structural, not `===`: several of these prefs are objects/arrays
- * (`attentionStates`, `healthCollapsedHosts`, `customPresets`), and a freshly
+ * (`attentionStates`, `healthCollapsedHosts`, `snippets`), and a freshly
  * built default object is never reference-equal to the live one even when the
  * two are identical.
  */

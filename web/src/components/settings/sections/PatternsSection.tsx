@@ -1,6 +1,6 @@
 // Watch patterns section (WARDEN-540) — backend /api/config (the matcher runs in
 // pollAgentStates server-side, so patterns MUST reach the backend, unlike
-// presets/snippets which stay client-side). The pattern CRUD is relocated here
+// snippets which stay client-side). The pattern CRUD is relocated here
 // verbatim from SettingsPage (WARDEN-664): each handler operates only on
 // `config`/`setConfig` this section receives, so behavior is unchanged.
 import { useState } from 'react';

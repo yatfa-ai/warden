@@ -12,7 +12,7 @@
 // membership test ("accepting hosts the picker cannot see is the whole point"),
 // so a typed host is by design absent from ~/.ssh/config. The result was no
 // sidebar row, no Open Chat scope chip, and — worse than omission — an ACTIVE
-// reset of a stored defaultNewChatHost back to (local) on every New Chat open.
+// reset of a stored default host back to (local) on every New Chat open.
 //
 // So the load-bearing case here is `configured`-only: that is the state the
 // shipped affordance produces, and the one that was silently dropped. The

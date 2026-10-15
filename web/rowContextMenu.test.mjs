@@ -5,9 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * STATIC SOURCE GUARDS for the SnippetRow / PresetRow right-click menus
- * (WARDEN-1359) and the duplicateSnippet / duplicatePreset handlers that back
- * their Duplicate items.
+ * STATIC SOURCE GUARDS for the SnippetRow right-click menu
+ * (WARDEN-1359) and the duplicateSnippet handler that backs its Duplicate item.
+ * (The PresetRow half was retired with the preset family in WARDEN-1816.)
  *
  * WHY SOURCE GUARDS AND NOT BEHAVIOR TESTS: this repo has no front-end DOM test
  * runner (see commitRowContextMenu.test.mjs — the same guard pattern shipped for
@@ -44,9 +44,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (...p) => fs.readFileSync(path.join(here, ...p), 'utf8');
 
 const snippetRow = read('src', 'components', 'settings', 'rows', 'SnippetRow.tsx');
-const presetRow = read('src', 'components', 'settings', 'rows', 'PresetRow.tsx');
 const snippetsSection = read('src', 'components', 'settings', 'sections', 'SnippetsSection.tsx');
-const newChatsSection = read('src', 'components', 'settings', 'sections', 'NewChatsSection.tsx');
 const patternRow = read('src', 'components', 'settings', 'rows', 'PatternRow.tsx');
 
 /** The inner text of the first `<Tag ...>` … `</Tag>` pair inside `src`. */
@@ -68,7 +66,6 @@ function payloadFor(content, label) {
 
 for (const [name, src, copySecondLabel, secondValue] of [
   ['SnippetRow', snippetRow, 'Copy instruction text', 'snippet.text'],
-  ['PresetRow', presetRow, 'Copy command', 'preset.cmd'],
 ]) {
   describe(`${name} declares a themed context menu (WARDEN-1359)`, () => {
     it('wraps the row in a radix ContextMenu with an asChild trigger (PatternRow shape)', () => {
@@ -110,26 +107,26 @@ for (const [name, src, copySecondLabel, secondValue] of [
     it('copy items route through copyWithToast with the row\'s RAW committed values', () => {
       assert.match(src, /import \{ copyWithToast \} from '@\/lib\/clipboardToast'/);
       const content = element(src, 'ContextMenuContent');
-      assert.equal(payloadFor(content, 'Copy name'), `copyWithToast(${name === 'SnippetRow' ? 'snippet' : 'preset'}.name)`);
+      assert.equal(payloadFor(content, 'Copy name'), `copyWithToast(snippet.name)`);
       assert.equal(payloadFor(content, copySecondLabel), `copyWithToast(${secondValue})`);
     });
 
     it('Duplicate calls the onDuplicate prop with the row\'s name (the section owns the handler)', () => {
       const content = element(src, 'ContextMenuContent');
-      assert.equal(payloadFor(content, 'Duplicate'), `onDuplicate(${name === 'SnippetRow' ? 'snippet' : 'preset'}.name)`);
+      assert.equal(payloadFor(content, 'Duplicate'), `onDuplicate(snippet.name)`);
     });
 
     it('menu Delete calls the SAME onDelete prop as the visible Trash button (WARDEN-942 confirm path)', () => {
       const content = element(src, 'ContextMenuContent');
-      assert.equal(payloadFor(content, 'Delete'), `onDelete(${name === 'SnippetRow' ? 'snippet' : 'preset'}.name)`);
+      assert.equal(payloadFor(content, 'Delete'), `onDelete(snippet.name)`);
       // …and the row declares onDelete as a plain prop, never a direct storage call.
-      assert.doesNotMatch(src, /setSnippets|setCustomPresets/,
+      assert.doesNotMatch(src, /setSnippets/,
         'the row must never touch storage directly — sections own the writes');
     });
 
     it('keeps commit-on-blur intact inside the trigger (both editable fields re-sync drafts)', () => {
       assert.match(src, /onBlur=\{commitName\}/);
-      assert.match(src, name === 'SnippetRow' ? /onBlur=\{commitText\}/ : /onBlur=\{commitCmd\}/);
+      assert.match(src, /onBlur=\{commitText\}/);
     });
   });
 }
@@ -168,29 +165,6 @@ describe('SnippetsSection wires the menu actions (WARDEN-1359)', () => {
     assert.match(fn, /validateSnippetName\(copyName, snippets\) === 'duplicate'/,
       'the loop terminates on a free slot only (empty/too-long are unreachable)');
     assert.match(fn, /text: src\.text/, 'the copy carries the source instruction body');
-  });
-});
-
-describe('NewChatsSection wires the menu actions (WARDEN-1359)', () => {
-  it('passes onDuplicate={duplicatePreset} alongside the unchanged confirm-guarded onDelete', () => {
-    const rowUsage = newChatsSection.slice(newChatsSection.indexOf('<PresetRow'));
-    assert.match(rowUsage, /onDuplicate=\{duplicatePreset\}/);
-    assert.match(rowUsage, /onDelete=\{\(name\) => setPendingDelete\(name\)\}/,
-      'Delete must still route through the WARDEN-942 ConfirmDialog state');
-  });
-
-  it('duplicatePreset synthesizes a non-colliding suffixed copy, truncated to PRESET_NAME_MAX', () => {
-    const fn = newChatsSection.slice(
-      newChatsSection.indexOf('const duplicatePreset = (name: string) =>'),
-      newChatsSection.indexOf('const deletePreset'),
-    );
-    assert.match(fn, /const suffix = n === 1 \? ' \(copy\)' : ` \(copy \$\{n\}\)`;/,
-      'the duplicatePattern suffix scheme: "Name (copy)" then "Name (copy 2)" …');
-    assert.match(fn, /src\.name\.slice\(0, PRESET_NAME_MAX - suffix\.length\)/,
-      'truncation so a name already at the cap does not overflow once suffixed');
-    assert.match(fn, /validatePresetName\(copyName, customPresets\) === 'duplicate'/,
-      'the loop terminates on a free slot only (empty/reserved are unreachable for a suffixed name)');
-    assert.match(fn, /cmd: src\.cmd/, 'the copy carries the source command');
   });
 });
 

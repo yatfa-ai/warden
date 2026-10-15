@@ -38,9 +38,9 @@ import { loadObs, saveObs, resetObsPrefsPreservingWorkspace } from '@/lib/storag
 //     blank. Setting live
 //     state to '' here would leave the Settings font-select showing "Custom…"
 //     (no '' option in the curated list) until reload.
-//   - User-curated lists (customPresets/snippets/watchedChats)
+//   - User-curated lists (snippets/watchedChats)
 //     reset too: this is a destructive, confirm-gated "back to factory
-//     defaults", consistent with customPresets → [].
+//     defaults", consistent with snippets → the starter set.
 //
 // Slice 34 (WARDEN-1596) retired the per-pref setter map; slice 47
 // (WARDEN-1677) moved this operation out of App into this plain module, so

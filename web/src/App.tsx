@@ -397,17 +397,16 @@ function App() {
   // subscribes directly, and the store's `?? {}` seed reproduces the retired
   // initializer's fallback. WARDEN-1471 (slice 16): App keeps only the SETTER
   // (the reset partition); the value rides the hook's store subscription.
-  // Default agent type + host pre-filled in the ＋ new chat form, plus the
-  // user-defined custom presets (named quick-fill commands beyond claude/shell).
+  // The new-chats spawn prefs (default cwd + shell and their per-host maps).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
-  // saveUi effect below, never sent to the backend. defaultNewChatPreset is a
-  // reserved built-in name ('claude' | 'shell') or a custom preset name.
+  // saveUi effect below, never sent to the backend. (The agent-type / host /
+  // custom-preset half was retired in WARDEN-1816.)
   //
   // WARDEN-1383 (roadmap WARDEN-1204 slice 8) — the LAST facts migrated off
   // App-owned useState + a second read channel onto the shared client-state
   // store (lib/uiStore.ts), following `snippets` through `hostLabels`: the
-  // eight new-chats spawn facts (preset + per-host map, host, cwd + per-host
-  // map, customPresets, shell + per-host map). NewChatForm (the reader) used
+  // eight new-chats spawn facts (then: preset + per-host map, host, cwd +
+  // per-host map, custom presets, shell + per-host map; four remain). NewChatForm (the reader) used
   // to do a PRIVATE `useState(() => loadUi())` here while NewChatsSection
   // (the writer) received the same facts through the NewChatsPrefs bag —
   // one value, two channels. Both now SUBSCRIBE directly, the bag interface
@@ -423,7 +422,7 @@ function App() {
   // Saved instruction snippets (WARDEN-323): a named, reusable intervention
   // library surfaced at the quick reply (insert-only) and a focused pane's
   // context menu (one-click send). Pure client-side localStorage pref like the
-  // spawn presets above: persisted by the saveUi effect below, never sent to the
+  // other spawn prefs above: persisted by the saveUi effect below, never sent to the
   // backend as anything but the literal `text` over the existing /api/send path.
   // Seeded once with STARTER_SNIPPETS by loadUi when the field is absent.
   //
@@ -446,7 +445,7 @@ function App() {
   // persistUiState → localStorage. The store seeds itself from loadUi() at
   // module load, which is the same persisted read the useState lazy
   // initializer did.
-  // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
+  // Default shell opened by BOTH the sidebar's Start shell button and the ＋ split
   // button (WARDEN-429 — unifies the prior split-only defaultSplitShell, migrated
   // into defaultShell on load). Blank means "no explicit shell" → the host
   // launches its own login shell. Pure client-side pref (like the new-chat prefs
@@ -454,7 +453,7 @@ function App() {
   // Store-backed since WARDEN-1383 (slice 8) like the rest of the spawn family.
   // WARDEN-1600 (slice 35): App does not subscribe — spawnShell reads it at call
   // time via uiStore.getState(), so a Settings toggle never re-renders App.
-  // Per-host default-shell overrides (WARDEN-429 — mirrors the cwd/preset maps
+  // Per-host default-shell overrides (WARDEN-429 — mirrors the cwd map
   // above). Keys are host strings ('(local)' / SSH host name); a host with no
   // entry (or an empty value, dropped on load) falls through to defaultShell,
   // then blank (host login shell). Pure client-side pref like defaultShell

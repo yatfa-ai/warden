@@ -40,9 +40,9 @@ export function SnippetsSection(props: SnippetsSectionProps) {
 
   // --- Instruction-snippet management (create / rename / edit-text / delete) --
   // All pure client-side: edits apply instantly via setSnippets and are
-  // persisted by App's saveUi effect. Mirrors the custom-preset handlers; the
-  // differences are the {name, text} shape, a text-edit handler, and NO reserved
-  // built-in names (so validateSnippetName has no 'reserved' case). The starter
+  // persisted by App's saveUi effect. The shape is {name, text}
+  // with a text-edit handler and NO reserved built-in names (so
+  // validateSnippetName has no 'reserved' case). The starter
   // set the library seeds on first run (WARDEN-323) renders here as ordinary
   // editable entries — rename, edit text, or delete like any user-created
   // snippet; once deleted, they stay deleted.
