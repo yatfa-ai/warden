@@ -1854,6 +1854,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
           onClear={clearSelection}
           onInterrupt={() => setInterruptOpen(true)}
           onKill={() => setKillOpen(true)}
+          selectedNames={selectedChats.map((c) => displayName(c))}
         />
       )}
 

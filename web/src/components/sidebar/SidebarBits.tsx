@@ -5,6 +5,9 @@ import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useTimestampFormat } from '@/lib/uiStore';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
+import { selectionBarMenuItems } from '@/lib/selectionBarMenu';
 
 // Subtle "updated Xs ago" affordance next to the sidebar ↻ button, signalling
 // the agent list is live. Re-renders only itself each second (not the whole
@@ -49,8 +52,14 @@ export function UpdatedAgo({ at }: { at?: number | null }) {
  * precomputed by the parent from its current selection + watchedChats so the bar
  * stays a dumb presentational component; it only renders the watch button when
  * `onWatch` is present.
+ *
+ * WARDEN-1826: the bar's root is wrapped in the themed ContextMenu (the bar hosts
+ * the destructive bulk Kill, so a native webview menu there is wrong). Menu items
+ * are pure aliases calling the SAME handlers as the buttons (Kill still only opens
+ * the confirm dialog); the item set comes from `selectionBarMenuItems`. The optional
+ * `selectedNames` feeds "Copy selected agent names" (hidden when absent/empty).
  */
-export function SelectionActionBar({ count, onSelectAll, onClear, onInterrupt, onWatch, watchMode, onKill }: {
+export function SelectionActionBar({ count, onSelectAll, onClear, onInterrupt, onWatch, watchMode, onKill, selectedNames }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
@@ -58,8 +67,27 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onInterrupt, o
   onWatch?: () => void;
   watchMode?: 'watch' | 'unwatch';
   onKill: () => void;
+  selectedNames?: string[];
 }) {
+  const names = (selectedNames ?? []).filter((n) => n);
+  const menuItems = selectionBarMenuItems({
+    count,
+    hasInterrupt: !!onInterrupt,
+    hasWatch: !!onWatch,
+    watchMode,
+    names,
+  });
+  const actions: Record<string, (() => void) | undefined> = {
+    'select-all': onSelectAll,
+    clear: onClear,
+    interrupt: onInterrupt,
+    watch: onWatch,
+    'copy-names': () => copyWithToast(names.join('\n')),
+    kill: onKill,
+  };
   return (
+    <ContextMenu>
+    <ContextMenuTrigger asChild>
     <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border-t shrink-0 bg-accent/40">
       <span className="text-xs text-muted-foreground whitespace-nowrap">{count} selected</span>
       <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
@@ -96,5 +124,20 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onInterrupt, o
         <Button variant="destructive" size="xs" onClick={onKill} title="stop each selected agent's tmux session">Kill {count}…</Button>
       </div>
     </div>
+    </ContextMenuTrigger>
+    <ContextMenuContent>
+      {menuItems.map((item, i) => item.kind === 'separator'
+        ? <ContextMenuSeparator key={`sep-${i}`} />
+        : (
+          <ContextMenuItem
+            key={item.id}
+            variant={item.destructive ? 'destructive' : undefined}
+            onSelect={() => actions[item.id]?.()}
+          >
+            {item.label}
+          </ContextMenuItem>
+        ))}
+    </ContextMenuContent>
+    </ContextMenu>
   );
 }
