@@ -1,7 +1,7 @@
 /** Unit tests for the shared settings-row draft-commit decision helpers
- *  (WARDEN-1219). These rules were previously hand-copied six times across
- *  PresetRow / SnippetRow / PatternRow with no coverage; the empty-name case is
- *  the silent-data-loss guard (parseCustomPresets / parseSnippets would drop a
+ *  (WARDEN-1219). These rules were previously hand-copied across
+ *  SnippetRow / PatternRow with no coverage; the empty-name case is
+ *  the silent-data-loss guard (parseSnippets would drop a
  *  stored entry whose name was committed empty). Pure decisions — no rendering.
  *
  *  No front-end test runner in this repo, so (like settingsDirty.test.mjs) this

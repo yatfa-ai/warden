@@ -2,9 +2,8 @@
  *  blur/Enter, reverted on a rejected rename) and a live-editable text field
  *  (the instruction itself — free-form, so a Textarea), plus delete. Stateless
  *  w.r.t. its own value except the two drafts — the list is the source of truth.
- *  Mirrors PresetRow; the only structural difference is Textarea vs Input for
- *  the body (instructions are multi-line free text up to SNIPPET_TEXT_MAX chars,
- *  not a single spawn command).
+ *  The body is a Textarea (instructions are multi-line free text up to
+ *  SNIPPET_TEXT_MAX chars).
  *
  *  Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged. */
 import { useState, useEffect } from 'react';

@@ -98,7 +98,7 @@ const test = (name, fn) => {
 // override stays available for the empty-mode launch test below.
 const flushSnapshotToDisk = (store, { restoreOnStartup, startedEmpty = false } = {}) => {
   const s = store.getState();
-  // The store-owned half rides the PRODUCTION selector (the 39 STORE_PERSISTED_KEYS
+  // The store-owned half rides the PRODUCTION selector (the 35 STORE_PERSISTED_KEYS
   // facts, workspaces / activeWorkspaceId included since WARDEN-1526); the
   // `{...loadUi(), …}` open stands in for every DEFAULT_UI field the snapshot
   // always carried.
@@ -913,53 +913,37 @@ test('a store seeded with two snippets renders them through the replySnippetPrev
 
 // ─── the new-chats spawn family (WARDEN-1383, roadmap WARDEN-1204 slice 8) ───
 //
-// Eight facts — defaultNewChatPreset, defaultNewChatPresetByHost,
-// defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost,
-// customPresets, defaultShell, defaultShellByHost — that NewChatForm read
-// through a PRIVATE `useState(() => loadUi())` while NewChatsSection wrote
-// them through the (now-retired) NewChatsPrefs bag. One home now: the store.
+// Four facts — defaultNewChatCwd, defaultNewChatCwdByHost, defaultShell,
+// defaultShellByHost (WARDEN-1816 retired the other four: defaultNewChatPreset,
+// defaultNewChatPresetByHost, defaultNewChatHost, customPresets — dead since
+// WARDEN-1422 deleted NewChatForm) — that NewChatForm read through a PRIVATE
+// `useState(() => loadUi())` while NewChatsSection wrote them through the
+// (now-retired) NewChatsPrefs bag. One home now: the store.
 console.log('\ncreateUiStore — the spawn family seeds from storage.ts, never from re-declared defaults');
-test('a fresh store seeds the eight spawn facts from DEFAULT_UI (not local literals)', () => {
+test('a fresh store seeds the four spawn facts from DEFAULT_UI (not local literals)', () => {
   reset();
   const store = createUiStore();
-  assert.equal(store.getState().defaultNewChatPreset, 'claude');
-  assert.equal(store.getState().defaultNewChatPreset, DEFAULT_UI.defaultNewChatPreset);
-  assert.deepEqual(store.getState().defaultNewChatPresetByHost, {});
-  assert.deepEqual(store.getState().defaultNewChatPresetByHost, DEFAULT_UI.defaultNewChatPresetByHost);
-  assert.equal(store.getState().defaultNewChatHost, '(local)');
-  assert.equal(store.getState().defaultNewChatHost, DEFAULT_UI.defaultNewChatHost);
   assert.equal(store.getState().defaultNewChatCwd, '');
   assert.equal(store.getState().defaultNewChatCwd, DEFAULT_UI.defaultNewChatCwd);
   assert.deepEqual(store.getState().defaultNewChatCwdByHost, {});
   assert.deepEqual(store.getState().defaultNewChatCwdByHost, DEFAULT_UI.defaultNewChatCwdByHost);
-  assert.deepEqual(store.getState().customPresets, []);
-  assert.deepEqual(store.getState().customPresets, DEFAULT_UI.customPresets);
   assert.equal(store.getState().defaultShell, '');
   assert.equal(store.getState().defaultShell, DEFAULT_UI.defaultShell);
   assert.deepEqual(store.getState().defaultShellByHost, {});
   assert.deepEqual(store.getState().defaultShellByHost, DEFAULT_UI.defaultShellByHost);
 });
-test('a fresh store seeds the eight from the PERSISTED payload when one exists (incl. shape of the maps and the preset list)', () => {
+test('a fresh store seeds the four from the PERSISTED payload when one exists (incl. shape of the maps)', () => {
   reset();
   saveUi({
     ...loadUi(),
-    defaultNewChatPreset: 'codex',
-    defaultNewChatPresetByHost: { 'box-1': 'claude' },
-    defaultNewChatHost: 'box-1',
     defaultNewChatCwd: '/srv/work',
     defaultNewChatCwdByHost: { 'box-1': '/srv/work/agents' },
-    customPresets: [{ name: 'codex', cmd: 'codex --full-auto' }],
     defaultShell: 'zsh',
     defaultShellByHost: { 'box-1': 'fish' },
   });
   const store = createUiStore();
-  assert.equal(store.getState().defaultNewChatPreset, 'codex');
-  assert.deepEqual(store.getState().defaultNewChatPresetByHost, { 'box-1': 'claude' });
-  assert.equal(store.getState().defaultNewChatHost, 'box-1');
   assert.equal(store.getState().defaultNewChatCwd, '/srv/work');
   assert.deepEqual(store.getState().defaultNewChatCwdByHost, { 'box-1': '/srv/work/agents' });
-  // The array shape survives: each entry keeps its {name, cmd} pair.
-  assert.deepEqual(store.getState().customPresets, [{ name: 'codex', cmd: 'codex --full-auto' }]);
   assert.equal(store.getState().defaultShell, 'zsh');
   assert.deepEqual(store.getState().defaultShellByHost, { 'box-1': 'fish' });
 });
@@ -980,40 +964,24 @@ test("the seed runs through loadUi's sanitizers (a bogus cwd map entry and a bla
   assert.equal(store.getState().defaultNewChatCwd, '/srv/work');
   assert.equal(store.getState().defaultShell, '');
 });
-test('an explicit seed overrides the persisted read for the eight (so a test needs no localStorage)', () => {
+test('an explicit seed overrides the persisted read for the four (so a test needs no localStorage)', () => {
   reset();
-  saveUi({ ...loadUi(), defaultNewChatHost: 'box-1', defaultShell: 'zsh', customPresets: [{ name: 'codex', cmd: 'codex' }] });
   const store = createUiStore({
-    defaultNewChatPreset: 'shell',
-    defaultNewChatPresetByHost: { 'box-1': 'claude' },
-    defaultNewChatHost: 'box-2',
     defaultNewChatCwd: '/tmp',
     defaultNewChatCwdByHost: { 'box-2': '/var/tmp' },
-    customPresets: [{ name: 'aider', cmd: 'aider' }],
     defaultShell: 'bash',
     defaultShellByHost: { 'box-2': 'fish' },
   });
-  assert.equal(store.getState().defaultNewChatPreset, 'shell');
-  assert.deepEqual(store.getState().defaultNewChatPresetByHost, { 'box-1': 'claude' });
-  assert.equal(store.getState().defaultNewChatHost, 'box-2');
   assert.equal(store.getState().defaultNewChatCwd, '/tmp');
   assert.deepEqual(store.getState().defaultNewChatCwdByHost, { 'box-2': '/var/tmp' });
-  assert.deepEqual(store.getState().customPresets, [{ name: 'aider', cmd: 'aider' }]);
   assert.equal(store.getState().defaultShell, 'bash');
   assert.deepEqual(store.getState().defaultShellByHost, { 'box-2': 'fish' });
 });
 
 console.log('\nthe spawn-family setters — the store is the live copy, and they do NOT write localStorage');
-test('each of the eight setters replaces its value and notifies subscribers', () => {
+test('each of the four setters replaces its value and notifies subscribers', () => {
   reset();
   const store = createUiStore();
-  const seen = [];
-  const unsubscribe = store.subscribe((s) => seen.push(s.defaultNewChatPreset));
-  store.getState().setDefaultNewChatPreset('codex');
-  unsubscribe();
-  assert.deepEqual(seen, ['codex']);
-  assert.equal(store.getState().defaultNewChatPreset, 'codex');
-
   const seenMap = [];
   const unsubMap = store.subscribe((s) => seenMap.push(s.defaultNewChatCwdByHost));
   store.getState().setDefaultNewChatCwdByHost({ 'box-1': '/srv' });
@@ -1021,17 +989,6 @@ test('each of the eight setters replaces its value and notifies subscribers', ()
   assert.equal(seenMap.length, 1);
   assert.deepEqual(store.getState().defaultNewChatCwdByHost, { 'box-1': '/srv' });
 
-  const seenPresets = [];
-  const unsubPresets = store.subscribe((s) => seenPresets.push(s.customPresets));
-  store.getState().setCustomPresets([{ name: 'codex', cmd: 'codex' }]);
-  unsubPresets();
-  assert.equal(seenPresets.length, 1);
-  assert.deepEqual(store.getState().customPresets, [{ name: 'codex', cmd: 'codex' }]);
-
-  store.getState().setDefaultNewChatPresetByHost({ 'box-1': 'aider' });
-  assert.deepEqual(store.getState().defaultNewChatPresetByHost, { 'box-1': 'aider' });
-  store.getState().setDefaultNewChatHost('box-1');
-  assert.equal(store.getState().defaultNewChatHost, 'box-1');
   store.getState().setDefaultNewChatCwd('/srv/work');
   assert.equal(store.getState().defaultNewChatCwd, '/srv/work');
   store.getState().setDefaultShell('zsh');
@@ -1039,48 +996,32 @@ test('each of the eight setters replaces its value and notifies subscribers', ()
   store.getState().setDefaultShellByHost({ 'box-1': 'fish' });
   assert.deepEqual(store.getState().defaultShellByHost, { 'box-1': 'fish' });
 });
-test('the eight setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
+test('the four setters alone write NOTHING to localStorage (single-writer: the saveUi effect owns the write)', () => {
   reset();
   const store = createUiStore();
-  store.getState().setDefaultNewChatPreset('codex');
-  store.getState().setDefaultNewChatPresetByHost({ 'box-1': 'claude' });
-  store.getState().setDefaultNewChatHost('box-1');
   store.getState().setDefaultNewChatCwd('/srv/work');
   store.getState().setDefaultNewChatCwdByHost({ 'box-1': '/srv' });
-  store.getState().setCustomPresets([{ name: 'codex', cmd: 'codex' }]);
   store.getState().setDefaultShell('zsh');
   store.getState().setDefaultShellByHost({ 'box-1': 'fish' });
   // The store deliberately has no write-through persistence: a second writer
   // here would silently race the ONE compile-locked saveUi effect.
   assert.equal(mem.get('warden:ui:v3'), undefined);
 });
-test('the eight action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
+test('the four action identities are stable across writes (safe in a React dep array, and in resetSetters)', () => {
   reset();
   const store = createUiStore();
   const before = {
-    preset: store.getState().setDefaultNewChatPreset,
-    presetByHost: store.getState().setDefaultNewChatPresetByHost,
-    host: store.getState().setDefaultNewChatHost,
     cwd: store.getState().setDefaultNewChatCwd,
     cwdByHost: store.getState().setDefaultNewChatCwdByHost,
-    customPresets: store.getState().setCustomPresets,
     shell: store.getState().setDefaultShell,
     shellByHost: store.getState().setDefaultShellByHost,
   };
-  store.getState().setDefaultNewChatPreset('codex');
-  store.getState().setDefaultNewChatPresetByHost({});
-  store.getState().setDefaultNewChatHost('box-1');
   store.getState().setDefaultNewChatCwd('/x');
   store.getState().setDefaultNewChatCwdByHost({});
-  store.getState().setCustomPresets([]);
   store.getState().setDefaultShell('zsh');
   store.getState().setDefaultShellByHost({});
-  assert.equal(store.getState().setDefaultNewChatPreset, before.preset);
-  assert.equal(store.getState().setDefaultNewChatPresetByHost, before.presetByHost);
-  assert.equal(store.getState().setDefaultNewChatHost, before.host);
   assert.equal(store.getState().setDefaultNewChatCwd, before.cwd);
   assert.equal(store.getState().setDefaultNewChatCwdByHost, before.cwdByHost);
-  assert.equal(store.getState().setCustomPresets, before.customPresets);
   assert.equal(store.getState().setDefaultShell, before.shell);
   assert.equal(store.getState().setDefaultShellByHost, before.shellByHost);
 });
@@ -1089,71 +1030,46 @@ console.log('\nround trip: Settings → New Chats → store → App snapshot →
 test('every spawn-family fact survives a restart through the real chain', () => {
   reset();
   const store = createUiStore();
-  // NewChatsSection's writes: the CRUD + per-host maps + the three globals.
-  store.getState().setDefaultNewChatPreset('codex');
-  store.getState().setDefaultNewChatPresetByHost({ 'box-1': 'claude' });
-  store.getState().setDefaultNewChatHost('box-1');
+  // NewChatsSection's writes: the per-host maps + the globals.
   store.getState().setDefaultNewChatCwd('/srv/work');
   store.getState().setDefaultNewChatCwdByHost({ 'box-1': '/srv/work/agents' });
-  store.getState().setCustomPresets([{ name: 'codex', cmd: 'codex --full-auto' }]);
   store.getState().setDefaultShell('zsh');
   store.getState().setDefaultShellByHost({ 'box-1': 'fish' });
   flushSnapshotToDisk(store);                  // App snapshot → saveUi effect
   const persisted = loadUi();                  // next launch
-  assert.equal(persisted.defaultNewChatPreset, 'codex');
-  assert.deepEqual(persisted.defaultNewChatPresetByHost, { 'box-1': 'claude' });
-  assert.equal(persisted.defaultNewChatHost, 'box-1');
   assert.equal(persisted.defaultNewChatCwd, '/srv/work');
   assert.deepEqual(persisted.defaultNewChatCwdByHost, { 'box-1': '/srv/work/agents' });
-  assert.deepEqual(persisted.customPresets, [{ name: 'codex', cmd: 'codex --full-auto' }]);
   assert.equal(persisted.defaultShell, 'zsh');
   assert.deepEqual(persisted.defaultShellByHost, { 'box-1': 'fish' });
   // And the next launch's store seeds from exactly that.
   const next = createUiStore().getState();
-  assert.equal(next.defaultNewChatPreset, 'codex');
-  assert.equal(next.defaultNewChatHost, 'box-1');
-  assert.deepEqual(next.customPresets, [{ name: 'codex', cmd: 'codex --full-auto' }]);
+  assert.equal(next.defaultNewChatCwd, '/srv/work');
+  assert.equal(next.defaultShell, 'zsh');
 });
-test('the reset path restores all eight defaults through the store-backed setters', () => {
+test('the reset path restores all four defaults through the store-backed setters', () => {
   reset();
   const store = createUiStore({
-    defaultNewChatPreset: 'codex',
-    defaultNewChatPresetByHost: { 'box-1': 'claude' },
-    defaultNewChatHost: 'box-1',
     defaultNewChatCwd: '/srv/work',
     defaultNewChatCwdByHost: { 'box-1': '/srv' },
-    customPresets: [{ name: 'codex', cmd: 'codex' }],
     defaultShell: 'zsh',
     defaultShellByHost: { 'box-1': 'fish' },
   });
-  // App's resetSetters entries are `defaultNewChatPreset: setDefaultNewChatPreset`
+  // App's resetSetters entries are `defaultShell: setDefaultShell`
   // (…and siblings) — the SAME setters, now backed by the store, called with
   // resetUiPrefDefaults()' values.
-  store.getState().setDefaultNewChatPreset(DEFAULT_UI.defaultNewChatPreset);
-  store.getState().setDefaultNewChatPresetByHost(DEFAULT_UI.defaultNewChatPresetByHost);
-  store.getState().setDefaultNewChatHost(DEFAULT_UI.defaultNewChatHost);
   store.getState().setDefaultNewChatCwd(DEFAULT_UI.defaultNewChatCwd);
   store.getState().setDefaultNewChatCwdByHost(DEFAULT_UI.defaultNewChatCwdByHost);
-  store.getState().setCustomPresets(DEFAULT_UI.customPresets);
   store.getState().setDefaultShell(DEFAULT_UI.defaultShell);
   store.getState().setDefaultShellByHost(DEFAULT_UI.defaultShellByHost);
   flushSnapshotToDisk(store);
-  assert.equal(store.getState().defaultNewChatPreset, 'claude');
-  assert.deepEqual(store.getState().defaultNewChatPresetByHost, {});
-  assert.equal(store.getState().defaultNewChatHost, '(local)');
   assert.equal(store.getState().defaultNewChatCwd, '');
   assert.deepEqual(store.getState().defaultNewChatCwdByHost, {});
-  assert.deepEqual(store.getState().customPresets, []);
   assert.equal(store.getState().defaultShell, '');
   assert.deepEqual(store.getState().defaultShellByHost, {});
-  assert.equal(loadUi().defaultNewChatPreset, 'claude');
-  assert.equal(loadUi().defaultNewChatHost, '(local)');
 });
 test('the family is independent of the other migrated facts', () => {
   reset();
   const store = createUiStore();
-  store.getState().setDefaultNewChatHost('box-1');
-  store.getState().setDefaultNewChatPreset('codex');
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
   assert.equal(store.getState().timestampFormat, 'relative');
   assert.deepEqual(store.getState().hostLabels, {});
@@ -1275,7 +1191,7 @@ test('the pair is independent of the other migrated facts', () => {
   const store = createUiStore({ attentionDesktopAlerts: true });
   store.getState().setAttentionStates({ stuck: false });
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
-  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().defaultNewChatCwd, '');
   store.getState().setAttentionDesktopAlerts(false);
   assert.deepEqual(store.getState().attentionStates, { stuck: false });
 });
@@ -1504,7 +1420,7 @@ test('the family is independent of the other migrated facts', () => {
   store.getState().setPaneLayout('stacked');
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
   assert.equal(store.getState().timestampFormat, 'relative');
-  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().defaultNewChatCwd, '');
   assert.equal(store.getState().attentionDesktopAlerts, false);
   // …and writing one of the six does not disturb the other five.
   assert.equal(store.getState().density, 'comfortable');
@@ -1650,7 +1566,7 @@ test('the pair is independent of the other migrated facts', () => {
   store.getState().setHealthCollapsedHosts({ 'build-01': true });
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
   assert.equal(store.getState().theme, 'system');
-  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().defaultNewChatCwd, '');
   // …and writing one of the pair does not disturb the other.
   assert.equal(store.getState().healthGroupBy, 'host');
   store.getState().setHealthGroupBy('project');
@@ -1799,7 +1715,7 @@ test('the pair is independent of the other migrated facts', () => {
   store.getState().setPaneRowRatios([0.3, 0.7]);
   assert.deepEqual(store.getState().snippets, STARTER_SNIPPETS);
   assert.equal(store.getState().theme, 'system');
-  assert.equal(store.getState().defaultNewChatHost, '(local)');
+  assert.equal(store.getState().defaultNewChatCwd, '');
   // …and writing one axis does not disturb the other.
   assert.deepEqual(store.getState().paneColRatios, [0.6, 0.4]);
   store.getState().setPaneColRatios([0.7, 0.3]);
@@ -2435,13 +2351,13 @@ test('the setter identity is stable across writes (safe in a React dep array)', 
   before(false);
   assert.equal(store.getState().setSourceControlCollapsed, before);
 });
-test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (39 keys) and rides selectPersistedStorePrefs", () => {
+test("sourceControlCollapsed joins STORE_PERSISTED_KEYS (35 keys) and rides selectPersistedStorePrefs", () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('sourceControlCollapsed'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   const store = createUiStore({ sourceControlCollapsed: false });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.equal(picked.sourceControlCollapsed, false);
 });
 
@@ -2539,14 +2455,14 @@ test('a clean install seeds paneHost as {}', () => {
   assert.deepEqual(createUiStore().getState().paneHost, {});
 });
 
-console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (39) and rides the selector');
+console.log('\ncreateUiStore — paneHost joins STORE_PERSISTED_KEYS (35) and rides the selector');
 test('paneHost is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('paneHost'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   const store = createUiStore({ paneHost: { a: 'h' } });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.deepEqual(picked.paneHost, { a: 'h' });
 });
 
@@ -2599,10 +2515,10 @@ test('setWatchedChats replaces the set and keeps a stable identity', () => {
 test('watchedChats is a STORE_PERSISTED_KEYS member and selectPersistedStorePrefs carries it', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('watchedChats'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   const store = createUiStore({ watchedChats: ['w'] });
   const picked = selectPersistedStorePrefs(store.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.deepEqual(picked.watchedChats, ['w']);
 });
 test('a watched set survives a restart through the production hop; [] persists as []', () => {
@@ -2671,12 +2587,12 @@ test('toggleSidebarCollapsed / toggleObserverCollapsed flip atomically; twice ->
   assert.equal(store.getState().observerCollapsed, false);
   assert.equal(store.getState().toggleSidebarCollapsed, toggleSidebarCollapsed, 'stable identity');
 });
-test('the three flags join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
+test('the three flags join STORE_PERSISTED_KEYS (35) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of COLLAPSE_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   const picked = selectPersistedStorePrefs(createUiStore().getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
 });
 test('each flag round-trips store -> snapshot -> saveUi -> loadUi -> a fresh store', () => {
   reset();
@@ -2758,12 +2674,12 @@ test('setters write one width each, with stable identity', () => {
   assert.equal(store.getState().setSidebarWidth, setSidebarWidth);
   assert.equal(store.getState().setObserverWidth, setObserverWidth);
 });
-test('both widths join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
+test('both widths join STORE_PERSISTED_KEYS (35) and ride selectPersistedStorePrefs', () => {
   reset();
   for (const k of WIDTH_KEYS) assert.ok(STORE_PERSISTED_KEYS.includes(k), k);
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   const picked = selectPersistedStorePrefs(createUiStore({ sidebarWidth: 233, observerWidth: 411 }).getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.equal(picked.sidebarWidth, 233);
   assert.equal(picked.observerWidth, 411);
 });
@@ -2910,14 +2826,14 @@ test('reclampPanelWidths has a stable identity across calls', () => {
 console.log('\ncreateUiStore — workspaces + activeWorkspaceId (slice 23)');
 const ws = (id, openPanes = [], focused = null, name = id) => ({ id, name, openPanes, focused, recentlyClosed: [] });
 const seeded = (workspaces, activeWorkspaceId = workspaces[0].id) => createUiStore({ workspaces, activeWorkspaceId });
-test('workspaces + activeWorkspaceId join STORE_PERSISTED_KEYS (39) and ride selectPersistedStorePrefs', () => {
+test('workspaces + activeWorkspaceId join STORE_PERSISTED_KEYS (35) and ride selectPersistedStorePrefs', () => {
   reset();
   assert.ok(STORE_PERSISTED_KEYS.includes('workspaces'));
   assert.ok(STORE_PERSISTED_KEYS.includes('activeWorkspaceId'));
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   const s = seeded([ws('a'), ws('b')], 'b');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.equal(picked.workspaces, s.getState().workspaces);
   assert.equal(picked.activeWorkspaceId, 'b');
 });
@@ -3213,13 +3129,13 @@ test('maximized starts null; setMaximized takes value and functional forms and i
   s.getState().setMaximized('p1');
   assert.equal(s.getState(), same);
 });
-test('maximized is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; the selector never carries it', () => {
+test('maximized is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; the selector never carries it', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('maximized'));
   const s = maxSeeded();
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('maximized' in picked));
   assert.equal(createUiStore().getState().maximized, null, 'never seeded');
 });
@@ -3341,14 +3257,14 @@ test('clearPaneActivity removes the id; a no-op (identical state object) when ab
   s.getState().clearPaneActivity('nope');
   assert.equal(s.getState(), before);
 });
-test('newActivity is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded', () => {
+test('newActivity is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('newActivity'));
   const s = seeded([ws('a', ['p1', 'p2'], 'p1')]);
   s.getState().markPaneActivity('p2');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('newActivity' in picked));
   assert.equal(createUiStore().getState().newActivity.size, 0, 'never seeded');
 });
@@ -3424,15 +3340,15 @@ test('the scheduled expiry fires after RECENTLY_SAVED_TTL_MS (30 s) and removes 
     assert.equal(s.getState().recentlySavedIds.size, 0);
   });
 });
-test('recentlySavedIds is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+test('recentlySavedIds is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('recentlySavedIds'));
   withCapturedTimers(() => {
     const s = createUiStore();
     s.getState().markRecentlySaved('c1');
     const picked = selectPersistedStorePrefs(s.getState());
-    assert.equal(Object.keys(picked).length, 39);
+    assert.equal(Object.keys(picked).length, 35);
     assert.ok(!('recentlySavedIds' in picked));
     saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
     assert.ok(!('recentlySavedIds' in loadUi()));
@@ -3476,14 +3392,14 @@ test('bump for a not-open pane is harmless: the entry waits unused, nothing else
   assert.equal(s.getState().maximized, before.maximized);
   assert.equal(s.getState().reconnectTokens['some-other-id'], undefined, 'never-bumped pane reads undefined');
 });
-test('reconnectTokens is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+test('reconnectTokens is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('reconnectTokens'));
   const s = createUiStore();
   s.getState().bumpReconnectToken('p1');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('reconnectTokens' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('reconnectTokens' in loadUi()));
@@ -3515,14 +3431,14 @@ test('two successive sets of equal-valued objects yield two DISTINCT references'
   assert.notEqual(a, b);
   assert.deepEqual(a, b);
 });
-test('externalSearchQuery is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+test('externalSearchQuery is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('externalSearchQuery'));
   const s = createUiStore();
   s.getState().setExternalSearchQuery({ paneId: 'p1', query: 'q' });
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('externalSearchQuery' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('externalSearchQuery' in loadUi()));
@@ -3557,8 +3473,8 @@ test('consume when already null is a no-op', () => {
   assert.equal(s.getState().externalSearchQuery, null);
   assert.equal(s.getState(), before, 'state object untouched');
 });
-test('consumeExternalSearchQuery is an action, not persisted: STORE_PERSISTED_KEYS stays 39 and excludes it', () => {
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+test('consumeExternalSearchQuery is an action, not persisted: STORE_PERSISTED_KEYS stays 35 and excludes it', () => {
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('consumeExternalSearchQuery'));
 });
 test('source shape: PaneTile consumes inside the external-search effect; PaneGrid passes the object, not .query', () => {
@@ -3588,14 +3504,14 @@ test('setGlobalSearchOpen stores the value (open then close)', () => {
   s.getState().setGlobalSearchOpen(false);
   assert.equal(s.getState().globalSearchOpen, false);
 });
-test('globalSearchOpen is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+test('globalSearchOpen is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('globalSearchOpen'));
   const s = createUiStore();
   s.getState().setGlobalSearchOpen(true);
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('globalSearchOpen' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('globalSearchOpen' in loadUi()));
@@ -3616,14 +3532,14 @@ test('setSettingsOpen stores the value (open then close)', () => {
   s.getState().setSettingsOpen(false);
   assert.equal(s.getState().settingsOpen, false);
 });
-test('settingsOpen is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+test('settingsOpen is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('settingsOpen'));
   const s = createUiStore();
   s.getState().setSettingsOpen(true);
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('settingsOpen' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('settingsOpen' in loadUi()));
@@ -3673,16 +3589,16 @@ test('factory isolation — two stores do not share the sidebar session facts, a
   assert.equal(uiStore.getState().sidebarHost, beforeHost, 'a test store\'s write must never leak into the app store');
   assert.equal(uiStore.getState().sidebarQuery, beforeQuery, 'a test store\'s write must never leak into the app store');
 });
-test('sidebarHost/sidebarQuery are NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes both; never seeded; absent from the loadUi round trip', () => {
+test('sidebarHost/sidebarQuery are NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes both; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarHost'));
   assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarQuery'));
   const s = createUiStore();
   s.getState().setSidebarHost('build-01');
   s.getState().setSidebarQuery('deploy');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('sidebarHost' in picked));
   assert.ok(!('sidebarQuery' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
@@ -3743,14 +3659,14 @@ test('factory isolation — a test store\'s sidebarCollectionId never leaks into
   assert.equal(b.getState().sidebarCollectionId, null);
   assert.equal(uiStore.getState().sidebarCollectionId, before, 'a test store\'s write must never leak into the app store');
 });
-test('sidebarCollectionId is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded; absent from the loadUi round trip', () => {
+test('sidebarCollectionId is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('sidebarCollectionId'));
   const s = createUiStore();
   s.getState().setSidebarCollectionId('col-1');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('sidebarCollectionId' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('sidebarCollectionId' in loadUi()));
@@ -3819,16 +3735,16 @@ test('factory isolation — two stores do not share the feed limits, and the sin
   assert.equal(uiStore.getState().observerActivityLimit, beforeA, 'a test store\'s write must never leak into the app store');
   assert.equal(uiStore.getState().observerDirectiveLimit, beforeD, 'a test store\'s write must never leak into the app store');
 });
-test('feed limits are NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes both; never seeded; absent from the loadUi round trip', () => {
+test('feed limits are NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes both; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('observerActivityLimit'));
   assert.ok(!STORE_PERSISTED_KEYS.includes('observerDirectiveLimit'));
   const s = createUiStore();
   s.getState().setObserverActivityLimit(500);
   s.getState().setObserverDirectiveLimit(1000);
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('observerActivityLimit' in picked));
   assert.ok(!('observerDirectiveLimit' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
@@ -3886,16 +3802,16 @@ test('factory isolation — two stores do not share the Fleet Health facts, and 
   assert.equal(uiStore.getState().fleetPanelOpen, before, 'a test store\'s write must never leak into the app store');
   assert.equal(uiStore.getState().healthClosedExpanded, false);
 });
-test('Fleet Health facts are NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes them; never seeded; absent from the loadUi round trip', () => {
+test('Fleet Health facts are NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes them; never seeded; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('healthClosedExpanded'));
   assert.ok(!STORE_PERSISTED_KEYS.includes('fleetPanelOpen'));
   const s = createUiStore();
   s.getState().setHealthClosedExpanded(true);
   s.getState().toggleFleetPanel('activity');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('healthClosedExpanded' in picked));
   assert.ok(!('fleetPanelOpen' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
@@ -4240,14 +4156,14 @@ test('setResolvedThemeId changes the selector under auto but not under a forced 
   assert.equal(selectTerminalThemeId(s.getState()), 'github-dark', 'forced scheme ignores the flip');
   assert.equal(s.getState().resolvedThemeId, 'github-light', 'the fact itself still moved');
 });
-test('resolvedThemeId is NOT persisted: STORE_PERSISTED_KEYS stays 39 and excludes it; never seeded from disk or a previous store; absent from the loadUi round trip', () => {
+test('resolvedThemeId is NOT persisted: STORE_PERSISTED_KEYS stays 35 and excludes it; never seeded from disk or a previous store; absent from the loadUi round trip', () => {
   reset();
-  assert.equal(STORE_PERSISTED_KEYS.length, 39);
+  assert.equal(STORE_PERSISTED_KEYS.length, 35);
   assert.ok(!STORE_PERSISTED_KEYS.includes('resolvedThemeId'));
   const s = createUiStore({ theme: 'system' });
   s.getState().setResolvedThemeId('dracula');
   const picked = selectPersistedStorePrefs(s.getState());
-  assert.equal(Object.keys(picked).length, 39);
+  assert.equal(Object.keys(picked).length, 35);
   assert.ok(!('resolvedThemeId' in picked));
   saveUi(persistUiState({ ...DEFAULT_UI, ...picked }));
   assert.ok(!('resolvedThemeId' in loadUi()));

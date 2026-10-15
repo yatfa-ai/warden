@@ -62,37 +62,11 @@ export type TerminalCursorStyle =
   | 'blink-bar'
   | 'steady-bar';
 
-// A user-defined spawn preset: a named quick-fill command beyond the two
-// built-in claude/shell presets (e.g. "codex" → "codex"). Pure client-side pref;
-// never sent to the backend. `name` is also a valid `defaultNewChatPreset` value.
-export interface CustomPreset {
-  name: string;
-  cmd: string;
-}
-
-// The reserved built-in preset names — custom presets may not reuse them (they
-// are always available as quick-fills regardless of the custom list).
-export const BUILTIN_PRESETS = ['claude', 'shell'] as const;
-
-// Maximum length of a custom preset name. Centralized here so every write site
-// (parseCustomPresets, SettingsPage add/rename, the name Inputs' maxLength)
-// agrees with the load-time sanitizer on one bound — the in-memory list can
-// never hold a name the sanitizer would silently drop on next reload.
-export const PRESET_NAME_MAX = 32;
-
-// Reserved built-in name check, CASE-INSENSITIVE — so "Claude"/"Shell" are
-// rejected just like "claude"/"shell". This matches the case-insensitive name
-// de-duplication, so a custom preset can never near-collide with a built-in
-// quick-fill that is always rendered regardless of the custom list.
-export function isReservedPresetName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return BUILTIN_PRESETS.some((b) => b.toLowerCase() === lower);
-}
-
 // ─── The ONE name-validation skeleton (WARDEN-1111) ───────────────────────────
 //
-// Extracted from the three hand-copied validate*Name bodies (preset WARDEN-219,
-// snippet WARDEN-323, pattern WARDEN-540) — same six steps in the same order,
+// Extracted from the hand-copied validate*Name bodies (preset WARDEN-219,
+// snippet WARDEN-323, pattern WARDEN-540; the preset caller was retired by
+// WARDEN-1816) — same six steps in the same order,
 // re-copied per feature, exactly the vein parseObjectMap (WARDEN-1027) and
 // parseEntryArray (WARDEN-1091) already collapsed further down this file. Now
 // the contract is inherited by CALLING this; only the delta is supplied.
@@ -100,8 +74,7 @@ export function isReservedPresetName(name: string): boolean {
 // The invariants that live here once, for every caller:
 //   - the name is TRIMMED first, matching how each load-time sanitizer
 //     normalizes, so validation and persistence agree on the same string;
-//   - check ORDER is empty → too-long → reserved → duplicate, and it is
-//     load-bearing: a reserved name that is ALSO a duplicate reports 'reserved';
+//   - check ORDER is empty → too-long → duplicate;
 //   - duplicate detection is CASE-INSENSITIVE (a custom entry can never
 //     near-collide with a differently-cased sibling);
 //   - `except` excludes ONE entry from duplicate detection, so a case-only
@@ -109,19 +82,16 @@ export function isReservedPresetName(name: string): boolean {
 //
 // The per-caller delta:
 //   - `opts.max` — the caller's own cap. Deliberately a PARAMETER, never a
-//     shared constant: PRESET_NAME_MAX/SNIPPET_NAME_MAX/WATCH_PATTERN_NAME_MAX
-//     stay distinct and independently tunable.
+//     shared constant: SNIPPET_NAME_MAX/WATCH_PATTERN_NAME_MAX stay distinct
+//     and independently tunable.
 //   - `opts.identityOf` — what `except` is compared against, and the reason this
-//     parameter is REQUIRED rather than defaulted. Preset and snippet exclude by
+//     parameter is REQUIRED rather than defaulted. Snippets exclude by
 //     NAME; watch patterns key on a stable id and exclude by ID. That divergence
 //     was previously an accident hiding under a "Mirrors validateSnippetName"
 //     comment — every call site happens to pass the matching kind, so it is
 //     correct today, but a fourth validator could silently inherit the wrong
 //     semantics. Making it explicit means the caller must now STATE its choice.
-//   - `opts.reserved` — the built-in-name guard. Preset-only; omitting it makes
-//     'reserved' unreachable, which is what lets snippet/pattern keep their
-//     narrower issue unions.
-type NameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
+type NameIssue = 'empty' | 'too-long' | 'duplicate';
 
 function validateEntryName<T extends { name: string }>(
   name: string,
@@ -129,14 +99,12 @@ function validateEntryName<T extends { name: string }>(
   opts: {
     max: number;
     identityOf: (entry: T) => string;
-    reserved?: (n: string) => boolean;
   },
   except?: string,
 ): NameIssue | null {
   const n = name.trim();
   if (!n) return 'empty';
   if (n.length > opts.max) return 'too-long';
-  if (opts.reserved?.(n)) return 'reserved';
   const lower = n.toLowerCase();
   if (existing.some((e) => opts.identityOf(e) !== except && e.name.toLowerCase() === lower)) {
     return 'duplicate';
@@ -144,11 +112,10 @@ function validateEntryName<T extends { name: string }>(
   return null;
 }
 
-// The message text shared by all three name formatters below. Only the noun and
-// the cap differ; the reserved-preset arm is the one genuinely per-noun message
-// and stays with its own formatter. `noun` is passed Capitalized (it opens two
-// of the three sentences) and lower-cased for the mid-sentence duplicate arm.
-type CommonNameIssue = 'empty' | 'too-long' | 'duplicate';
+// The message text shared by the name formatters below. Only the noun and the
+// cap differ. `noun` is passed Capitalized (it opens two of the three
+// sentences) and lower-cased for the mid-sentence duplicate arm.
+type CommonNameIssue = NameIssue;
 
 function nameIssueMessage(
   noun: string,
@@ -161,41 +128,6 @@ function nameIssueMessage(
     case 'too-long': return `${noun} name must be ${max} characters or fewer.`;
     case 'duplicate': return `A ${noun.toLowerCase()} named "${name}" already exists.`;
   }
-}
-
-// The validation outcome for a candidate preset name. `null` means acceptable.
-export type PresetNameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
-
-// Validate a candidate preset name against the SAME contract parseCustomPresets
-// enforces at load time, so the Settings write sites (add/rename) can never
-// persist a name the sanitizer would silently drop. Pure and dependency-free so
-// it is unit-tested directly (there is no React test runner in this repo).
-//   - `existing`: the current custom-preset list (for duplicate detection)
-//   - `except`:   an entry NAME to EXCLUDE from duplicate detection (for renames,
-//                 so a case-only rename like codex -> Codex isn't its own dupe)
-export function validatePresetName(
-  name: string,
-  existing: CustomPreset[],
-  except?: string,
-): PresetNameIssue | null {
-  return validateEntryName(
-    name,
-    existing,
-    { max: PRESET_NAME_MAX, identityOf: (p) => p.name, reserved: isReservedPresetName },
-    except,
-  );
-}
-
-// Human message for a non-null preset-name validation issue. Lives here beside
-// the contract it renders (rather than inside NewChatsSection) so it is covered
-// by storage.test.mjs — this repo has no React test runner, so a pure function
-// trapped in a component is a pure function nothing can test.
-export function presetNameErrorMessage(name: string, issue: PresetNameIssue): string {
-  // The one arm with no snippet/pattern counterpart; the rest are shared text.
-  if (issue === 'reserved') {
-    return `"${name}" is a reserved preset name (use the built-in claude/shell instead).`;
-  }
-  return nameIssueMessage('Preset', PRESET_NAME_MAX, name, issue);
 }
 
 // A snapshot of a pane the user closed, kept per-workspace as a click-to-reopen
@@ -307,7 +239,7 @@ function parseRecentlyClosed(raw: unknown): RecentlyClosedEntry[] {
 // A user-defined instruction snippet: a named, reusable instruction the human
 // can insert at an intervention point (the quick reply + a focused pane's
 // context menu) instead of retyping common guidance ("run the tests", "pull
-// latest", "commit your work"). Mirrors CustomPreset's {name, cmd} shape but
+// latest", "commit your work"). Same {name, text} entry shape but
 // holds free-form instruction text rather than a spawn command. Pure client-
 // side pref; never sent to the backend as anything but the literal `text` over
 // the existing /api/send path. Global — one flat list, not host-keyed
@@ -330,7 +262,7 @@ export const SNIPPET_TEXT_MAX = 2000;
 export const SNIPPET_MAX_COUNT = 50;
 
 // The validation outcome for a candidate snippet name. `null` means acceptable.
-// Simpler than presets: there are no reserved built-in snippet names, so only
+// There are no reserved built-in snippet names, so only
 // empty | too-long | duplicate.
 export type SnippetNameIssue = 'empty' | 'too-long' | 'duplicate';
 
@@ -359,7 +291,8 @@ export function validateSnippetName(
 
 // Human message for a non-null snippet-name validation issue. Lives here beside
 // the contract it renders (rather than inside SnippetsSection) so it is covered
-// by storage.test.mjs — see presetNameErrorMessage.
+// by storage.test.mjs — this repo has no React test runner, so a pure function
+// trapped in a component is a pure function nothing can test.
 export function snippetNameErrorMessage(name: string, issue: SnippetNameIssue): string {
   return nameIssueMessage('Snippet', SNIPPET_NAME_MAX, name, issue);
 }
@@ -424,7 +357,7 @@ export type PatternNameIssue = 'empty' | 'too-long' | 'duplicate';
  *
  * `except` is a pattern ID, NOT a name — watch patterns key on a stable id, so a
  * rename never confuses the row. That is the one thing this validator does
- * differently from its preset/snippet siblings, and it is now stated outright as
+ * differently from its snippet sibling, and it is now stated outright as
  * the skeleton's `identityOf` rather than buried in a hand-copied `.some()`.
  */
 export function validatePatternName(
@@ -444,7 +377,8 @@ export function validatePatternName(
 /**
  * Human message for a non-null pattern-name validation issue. Lives here beside
  * the contract it renders (rather than inside PatternsSection) so it is covered
- * by storage.test.mjs — see presetNameErrorMessage.
+ * by storage.test.mjs — this repo has no React test runner, so a pure function
+// trapped in a component is a pure function nothing can test.
  */
 export function patternNameErrorMessage(name: string, issue: PatternNameIssue): string {
   return nameIssueMessage('Pattern', WATCH_PATTERN_NAME_MAX, name, issue);
@@ -598,38 +532,23 @@ export interface UiState {
   // Whether launch reopens the previous workspace ('previous') or starts empty
   // ('empty'). Pure client-side pref; never sent to the backend.
   restoreOnStartup?: RestoreOnStartup;
-  // Default agent type pre-filled in the New Chats spawn form. 'claude' and
-  // 'shell' are reserved built-ins; any other value must name a `customPresets`
-  // entry (falls back to 'claude' if that preset was since deleted). Pure
-  // client-side pref; never sent to the backend.
-  defaultNewChatPreset?: string;
-  // Per-host default agent-type overrides for the ＋ new chat spawn form
-  // (WARDEN-352 — mirrors defaultNewChatCwdByHost from WARDEN-336). Keys are the
-  // host strings — '(local)' for local, the SSH host name for remote (matching
-  // defaultNewChatHost); values are preset names. A host with no entry (or one
-  // whose value is empty/whitespace OR names a since-deleted custom preset, both
-  // dropped on load by parsePresetByHost) falls through to defaultNewChatPreset,
-  // then 'claude' — identical to today's single-host behavior. Pure client-side
-  // pref; never sent to the backend / /api/config.
-  defaultNewChatPresetByHost?: Record<string, string>;
-  defaultNewChatHost?: string;
-  // Default working directory pre-filled in the ＋ new chat spawn form
+  // Default working directory pre-filled in the sidebar Start shell control
   // (WARDEN-311). Blank (default) → the host's home directory (today's
   // behavior); a path like '~/projects/warden' is seeded into the cwd field and
   // remains editable per-spawn. Pure client-side pref; never sent to the
   // backend / /api/config.
   defaultNewChatCwd?: string;
-  // Per-host default working directory overrides for the ＋ new chat spawn form
+  // Per-host default working directory overrides for the sidebar Start shell control
   // (WARDEN-336). Keys are the host strings — '(local)' for local, the SSH host
-  // name for remote (matching defaultNewChatHost); values are cwd paths. A host
+  // name for remote (the same host keys as hostLabels); values are cwd paths. A host
   // with no entry (or an empty/whitespace value, dropped on load) falls through
   // to defaultNewChatCwd, then blank — identical to today's single-host
   // behavior. Sanitized on load by parseCwdByHost. Pure client-side pref; never
   // sent to the backend / /api/config.
   defaultNewChatCwdByHost?: Record<string, string>;
-  // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
+  // Default shell opened by BOTH the Start shell button and the ＋ split
   // button (WARDEN-429 — unifies the prior split-only `defaultSplitShell` with the
-  // hardcoded `'bash'` the new-chat shell preset used to force-feed). Blank
+  // hardcoded `'bash'` the retired new-chat shell preset used to force-feed). Blank
   // (default) means "no explicit shell" → the host launches its own login shell
   // (auto-detected per host, never hardcoded; WARDEN-223), so a zsh-login host
   // yields zsh out of the box with zero config. A non-empty value (e.g. 'zsh',
@@ -645,11 +564,6 @@ export interface UiState {
   // single-host behavior. Pure client-side pref; never sent to the backend /
   // /api/config.
   defaultShellByHost?: Record<string, string>;
-  // User-defined spawn presets (named quick-fill commands beyond claude/shell).
-  // Validated on load: entries missing a name/cmd are dropped, names are bounded
-  // (≤32 chars) and de-duplicated, and reserved built-in names are rejected.
-  // Pure client-side pref; never sent to the backend.
-  customPresets?: CustomPreset[];
   // User-defined instruction snippets (named, reusable intervention text —
   // "run the tests", "pull latest", etc.) surfaced at the quick reply and
   // a focused pane's context menu. Global (one flat list, not host-keyed).
@@ -691,31 +605,13 @@ export interface UiState {
   hostLabels?: HostLabels;
 }
 
-// Sanitize a raw customPresets value into a valid CustomPreset[]. Defensive:
-// never throws on malformed input (WARDEN-89) — it drops bad entries instead, so
-// one corrupt entry can never blank the spawn command. Drops entries missing a
-// name or cmd, names over PRESET_NAME_MAX chars, reserved built-in names
-// (case-insensitive), and duplicates (case-insensitive; first occurrence wins).
-function parseCustomPresets(raw: unknown): CustomPreset[] {
-  return parseEntryArray<CustomPreset>(raw, 'customPresets', (entry) => {
-    if (!entry || typeof entry !== 'object') return undefined;
-    const e = entry as Record<string, unknown>;
-    const name = typeof e.name === 'string' ? e.name.trim() : '';
-    const cmd = typeof e.cmd === 'string' ? e.cmd.trim() : '';
-    if (!name || !cmd) return undefined;
-    if (name.length > PRESET_NAME_MAX) return undefined;
-    if (isReservedPresetName(name)) return undefined;
-    return { name, cmd };
-  }, { key: (p) => p.name.toLowerCase() });
-}
-
 // Sanitize a raw snippets value into a valid Snippet[]. Defensive: never throws
 // on malformed input (WARDEN-89) — it drops bad entries instead, so one corrupt
 // entry can never blank the snippet list. Drops entries missing a name or text,
 // names over SNIPPET_NAME_MAX chars, text over SNIPPET_TEXT_MAX chars, and
 // duplicates (case-insensitive; first occurrence wins). Caps the count at
 // SNIPPET_MAX_COUNT (overflow dropped) so the payload can never bloat
-// localStorage. Mirrors parseCustomPresets's drop-bad-entries discipline.
+// localStorage. Drop-bad-entries discipline.
 function parseSnippets(raw: unknown): Snippet[] {
   return parseEntryArray<Snippet>(raw, 'snippets', (entry) => {
     if (!entry || typeof entry !== 'object') return undefined;
@@ -730,7 +626,7 @@ function parseSnippets(raw: unknown): Snippet[] {
 }
 
 // WARDEN-1091: the ONE array sanitizer skeleton — the array complement of
-// parseObjectMap below. Five parsers (recentlyClosed, customPresets, snippets,
+// parseObjectMap below. Five parsers (recentlyClosed, snippets,
 // mutedAlertKeys, workspaces) each carried a byte-identical copy of the same
 // 6-line preamble, re-copied by five separate shipped features (WARDEN-219,
 // 256, 323, 364, 372) so each could inherit the WARDEN-89 guard. Now the guard
@@ -793,7 +689,7 @@ function parseEntryArray<T>(
 }
 
 // WARDEN-1027: the ONE object-map sanitizer skeleton, extracted from the six
-// hand-copied parsers below (cwd/shell/labels/collapsed/preset per-host maps and
+// hand-copied parsers below (cwd/shell/labels/collapsed per-host maps and
 // the snoozed-alert map). Every copy shared the same ~16 lines and differed only
 // in its console.warn field name and its value rule, so each new per-host
 // preference re-copied the whole thing to inherit the WARDEN-89 guard. Now the
@@ -858,8 +754,8 @@ function parseCwdByHost(raw: unknown): Record<string, string> {
 
 // Sanitize a raw defaultShellByHost value (host key → default shell) into a
 // valid Record<string,string> (WARDEN-429). Like a cwd path, a shell name is an
-// arbitrary string, so a non-empty trim is enough (there is no semantic "valid
-// preset" check as parsePresetByHost needs). Entries whose value is
+// arbitrary string, so a non-empty trim is enough (there is no semantic "valid"
+// check). Entries whose value is
 // empty/whitespace are dropped — an empty override means "use the global
 // defaultShell" (then the host login shell) and so must never persist as a blank
 // that could seed the command field empty, or leave a dangling shell name.
@@ -890,33 +786,6 @@ function parseLabelsByHost(raw: unknown): HostLabels {
 // regression for fresh installs).
 function parseCollapsedHosts(raw: unknown): Record<string, boolean> {
   return parseObjectMap(raw, 'healthCollapsedHosts', (v) => (typeof v === 'boolean' ? v : undefined));
-}
-
-// Sanitize a raw defaultNewChatPresetByHost value (host key → preset name) into a
-// valid Record<string,string> (WARDEN-352). CRITICAL DIFFERENCE from
-// parseCwdByHost: cwd values are arbitrary path strings (a non-empty trim is
-// enough), but preset values are SEMANTIC names — each must be a VALID preset (a
-// built-in 'claude'/'shell' OR an existing customPresets entry). A host
-// defaulting to a since-deleted custom preset is DROPPED on load, which means
-// "inherit the global defaultNewChatPreset" — exactly mirroring how the global
-// defaultNewChatPreset itself falls back to 'claude' via presetIsValid when it
-// names a deleted preset. `isValid` is that same loadUi-scoped presetIsValid
-// closure (built-in OR in the parsed customPresets), passed in at the call site
-// where customPresets is already in scope — so a per-host value naming a REAL
-// custom preset is correctly KEPT. CALL-ORDERING CONTRACT (unchanged by
-// WARDEN-1027): do NOT call this where customPresets has not yet been parsed.
-// Defensive: never throws (WARDEN-89) — drops bad entries instead, so one
-// corrupt entry can never seed the spawn field with a dangling preset name.
-function parsePresetByHost(
-  raw: unknown,
-  isValid: (p: unknown) => boolean,
-): Record<string, string> {
-  // empty value → inherit global default; invalid preset (not a built-in and not
-  // in customPresets) → inherit global default.
-  return parseObjectMap(raw, 'defaultNewChatPresetByHost', (v) => {
-    const val = coerceNonEmptyString(v);
-    return val !== undefined && isValid(val) ? val : undefined;
-  });
 }
 
 // WARDEN-660: coerce a persisted gutter-ratio array to a valid number[] (each
@@ -1049,7 +918,7 @@ export const DEFAULT_UI: UiState = {
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
-  defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
+  snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultShell: '', defaultShellByHost: {},
   paneHost: {}, healthGroupBy: 'health', healthCollapsedHosts: {}, hostLabels: {},
 };
@@ -1077,8 +946,7 @@ export const PERSISTED_PREF_KEYS = [
   'terminalScrollback', 'terminalFontFamily', 'terminalColorScheme', 'terminalCursorStyle',
   'copyOnSelect', 'timestampFormat', 'fileViewerViewMode',
   'theme', 'density', 'paneLayout', 'paneColRatios', 'paneRowRatios', 'onExitBehavior', 'autoFocusNewPane',
-  'defaultNewChatPreset', 'defaultNewChatPresetByHost', 'defaultNewChatHost',
-  'defaultNewChatCwd', 'defaultNewChatCwdByHost', 'customPresets', 'snippets',
+  'defaultNewChatCwd', 'defaultNewChatCwdByHost', 'snippets',
   'defaultShell', 'defaultShellByHost',
   'paneHost', 'healthGroupBy', 'healthCollapsedHosts', 'hostLabels',
 ] as const satisfies readonly (keyof Omit<UiState, 'restoreOnStartup'>)[];
@@ -1167,12 +1035,8 @@ export function resetUiPrefDefaults(): ResetUiDefaults {
     terminalColorScheme: 'auto',
     terminalCursorStyle: 'blink-block',
     // New chats
-    defaultNewChatPreset: 'claude',
-    defaultNewChatPresetByHost: {},
-    defaultNewChatHost: '(local)',
     defaultNewChatCwd: '',
     defaultNewChatCwdByHost: {},
-    customPresets: [],
     snippets: STARTER_SNIPPETS.map((s) => ({ ...s })),
     defaultShell: '',
     defaultShellByHost: {},
@@ -1191,14 +1055,6 @@ export function loadUi(): UiState {
     // "is this a non-null object" is robust against future field removals and
     // still rejects a non-payload (string/number/null) the parse might surface.
     if (v && typeof v === 'object' && !Array.isArray(v)) {
-      // Parse custom presets first so defaultNewChatPreset can be validated
-      // against them: a default naming a since-deleted preset falls back to claude.
-      const customPresets = parseCustomPresets(v.customPresets);
-      const presetIsValid = (p: unknown): boolean =>
-        typeof p === 'string' && (
-          (BUILTIN_PRESETS as readonly string[]).includes(p) ||
-          customPresets.some((c) => c.name === p)
-        );
       // Workspaces: parse the new model, migrating legacy single-workspace state
       // (flat openPanes/focused) forward on first load so no open pane is lost.
       let workspaces = parseWorkspaces(v.workspaces);
@@ -1279,16 +1135,6 @@ export function loadUi(): UiState {
         // partial payload never silently disables focus-stealing.
         autoFocusNewPane: v.autoFocusNewPane !== false,
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
-        defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
-        // Per-host preset overrides (WARDEN-352): same drop-bad-entries discipline
-        // as the cwd map above, but stricter — each value must additionally be a
-        // VALID preset (built-in OR a customPresets entry) or it is dropped on
-        // load (→ inherit the global default), so a since-deleted custom preset
-        // can never seed the agent-type field with a dangling name. presetIsValid
-        // (which closes over the just-parsed customPresets) is passed in so real
-        // custom presets are kept.
-        defaultNewChatPresetByHost: parsePresetByHost(v.defaultNewChatPresetByHost, presetIsValid),
-        defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
         // Trim on load so stray whitespace never becomes the seeded cwd path;
         // blank is the meaningful "host home directory" value (today's behavior).
         defaultNewChatCwd: typeof v.defaultNewChatCwd === 'string' ? v.defaultNewChatCwd.trim() : '',
@@ -1296,7 +1142,7 @@ export function loadUi(): UiState {
         // paneHost's loose pass — a corrupt/blank entry must never seed the
         // spawn field empty. Empty values drop ("use the global default").
         defaultNewChatCwdByHost: parseCwdByHost(v.defaultNewChatCwdByHost),
-        // Default shell for the ＋ new-chat *shell* preset AND the ＋ split
+        // Default shell for the Start shell button AND the ＋ split
         // button (WARDEN-429). MIGRATION: the legacy split-only `defaultSplitShell`
         // is folded in here — if the new `defaultShell` field is absent, the prior
         // split-shell value (if any) is used so an upgrade never silently drops
@@ -1312,7 +1158,6 @@ export function loadUi(): UiState {
         // map — a corrupt/blank entry must never seed the command field empty.
         // Empty values drop ("use the global default", then the host login shell).
         defaultShellByHost: parseShellByHost(v.defaultShellByHost),
-        customPresets,
         // One-time starter-set seeding (WARDEN-323 Decision 3): when the
         // persisted `snippets` field is ABSENT (a fresh install OR a v2→v3
         // promote of a payload that predates snippets), seed STARTER_SNIPPETS so

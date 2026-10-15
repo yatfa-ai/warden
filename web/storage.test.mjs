@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, presetNameErrorMessage, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, snippetNameErrorMessage, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, patternNameErrorMessage, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, resetObsPrefDefaults, resetObsPrefsPreservingWorkspace } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, snippetNameErrorMessage, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, patternNameErrorMessage, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, resetObsPrefDefaults, resetObsPrefsPreservingWorkspace } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -76,175 +76,28 @@ test('a missing field loads as "previous"', () => {
   assert.equal(loadUi().restoreOnStartup, 'previous');
 });
 
-console.log('\ndefault-new-chat prefs (agent type + host) round-trip through loadUi/saveUi');
-test('preset defaults to "claude" and host to "(local)" when nothing is stored', () => {
+console.log('\nWARDEN-1816 — the retired New Chats preset family (agent type / per-host agent type / host / custom presets) in a legacy payload is ignored and dropped on next save');
+test('a legacy payload carrying the four retired keys loads without them and saveUi drops them', () => {
   reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    defaultNewChatPreset: 'codex',
+    defaultNewChatPresetByHost: { 'gpu-box': 'codex' },
+    defaultNewChatHost: 'prod-box',
+    defaultNewChatCwd: '~/proj',
+    copyOnSelect: true,
+  }));
   const ui = loadUi();
-  assert.equal(ui.defaultNewChatPreset, 'claude');
-  assert.equal(ui.defaultNewChatHost, '(local)');
-});
-test('shell preset + a remote host round-trip', () => {
-  reset();
-  saveUi({ ...loadUi(), defaultNewChatPreset: 'shell', defaultNewChatHost: 'prod-box' });
-  const ui = loadUi();
-  assert.equal(ui.defaultNewChatPreset, 'shell');
-  assert.equal(ui.defaultNewChatHost, 'prod-box');
-});
-test('an out-of-allow-set preset coerces back to "claude" on load (defensive)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'bogus', defaultNewChatHost: 'prod-box' }));
-  const ui = loadUi();
-  assert.equal(ui.defaultNewChatPreset, 'claude');
-  assert.equal(ui.defaultNewChatHost, 'prod-box', 'host is unaffected by preset coercion');
-});
-test('a non-string host coerces back to "(local)" on load (defensive)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatHost: 42 }));
-  assert.equal(loadUi().defaultNewChatHost, '(local)');
-});
-test('missing fields load as the defaults', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
-  const ui = loadUi();
-  assert.equal(ui.defaultNewChatPreset, 'claude');
-  assert.equal(ui.defaultNewChatHost, '(local)');
-});
-test('both prefs survive an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
-  // The new prefs are NOT workspace fields, so persistUiState spreads them from
-  // `live`. Confirm an empty-launch still round-trips a freshly set default.
-  reset();
-  const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, defaultNewChatPreset: 'shell', defaultNewChatHost: 'prod-box' }, 'empty', d0, true));
-  const after = loadUi();
-  assert.equal(after.defaultNewChatPreset, 'shell');
-  assert.equal(after.defaultNewChatHost, 'prod-box');
-});
-
-console.log('\ncustomPresets validate + round-trip through loadUi/saveUi');
-test('defaults to [] when nothing is stored', () => {
-  reset();
-  assert.deepEqual(loadUi().customPresets, []);
-});
-test('valid presets round-trip', () => {
-  reset();
-  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }, { name: 'gemini', cmd: 'gemini -m pro' }] });
-  assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }, { name: 'gemini', cmd: 'gemini -m pro' }]);
-});
-test('a non-array customPresets coerces to [] (defensive, no throw)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: 'bogus' }));
-  assert.deepEqual(loadUi().customPresets, []);
-});
-test('entries missing name or cmd are dropped (never blank the spawn command)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'ok', cmd: 'ok' }, { name: 'nocmd' }, { cmd: 'noname' }, {}] }));
-  assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
-});
-test('reserved built-in names (claude/shell) are rejected as custom presets', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'claude', cmd: 'whatever' }, { name: 'shell', cmd: 'bash' }, { name: 'codex', cmd: 'codex' }] }));
-  assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
-});
-test('reserved built-in names are rejected CASE-INSENSITIVELY (no "Claude"/"Shell" near-collision)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Claude', cmd: 'whatever' }, { name: 'SHELL', cmd: 'bash' }, { name: 'ShElL', cmd: 'zsh' }, { name: 'codex', cmd: 'codex' }] }));
-  // Every case variant of a built-in is dropped, matching the case-insensitive dedup.
-  assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
-});
-test('the name length cap is exactly PRESET_NAME_MAX (boundary: N ok, N+1 dropped)', () => {
-  reset();
-  const exact = 'x'.repeat(PRESET_NAME_MAX);
-  const tooLong = 'x'.repeat(PRESET_NAME_MAX + 1);
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: exact, cmd: 'a' }, { name: tooLong, cmd: 'b' }] }));
-  assert.deepEqual(loadUi().customPresets, [{ name: exact, cmd: 'a' }]);
-});
-test('duplicate names are de-duplicated (case-insensitive, first wins)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Codex', cmd: 'codex' }, { name: 'codex', cmd: 'codex2' }] }));
-  assert.deepEqual(loadUi().customPresets, [{ name: 'Codex', cmd: 'codex' }]);
-});
-test('names over 32 chars are dropped', () => {
-  reset();
-  const long = 'x'.repeat(33);
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: long, cmd: 'cmd' }, { name: 'ok', cmd: 'ok' }] }));
-  assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
-});
-
-console.log('\nvalidatePresetName / isReservedPresetName — the write-site contract (add/rename route through this)');
-test('isReservedPresetName matches built-ins case-insensitively', () => {
-  assert.equal(isReservedPresetName('claude'), true);
-  assert.equal(isReservedPresetName('SHELL'), true);
-  assert.equal(isReservedPresetName('ShElL'), true);
-  assert.equal(isReservedPresetName('codex'), false);
-  assert.equal(isReservedPresetName(''), false);
-});
-test('validatePresetName returns null for an acceptable name', () => {
-  assert.equal(validatePresetName('codex', [{ name: 'gemini', cmd: 'g' }]), null);
-});
-test('validatePresetName flags empty (after trim)', () => {
-  assert.equal(validatePresetName('', []), 'empty');
-  assert.equal(validatePresetName('   ', []), 'empty');
-});
-test('validatePresetName flags names longer than PRESET_NAME_MAX', () => {
-  // Regression for the blocking review issue: rename must not bypass the cap.
-  assert.equal(validatePresetName('x'.repeat(PRESET_NAME_MAX), []), null);
-  assert.equal(validatePresetName('x'.repeat(PRESET_NAME_MAX + 1), []), 'too-long');
-});
-test('validatePresetName flags reserved built-ins case-insensitively', () => {
-  assert.equal(validatePresetName('claude', []), 'reserved');
-  assert.equal(validatePresetName('Claude', []), 'reserved');
-  assert.equal(validatePresetName('SHELL', []), 'reserved');
-});
-test('validatePresetName flags duplicates case-insensitively', () => {
-  const existing = [{ name: 'codex', cmd: 'c' }];
-  assert.equal(validatePresetName('codex', existing), 'duplicate');
-  assert.equal(validatePresetName('CODEX', existing), 'duplicate');
-  assert.equal(validatePresetName('gemini', existing), null);
-});
-test('validatePresetName excludes `except` so a case-only rename is allowed', () => {
-  // Renaming codex -> Codex must NOT be flagged as its own duplicate.
-  const existing = [{ name: 'codex', cmd: 'c' }];
-  assert.equal(validatePresetName('Codex', existing, 'codex'), null);
-  // But a rename colliding with a DIFFERENT preset is still blocked.
-  const two = [{ name: 'codex', cmd: 'c' }, { name: 'gemini', cmd: 'g' }];
-  assert.equal(validatePresetName('gemini', two, 'codex'), 'duplicate');
-});
-test('validatePresetName trims before validating (matches load-time normalization)', () => {
-  assert.equal(validatePresetName('  codex  ', []), null);
-  assert.equal(validatePresetName('  codex  ', [{ name: 'codex', cmd: 'c' }]), 'duplicate');
-});
-
-console.log('\ndefaultNewChatPreset (widened) accepts a custom preset name and falls back on delete');
-test('a custom preset name can be the default and round-trips', () => {
-  reset();
-  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPreset: 'codex' });
-  const ui = loadUi();
-  assert.equal(ui.defaultNewChatPreset, 'codex');
-  assert.deepEqual(ui.customPresets, [{ name: 'codex', cmd: 'codex' }]);
-});
-test('a default naming a since-deleted preset falls back to claude (criterion e)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPreset: 'codex' }));
-  // codex is not in the (empty) custom list → must not dangle
-  assert.equal(loadUi().defaultNewChatPreset, 'claude');
-});
-test('built-in claude/shell defaults remain valid', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'shell' }));
-  assert.equal(loadUi().defaultNewChatPreset, 'shell');
-});
-test('a stored non-string preset coerces back to claude (defensive)', () => {
-  reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 42 }));
-  assert.equal(loadUi().defaultNewChatPreset, 'claude');
-});
-test('custom presets survive an empty-mode mount (criterion c)', () => {
-  reset();
-  const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPreset: 'codex' }, 'empty', d0, true));
-  const after = loadUi();
-  assert.deepEqual(after.customPresets, [{ name: 'codex', cmd: 'codex' }]);
-  assert.equal(after.defaultNewChatPreset, 'codex');
+  for (const k of ['defaultNewChatPreset', 'defaultNewChatPresetByHost', 'defaultNewChatHost', 'customPresets']) {
+    assert.equal(k in ui, false, `${k} is not loaded`);
+  }
+  assert.equal(ui.defaultNewChatCwd, '~/proj', 'a surviving spawn pref in the same payload is unaffected');
+  assert.equal(ui.copyOnSelect, true);
+  saveUi(ui);
+  const raw = JSON.parse(mem.get('warden:ui:v3'));
+  for (const k of ['defaultNewChatPreset', 'defaultNewChatPresetByHost', 'defaultNewChatHost', 'customPresets']) {
+    assert.equal(k in raw, false, `${k} is dropped on the next save`);
+  }
 });
 
 console.log('\npaneLayout round-trips through loadUi/saveUi');
@@ -903,13 +756,13 @@ test('UI data under the prior versioned key (v2) is promoted forward to v3 on lo
   // theme:'dark' is a legacy literal — it survives the v2->v3 promotion AND
   // normalizes to GitHub Dark (WARDEN-255) on load; snippets seed because the v2
   // payload has no snippets field (the starter-set discriminator fires).
-  mem.set('warden:ui:v2', JSON.stringify({ workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['chat-a', 'chat-b'], focused: 'chat-a', recentlyClosed: [] }], activeWorkspaceId: 'w1', theme: 'dark', density: 'compact', customPresets: [{ name: 'codex', cmd: 'codex' }] }));
+  mem.set('warden:ui:v2', JSON.stringify({ workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['chat-a', 'chat-b'], focused: 'chat-a', recentlyClosed: [] }], activeWorkspaceId: 'w1', theme: 'dark', density: 'compact', copyOnSelect: true }));
   const ui = loadUi();
   assert.deepEqual(ui.workspaces[0].openPanes, ['chat-a', 'chat-b'], 'workspace openPanes survived the v2->v3 promotion');
   assert.equal(ui.activeWorkspaceId, 'w1', 'activeWorkspaceId survived the promotion');
   assert.equal(ui.theme, 'github-dark', 'legacy dark pref migrated to GitHub Dark across the promotion');
   assert.equal(ui.density, 'compact', 'density survived');
-  assert.deepEqual(ui.customPresets, [{ name: 'codex', cmd: 'codex' }], 'customPresets survived');
+  assert.equal(ui.copyOnSelect, true, 'copyOnSelect survived');
   assert.deepEqual(ui.snippets, STARTER_SNIPPETS, 'snippets seeded (no field in the v2 payload)');
   assert.ok(mem.has('warden:ui:v3'), 'payload promoted to the current key (v3)');
   assert.ok(!mem.has('warden:ui:v2'), 'prior key (v2) removed after promotion');
@@ -1216,7 +1069,7 @@ test('observer reset classification partitions every ObsUi key: OBS_RESET_KEYS �
   }
 });
 
-console.log('\ndefaultShell (the unified shell for new-chat shell preset + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');
+console.log('\ndefaultShell (the unified shell for the Start shell button + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');
 test('defaults to "" (auto-detect host login shell) when nothing is stored', () => {
   reset();
   assert.equal(loadUi().defaultShell, '');
@@ -1935,28 +1788,19 @@ console.log('\nvalidateEntryName — the shared skeleton\'s per-caller parameter
 // public validators supplies to it, so a future edit cannot quietly unify a
 // per-caller knob (cap / reserved guard / `except` identity) across all three.
 test('each validator keeps its OWN cap — the cap is a parameter, never a shared constant', () => {
-  // Patterns allow 64, presets/snippets 32. A name in between must therefore be
-  // rejected by two of the three and accepted by the third.
-  assert.notEqual(WATCH_PATTERN_NAME_MAX, PRESET_NAME_MAX);
-  const between = 'x'.repeat(PRESET_NAME_MAX + 1);
+  // Patterns allow 64, snippets 32. A name in between must therefore be
+  // rejected by the snippet validator and accepted by the pattern one.
+  assert.notEqual(WATCH_PATTERN_NAME_MAX, SNIPPET_NAME_MAX);
+  const between = 'x'.repeat(SNIPPET_NAME_MAX + 1);
   assert.ok(between.length <= WATCH_PATTERN_NAME_MAX);
-  assert.equal(validatePresetName(between, []), 'too-long');
   assert.equal(validateSnippetName(between, []), 'too-long');
   assert.equal(validatePatternName(between, []), null);
 });
-test('the reserved guard is preset-only — snippets and patterns may be named "claude"', () => {
-  // Only validatePresetName passes a `reserved` predicate to the skeleton, which
-  // is what keeps 'reserved' out of the snippet/pattern issue unions.
-  assert.equal(validatePresetName('claude', []), 'reserved');
+test('neither surviving validator reserves built-in names — snippets and patterns may be named "claude"', () => {
   assert.equal(validateSnippetName('claude', []), null);
   assert.equal(validatePatternName('SHELL', []), null);
 });
-test('reserved is checked BEFORE duplicate when a name is both', () => {
-  // Order is load-bearing: a preset list already holding 'claude' must still
-  // report the more specific 'reserved', not 'duplicate'.
-  assert.equal(validatePresetName('claude', [{ name: 'claude', cmd: 'c' }]), 'reserved');
-});
-test('`except` identity is per-caller: presets/snippets exclude by NAME, patterns by ID', () => {
+test('`except` identity is per-caller: snippets exclude by NAME, patterns by ID', () => {
   // The complement of the "excludes `except`" tests above: passing the WRONG
   // kind of key must NOT exclude anything. This is the assertion that fails if
   // the skeleton's identityOf is ever flattened to one shared key.
@@ -1964,23 +1808,14 @@ test('`except` identity is per-caller: presets/snippets exclude by NAME, pattern
   // Patterns key on id, so the entry's NAME is not an identity → no exclusion.
   assert.equal(validatePatternName('Deploy failed', pattern, 'Deploy failed'), 'duplicate');
   assert.equal(validatePatternName('Deploy failed', pattern, 'p1'), null);
-  // Presets/snippets key on name, so an id-shaped `except` excludes nothing.
-  assert.equal(validatePresetName('codex', [{ name: 'codex', cmd: 'c' }], 'p1'), 'duplicate');
+  // Snippets key on name, so an id-shaped `except` excludes nothing.
   assert.equal(validateSnippetName('Ship', [{ name: 'Ship', text: 's' }], 'p1'), 'duplicate');
 });
 
-console.log('\npresetNameErrorMessage / snippetNameErrorMessage / patternNameErrorMessage — the toast text (WARDEN-1111)');
-// Relocated out of NewChatsSection/SnippetsSection/PatternsSection so they are
+console.log('\nsnippetNameErrorMessage / patternNameErrorMessage — the toast text (WARDEN-1111)');
+// Relocated out of SnippetsSection/PatternsSection so they are
 // testable at all — this repo has no React test runner, so a pure function
 // trapped in a component is a pure function nothing can cover.
-test('presetNameErrorMessage renders every arm of PresetNameIssue', () => {
-  assert.equal(presetNameErrorMessage('codex', 'empty'), 'Preset needs a name.');
-  assert.equal(presetNameErrorMessage('codex', 'duplicate'), 'A preset named "codex" already exists.');
-  assert.equal(
-    presetNameErrorMessage('claude', 'reserved'),
-    '"claude" is a reserved preset name (use the built-in claude/shell instead).',
-  );
-});
 test('snippetNameErrorMessage renders every arm of SnippetNameIssue', () => {
   assert.equal(snippetNameErrorMessage('Run tests', 'empty'), 'Snippet needs a name.');
   assert.equal(snippetNameErrorMessage('Run tests', 'duplicate'), 'A snippet named "Run tests" already exists.');
@@ -1989,102 +1824,21 @@ test('patternNameErrorMessage renders every arm of PatternNameIssue', () => {
   assert.equal(patternNameErrorMessage('Deploy failed', 'empty'), 'Pattern needs a name.');
   assert.equal(patternNameErrorMessage('Deploy failed', 'duplicate'), 'A pattern named "Deploy failed" already exists.');
 });
-test('each too-long message quotes its OWN cap (32 preset/snippet vs 64 pattern)', () => {
+test('each too-long message quotes its OWN cap (32 snippet vs 64 pattern)', () => {
   // Literal caps, not the constants, so this fails loudly if a formatter is ever
   // rewired to a shared cap — the exact mistake the shared skeleton invites.
-  assert.equal(PRESET_NAME_MAX, 32);
   assert.equal(SNIPPET_NAME_MAX, 32);
   assert.equal(WATCH_PATTERN_NAME_MAX, 64);
-  assert.equal(presetNameErrorMessage('x', 'too-long'), 'Preset name must be 32 characters or fewer.');
   assert.equal(snippetNameErrorMessage('x', 'too-long'), 'Snippet name must be 32 characters or fewer.');
   assert.equal(patternNameErrorMessage('x', 'too-long'), 'Pattern name must be 64 characters or fewer.');
 });
 test('validator issue → formatter is the exact toast the Settings write sites show', () => {
   // The end-to-end shape each section runs: validate, then render the issue.
-  const presets = [{ name: 'codex', cmd: 'c' }];
-  assert.equal(
-    presetNameErrorMessage('codex', validatePresetName('codex', presets)),
-    'A preset named "codex" already exists.',
-  );
   const patterns = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
   assert.equal(
     patternNameErrorMessage('Deploy failed', validatePatternName('Deploy failed', patterns)),
     'A pattern named "Deploy failed" already exists.',
   );
-});
-
-console.log('\ndefaultNewChatPresetByHost (per-host preset overrides) round-trips through loadUi/saveUi — WARDEN-352');
-test('defaults to {} when nothing is stored', () => {
-  reset();
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
-});
-test('a valid host→preset map round-trips (a custom preset present in the same payload is kept)', () => {
-  reset();
-  // 'codex' is a custom preset in the SAME payload → kept; built-ins always kept.
-  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: { 'gpu-box': 'codex', '(local)': 'claude' } });
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'codex', '(local)': 'claude' });
-});
-test('an empty map round-trips as {} (clearing all overrides persists nothing)', () => {
-  reset();
-  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: {} });
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
-});
-test('a non-object coerces to {} (defensive, no throw)', () => {
-  reset();
-  // A string is not a plain map → {}.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: 'bogus' }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
-  // An array is an object but NOT a plain map → {}.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: [['gpu-box', 'codex']] }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
-  // A number → {}.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: 42 }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
-});
-test('a per-host value naming a custom preset NOT in the stored customPresets is DROPPED (falls back to global at read time — the key correctness behavior)', () => {
-  reset();
-  // 'codex' is not a built-in and NOT in the (empty) customPresets → dropped.
-  // 'claude' is a built-in → kept.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPresetByHost: { 'gpu-box': 'codex', '(local)': 'claude' } }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
-});
-test('a per-host value of a reserved built-in (claude/shell) is kept with no custom presets', () => {
-  reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPresetByHost: { 'gpu-box': 'shell', '(local)': 'claude' } }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'shell', '(local)': 'claude' });
-});
-test('entries with non-string values are dropped (never seed the agent-type field with a non-name)', () => {
-  reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '(local)': 'claude', 'num': 42, 'obj': { x: 1 }, 'arr': [1] } }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
-});
-test('entries with empty/whitespace values are dropped (empty override = use the global default, never persists as a blank)', () => {
-  reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '(local)': 'claude', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
-});
-test('entries with an empty-string key are dropped', () => {
-  reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '': 'claude', '(local)': 'claude' } }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
-});
-test('values are trimmed on load (matching defaultNewChatPreset)', () => {
-  reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '(local)': '  claude  ' } }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
-});
-test('a missing field loads as {}', () => {
-  reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
-});
-test('the map survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
-  // defaultNewChatPresetByHost is NOT a workspace field, so persistUiState spreads
-  // it from `live`. Confirm an empty-launch still round-trips a freshly set map.
-  reset();
-  const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: { 'gpu-box': 'codex' } }, 'empty', d0, true));
-  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'codex' });
 });
 
 // --- resetUiPrefsPreservingWorkspace — workspace-preserving reset (WARDEN-346) -
@@ -2117,12 +1871,8 @@ const overTunedLive = () => {
     terminalColorScheme: 'dark',
     terminalCursorStyle: 'steady-bar',
     copyOnSelect: true,
-    defaultNewChatPreset: 'shell',
-    defaultNewChatPresetByHost: { 'host-a': 'shell' },
-    defaultNewChatHost: 'prod-box',
     defaultNewChatCwd: '~/projects/warden',
     defaultNewChatCwdByHost: { 'host-a': '/srv' },
-    customPresets: [{ name: 'codex', cmd: 'codex' }],
     snippets: [{ name: 'custom-snippet', text: 'do the thing' }],
     defaultShell: 'zsh',
     defaultShellByHost: { 'host-a': 'fish' },
@@ -2163,7 +1913,7 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.equal(live.density, 'compact');
   assert.notEqual(live.terminalFontFamily, '');
   assert.equal(live.copyOnSelect, true);
-  assert.deepEqual(live.customPresets, [{ name: 'codex', cmd: 'codex' }]);
+  assert.equal(live.defaultNewChatCwd, '~/projects/warden');
   assert.equal(live.restoreOnStartup, 'empty');
   assert.equal(live.timestampFormat, 'absolute');
   assert.deepEqual(live.snippets, [{ name: 'custom-snippet', text: 'do the thing' }]);
@@ -2186,10 +1936,7 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.equal(r.terminalColorScheme, 'auto');
   assert.equal(r.terminalCursorStyle, 'blink-block');
   assert.equal(r.copyOnSelect, false);
-  assert.equal(r.defaultNewChatPreset, 'claude');
-  assert.equal(r.defaultNewChatHost, '(local)');
   assert.equal(r.defaultNewChatCwd, '');
-  assert.deepEqual(r.customPresets, []);
   assert.equal(r.defaultShell, '');
   assert.deepEqual(r.defaultShellByHost, {});
   // Prefs added by tickets that landed after WARDEN-346 branched reset too.
@@ -2198,7 +1945,6 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   // entries in a stored payload are structurally ignored by loadUi.
   assert.deepEqual(r.attentionStates, { stuck: true, done: true });
   assert.deepEqual(r.watchedChats, []);
-  assert.deepEqual(r.defaultNewChatPresetByHost, {});
   assert.deepEqual(r.defaultNewChatCwdByHost, {});
   assert.deepEqual(r.snippets, STARTER_SNIPPETS);
   // healthGroupBy/fileViewerViewMode are in DEFAULT_UI; the helper resets them too.
@@ -2253,10 +1999,7 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   assert.equal(after.terminalColorScheme, 'auto');
   assert.equal(after.terminalCursorStyle, 'blink-block');
   assert.equal(after.copyOnSelect, false);
-  assert.equal(after.defaultNewChatPreset, 'claude');
-  assert.equal(after.defaultNewChatHost, '(local)');
   assert.equal(after.defaultNewChatCwd, '');
-  assert.deepEqual(after.customPresets, []);
   assert.equal(after.defaultShell, '');
   assert.deepEqual(after.defaultShellByHost, {});
   // Prefs added after WARDEN-346 round-trip to their defaults through loadUi too.
@@ -2393,19 +2136,17 @@ test('reset classification partitions every pref: RESET_PRESERVED_KEYS ⊎ reset
     'fileViewerViewMode resets to the DEFAULT_UI value');
 
   // WARDEN-957: the copy anchor. ResetSection's blurb + confirm dialog promise,
-  // by name, that this reset "deletes your custom spawn presets", "reverts your
-  // instruction snippets to the four starters", and "clears your per-host
-  // display labels". All three are USER-AUTHORED content with no undo, so that
+  // by name, that this reset "reverts your
+  // instruction snippets to the four starters" and "clears your per-host
+  // display labels". Both are USER-AUTHORED content with no undo, so that
   // enumeration is the safety mechanism (WARDEN-68 Rule 8) — not a wording nit.
   // Pin each key to RESET (not preserved) and to its DEFAULT_UI value, so moving
   // one to preserved fails loudly here instead of silently making the copy lie.
-  for (const k of ['customPresets', 'snippets', 'hostLabels']) {
+  for (const k of ['snippets', 'hostLabels']) {
     assert.ok(resetKeys.includes(k),
       `${k} is reset by "Reset appearance & UI preferences" — ResetSection copy names it as destroyed`);
     assert.ok(!preserved.includes(k), `${k} is NOT preserved by the reset`);
   }
-  assert.deepEqual(resetUiPrefDefaults().customPresets, [],
-    'customPresets resets to [] — every custom spawn preset is deleted');
   assert.deepEqual(resetUiPrefDefaults().hostLabels, {},
     'hostLabels resets to {} — every per-host display label is cleared');
   // Snippets revert to the 4 seeded starters: authored snippets are lost, and
@@ -2474,7 +2215,7 @@ test('resetUiPrefDefaults() returns fresh containers (no aliasing of DEFAULT_UI/
 // the retired fleet attention alert. The shared skeletons those blocks also
 // exercised — parseObjectMap and parseEntryArray — keep their coverage through
 // their surviving callers (healthCollapsedHosts / hostLabels / defaultShellByHost
-// for the map; recentlyClosed / customPresets / snippets / workspaces for the
+// for the map; recentlyClosed / snippets / workspaces for the
 // array), so neither skeleton is left unpinned.
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

@@ -20,8 +20,8 @@
 // scanned it correctly while every client host list dropped it, producing three
 // user-visible failures: no Open Chat scope chip, no sidebar host row (so
 // `enterHost` was unreachable), and — worse than omission — NewChatForm
-// actively reset a stored `defaultNewChatHost` back to `(local)`, re-seeding
-// cwd and preset on every open.
+// (since deleted) actively reset a stored default host back to `(local)`,
+// re-seeding cwd and preset on every open.
 //
 // Pure (no React, no DOM, no fetch) so it is unit-testable. See web/hostList.test.mjs.
 import { THIS_MACHINE } from './chatDisplay';

@@ -64,7 +64,7 @@ export function PatternRow({
   const commitName = () => {
     const decision = decideDraftNameCommit(nameDraft, pattern.name);
     if (decision.commit) {
-      // Divergence from PresetRow/SnippetRow (preserved): patterns are renamed
+      // Divergence from SnippetRow (preserved): patterns are renamed
       // by id, not by previous name.
       if (!onRename(pattern.id, decision.value)) setNameDraft(pattern.name); // revert on rejection
     } else {

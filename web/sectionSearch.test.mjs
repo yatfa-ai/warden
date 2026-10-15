@@ -288,20 +288,11 @@ const SHIPPED_LABELS = [
   ['appearance', 'Menlo', 'src/components/settings/fontOptions.ts'],
   ['appearance', 'Consolas', 'src/components/settings/fontOptions.ts'],
 
-  ['newchats', 'Default agent type'],
-  ['newchats', 'claude (default)'],
-  ['newchats', 'Custom presets'],
-  ['newchats', 'Add preset'],
-  ['newchats', 'New preset name'],
-  ['newchats', 'New preset command'],
-  ['newchats', 'Default host'],
   ['newchats', 'this machine (local)'],
   ['newchats', 'Default shell (fallback for any host without its own)'],
   ['newchats', 'Default shell per host'],
   ['newchats', 'Default working directory (fallback for any host without its own)'],
   ['newchats', 'Working directory per host'],
-  ['newchats', 'Agent type per host'],
-  ['newchats', 'Use global default'],
 
   ['snippets', 'Add snippet'],
   ['snippets', 'New snippet name'],
@@ -437,7 +428,7 @@ function stripComments(source) {
  *   - <Label>/<SelectItem> children  (most rows and every literal dropdown option)
  *   - font-medium <span>/<div> group headings (Notifications channels, Observer model)
  *   - aria-label="…" on inputs with no visible label (Snippets, Patterns,
- *     custom font, presets) — a user searches for these by that name too.
+ *     custom font, snippets) — a user searches for these by that name too.
  *   - `label: '…'` string literals (inline data arrays: Notifications'
  *     pane-state switches, `this machine (local)`) — the inline variant of
  *     authoring shape (b), where the array lives in the section file itself.
@@ -446,7 +437,7 @@ function stripComments(source) {
  * the first nested tag or `{expression}`. That keeps a label from being
  * concatenated with its sub-hint <span> (`Attention` + `Stuck` + its hint,
  * which would produce a string that renders nowhere), and it drops genuinely
- * dynamic runtime values (`{defaultNewChatPreset} (deleted)`, `{host} (no
+ * dynamic runtime values (`{saved} (deleted)`, `{host} (no
  * longer available)` — per-host text, not preferences).
  *
  * ⚠️ Cutting at `{` ALSO drops STATIC option lists rendered by mapping over a
@@ -508,7 +499,7 @@ test('every row the source renders resolves to its own section (omission guard)'
     }
   }
   // A regex that silently stops matching would make this test vacuously green.
-  assert.ok(checked > 100, `extractor found only ${checked} rows — it has stopped matching`);
+  assert.ok(checked > 90, `extractor found only ${checked} rows — it has stopped matching`);
 });
 
 // --- Guard 4 (corpus -> source): every ANCHOR points at a real control -------
@@ -770,7 +761,7 @@ test('each data module is actually rendered by the section it is registered unde
 
 // Mapped imports deliberately NOT in OPTION_DATA_MODULES. Same honesty
 // contract as NOT_A_PREFERENCE: an entry without a reason is indistinguishable
-// from a bug. (Runtime/user-data arrays — hosts, presets, snippets, patterns —
+// from a bug. (Runtime/user-data arrays — hosts, snippets, patterns —
 // are LOCALS or props, not imports, so they never reach this check; only
 // static imported arrays do.)
 const MAPPED_IMPORT_EXCLUSIONS = new Map([
@@ -887,7 +878,6 @@ test("the ticket's probe terms resolve to the sections that ship them", () => {
     ['refresh', 'hosts'],
     ['secret', 'notifications'],
     ['cwd', 'newchats'],
-    ['preset', 'newchats'],
     ['token', 'tokenbudget'],
     ['working directory', 'newchats'],
     // Data-authored option names — the round-three failure: a user who knows

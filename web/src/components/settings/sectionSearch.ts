@@ -85,14 +85,14 @@
 //    Terminal color scheme, was missing while both its siblings (`Always dark`,
 //    `Always light`) were present, so a user typing what their own dropdown says
 //    was told Warden has no such setting. Three aria-labelled fields
-//    (`Custom terminal font family`, `New preset name`, `New preset command`)
-//    were missing the same way.
+//    (`Custom terminal font family`, `New snippet name`, `New snippet
+//    instruction text`) were missing the same way.
 //    A corpus->source test structurally CANNOT catch this: a row absent from
 //    both the corpus and the test table is invisible to both. The guard that
 //    catches it reads the SOURCE and requires every row/option/aria-label found
 //    there to resolve — see EVERY_SOURCE_ROW_IS_IN_THE_CORPUS in the test file.
 //    Note a row's accessible name may be an `aria-label` rather than a visible
-//    <Label> (Snippets, Patterns, the custom-font and preset inputs); those are
+//    <Label> (Snippets, Patterns, the custom-font and snippet inputs); those are
 //    rows too, and users search for them by that name.
 //
 // 4. A LABEL'S SEARCHABILITY MUST NOT DEPEND ON HOW IT WAS AUTHORED.
@@ -407,31 +407,19 @@ export const SETTINGS_SECTIONS = [
   {
     id: 'newchats',
     label: 'New Chats',
-    description: 'Set the defaults for new chats: agent type, host, shell, and working directory.',
+    description: 'Set the defaults for new chats: shell and working directory.',
     // Rows + options — NewChatsSection.tsx
     rows: [
-      {
-        anchorId: 'defaultNewChatPreset',
-        terms: ['Default agent type', 'claude (default)', 'claude', 'shell'],
-      },
-      // `Custom presets` heads the preset list + the add-a-preset block; it
-      // borrows the first control of that block.
-      { anchorId: 'newPresetName', terms: ['Custom presets'] },
-      { anchorId: 'newPresetName', terms: ['Add preset', 'preset'] },
-      { anchorId: 'newPresetName', terms: ['New preset name'] },
-      { anchorId: 'newPresetCmd', terms: ['New preset command'] },
-      { anchorId: 'defaultNewChatHost', terms: ['Default host', 'this machine (local)'] },
       { anchorId: 'defaultShell', terms: ['Default shell (fallback for any host without its own)'] },
       // Per-host rows below: ids are minted at runtime from the host name
       // (`defaultShellByHost-<host>`, `defaultNewChatCwdByHost-<host>`), so
       // these group headings carry no anchor.
-      { terms: ['Default shell per host'] },
+      { terms: ['Default shell per host', 'this machine (local)'] },
       {
         anchorId: 'defaultNewChatCwd',
         terms: ['Default working directory (fallback for any host without its own)', 'cwd'],
       },
       { terms: ['Working directory per host'] },
-      { terms: ['Agent type per host', 'Use global default'] },
     ],
   },
   {

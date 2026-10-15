@@ -1,16 +1,16 @@
 /** Shared draft-commit decision helpers for the settings rows (WARDEN-1219).
  *
- *  PresetRow, SnippetRow and PatternRow each carry the same two commit-on-blur
- *  rules, previously hand-copied six times. These helpers hold each rule in one
+ *  SnippetRow and PatternRow each carry the same two commit-on-blur rules
+ *  (originally hand-copied across PresetRow too, retired in WARDEN-1816). These helpers hold each rule in one
  *  tested place; the rows delegate to them. They are pure decisions — they never
  *  touch state or callbacks, so they are testable without rendering anything.
  *
  *  The silent-data-loss guard: committing an EMPTY name or value must revert,
- *  never persist — parseCustomPresets / parseSnippets would drop the whole
+ *  never persist — parseSnippets would drop the whole
  *  stored entry on next reload if an empty field were written through.
  *
- *  The rows differ in what identifies the entry to the rename callback (preset
- *  and snippet rows pass the previous NAME, the pattern row passes its id), so
+ *  The rows differ in what identifies the entry to the rename callback (the snippet
+ *  row passes the previous NAME, the pattern row passes its id), so
  *  these helpers take no identity at all — the row supplies its own argument
  *  when invoking its callback.
  */

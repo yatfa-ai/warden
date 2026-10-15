@@ -7,7 +7,7 @@
  *
  *  It restores exactly ONE preference. The two shipped revert paths are
  *  all-or-nothing (the footer Cancel discards a whole section's draft; the two
- *  Reset-everything buttons take presets/snippets/host labels/watch patterns
+ *  Reset-everything buttons take snippets/host labels/watch patterns
  *  with them — the collateral WARDEN-956/957 had to make honest), so this is
  *  the missing middle, not a replacement: `ResetSection` is untouched.
  *

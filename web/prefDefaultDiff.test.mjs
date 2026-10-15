@@ -115,7 +115,7 @@ test('a modified pref DOES differ (affordance shows)', () => {
 test('restoring a client pref hands back its default value', () => {
   assert.equal(clientPrefDefault('terminalScrollback'), 10000);
   assert.equal(clientPrefDefault('terminalFontSize'), 14);
-  assert.equal(clientPrefDefault('defaultNewChatHost'), '(local)');
+  assert.equal(clientPrefDefault('defaultNewChatCwd'), '');
   assert.equal(clientPrefDefault('defaultShell'), '');
 });
 test('object/array prefs compare STRUCTURALLY, not by reference', () => {
@@ -133,8 +133,8 @@ test('object/array prefs compare STRUCTURALLY, not by reference', () => {
     }),
     true,
   );
-  assert.equal(clientPrefDiffersFromDefault('customPresets', []), false);
-  assert.equal(clientPrefDiffersFromDefault('customPresets', [{ name: 'codex', cmd: 'codex' }]), true);
+  assert.equal(clientPrefDiffersFromDefault('defaultShellByHost', {}), false);
+  assert.equal(clientPrefDiffersFromDefault('defaultShellByHost', { 'box-1': 'zsh' }), true);
 });
 
 // ---------------------------------------------------------------------------

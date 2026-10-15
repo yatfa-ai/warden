@@ -166,7 +166,7 @@ export function HostsSection({
             config.hosts.map((host) => (
               // WARDEN-928 — the chip BODY is inert. Removal lives on a
               // dedicated, keyboard-reachable ghost icon-button with an
-              // accessible name, matching PatternRow/SnippetRow/PresetRow.
+              // accessible name, matching PatternRow/SnippetRow.
               // `icon-xs` (not `icon-sm`) because those rows are full-height
               // form rows while this control sits beside an `h-5` Badge —
               // its `size-3` glyph matches the badge's own icon scale.
