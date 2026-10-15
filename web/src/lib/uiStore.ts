@@ -808,6 +808,28 @@ export interface UiStoreState {
    */
   markObserverReconnected: (id: string) => boolean;
   /**
+   * Per-pane "agent exit" phase for the pane-on-agent-exit pref (WARDEN-1820,
+   * roadmap WARDEN-1204 slice 70): `live` once the pane's agent was seen
+   * active, `exited` after a live→exited transition was handled. A NON-persisted
+   * session fact: NOT a STORE_PERSISTED_KEYS member, initial empty, never seeded
+   * from disk. PaneTile remounts on every Settings round trip, un-maximize and
+   * workspace switch, which reset the old component-local cells (auto-close never
+   * fired, dim/keep lost the overlay); the store keeps the phase for the session.
+   * Entries are dropped when the pane id leaves EVERY workspace's openPanes
+   * (`setOpenPanes`, `closeWorkspace`), so a closed-then-reopened dead pane
+   * starts with no history and does NOT auto-close on reopen. A moved pane
+   * stays in some workspace, so its entry is kept. Declared residual: liveness
+   * is only recorded while a tile is mounted.
+   */
+  paneAgentExit: Record<string, 'live' | 'exited'>;
+  /** The agent is (re)started: set `live` (re-arms a future exit). Identity-preserving when already `live`. */
+  markPaneAgentLive: (id: string) => void;
+  /**
+   * ATOMIC one-shot: returns `true` iff the phase was `live` (transitioning it
+   * to `exited`), `false` otherwise (never-live, or already handled).
+   */
+  markPaneAgentExited: (id: string) => boolean;
+  /**
    * Observer chatKeys whose Auto-start Observer attempt already ran this app
    * session (WARDEN-1802, roadmap WARDEN-1204 slice 67). A NON-persisted
    * session fact: NOT a STORE_PERSISTED_KEYS member, initial empty, never
@@ -1176,6 +1198,25 @@ function newPaneSet(id: string, n: number, seedPaneId?: string): WorkspacePaneSe
 }
 
 /**
+ * Drop `paneAgentExit` entries whose pane id is open in NO workspace
+ * (WARDEN-1820). Returns the SAME object when nothing is dropped, so a no-op
+ * prune never produces a new reference.
+ */
+function pruneAgentExit(
+  exit: Record<string, 'live' | 'exited'>,
+  workspaces: WorkspacePaneSet[],
+): Record<string, 'live' | 'exited'> {
+  const ids = Object.keys(exit);
+  if (ids.length === 0) return exit;
+  const open = new Set<string>();
+  for (const w of workspaces) for (const id of w.openPanes) open.add(id);
+  if (ids.every((id) => open.has(id))) return exit;
+  const next: Record<string, 'live' | 'exited'> = {};
+  for (const id of ids) if (open.has(id)) next[id] = exit[id];
+  return next;
+}
+
+/**
  * `w` without `paneId`: a source workspace whose focused pane moved falls back
  * to its first remaining pane (not null), so it never shows a visible-but-
  * unfocused pane. Returns the SAME object when the pane is not in it.
@@ -1539,6 +1580,16 @@ export function createUiStore(seed: UiStoreSeed = {}) {
       set((s) => ({ observerReconnected: { ...s.observerReconnected, [id]: true } }));
       return true;
     },
+    // WARDEN-1820 (slice 70): the not-persisted per-pane agent-exit phase —
+    // starts empty; pruned where a pane id leaves every workspace's openPanes.
+    paneAgentExit: {},
+    markPaneAgentLive: (id) =>
+      set((s) => (s.paneAgentExit[id] === 'live' ? s : { paneAgentExit: { ...s.paneAgentExit, [id]: 'live' } })),
+    markPaneAgentExited: (id) => {
+      if (get().paneAgentExit[id] !== 'live') return false;
+      set((s) => ({ paneAgentExit: { ...s.paneAgentExit, [id]: 'exited' } }));
+      return true;
+    },
     // WARDEN-1802 (slice 67): the not-persisted once-per-session auto-start
     // record — starts empty; the atomic mark returns whether `chatKey` is new.
     observerAutoStarted: {},
@@ -1574,8 +1625,10 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         const remaining = s.workspaces.filter((w) => w.id !== id);
         if (!remaining.length) return s; // never drop below one workspace
         if (remaining.length === s.workspaces.length) return s; // unknown id
+        const paneAgentExit = pruneAgentExit(s.paneAgentExit, remaining);
         return {
           workspaces: remaining,
+          ...(paneAgentExit !== s.paneAgentExit ? { paneAgentExit } : {}),
           activeWorkspaceId: s.activeWorkspaceId === id ? remaining[0].id : s.activeWorkspaceId,
           // Only closing the ACTIVE workspace changes the grid on screen.
           ...(s.activeWorkspaceId === id ? { maximized: null } : {}),
@@ -1633,8 +1686,10 @@ export function createUiStore(seed: UiStoreSeed = {}) {
         if (next === w.openPanes) return s;
         const copy = [...s.workspaces];
         copy[target] = { ...w, openPanes: next };
+        const paneAgentExit = pruneAgentExit(s.paneAgentExit, copy);
         return {
           workspaces: copy,
+          ...(paneAgentExit !== s.paneAgentExit ? { paneAgentExit } : {}),
           ...(s.maximized !== null && !next.includes(s.maximized) ? { maximized: null } : {}),
         };
       }),
@@ -2652,6 +2707,21 @@ export function useMarkObserverReconnected(): (id: string) => boolean {
 /** Stable-identity atomic action: mark a chatKey auto-started; true iff newly marked (WARDEN-1802, slice 67) — NOT persisted. */
 export function useMarkObserverAutoStarted(): (chatKey: string) => boolean {
   return useUiStore((s) => s.markObserverAutoStarted);
+}
+
+/** Selector: this pane's agent-exit phase (WARDEN-1820, slice 70) — NOT persisted. */
+export function usePaneAgentExit(id: string): 'live' | 'exited' | undefined {
+  return useUiStore((s) => s.paneAgentExit[id]);
+}
+
+/** Stable-identity action: mark a pane's agent live (re-arms exit) (WARDEN-1820) — NOT persisted. */
+export function useMarkPaneAgentLive(): (id: string) => void {
+  return useUiStore((s) => s.markPaneAgentLive);
+}
+
+/** Stable-identity atomic action: mark a pane's agent exited; true iff it was live (WARDEN-1820) — NOT persisted. */
+export function useMarkPaneAgentExited(): (id: string) => boolean {
+  return useUiStore((s) => s.markPaneAgentExited);
 }
 
 export function useDropRecentlyClosed(): (id: string) => void {
