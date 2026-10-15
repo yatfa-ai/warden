@@ -1,4 +1,12 @@
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { OctagonXIcon, WifiIcon, Loader2Icon, RefreshCwIcon } from 'lucide-react';
 
 export interface ErrorStateProps {
@@ -45,30 +53,51 @@ export function ErrorState({
   const displayTitle = title || config.title;
 
   return (
-    <div className={`flex flex-col items-center justify-center p-6 gap-3 text-center ${className}`}>
-      <div className="rounded-full bg-destructive/10 p-3">
-        <Icon className="size-6 text-destructive" />
-      </div>
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-semibold text-destructive">{displayTitle}</div>
-        <div className="text-xs text-muted-foreground">{config.description}</div>
-        {errorMessage && (
-          <div className="text-[10px] text-muted-foreground/70 mt-1 font-mono">
-            {errorMessage}
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className={`flex flex-col items-center justify-center p-6 gap-3 text-center ${className}`}>
+          <div className="rounded-full bg-destructive/10 p-3">
+            <Icon className="size-6 text-destructive" />
           </div>
+          <div className="flex flex-col gap-1">
+            <div className="text-sm font-semibold text-destructive">{displayTitle}</div>
+            <div className="text-xs text-muted-foreground">{config.description}</div>
+            {errorMessage && (
+              <div className="text-[10px] text-muted-foreground/70 mt-1 font-mono">
+                {errorMessage}
+              </div>
+            )}
+          </div>
+          {onRetry && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRetry}
+              className="gap-1.5"
+            >
+              <RefreshCwIcon className="size-3" />
+              Retry
+            </Button>
+          )}
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        {onRetry && (
+          <>
+            <ContextMenuItem onSelect={() => onRetry()}>Retry</ContextMenuItem>
+            <ContextMenuSeparator />
+          </>
         )}
-      </div>
-      {onRetry && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onRetry}
-          className="gap-1.5"
+        <ContextMenuItem
+          disabled={!errorMessage}
+          onSelect={() => copyWithToast(errorMessage)}
         >
-          <RefreshCwIcon className="size-3" />
-          Retry
-        </Button>
-      )}
-    </div>
+          Copy error message
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(displayTitle)}>
+          Copy error title
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
