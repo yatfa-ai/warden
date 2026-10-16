@@ -62,22 +62,31 @@ export class Scrollback {
   constructor(max = MAX_LINES) {
     this.lines = [''];
     this.max = max;
+    // The line a bare `\r` blanked, held until we learn whether it was a restart
+    // (any real char follows) or the CR of a CRLF (`\n` follows). Instance state,
+    // not per-chunk, because pty.onData may split `\r` and `\n` across chunks.
+    this.crSaved = null;
   }
 
   write(chunk) {
-    const s = String(chunk).replace(/\r\n/g, '\n');
+    const s = String(chunk);
     for (const ch of s) {
       if (ch === '\n') {
+        if (this.crSaved !== null) this.lines[this.lines.length - 1] = this.crSaved;
+        this.crSaved = null;
         this.lines.push('');
         // `max` bounds COMPLETED lines; the trailing element is the still-open
         // current line, so the cap is max+1 entries.
         if (this.lines.length > this.max + 1) this.lines.splice(0, this.lines.length - (this.max + 1));
       } else if (ch === '\r') {
+        if (this.crSaved === null) this.crSaved = this.lines[this.lines.length - 1];
         this.lines[this.lines.length - 1] = '';
       } else if (ch === '\b') {
+        this.crSaved = null;
         const cur = this.lines[this.lines.length - 1];
         this.lines[this.lines.length - 1] = cur.slice(0, -1);
       } else {
+        this.crSaved = null;
         this.lines[this.lines.length - 1] += ch;
       }
     }
