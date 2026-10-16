@@ -33,6 +33,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -738,22 +739,24 @@ export function ObserverPanel({ sessionId, onActivity, issueEntries }: Props) {
       {/* Composer */}
       <div className="shrink-0 border-t p-3">
         <div className="flex flex-col gap-2 rounded-xl border bg-background p-2 focus-within:ring-2 focus-within:ring-ring/40">
-          <Textarea
-            ref={taRef}
-            data-observer-composer
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            placeholder={conn ? 'Ask the observer…  (Enter to send, Shift+Enter for newline)' : 'Connecting…'}
-            rows={1}
-            disabled={!conn}
-            className="min-h-9 min-w-48 max-h-40 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0"
-          />
+          <EditableContextMenu>
+            <Textarea
+              ref={taRef}
+              data-observer-composer
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={conn ? 'Ask the observer…  (Enter to send, Shift+Enter for newline)' : 'Connecting…'}
+              rows={1}
+              disabled={!conn}
+              className="min-h-9 min-w-48 max-h-40 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0"
+            />
+          </EditableContextMenu>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">
               <Button
