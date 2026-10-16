@@ -1,0 +1,96 @@
+// Tests for the pure edit-menu item derivation (src/lib/editMenu.ts, WARDEN-1830)
+// + static source guards for the wrapper and its two call sites. No front-end DOM
+// runner exists, so the guards pin properties of the SOURCE; right-click/paste/undo
+// behaviour is verified live.
+import { describe, it } from 'node:test';
+import { transformWithOxc } from 'vite';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const file = resolve(__dirname, 'src/lib/editMenu.ts');
+const { code } = await transformWithOxc(readFileSync(file, 'utf8'), file, {});
+const tmpDir = mkdtempSync(join(tmpdir(), 'warden-editmenu-test-'));
+const out = join(tmpDir, 'editMenu.mjs');
+writeFileSync(out, code);
+const { editMenuItems, selectedText } = await import(out);
+rmSync(tmpDir, { recursive: true, force: true });
+
+const ids = (items) => items.map((i) => (i.kind === 'separator' ? '---' : i.id));
+const state = (items) => Object.fromEntries(items.filter((i) => i.kind === 'item').map((i) => [i.id, i.disabled]));
+
+describe('editMenuItems (WARDEN-1830)', () => {
+  it('order is Cut · Copy · Paste · separator · Select all', () => {
+    assert.deepEqual(ids(editMenuItems({ hasSelection: true })), ['cut', 'copy', 'paste', '---', 'select-all']);
+  });
+
+  it('with a selection everything is enabled', () => {
+    assert.deepEqual(state(editMenuItems({ hasSelection: true })), { cut: false, copy: false, paste: false, 'select-all': false });
+  });
+
+  it('no selection disables Cut and Copy only', () => {
+    assert.deepEqual(state(editMenuItems({ hasSelection: false })), { cut: true, copy: true, paste: false, 'select-all': false });
+  });
+
+  it('readOnly disables Cut and Paste but leaves Copy / Select all', () => {
+    assert.deepEqual(state(editMenuItems({ hasSelection: true, readOnly: true })), { cut: true, copy: false, paste: true, 'select-all': false });
+  });
+
+  it('a disabled field gets no menu at all', () => {
+    assert.deepEqual(editMenuItems({ hasSelection: true, disabled: true }), []);
+  });
+
+  it('labels are the human strings', () => {
+    const labels = editMenuItems({ hasSelection: true }).filter((i) => i.kind === 'item').map((i) => i.label);
+    assert.deepEqual(labels, ['Cut', 'Copy', 'Paste', 'Select all']);
+  });
+});
+
+describe('selectedText (WARDEN-1830)', () => {
+  it('slices the selection, in either order, and tolerates null', () => {
+    assert.equal(selectedText('hello world', 6, 11), 'world');
+    assert.equal(selectedText('hello world', 11, 6), 'world');
+    assert.equal(selectedText('hello', 2, 2), '');
+    assert.equal(selectedText('hello', null, undefined), '');
+  });
+});
+
+const read = (p) => readFileSync(resolve(__dirname, p), 'utf8');
+const wrapper = read('src/components/ui/editable-context-menu.tsx');
+const quick = read('src/components/QuickReply.tsx');
+const observer = read('src/components/ObserverPanel.tsx');
+
+describe('EditableContextMenu source guards (WARDEN-1830)', () => {
+  it('wrapper uses the themed primitive via ContextMenuTrigger asChild', () => {
+    assert.match(wrapper, /from '@\/components\/ui\/context-menu'/);
+    assert.match(wrapper, /<ContextMenuTrigger asChild/);
+  });
+
+  it('wrapper has no hand-rolled contextmenu handling (WARDEN-926)', () => {
+    assert.ok(!/onContextMenu/.test(wrapper.replace(/\/\/.*$/gm, '')));
+    assert.ok(!/preventDefault|stopPropagation/.test(wrapper.replace(/\/\/.*$/gm, '')));
+  });
+
+  it('paste uses insertText execCommand (onChange + undo) and cut copies then deletes', () => {
+    assert.match(wrapper, /execCommand\('insertText', false, text\)/);
+    assert.match(wrapper, /execCommand\('delete'\)/);
+    assert.match(wrapper, /navigator\.clipboard\.readText\(\)/);
+    assert.match(wrapper, /toast\.error/);
+    assert.match(wrapper, /copyWithToast/);
+  });
+
+  it('QuickReply textarea is wrapped; key handling untouched', () => {
+    assert.match(quick, /<EditableContextMenu>\s*<Textarea/);
+    assert.match(quick, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/);
+    assert.ok(!quick.includes('onContextMenu'));
+  });
+
+  it('Observer composer textarea is wrapped; bare-Enter submit untouched', () => {
+    assert.match(observer, /<EditableContextMenu>\s*<Textarea\s+ref=\{taRef\}\s+data-observer-composer/);
+    assert.match(observer, /e\.key === 'Enter' && !e\.shiftKey && !e\.nativeEvent\.isComposing/);
+    assert.match(observer, /disabled=\{!conn\}/);
+  });
+});

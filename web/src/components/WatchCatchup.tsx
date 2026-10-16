@@ -88,9 +88,10 @@ export function WatchCatchup({ misses, onOpenMiss, onDismiss, onReplyResult }: P
                     menu. `ContextMenuTrigger asChild` composes onContextMenu onto the
                     existing deep-link Button — left-click and Enter/Space are
                     untouched. The wrap covers ONLY the Button: the Reply toggle and
-                    the mounted QuickReply textarea stay OUTSIDE the trigger, so
-                    right-click inside the reply box keeps the native edit menu
-                    (cut/copy/paste) — the editable-field trap that withdrew WARDEN-495.
+                    the mounted QuickReply textarea stay OUTSIDE this trigger (the
+                    editable-field trap that withdrew WARDEN-495). Electron ships no
+                    native edit menu, so the textarea carries its own themed
+                    Cut/Copy/Paste/Select all menu (EditableContextMenu, WARDEN-1830).
                   */}
                   <ContextMenu>
                     <ContextMenuTrigger asChild>

@@ -32,6 +32,7 @@ import { useState, type KeyboardEvent } from 'react';
 import { Loader2, CornerDownLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { postJson } from '@/lib/api';
 import { canSendReply, replySnippetPreview, sanitizeReplyText } from '@/lib/quickReply';
 import { useSnippets } from '@/lib/uiStore';
@@ -145,19 +146,21 @@ export function QuickReply({
 
   return (
     <div className="flex flex-col gap-1.5 px-2 pb-2 pt-1">
-      <Textarea
-        value={msg}
-        onChange={(e) => { setMsg(e.target.value); if (error) setError(null); }}
-        onKeyDown={onKeyDown}
-        placeholder="Reply…"
-        aria-label={`Reply to ${targetLabel}`}
-        autoFocus={autoFocus}
-        disabled={sending}
-        // Compact override of the Textarea default (min-h-[80px] / text-base) so the
-        // control fits the narrow w-72 popover without dominating the row it expanded
-        // from. min-h-[44px] keeps the tap target comfortable.
-        className="min-h-[44px] text-xs"
-      />
+      <EditableContextMenu>
+        <Textarea
+          value={msg}
+          onChange={(e) => { setMsg(e.target.value); if (error) setError(null); }}
+          onKeyDown={onKeyDown}
+          placeholder="Reply…"
+          aria-label={`Reply to ${targetLabel}`}
+          autoFocus={autoFocus}
+          disabled={sending}
+          // Compact override of the Textarea default (min-h-[80px] / text-base) so the
+          // control fits the narrow w-72 popover without dominating the row it expanded
+          // from. min-h-[44px] keeps the tap target comfortable.
+          className="min-h-[44px] text-xs"
+        />
+      </EditableContextMenu>
       {error && (
         <span role="alert" className="text-[10px] text-red-500 dark:text-red-400">{error}</span>
       )}
