@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 import type { PaneAttachPhase } from '@/lib/paneAttach';
@@ -1005,13 +1006,15 @@ export function PaneGrid({ tiles, chats, onClose, onForceKill, onSplitShell, onS
             <DialogTitle>Open file from chat directory</DialogTitle>
             <DialogDescription>Working directory: {actingChat?.cwd || '.'}</DialogDescription>
           </DialogHeader>
-          <Input
-            ref={fileInputRef}
-            value={fileInput}
-            onChange={(e) => { setFileInput(e.target.value); setFileInputError(''); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); }}
-            placeholder="relative/path/to/file.txt"
-          />
+          <EditableContextMenu>
+            <Input
+              ref={fileInputRef}
+              value={fileInput}
+              onChange={(e) => { setFileInput(e.target.value); setFileInputError(''); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); }}
+              placeholder="relative/path/to/file.txt"
+            />
+          </EditableContextMenu>
           {fileInputError && (
             <p className="text-xs text-destructive">{fileInputError}</p>
           )}

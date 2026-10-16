@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
@@ -351,13 +352,15 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
             primary way this dialog is fired and an ungated one walked around the
             one-search-at-a-time rule the Button already implements. */}
         <div className="flex items-center gap-2">
-          <Input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setError(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
-            placeholder="Search across all panes..."
-          />
+          <EditableContextMenu>
+            <Input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
+              placeholder="Search across all panes..."
+            />
+          </EditableContextMenu>
           <Button onClick={doSearch} disabled={searching || !query.trim()}>
             {searching ? <Loader2Icon className="w-4 h-4 animate-spin" /> : 'Search'}
           </Button>

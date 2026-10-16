@@ -7,6 +7,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
@@ -186,13 +187,15 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
             input is auto-focused on open), so an ungated Enter walked straight
             around the one-search-at-a-time rule the Button already implements. */}
         <div className="flex items-center gap-2">
-          <Input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setError(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
-            placeholder="function name, class, error string…"
-          />
+          <EditableContextMenu>
+            <Input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
+              placeholder="function name, class, error string…"
+            />
+          </EditableContextMenu>
           <Button onClick={doSearch} disabled={searching || !query.trim()}>
             {searching ? <Loader2Icon className="w-4 h-4 animate-spin" /> : 'Search'}
           </Button>

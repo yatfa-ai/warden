@@ -19,6 +19,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Skeleton } from '@/components/ui/skeleton';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EyeIcon, AlertCircleIcon, Loader2Icon, SearchIcon, ChevronUpIcon, ChevronDownIcon, XIcon } from 'lucide-react';
@@ -361,23 +362,25 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, issueEntr
                 ships focus-visible:ring-3 / min-w-0 / bg + dark variants, so the raw
                 className reinvents nothing here. autoFocus/onKeyDown/value/onChange
                 pass straight through {...props}. */}
-            <Input
-              autoFocus
-              aria-label="Find in transcript"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  stepMatch(e.shiftKey ? -1 : 1);
-                } else if (e.key === 'Escape') {
-                  e.preventDefault();
-                  toggleSearch();
-                }
-              }}
-              placeholder="find in transcript…"
-              className="h-7 flex-1 text-xs"
-            />
+            <EditableContextMenu>
+              <Input
+                autoFocus
+                aria-label="Find in transcript"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    stepMatch(e.shiftKey ? -1 : 1);
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    toggleSearch();
+                  }
+                }}
+                placeholder="find in transcript…"
+                className="h-7 flex-1 text-xs"
+              />
+            </EditableContextMenu>
             <span
               aria-live="polite"
               className="shrink-0 text-xs tabular-nums text-muted-foreground"

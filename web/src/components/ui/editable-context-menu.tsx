@@ -1,11 +1,12 @@
 // EditableContextMenu — the themed right-click edit menu (Cut · Copy · Paste ·
-// Select all) for a single free-text <textarea> child (WARDEN-1830). Electron
-// ships no default context menu, so without this a right-click in a reply box
-// is silent. Built on the existing themed ContextMenu (`ContextMenuTrigger
+// Select all) for a single free-text <textarea> OR text-like <input> child
+// (WARDEN-1830, widened to inputs in WARDEN-1837). Electron ships no default
+// context menu, so without this a right-click in a reply box / search field is
+// silent. Do NOT wrap password/number inputs (selectionStart is null there). Built on the existing themed ContextMenu (`ContextMenuTrigger
 // asChild` composes onto the textarea; no hand-rolled menu and no onContextMenu
 // / preventDefault / stopPropagation of its own — WARDEN-926).
 //
-// Selection is read from the element's selectionStart/End, which a textarea
+// Selection is read from the element's selectionStart/End, which a text field
 // retains after focus moves to the menu. Paste/Cut go through
 // document.execCommand so the browser fires a real `input` event (React onChange
 // updates the controlled value) and the native undo stack stays intact.
@@ -21,28 +22,31 @@ import {
 import { copyWithToast } from '@/lib/clipboardToast';
 import { editMenuItems, selectedText, type EditMenuItemId } from '@/lib/editMenu';
 
+type EditableEl = HTMLInputElement | HTMLTextAreaElement;
+type EditableProps = React.ComponentProps<'textarea'> | React.ComponentProps<'input'>;
+
 /** Insert text over the current selection; execCommand first (undo + onChange), setRangeText fallback. */
-function insertAtSelection(el: HTMLTextAreaElement, text: string) {
+function insertAtSelection(el: EditableEl, text: string) {
   if (document.execCommand('insertText', false, text)) return;
-  el.setRangeText(text, el.selectionStart, el.selectionEnd, 'end');
+  el.setRangeText(text, el.selectionStart ?? 0, el.selectionEnd ?? 0, 'end');
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-function restoreFocus(el: HTMLTextAreaElement, start: number, end: number) {
+function restoreFocus(el: EditableEl, start: number, end: number) {
   el.focus();
   el.setSelectionRange(start, end);
 }
 
-export function EditableContextMenu({ children }: { children: React.ReactElement<React.ComponentProps<'textarea'>> }) {
-  const elRef = React.useRef<HTMLTextAreaElement | null>(null);
+export function EditableContextMenu({ children }: { children: React.ReactElement<EditableProps> }) {
+  const elRef = React.useRef<EditableEl | null>(null);
   const [hasSelection, setHasSelection] = React.useState(false);
 
   // Compose our ref with the child's own (Observer's taRef) — React 19: ref is a prop.
-  const childRef = (children.props as { ref?: React.Ref<HTMLTextAreaElement> }).ref;
-  const setRef = React.useCallback((node: HTMLTextAreaElement | null) => {
+  const childRef = (children.props as { ref?: React.Ref<EditableEl> }).ref;
+  const setRef = React.useCallback((node: EditableEl | null) => {
     elRef.current = node;
     if (typeof childRef === 'function') childRef(node);
-    else if (childRef) (childRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = node;
+    else if (childRef) (childRef as React.MutableRefObject<EditableEl | null>).current = node;
   }, [childRef]);
 
   const { disabled, readOnly } = children.props;
@@ -92,7 +96,7 @@ export function EditableContextMenu({ children }: { children: React.ReactElement
       }}
     >
       <ContextMenuTrigger asChild disabled={items.length === 0}>
-        {React.cloneElement(children, { ref: setRef } as React.ComponentProps<'textarea'>)}
+        {React.cloneElement(children, { ref: setRef } as EditableProps)}
       </ContextMenuTrigger>
       <ContextMenuContent>
         {items.map((it, i) =>

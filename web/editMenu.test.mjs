@@ -62,6 +62,11 @@ const read = (p) => readFileSync(resolve(__dirname, p), 'utf8');
 const wrapper = read('src/components/ui/editable-context-menu.tsx');
 const quick = read('src/components/QuickReply.tsx');
 const observer = read('src/components/ObserverPanel.tsx');
+const sidebar = read('src/components/ChatSidebar.tsx');
+const globalSearch = read('src/components/GlobalSearchDialog.tsx');
+const workspaceSearch = read('src/components/WorkspaceSearchDialog.tsx');
+const transcript = read('src/components/SessionTranscriptViewer.tsx');
+const paneGrid = read('src/components/PaneGrid.tsx');
 
 describe('EditableContextMenu source guards (WARDEN-1830)', () => {
   it('wrapper uses the themed primitive via ContextMenuTrigger asChild', () => {
@@ -92,5 +97,55 @@ describe('EditableContextMenu source guards (WARDEN-1830)', () => {
     assert.match(observer, /<EditableContextMenu>\s*<Textarea\s+ref=\{taRef\}\s+data-observer-composer/);
     assert.match(observer, /e\.key === 'Enter' && !e\.shiftKey && !e\.nativeEvent\.isComposing/);
     assert.match(observer, /disabled=\{!conn\}/);
+  });
+});
+
+describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
+  const code = wrapper.replace(/\/\/.*$/gm, '');
+  it('wrapper accepts an <input> or <textarea> child and types the ref for both', () => {
+    assert.match(code, /type EditableEl = HTMLInputElement \| HTMLTextAreaElement/);
+    assert.match(code, /React\.ComponentProps<'input'>/);
+    assert.match(code, /children: React\.ReactElement<EditableProps>/);
+    assert.ok(!/HTMLTextAreaElement \| null/.test(code), 'ref must not be textarea-only');
+  });
+
+  it('wrapper still adds no wrapper DOM node and keeps ContextMenuTrigger asChild', () => {
+    assert.match(code, /<ContextMenuTrigger asChild/);
+    assert.ok(!/<div|<span/.test(code));
+  });
+
+  it('wrapper treats a null selectionStart/End as no selection', () => {
+    assert.match(code, /el\.selectionStart \?\? 0/);
+  });
+
+  const sites = [
+    ['ChatSidebar sidebar search', () => sidebar, /<EditableContextMenu>\s*<Input\s+value=\{searchQuery\}/],
+    ['GlobalSearchDialog', () => globalSearch, /<EditableContextMenu>\s*<Input\s+ref=\{inputRef\}/],
+    ['WorkspaceSearchDialog', () => workspaceSearch, /<EditableContextMenu>\s*<Input\s+ref=\{inputRef\}/],
+    ['SessionTranscriptViewer find', () => transcript, /<EditableContextMenu>\s*<Input\s+autoFocus\s+aria-label="Find in transcript"/],
+    ['PaneGrid Open-file path', () => paneGrid, /<EditableContextMenu>\s*<Input\s+ref=\{fileInputRef\}/],
+  ];
+  for (const [name, src, re] of sites) {
+    it(`${name} input is wrapped and imports the wrapper`, () => {
+      assert.match(src(), re);
+      assert.match(src(), /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
+      assert.ok(!src().includes('onContextMenu={'));
+    });
+  }
+
+  it('search/open-file Enter handlers are untouched', () => {
+    assert.match(globalSearch, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Enter' && !searching\) doSearch\(\); \}\}/);
+    assert.match(workspaceSearch, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Enter' && !searching\) doSearch\(\); \}\}/);
+    assert.match(paneGrid, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Enter'\) handleOpenFile\(\); \}\}/);
+    assert.match(paneGrid, /onOpenAutoFocus=\{\(e\) => e\.preventDefault\(\)\}/);
+  });
+
+  it('transcript find keeps Enter / Shift+Enter / Escape handling', () => {
+    assert.match(transcript, /if \(e\.key === 'Enter'\) \{\s*e\.preventDefault\(\);\s*stepMatch\(e\.shiftKey \? -1 : 1\);\s*\} else if \(e\.key === 'Escape'\) \{\s*e\.preventDefault\(\);\s*toggleSearch\(\);\s*\}/);
+  });
+
+  it('out-of-scope fields stay unwrapped (PaneTile search bar, ui/input.tsx)', () => {
+    assert.ok(!read('src/components/PaneTile.tsx').includes('EditableContextMenu'));
+    assert.ok(!read('src/components/ui/input.tsx').includes('EditableContextMenu'));
   });
 });

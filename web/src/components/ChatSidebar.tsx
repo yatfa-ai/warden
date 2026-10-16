@@ -23,6 +23,7 @@ import { Bookmark, History } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
@@ -714,14 +715,16 @@ export function ChatSidebar({
           </IconTooltip>
         )}
         {title && <span className="max-w-[44%] flex-none wrap-anywhere text-[11.5px] text-foreground">{title}</span>}
-        <Input
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder={searchPlaceholder}
-          aria-label={searchPlaceholder.replace('…', '')}
-          spellCheck={false}
-          className="h-[22px] min-w-[7rem] flex-1 basis-[7rem] px-1.5 text-[10.5px] @max-[13rem]:order-last @max-[13rem]:basis-full"
-        />
+        <EditableContextMenu>
+          <Input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder.replace('…', '')}
+            spellCheck={false}
+            className="h-[22px] min-w-[7rem] flex-1 basis-[7rem] px-1.5 text-[10.5px] @max-[13rem]:order-last @max-[13rem]:basis-full"
+          />
+        </EditableContextMenu>
         <span className="ml-auto flex flex-none items-center gap-0.5 @max-[13rem]:order-2">
           <IconTooltip label={`recently closed — ${closedTemps.length} temporary session${closedTemps.length === 1 ? '' : 's'} you closed; they disappear on their own`}>
             <button
