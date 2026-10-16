@@ -188,6 +188,10 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
     const attaches = new Map(); // id -> { pty, chat }
     const monitors = new Set(); // chat keys
+    // The close handler below runs once, synchronously. Frame paths that register state
+    // AFTER an await (monitor timer/subscription, attach PTY) must bail when the socket
+    // closed meanwhile, or that state is never cleaned up.
+    let closed = false;
     let monitorTimer = null;
 
     const tickMonitor = async () => {
@@ -265,6 +269,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         const isNew = !monitors.has(id);
         monitors.add(id);
         await resolve(id);
+        if (closed) return;
         startMonitor();
         if (isNew) {
           // Subscribe this pane's host to pushed deltas (skip-on-tick gate). resolve()
@@ -295,6 +300,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           } catch { /* fall through; resolve() still has a locate fallback */ }
         }
         const r = await resolve(String(m.id));
+        if (closed) return;
         if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); await appendEventSafe({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
         const chat = r.chat;
         const cols = Math.max(20, Math.floor(m.cols || 100));
@@ -311,6 +317,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         let reason = null;
         try { reason = classifyProbe(await probeSession(chat, cfg)); }
         catch { /* probe threw → leave reason null and attempt a normal attach */ }
+        if (closed) return;
         if (reason === 'host_unreachable') {
           send({ type: 'host_unreachable', id: m.id });
           await appendEventSafe({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
@@ -437,6 +444,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     });
 
     ws.on('close', () => {
+      closed = true;
       for (const [, a] of attaches) { try { a.pty.kill(); } catch { /* noop */ } }
       if (monitorTimer) clearInterval(monitorTimer);
       // WARDEN-413: drop this connection's monitored pane refs so a shared
