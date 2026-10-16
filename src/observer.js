@@ -16,7 +16,7 @@ import { shellQuote } from './ssh.js';
 import { deliverRemoteScript } from './companion.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
-import { getSession, saveMessages, appendTranscript } from './sessions.js';
+import { getSession, getSessionAsync, saveMessages, appendTranscript } from './sessions.js';
 // The pane-state classifier was extracted into agentState.js (WARDEN-344) so the
 // proactive attention surfaces can reach it without this Observer's LLM. Re-imported
 // here unchanged — read_chats still classifies panes with the exact same
@@ -983,7 +983,10 @@ export class Observer {
       this.messages.push({ role: 'user', content: results });
     }
     if (!finalText) finalText = '(tool loop limit reached — try simplifying your request)';
-    if (this.sid) {
+    // Skip the write-back when the session was deleted mid-turn (tab closed = DELETE
+    // /api/sessions/:id): saveMessages/appendTranscript create-if-missing and would
+    // resurrect it as a ghost. The reply is still returned.
+    if (this.sid && await getSessionAsync(this.sid)) {
       // Deliberately omit the connect-time `this.name`: it is a stale snapshot, and passing
       // it makes saveMessages overwrite a rename made via PATCH /api/sessions/:id while this
       // Observer stayed open. Without it saveMessages keeps the live on-disk name (WARDEN-1681).
