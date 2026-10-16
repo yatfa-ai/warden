@@ -1070,15 +1070,21 @@ describe('WARDEN-1412 companion-totality sweep', () => {
         // server.js row below) and the LOCAL leg (no transport at all).
         detectClaude: 2,
       },
-      // ---- class (b) + (c): server.js carries one of each -----------------
+      // ---- class (b): hostsRoutes.js (probeHostReachability's raw fallback) ----
+      'hostsRoutes.js': {
+        // probeHostReachability's raw fallback (moved here from server.js,
+        //   WARDEN-1829) — companion-routing the probe would bootstrap the
+        //   binary being probed (see the comment above probeHostReachability).
+        validateHost: 1,
+      },
+      // ---- class (b) + (c): server.js carries a (b) and a (c) --------------
       'server.js': {
-        // :1217 probeHostReachability's raw fallback — companion-routing the
-        //   probe would bootstrap the binary being probed (comments :1200–1213).
-        // :2424 POST /api/companion/uninstall's precheck — a named allow-list
+        // POST /api/companion/uninstall's precheck — a named allow-list
         //   exception: a host whose flag was on and is now off must still be
         //   cleanable, so the endpoint works regardless of toggle state
-        //   (comments :2420–2422; re-asserted as a sweep leg above).
-        validateHost: 2,
+        //   (re-asserted as a sweep leg above). probeHostReachability's raw
+        //   fallback no longer lives here — it moved to hostsRoutes.js.
+        validateHost: 1,
         // WARDEN-1462. detectClaude's default path probes remote hosts through
         // deliverRemoteScript (companion.js :1832) with
         // `run: deps.runWithPool ?? runWithPool` as its toggle-off transport
