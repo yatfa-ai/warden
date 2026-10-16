@@ -141,6 +141,27 @@ describe('Scrollback — the capture-pane model', () => {
     s.write('1\n2\n3\n4\n5\n');
     assert.strictEqual(s.capture(), '3\n4\n5');
   });
+
+  it('captures a CRLF stream identically however pty chunks split it (incl. between CR and LF)', () => {
+    const stream = 'build start\r\nstep one ok\r\nstep two ok\r\nstep three ok\r\n';
+    const whole = new Scrollback();
+    whole.write(stream);
+    assert.strictEqual(whole.capture(), 'build start\nstep one ok\nstep two ok\nstep three ok');
+    for (let i = 0; i <= stream.length; i++) {
+      const split = new Scrollback();
+      split.write(stream.slice(0, i));
+      split.write(stream.slice(i));
+      assert.strictEqual(split.capture(), whole.capture(), `split at ${i}`);
+    }
+  });
+
+  it('still treats a bare CR followed by text as a line restart, even across chunks', () => {
+    const s = new Scrollback();
+    s.write('working 10%\r');
+    s.write('working 90%\r');
+    s.write('working done\n');
+    assert.strictEqual(s.capture(), 'working done');
+  });
 });
 
 describe('buildLaunch — how a command reaches ConPTY', () => {
