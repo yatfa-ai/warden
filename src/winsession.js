@@ -257,7 +257,10 @@ export function createSessionManager(deps = {}) {
     });
     pty.onExit(({ exitCode } = {}) => {
       session.dead = true;
-      sessions.delete(name);
+      // Identity guard: kill-session removes the entry synchronously and a real
+      // pty reports exit asynchronously, so a same-name replacement (POST
+      // /api/respawn) may already be registered when this late exit lands.
+      if (sessions.get(name) === session) sessions.delete(name);
       // Snapshot before iterating: each `_exit` removes its own client from the
       // set, so iterating the live Set would skip clients (a linter will call the
       // spread useless — it is load-bearing).

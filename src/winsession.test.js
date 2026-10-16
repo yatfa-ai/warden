@@ -301,6 +301,40 @@ describe('session manager — the tmux argv subset, executed natively', () => {
     assert.strictEqual((await mgr.run(['has-session', '-t', 'other'])).ok, false);
   });
 
+  it('a killed session\'s late async onExit does not evict a same-name replacement (respawn)', async () => {
+    // A real pty reports exit asynchronously: kill-session removes the entry
+    // synchronously, so POST /api/respawn registers the replacement under the
+    // SAME name before the old pty's onExit lands.
+    const ptys = [];
+    const mgr = createSessionManager({
+      spawnPty: () => {
+        const p = fakePty();
+        p.kill = () => { p.killed = true; setTimeout(() => p.exit(0), 5); };
+        ptys.push(p);
+        return p;
+      },
+      env: { ComSpec: 'C:\\Windows\\system32\\cmd.exe' },
+      comspec: 'C:\\Windows\\system32\\cmd.exe',
+      shell: { file: 'powershell.exe', args: ['-NoLogo'] },
+    });
+
+    assert.strictEqual((await mgr.run(newSession('a'))).ok, true);
+    const oldClient = mgr.attach(['attach', '-t', 'a'], { cols: 80, rows: 24 });
+    const exits = [];
+    oldClient.onExit((e) => exits.push(e));
+
+    assert.strictEqual((await mgr.run(['kill-session', '-t', 'a'])).ok, true);
+    assert.strictEqual((await mgr.run(newSession('a'))).ok, true, 'respawn under the same name');
+    assert.strictEqual(ptys.length, 2);
+
+    await new Promise((r) => setTimeout(r, 30)); // past the old pty's late exit
+
+    assert.strictEqual((await mgr.run(['has-session', '-t', 'a'])).ok, true,
+      'the replacement survives the old session\'s late exit');
+    assert.strictEqual(exits.length, 1, 'the OLD session\'s attached client still received _exit');
+    assert.strictEqual(exits[0].exitCode, 0);
+  });
+
   it('an op against an absent session fails with tmux\'s own wording', async () => {
     const { mgr } = harness();
     for (const args of [
