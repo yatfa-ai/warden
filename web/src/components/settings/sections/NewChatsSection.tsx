@@ -8,6 +8,7 @@
 // host / custom-preset controls were retired in WARDEN-1816: WARDEN-1422
 // deleted NewChatForm, their only consumer, so nothing applied them.
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { SettingsSection } from '../SettingsSection';
 import { ClientPrefResetToDefaultButton } from '../rows/ResetToDefaultButton';
@@ -87,12 +88,14 @@ export function NewChatsSection({ availableHosts, hidden }: NewChatsSectionProps
           <Label htmlFor="defaultShell">Default shell (fallback for any host without its own)</Label>
           <ClientPrefResetToDefaultButton label="Default shell (fallback for any host without its own)" prefKey="defaultShell" value={defaultShell} setter={setDefaultShell} />
         </div>
-        <Input
-          id="defaultShell"
-          value={defaultShell}
-          onChange={(e) => setDefaultShell(e.target.value)}
-          placeholder="auto (host login shell)"
-        />
+        <EditableContextMenu>
+          <Input
+            id="defaultShell"
+            value={defaultShell}
+            onChange={(e) => setDefaultShell(e.target.value)}
+            placeholder="auto (host login shell)"
+          />
+        </EditableContextMenu>
         <p className="text-xs text-muted-foreground">
           Shell opened by the sidebar's <em>Start shell</em> button and the ＋ split button. Enter a name like <code className="bg-muted px-1 rounded">zsh</code> or <code className="bg-muted px-1 rounded">fish</code>; leave blank to use each host's default login shell (the out-of-the-box behavior). Set a per-host override below to use a different shell on a specific host.
         </p>
@@ -115,13 +118,15 @@ export function NewChatsSection({ availableHosts, hidden }: NewChatsSectionProps
             return (
               <div className="flex flex-col gap-1" key={`shellByHost-${key}`}>
                 <Label htmlFor={safeId} className="text-xs font-normal text-muted-foreground">{label}</Label>
-                <Input
-                  id={safeId}
-                  value={defaultShellByHost[key] ?? ''}
-                  onChange={(e) => setHostShell(key, e.target.value)}
-                  placeholder="auto (host login shell)"
-                  className="h-8"
-                />
+                <EditableContextMenu>
+                  <Input
+                    id={safeId}
+                    value={defaultShellByHost[key] ?? ''}
+                    onChange={(e) => setHostShell(key, e.target.value)}
+                    placeholder="auto (host login shell)"
+                    className="h-8"
+                  />
+                </EditableContextMenu>
               </div>
             );
           })}
@@ -138,12 +143,14 @@ export function NewChatsSection({ availableHosts, hidden }: NewChatsSectionProps
           <Label htmlFor="defaultNewChatCwd">Default working directory (fallback for any host without its own)</Label>
           <ClientPrefResetToDefaultButton label="Default working directory (fallback for any host without its own)" prefKey="defaultNewChatCwd" value={defaultNewChatCwd} setter={setDefaultNewChatCwd} />
         </div>
-        <Input
-          id="defaultNewChatCwd"
-          value={defaultNewChatCwd}
-          onChange={(e) => setDefaultNewChatCwd(e.target.value)}
-          placeholder="auto (home directory)"
-        />
+        <EditableContextMenu>
+          <Input
+            id="defaultNewChatCwd"
+            value={defaultNewChatCwd}
+            onChange={(e) => setDefaultNewChatCwd(e.target.value)}
+            placeholder="auto (home directory)"
+          />
+        </EditableContextMenu>
         <p className="text-xs text-muted-foreground">
           Working directory pre-filled in the sidebar's Start shell control. Enter a path like <code className="bg-muted px-1 rounded">~/projects/warden</code>; leave blank to start each chat in the host's home directory (today's behavior). Editable per-spawn. Set a per-host override below to use a different directory on a specific host.
         </p>
@@ -165,13 +172,15 @@ export function NewChatsSection({ availableHosts, hidden }: NewChatsSectionProps
             return (
               <div className="flex flex-col gap-1" key={`cwdByHost-${key}`}>
                 <Label htmlFor={safeId} className="text-xs font-normal text-muted-foreground">{label}</Label>
-                <Input
-                  id={safeId}
-                  value={defaultNewChatCwdByHost[key] ?? ''}
-                  onChange={(e) => setHostCwd(key, e.target.value)}
-                  placeholder="auto (home directory)"
-                  className="h-8"
-                />
+                <EditableContextMenu>
+                  <Input
+                    id={safeId}
+                    value={defaultNewChatCwdByHost[key] ?? ''}
+                    onChange={(e) => setHostCwd(key, e.target.value)}
+                    placeholder="auto (home directory)"
+                    className="h-8"
+                  />
+                </EditableContextMenu>
               </div>
             );
           })}

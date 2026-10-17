@@ -4,6 +4,7 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { cn } from '@/lib/utils';
 import { SettingsSection } from '../SettingsSection';
 import { ConfigResetToDefaultButton } from '../rows/ResetToDefaultButton';
@@ -64,18 +65,20 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
           <Label htmlFor="companionExcludedHosts">Companion excluded hosts</Label>
           <ConfigResetToDefaultButton label="Companion excluded hosts" path="companionExcludedHosts" config={config} setConfig={setConfig} />
         </div>
-        <Input
-          id="companionExcludedHosts"
-          value={(config.companionExcludedHosts ?? []).join(', ')}
-          onChange={(e) => setConfig({
-            ...config,
-            companionExcludedHosts: e.target.value
-              .split(',')
-              .map((s) => s.trim())
-              .filter(Boolean),
-          })}
-          placeholder="e.g. win-box, build-agent (comma-separated host aliases)"
-        />
+        <EditableContextMenu>
+          <Input
+            id="companionExcludedHosts"
+            value={(config.companionExcludedHosts ?? []).join(', ')}
+            onChange={(e) => setConfig({
+              ...config,
+              companionExcludedHosts: e.target.value
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean),
+            })}
+            placeholder="e.g. win-box, build-agent (comma-separated host aliases)"
+          />
+        </EditableContextMenu>
         <p className="text-xs text-muted-foreground">
           Hosts listed here never use the companion transport — they keep the default
           SSH path for every operation (attach, capture, exec, …), while all other

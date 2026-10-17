@@ -20,6 +20,7 @@ import { useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -236,17 +237,19 @@ export function HostsSection({
           </Select>
         )}
         <div className="flex items-center gap-2">
-          <Input
-            id="addHostName"
-            value={newHost}
-            onChange={(e) => setNewHost(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') { e.preventDefault(); addTypedHost(); }
-            }}
-            className="h-8 flex-1"
-            placeholder="host name or IP (e.g. build-box or 10.0.0.5)"
-            aria-label="Host name to add"
-          />
+          <EditableContextMenu>
+            <Input
+              id="addHostName"
+              value={newHost}
+              onChange={(e) => setNewHost(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); addTypedHost(); }
+              }}
+              className="h-8 flex-1"
+              placeholder="host name or IP (e.g. build-box or 10.0.0.5)"
+              aria-label="Host name to add"
+            />
+          </EditableContextMenu>
           <Button variant="outline" size="sm" onClick={addTypedHost}>
             Add
           </Button>
@@ -296,13 +299,15 @@ export function HostsSection({
             return (
               <div className="flex flex-col gap-1" key={`hostLabel-${key}`}>
                 <Label htmlFor={safeId} className="text-xs font-normal text-muted-foreground">{label}</Label>
-                <Input
-                  id={safeId}
-                  value={hostLabels[key] ?? ''}
-                  onChange={(e) => setHostLabel(key, e.target.value)}
-                  placeholder={`raw name (${key === THIS_MACHINE ? 'local' : key})`}
-                  className="h-8"
-                />
+                <EditableContextMenu>
+                  <Input
+                    id={safeId}
+                    value={hostLabels[key] ?? ''}
+                    onChange={(e) => setHostLabel(key, e.target.value)}
+                    placeholder={`raw name (${key === THIS_MACHINE ? 'local' : key})`}
+                    className="h-8"
+                  />
+                </EditableContextMenu>
               </div>
             );
           })}
@@ -363,11 +368,13 @@ export function HostsSection({
           <Label htmlFor="tmuxSession">Tmux Session Name</Label>
           <ConfigResetToDefaultButton label="Tmux Session Name" path="tmuxSession" config={config} setConfig={setConfig} />
         </div>
-        <Input
-          id="tmuxSession"
-          value={config.tmuxSession}
-          onChange={(e) => setConfig({ ...config, tmuxSession: e.target.value })}
-        />
+        <EditableContextMenu>
+          <Input
+            id="tmuxSession"
+            value={config.tmuxSession}
+            onChange={(e) => setConfig({ ...config, tmuxSession: e.target.value })}
+          />
+        </EditableContextMenu>
       </div>
 
       <div className="flex flex-col gap-2">

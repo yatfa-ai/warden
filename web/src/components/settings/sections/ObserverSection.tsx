@@ -1,6 +1,7 @@
 // Observer Preferences section (backend /api/config + write-only auth token).
 // Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged.
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -148,12 +149,14 @@ export function ObserverSection({
             <Label htmlFor="observerModel">Model</Label>
             <ConfigResetToDefaultButton label="Observer model" path="llm.model" config={config} setConfig={setConfig} />
           </div>
-          <Input
-            id="observerModel"
-            value={config.llm.model}
-            onChange={(e) => setConfig({ ...config, llm: { ...config.llm, model: e.target.value } })}
-            placeholder="glm-5.2"
-          />
+          <EditableContextMenu>
+            <Input
+              id="observerModel"
+              value={config.llm.model}
+              onChange={(e) => setConfig({ ...config, llm: { ...config.llm, model: e.target.value } })}
+              placeholder="glm-5.2"
+            />
+          </EditableContextMenu>
           <p className="text-xs text-muted-foreground">
             The model id the Observer uses. A trailing context tag like <code className="bg-muted px-1 rounded">[1m]</code> is stripped automatically. Falls back to the WARDEN_MODEL env var, then the default (glm-5.2).
           </p>
@@ -163,12 +166,14 @@ export function ObserverSection({
             <Label htmlFor="observerBaseUrl">Base URL</Label>
             <ConfigResetToDefaultButton label="Observer base URL" path="llm.baseUrl" config={config} setConfig={setConfig} />
           </div>
-          <Input
-            id="observerBaseUrl"
-            value={config.llm.baseUrl}
-            onChange={(e) => setConfig({ ...config, llm: { ...config.llm, baseUrl: e.target.value } })}
-            placeholder="https://api.anthropic.com"
-          />
+          <EditableContextMenu>
+            <Input
+              id="observerBaseUrl"
+              value={config.llm.baseUrl}
+              onChange={(e) => setConfig({ ...config, llm: { ...config.llm, baseUrl: e.target.value } })}
+              placeholder="https://api.anthropic.com"
+            />
+          </EditableContextMenu>
           <p className="text-xs text-muted-foreground">
             Anthropic-Messages-compatible endpoint. Leave blank for the default (https://api.anthropic.com) or an ANTHROPIC_BASE_URL env var.
           </p>
