@@ -135,4 +135,58 @@ describe('WARDEN-1836 — /api/stream closed-socket guard after awaits', () => {
     for (let i = 0; i < 40 && (await clients()).length; i++) await sleep(50);
     assert.deepStrictEqual(await clients(), []);
   });
+  // WARDEN-1846 — a per-pane `detach` (socket still OPEN) landing while `attach` is
+  // awaiting resolve()/probeSession() must cancel that attach.
+  const collect = (ws) => { const frames = []; ws.on('message', (d) => { try { frames.push(JSON.parse(String(d))); } catch { /* noop */ } }); return frames; };
+  const attachFrame = () => JSON.stringify({ type: 'attach', id: chat.id, cols: 80, rows: 24 });
+  const detachFrame = () => JSON.stringify({ type: 'detach', id: chat.id });
+  const drain = async () => { for (let i = 0; i < 40 && (await clients()).length; i++) await sleep(50); };
+
+  it('attach: a detach landing mid-resolve (socket open) spawns no client and sends no attached frame', { skip: !tmuxPresent && 'tmux not installed' }, async () => {
+    await newSession();
+    resolveDelayMs = RESOLVE_DELAY;
+    const ws = await open();
+    const frames = collect(ws);
+    ws.send(attachFrame());
+    await sleep(CLOSE_AT);
+    ws.send(detachFrame());
+    await sleep(RESOLVE_DELAY + 1500);
+    assert.deepStrictEqual(await clients(), [], 'a detached pane must not get a tmux client while the socket is open');
+    assert.deepStrictEqual(frames.filter((f) => ['attached', 'attach_error', 'host_unreachable', 'session_dead'].includes(f.type)), [],
+      'a stale attach must not report on a pane the client already tore down');
+    ws.close();
+  });
+
+  it('attach: attach -> detach -> attach (Retry) mid-resolve yields exactly one client, none after close', { skip: !tmuxPresent && 'tmux not installed' }, async () => {
+    await newSession();
+    resolveDelayMs = RESOLVE_DELAY;
+    const ws = await open();
+    const frames = collect(ws);
+    ws.send(attachFrame());
+    await sleep(CLOSE_AT);
+    ws.send(detachFrame());
+    ws.send(attachFrame());
+    await sleep(RESOLVE_DELAY + 1500);
+    assert.strictEqual((await clients()).length, 1, 'only the latest attach may spawn a client');
+    assert.strictEqual(frames.filter((f) => f.type === 'attached').length, 1);
+    ws.close();
+    await drain();
+    assert.deepStrictEqual(await clients(), [], 'no orphan client may survive the socket close');
+  });
+
+  it('attach positive control: attach -> detach after attached still tears the client down', { skip: !tmuxPresent && 'tmux not installed' }, async () => {
+    await newSession();
+    const ws = await open();
+    ws.send(attachFrame());
+    for (let i = 0; i < 60 && !(await clients()).length; i++) await sleep(50);
+    assert.strictEqual((await clients()).length, 1);
+    ws.send(detachFrame());
+    await drain();
+    assert.deepStrictEqual(await clients(), [], 'detach after attached must kill the client');
+    ws.send(attachFrame()); // a fresh attach after detach still works
+    for (let i = 0; i < 60 && !(await clients()).length; i++) await sleep(50);
+    assert.strictEqual((await clients()).length, 1);
+    ws.close();
+    await drain();
+  });
 });
