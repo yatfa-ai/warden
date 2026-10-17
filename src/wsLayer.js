@@ -188,6 +188,11 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
     const attaches = new Map(); // id -> { pty, chat }
     const monitors = new Set(); // chat keys
+    // WARDEN-1846: attach awaits refreshHost/resolve/probeSession before it registers in
+    // `attaches`, so a per-pane `detach` (or a re-attach) landing in that window found
+    // nothing to kill. id -> token of the attach currently in flight; `detach` clears it
+    // and a newer attach replaces it, which makes the older attach stale.
+    const pendingAttach = new Map();
     // The close handler below runs once, synchronously. Frame paths that register state
     // AFTER an await (monitor timer/subscription, attach PTY) must bail when the socket
     // closed meanwhile, or that state is never cleaned up.
@@ -291,6 +296,10 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
       }
       else if (m.type === 'attach') {
         if (attaches.has(m.id)) return;
+        const token = Symbol('attach');
+        pendingAttach.set(m.id, token);
+        const stale = () => closed || pendingAttach.get(m.id) !== token;
+        const settle = () => { if (pendingAttach.get(m.id) === token) pendingAttach.delete(m.id); };
         // Lazy restore: if the client knows the host (stored when the pane was first
         // opened), discover just that one host so resolve() hits the catalogue — no
         // all-hosts scan.
@@ -300,8 +309,8 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           } catch { /* fall through; resolve() still has a locate fallback */ }
         }
         const r = await resolve(String(m.id));
-        if (closed) return;
-        if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); await appendEventSafe({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
+        if (stale()) return;
+        if (r.error) { settle(); send({ type: 'attach_error', id: m.id, error: r.error }); await appendEventSafe({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
         const chat = r.chat;
         const cols = Math.max(20, Math.floor(m.cols || 100));
         const rows = Math.max(6, Math.floor(m.rows || 30));
@@ -317,18 +326,21 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         let reason = null;
         try { reason = classifyProbe(await probeSession(chat, cfg)); }
         catch { /* probe threw → leave reason null and attempt a normal attach */ }
-        if (closed) return;
+        if (stale()) return;
         if (reason === 'host_unreachable') {
+          settle();
           send({ type: 'host_unreachable', id: m.id });
           await appendEventSafe({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
           return;
         }
         if (reason === 'session_dead') {
+          settle();
           send({ type: 'session_dead', id: m.id });
           await appendEventSafe({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
           return;
         }
 
+        settle();
         let pty;
         try { pty = attachStream(chat, cfg, { cols, rows }); }
         catch (e) {
@@ -427,6 +439,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           try { await resize(a.chat, cfg, c, r); } catch { /* noop */ }
         }
       } else if (m.type === 'detach') {
+        pendingAttach.delete(m.id);
         const a = attaches.get(m.id);
         if (a) {
           try { a.pty.kill(); } catch { /* noop */ }
