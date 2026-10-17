@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -167,31 +168,35 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
 
         {/* Add a new pattern */}
         <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
-          <Input
-            value={newPatternName}
-            onChange={(e) => setNewPatternName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') { e.preventDefault(); addPattern(); }
-            }}
-            className="h-8"
-            placeholder="name (e.g. Deploy failed)"
-            id="newPatternName"
-            aria-label="New pattern name"
-            maxLength={WATCH_PATTERN_NAME_MAX}
-          />
-          <div className="flex items-center gap-2">
+          <EditableContextMenu>
             <Input
-              value={newPatternExpression}
-              onChange={(e) => setNewPatternExpression(e.target.value)}
+              value={newPatternName}
+              onChange={(e) => setNewPatternName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') { e.preventDefault(); addPattern(); }
               }}
-              className="h-8 flex-1"
-              placeholder={newPatternMode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
-              id="newPatternExpression"
-              aria-label="New pattern expression"
-              maxLength={WATCH_PATTERN_EXPRESSION_MAX}
+              className="h-8"
+              placeholder="name (e.g. Deploy failed)"
+              id="newPatternName"
+              aria-label="New pattern name"
+              maxLength={WATCH_PATTERN_NAME_MAX}
             />
+          </EditableContextMenu>
+          <div className="flex items-center gap-2">
+            <EditableContextMenu>
+              <Input
+                value={newPatternExpression}
+                onChange={(e) => setNewPatternExpression(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); addPattern(); }
+                }}
+                className="h-8 flex-1"
+                placeholder={newPatternMode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
+                id="newPatternExpression"
+                aria-label="New pattern expression"
+                maxLength={WATCH_PATTERN_EXPRESSION_MAX}
+              />
+            </EditableContextMenu>
             <Select
               value={newPatternMode}
               onValueChange={(v) => setNewPatternMode(v === 'regex' ? 'regex' : 'string')}

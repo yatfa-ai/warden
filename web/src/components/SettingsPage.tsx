@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
@@ -220,14 +221,16 @@ export function SettingsPage({
             (relative wrapper, absolute affordance, padded input). */}
         <div className="relative ml-auto w-40 sm:w-64">
           <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search settings…"
-            aria-label="Search settings"
-            className="pl-8"
-          />
+          <EditableContextMenu>
+            <Input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search settings…"
+              aria-label="Search settings"
+              className="pl-8"
+            />
+          </EditableContextMenu>
         </div>
       </header>
 

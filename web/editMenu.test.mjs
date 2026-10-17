@@ -70,6 +70,16 @@ const paneGrid = read('src/components/PaneGrid.tsx');
 const spawnControl = read('src/components/sidebar/SpawnControl.tsx');
 const gitBadges = read('src/components/sidebar/GitBadges.tsx');
 const createCollection = read('src/components/CreateCollectionDialog.tsx');
+const settingsPage = read('src/components/SettingsPage.tsx');
+const hostsSection = read('src/components/settings/sections/HostsSection.tsx');
+const newChatsSection = read('src/components/settings/sections/NewChatsSection.tsx');
+const notificationsSection = read('src/components/settings/sections/NotificationsSection.tsx');
+const observerSection = read('src/components/settings/sections/ObserverSection.tsx');
+const appearanceSection = read('src/components/settings/sections/AppearanceSection.tsx');
+const performanceSection = read('src/components/settings/sections/PerformanceSection.tsx');
+const telemetrySection = read('src/components/settings/sections/TelemetrySection.tsx');
+const patternsSection = read('src/components/settings/sections/PatternsSection.tsx');
+const snippetsSection = read('src/components/settings/sections/SnippetsSection.tsx');
 
 describe('EditableContextMenu source guards (WARDEN-1830)', () => {
   it('wrapper uses the themed primitive via ContextMenuTrigger asChild', () => {
@@ -137,6 +147,26 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     ['CreateCollectionDialog Host', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{host\}/],
     ['CreateCollectionDialog Custom criteria', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{custom\}/],
     ['CreateCollectionDialog hex colour text', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{color\}/],
+    // WARDEN-1851 — the Settings surfaces. For the per-host mapped inputs
+    // (id={safeId}) the distinguishing attribute is the mapped `value=` prop.
+    ['SettingsPage search settings', () => settingsPage, /<EditableContextMenu>\s*<Input\s+type="text"\s+value=\{search\}/],
+    ['HostsSection add-host name', () => hostsSection, /<EditableContextMenu>\s*<Input\s+id="addHostName"/],
+    ['HostsSection per-host label', () => hostsSection, /<EditableContextMenu>\s*<Input\s+id=\{safeId\}\s+value=\{hostLabels\[key\]/],
+    ['HostsSection tmux session', () => hostsSection, /<EditableContextMenu>\s*<Input\s+id="tmuxSession"/],
+    ['NewChatsSection default shell', () => newChatsSection, /<EditableContextMenu>\s*<Input\s+id="defaultShell"/],
+    ['NewChatsSection per-host shell', () => newChatsSection, /<EditableContextMenu>\s*<Input\s+id=\{safeId\}\s+value=\{defaultShellByHost\[key\]/],
+    ['NewChatsSection default cwd', () => newChatsSection, /<EditableContextMenu>\s*<Input\s+id="defaultNewChatCwd"/],
+    ['NewChatsSection per-host cwd', () => newChatsSection, /<EditableContextMenu>\s*<Input\s+id=\{safeId\}\s+value=\{defaultNewChatCwdByHost\[key\]/],
+    ['NotificationsSection webhook URL', () => notificationsSection, /<EditableContextMenu>\s*<Input\s+id="webhookUrl"/],
+    ['ObserverSection model', () => observerSection, /<EditableContextMenu>\s*<Input\s+id="observerModel"/],
+    ['ObserverSection base URL', () => observerSection, /<EditableContextMenu>\s*<Input\s+id="observerBaseUrl"/],
+    ['AppearanceSection custom font family', () => appearanceSection, /<EditableContextMenu>\s*<Input\s+id="customTerminalFontFamily"/],
+    ['PerformanceSection companion excluded hosts', () => performanceSection, /<EditableContextMenu>\s*<Input\s+id="companionExcludedHosts"/],
+    ['TelemetrySection receiver endpoint', () => telemetrySection, /<EditableContextMenu>\s*<Input\s+id="telemetryEndpoint"/],
+    ['PatternsSection new pattern name', () => patternsSection, /<EditableContextMenu>\s*<Input\s+value=\{newPatternName\}/],
+    ['PatternsSection new pattern expression', () => patternsSection, /<EditableContextMenu>\s*<Input\s+value=\{newPatternExpression\}/],
+    ['SnippetsSection new snippet name', () => snippetsSection, /<EditableContextMenu>\s*<Input\s+value=\{newSnippetName\}/],
+    ['SnippetsSection new snippet text', () => snippetsSection, /<EditableContextMenu>\s*<Textarea\s+value=\{newSnippetText\}/],
   ];
   for (const [name, src, re] of sites) {
     it(`${name} input is wrapped and imports the wrapper`, () => {
@@ -171,5 +201,26 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
   it('GitBadges search keeps its stopPropagation handlers and the clear button (WARDEN-1847)', () => {
     assert.match(gitBadges, /onChange=\{\(e\) => setGrepInput\(e\.target\.value\)\}\s+onClick=\{\(e\) => e\.stopPropagation\(\)\}\s+onKeyDown=\{\(e\) => e\.stopPropagation\(\)\}\s+placeholder="search commit messages…"/);
     assert.match(gitBadges, /<\/EditableContextMenu>\s*\{\(searching \|\| searchLoading\) && \(\s*<Button/);
+  });
+
+  it('Settings surfaces wrap exactly the 18 text-like fields and import the wrapper in each file (WARDEN-1851)', () => {
+    const files = [settingsPage, hostsSection, newChatsSection, notificationsSection, observerSection, appearanceSection, performanceSection, telemetrySection, patternsSection, snippetsSection];
+    assert.strictEqual(files.reduce((n, f) => n + (f.match(/<EditableContextMenu>/g) || []).length, 0), 18);
+    for (const f of files) {
+      assert.match(f, /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
+      assert.ok(!f.includes('onContextMenu={'));
+    }
+  });
+
+  it('Settings number inputs and in-row/secret fields stay unwrapped (WARDEN-1851)', () => {
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="pollIntervalMs"/.test(hostsSection));
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="connectTimeout"/.test(hostsSection));
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="observerSessionTimeout"/.test(observerSection));
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="observerMaxTokens"/.test(observerSection));
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="terminalFontSize"/.test(appearanceSection));
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="terminalScrollback"/.test(appearanceSection));
+    assert.ok(!read('src/components/settings/rows/PatternRow.tsx').includes('EditableContextMenu'));
+    assert.ok(!read('src/components/settings/rows/SnippetRow.tsx').includes('EditableContextMenu'));
+    assert.ok(!read('src/components/settings/rows/WriteOnlySecretField.tsx').includes('EditableContextMenu'));
   });
 });

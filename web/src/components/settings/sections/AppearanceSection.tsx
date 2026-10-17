@@ -31,6 +31,7 @@
 // which PaneTile subscribes to — App no longer reads the scheme at all.)
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -233,20 +234,22 @@ export function AppearanceSection(props: AppearanceSectionProps) {
           </SelectContent>
         </Select>
         {customFontMode && (
-          <Input
-            id="customTerminalFontFamily"
-            aria-label="Custom terminal font family"
-            value={customFontText}
-            onChange={(e) => {
-              const v = e.target.value;
-              setCustomFontText(v);
-              // A blank custom value falls back to the default stack
-              // (never a blank pane); we stay in custom mode so the
-              // field keeps showing while editing.
-              setTerminalFontFamily(v.trim() === '' ? DEFAULT_TERMINAL_FONT_FAMILY : v);
-            }}
-            placeholder='e.g. "Hack Nerd Font", ui-monospace, monospace'
-          />
+          <EditableContextMenu>
+            <Input
+              id="customTerminalFontFamily"
+              aria-label="Custom terminal font family"
+              value={customFontText}
+              onChange={(e) => {
+                const v = e.target.value;
+                setCustomFontText(v);
+                // A blank custom value falls back to the default stack
+                // (never a blank pane); we stay in custom mode so the
+                // field keeps showing while editing.
+                setTerminalFontFamily(v.trim() === '' ? DEFAULT_TERMINAL_FONT_FAMILY : v);
+              }}
+              placeholder='e.g. "Hack Nerd Font", ui-monospace, monospace'
+            />
+          </EditableContextMenu>
         )}
         <p className="text-xs text-muted-foreground">
           Monospace font for all agent panes. Pick a common font, or choose <strong>Custom…</strong> to paste any installed CSS font-family (e.g. a Nerd Font for glyphs). Applies live to open panes; blank reverts to the system default.

@@ -8,6 +8,7 @@
 // here without editing this file. A category with no producer is not in the
 // registry, so this surface cannot show a toggle that collects nothing.
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
@@ -173,16 +174,18 @@ export function TelemetrySection({
           <Label htmlFor="telemetryEndpoint">Receiver endpoint</Label>
           <ConfigResetToDefaultButton label="Receiver endpoint" path="telemetryEndpoint" config={config} setConfig={setConfig} />
         </div>
-        <Input
-          id="telemetryEndpoint"
-          value={config.telemetryEndpoint}
-          onChange={(e) => {
-            setConfig({ ...config, telemetryEndpoint: e.target.value });
-            // An edited endpoint invalidates any prior probe result.
-            setTelemetryTestVerdict(null);
-          }}
-          placeholder="https://your-receiver.example/ingest"
-        />
+        <EditableContextMenu>
+          <Input
+            id="telemetryEndpoint"
+            value={config.telemetryEndpoint}
+            onChange={(e) => {
+              setConfig({ ...config, telemetryEndpoint: e.target.value });
+              // An edited endpoint invalidates any prior probe result.
+              setTelemetryTestVerdict(null);
+            }}
+            placeholder="https://your-receiver.example/ingest"
+          />
+        </EditableContextMenu>
         <p className="text-xs text-muted-foreground">
           Leave blank for unconfigured (sends nothing). Events go only to this URL — a self-hosted receiver you control, never a third-party analytics service.
         </p>

@@ -8,6 +8,7 @@
 // Extracted from SettingsPage (WARDEN-664); behavior is unchanged — this only
 // surfaces the existing persistence split that decomposition made structural.
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
@@ -274,16 +275,18 @@ export function NotificationsSection(props: NotificationsSectionProps) {
             <Label htmlFor="webhookUrl">Webhook URL</Label>
             <ConfigResetToDefaultButton label="Webhook URL" path="webhookUrl" config={config} setConfig={setConfig} />
           </div>
-          <Input
-            id="webhookUrl"
-            value={config.webhookUrl}
-            onChange={(e) => {
-              setConfig({ ...config, webhookUrl: e.target.value });
-              // An edited URL invalidates any prior test result (WARDEN-970).
-              setWebhookTestVerdict(null);
-            }}
-            placeholder="https://ntfy.sh/your-topic"
-          />
+          <EditableContextMenu>
+            <Input
+              id="webhookUrl"
+              value={config.webhookUrl}
+              onChange={(e) => {
+                setConfig({ ...config, webhookUrl: e.target.value });
+                // An edited URL invalidates any prior test result (WARDEN-970).
+                setWebhookTestVerdict(null);
+              }}
+              placeholder="https://ntfy.sh/your-topic"
+            />
+          </EditableContextMenu>
           <p className="text-xs text-muted-foreground">
             Leave blank for unconfigured (sends nothing). Alerts go only to this URL — a destination you control, never a third-party service.
           </p>

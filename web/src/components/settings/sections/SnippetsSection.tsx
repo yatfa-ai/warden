@@ -15,6 +15,7 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import {
@@ -172,36 +173,40 @@ export function SnippetsSection(props: SnippetsSectionProps) {
 
         {/* Add a new snippet */}
         <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
-          <Input
-            value={newSnippetName}
-            onChange={(e) => setNewSnippetName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                addSnippet();
-              }
-            }}
-            className="h-8"
-            placeholder="name (e.g. Run tests)"
-            id="newSnippetName"
-            aria-label="New snippet name"
-            maxLength={SNIPPET_NAME_MAX}
-          />
-          <Textarea
-            value={newSnippetText}
-            onChange={(e) => setNewSnippetText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                addSnippet();
-              }
-            }}
-            className="min-h-[60px] text-sm"
-            placeholder="instruction (e.g. run the test suite)"
-            id="newSnippetText"
-            aria-label="New snippet instruction text"
-            maxLength={SNIPPET_TEXT_MAX}
-          />
+          <EditableContextMenu>
+            <Input
+              value={newSnippetName}
+              onChange={(e) => setNewSnippetName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addSnippet();
+                }
+              }}
+              className="h-8"
+              placeholder="name (e.g. Run tests)"
+              id="newSnippetName"
+              aria-label="New snippet name"
+              maxLength={SNIPPET_NAME_MAX}
+            />
+          </EditableContextMenu>
+          <EditableContextMenu>
+            <Textarea
+              value={newSnippetText}
+              onChange={(e) => setNewSnippetText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  addSnippet();
+                }
+              }}
+              className="min-h-[60px] text-sm"
+              placeholder="instruction (e.g. run the test suite)"
+              id="newSnippetText"
+              aria-label="New snippet instruction text"
+              maxLength={SNIPPET_TEXT_MAX}
+            />
+          </EditableContextMenu>
           <Button variant="outline" size="sm" className="w-full" onClick={addSnippet}>
             Add snippet
           </Button>
