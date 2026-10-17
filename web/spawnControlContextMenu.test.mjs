@@ -48,8 +48,17 @@ describe('SpawnControl collapsed row declares a themed context menu (WARDEN-1786
     assert.match(content, /\{cwd && <ContextMenuItem onSelect=\{\(\) => copyWithToast\(cwd\)\}>Copy directory</);
   });
 
-  it('the expanded branch carries no ContextMenu (native field menus preserved)', () => {
+  it('the expanded branch has no hand-rolled trigger and wraps exactly the two text inputs in EditableContextMenu (WARDEN-1847)', () => {
     assert.ok(expandedStart > 0 && expandedBranch.length > 100);
-    assert.doesNotMatch(expandedBranch, /ContextMenu/);
+    assert.doesNotMatch(expandedBranch, /ContextMenuTrigger|onContextMenu/);
+    assert.strictEqual((expandedBranch.match(/<EditableContextMenu>/g) || []).length, 2);
+    assert.match(expandedBranch, /<EditableContextMenu>\s*<Input\s+value=\{cwd\}[\s\S]*?aria-label="directory"/);
+    assert.match(expandedBranch, /<EditableContextMenu>\s*<Input\s+value=\{name\}[\s\S]*?aria-label="session name \(optional\)"/);
+    assert.match(text, /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
+  });
+
+  it('Enter-to-spawn on both inputs and the select-focused firstFieldRef are untouched', () => {
+    assert.strictEqual((expandedBranch.match(/onKeyDown=\{\(e\) => \{ if \(e\.key === 'Enter'\) void spawn\(\); \}\}/g) || []).length, 2);
+    assert.match(expandedBranch, /<select\s+ref=\{firstFieldRef\}/);
   });
 });

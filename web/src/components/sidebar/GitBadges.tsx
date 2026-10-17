@@ -20,6 +20,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
@@ -1299,16 +1300,18 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
               window than the browse cap. */}
           <div className="relative mb-1">
             <Search className="pointer-events-none absolute left-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              type="text"
-              value={grepInput}
-              onChange={(e) => setGrepInput(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => e.stopPropagation()}
-              placeholder="search commit messages…"
-              aria-label="search commit messages"
-              className="h-6 text-xs md:text-xs pl-6 pr-6"
-            />
+            <EditableContextMenu>
+              <Input
+                type="text"
+                value={grepInput}
+                onChange={(e) => setGrepInput(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+                placeholder="search commit messages…"
+                aria-label="search commit messages"
+                className="h-6 text-xs md:text-xs pl-6 pr-6"
+              />
+            </EditableContextMenu>
             {(searching || searchLoading) && (
               <Button
                 type="button"

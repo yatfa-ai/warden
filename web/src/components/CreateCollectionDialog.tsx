@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { parseCustomCriteria } from '@/lib/collections';
 import type { Collection } from '@/lib/types';
@@ -165,48 +166,58 @@ export function CreateCollectionDialog({
             {/* Name */}
             <div className="flex flex-col gap-2">
               <Label htmlFor="name">Name</Label>
-              <Input
-                id="name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Warden Workers"
-                maxLength={60}
-                required
-              />
+              <EditableContextMenu>
+                <Input
+                  id="name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g., Warden Workers"
+                  maxLength={60}
+                  required
+                />
+              </EditableContextMenu>
               <span className="text-[10px] text-muted-foreground">{name.length}/60</span>
             </div>
 
             {/* Description (optional) */}
             <div className="flex flex-col gap-2">
               <Label htmlFor="description">Description (optional)</Label>
-              <Input
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="e.g., All worker agents in the warden project"
-                maxLength={200}
-              />
+              <EditableContextMenu>
+                <Input
+                  id="description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="e.g., All worker agents in the warden project"
+                  maxLength={200}
+                />
+              </EditableContextMenu>
             </div>
 
             {/* Criteria */}
             <div className="flex flex-col gap-2">
               <Label>Filter Criteria (optional)</Label>
               <div className="flex flex-col gap-2">
-                <Input
-                  value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  placeholder="Role (e.g., worker, reviewer)"
-                />
-                <Input
-                  value={project}
-                  onChange={(e) => setProject(e.target.value)}
-                  placeholder="Project (e.g., warden, tinker)"
-                />
-                <Input
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                  placeholder="Host (e.g., server1, (local))"
-                />
+                <EditableContextMenu>
+                  <Input
+                    value={role}
+                    onChange={(e) => setRole(e.target.value)}
+                    placeholder="Role (e.g., worker, reviewer)"
+                  />
+                </EditableContextMenu>
+                <EditableContextMenu>
+                  <Input
+                    value={project}
+                    onChange={(e) => setProject(e.target.value)}
+                    placeholder="Project (e.g., warden, tinker)"
+                  />
+                </EditableContextMenu>
+                <EditableContextMenu>
+                  <Input
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    placeholder="Host (e.g., server1, (local))"
+                  />
+                </EditableContextMenu>
                 {/*
                   Custom criteria (WARDEN-553): the writable half of the grouping
                   the dialog's description advertises. A chat matches if ANY
@@ -215,11 +226,13 @@ export function CreateCollectionDialog({
                   text → string[] on submit (parseCustomCriteria splits, trims,
                   drops empties, dedupes).
                 */}
-                <Input
-                  value={custom}
-                  onChange={(e) => setCustom(e.target.value)}
-                  placeholder="Custom (e.g., warden, server1, My Agent)"
-                />
+                <EditableContextMenu>
+                  <Input
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    placeholder="Custom (e.g., warden, server1, My Agent)"
+                  />
+                </EditableContextMenu>
               </div>
               <span className="text-[10px] text-muted-foreground">
                 Leave all empty to include all agents. Agents must match ALL specified criteria. Custom matches if any value equals an agent's role, project, host, or name.
@@ -237,12 +250,14 @@ export function CreateCollectionDialog({
                   onChange={(e) => setColor(e.target.value)}
                   className="w-12 h-8 p-0 border-0"
                 />
-                <Input
-                  value={color}
-                  onChange={(e) => setColor(e.target.value)}
-                  placeholder="#6366f1"
-                  className="flex-1"
-                />
+                <EditableContextMenu>
+                  <Input
+                    value={color}
+                    onChange={(e) => setColor(e.target.value)}
+                    placeholder="#6366f1"
+                    className="flex-1"
+                  />
+                </EditableContextMenu>
               </div>
             </div>
 

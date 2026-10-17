@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, Plus, Server } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
@@ -103,25 +104,29 @@ export function SpawnControl({ hosts, host, onSpawn, disabled }: SpawnControlPro
         </button>
       </div>
       <div className="mb-1.5 flex items-center gap-2">
-        <Input
-          value={cwd}
-          onChange={(e) => setCwd(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void spawn(); }}
-          placeholder="~/directory (home if empty)"
-          aria-label="directory"
-          className="h-6 min-w-0 flex-1 px-1.5 text-[10.5px]"
-        />
+        <EditableContextMenu>
+          <Input
+            value={cwd}
+            onChange={(e) => setCwd(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void spawn(); }}
+            placeholder="~/directory (home if empty)"
+            aria-label="directory"
+            className="h-6 min-w-0 flex-1 px-1.5 text-[10.5px]"
+          />
+        </EditableContextMenu>
       </div>
       <div className="mb-1.5 flex items-center gap-2">
-        <Input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void spawn(); }}
-          placeholder="optional — name it to save it"
-          aria-label="session name (optional)"
-          maxLength={60}
-          className="h-6 min-w-0 flex-1 px-1.5 text-[10.5px]"
-        />
+        <EditableContextMenu>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void spawn(); }}
+            placeholder="optional — name it to save it"
+            aria-label="session name (optional)"
+            maxLength={60}
+            className="h-6 min-w-0 flex-1 px-1.5 text-[10.5px]"
+          />
+        </EditableContextMenu>
       </div>
       <button
         className="flex h-6 w-full items-center justify-center gap-1 rounded-md border border-border bg-accent text-[10.5px] text-foreground hover:border-green-600 disabled:opacity-50"
@@ -137,10 +142,11 @@ export function SpawnControl({ hosts, host, onSpawn, disabled }: SpawnControlPro
       </div>
     </div>
   ) : (
-    // Themed right-click menu on the COLLAPSED one-liner only (WARDEN-1786). The
-    // expanded form is deliberately menu-free: it holds native <select>/<input>
-    // fields, and intercepting right-click there would clobber native
-    // Cut/Copy/Paste (WARDEN-926 / withdrawn WARDEN-495).
+    // Themed right-click menu on the COLLAPSED one-liner (WARDEN-1786). The
+    // expanded form's two text inputs (directory, session name) carry the themed
+    // Cut/Copy/Paste/Select all menu via EditableContextMenu (WARDEN-1847) — Electron
+    // ships no native field menu, so without it right-click there is silent. The
+    // expanded form has no hand-rolled ContextMenuTrigger of its own.
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div className="flex flex-none flex-wrap items-center gap-[5px] border-b border-border/50 px-2 py-1.5">

@@ -67,6 +67,9 @@ const globalSearch = read('src/components/GlobalSearchDialog.tsx');
 const workspaceSearch = read('src/components/WorkspaceSearchDialog.tsx');
 const transcript = read('src/components/SessionTranscriptViewer.tsx');
 const paneGrid = read('src/components/PaneGrid.tsx');
+const spawnControl = read('src/components/sidebar/SpawnControl.tsx');
+const gitBadges = read('src/components/sidebar/GitBadges.tsx');
+const createCollection = read('src/components/CreateCollectionDialog.tsx');
 
 describe('EditableContextMenu source guards (WARDEN-1830)', () => {
   it('wrapper uses the themed primitive via ContextMenuTrigger asChild', () => {
@@ -124,6 +127,16 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     ['WorkspaceSearchDialog', () => workspaceSearch, /<EditableContextMenu>\s*<Input\s+ref=\{inputRef\}/],
     ['SessionTranscriptViewer find', () => transcript, /<EditableContextMenu>\s*<Input\s+autoFocus\s+aria-label="Find in transcript"/],
     ['PaneGrid Open-file path', () => paneGrid, /<EditableContextMenu>\s*<Input\s+ref=\{fileInputRef\}/],
+    ['SpawnControl directory', () => spawnControl, /<EditableContextMenu>\s*<Input\s+value=\{cwd\}/],
+    ['SpawnControl session name', () => spawnControl, /<EditableContextMenu>\s*<Input\s+value=\{name\}/],
+    ['GitBadges commit-message search', () => gitBadges, /<EditableContextMenu>\s*<Input\s+type="text"\s+value=\{grepInput\}/],
+    ['CreateCollectionDialog Name', () => createCollection, /<EditableContextMenu>\s*<Input\s+id="name"/],
+    ['CreateCollectionDialog Description', () => createCollection, /<EditableContextMenu>\s*<Input\s+id="description"/],
+    ['CreateCollectionDialog Role', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{role\}/],
+    ['CreateCollectionDialog Project', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{project\}/],
+    ['CreateCollectionDialog Host', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{host\}/],
+    ['CreateCollectionDialog Custom criteria', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{custom\}/],
+    ['CreateCollectionDialog hex colour text', () => createCollection, /<EditableContextMenu>\s*<Input\s+value=\{color\}/],
   ];
   for (const [name, src, re] of sites) {
     it(`${name} input is wrapped and imports the wrapper`, () => {
@@ -147,5 +160,16 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
   it('out-of-scope fields stay unwrapped (PaneTile search bar, ui/input.tsx)', () => {
     assert.ok(!read('src/components/PaneTile.tsx').includes('EditableContextMenu'));
     assert.ok(!read('src/components/ui/input.tsx').includes('EditableContextMenu'));
+  });
+
+  it('CreateCollectionDialog wraps exactly seven fields and leaves the type="color" swatch unwrapped (WARDEN-1847)', () => {
+    assert.strictEqual((createCollection.match(/<EditableContextMenu>/g) || []).length, 7);
+    assert.match(createCollection, /<Input\s+id="color"\s+type="color"/);
+    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="color"/.test(createCollection));
+  });
+
+  it('GitBadges search keeps its stopPropagation handlers and the clear button (WARDEN-1847)', () => {
+    assert.match(gitBadges, /onChange=\{\(e\) => setGrepInput\(e\.target\.value\)\}\s+onClick=\{\(e\) => e\.stopPropagation\(\)\}\s+onKeyDown=\{\(e\) => e\.stopPropagation\(\)\}\s+placeholder="search commit messages…"/);
+    assert.match(gitBadges, /<\/EditableContextMenu>\s*\{\(searching \|\| searchLoading\) && \(\s*<Button/);
   });
 });
