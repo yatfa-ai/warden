@@ -13,6 +13,7 @@
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Switch } from '@/components/ui/switch';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Trash2 } from 'lucide-react';
@@ -95,19 +96,27 @@ export function PatternRow({
       <ContextMenuTrigger asChild>
         <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
           <div className="flex items-center gap-2">
-            <Input
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={commitName}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') e.currentTarget.blur();
-                if (e.key === 'Escape') setNameDraft(pattern.name);
-              }}
-              className="h-8 flex-1"
-              placeholder="name (e.g. Deploy failed)"
-              aria-label="Pattern name"
-              maxLength={WATCH_PATTERN_NAME_MAX}
-            />
+            {/* Field-level edit menu (WARDEN-1854): radix's innermost trigger wins,
+                so a right-click inside the field opens Cut/Copy/Paste/Select all
+                while the row body keeps the WARDEN-898 row menu. No focus-retention
+                prop here: these fields never unmount on commit, so the menu-open
+                blur fires commitName/commitExpr (established WARDEN-898 semantics)
+                and the menu acts on the committed value. */}
+            <EditableContextMenu>
+              <Input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur();
+                  if (e.key === 'Escape') setNameDraft(pattern.name);
+                }}
+                className="h-8 flex-1"
+                placeholder="name (e.g. Deploy failed)"
+                aria-label="Pattern name"
+                maxLength={WATCH_PATTERN_NAME_MAX}
+              />
+            </EditableContextMenu>
             {/* Enabled toggle: silence a pattern without deleting it. */}
             <IconTooltip label={pattern.enabled ? 'disable — stop alerting on this pattern' : 'enable — alert when this matches'}>
               <Switch
@@ -126,19 +135,23 @@ export function PatternRow({
             </Button>
           </div>
           <div className="flex items-center gap-2">
-            <Input
-              value={exprDraft}
-              onChange={(e) => setExprDraft(e.target.value)}
-              onBlur={commitExpr}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') e.currentTarget.blur();
-                if (e.key === 'Escape') setExprDraft(pattern.expression);
-              }}
-              className="h-8 flex-1"
-              placeholder={pattern.mode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
-              aria-label={`${pattern.name} match expression`}
-              maxLength={WATCH_PATTERN_EXPRESSION_MAX}
-            />
+            {/* Field-level edit menu (WARDEN-1854) — see the name field above for
+                why no focus-retention prop is needed on these unconditioned fields. */}
+            <EditableContextMenu>
+              <Input
+                value={exprDraft}
+                onChange={(e) => setExprDraft(e.target.value)}
+                onBlur={commitExpr}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur();
+                  if (e.key === 'Escape') setExprDraft(pattern.expression);
+                }}
+                className="h-8 flex-1"
+                placeholder={pattern.mode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
+                aria-label={`${pattern.name} match expression`}
+                maxLength={WATCH_PATTERN_EXPRESSION_MAX}
+              />
+            </EditableContextMenu>
             <Select
               value={pattern.mode}
               onValueChange={(v) => onModeChange(pattern.id, v === 'regex' ? 'regex' : 'string')}

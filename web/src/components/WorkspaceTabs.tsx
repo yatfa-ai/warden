@@ -9,6 +9,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { cn } from '@/lib/utils';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
@@ -153,10 +154,12 @@ export function WorkspaceTabs({ className }: Props) {
                 groups them + serves as the drop target, so it carries role=tab.
                 asChild merges the radix trigger onto this div (no extra wrapper),
                 so the onDragOver/onDrop drop-target handlers and role=tab are
-                preserved. disabled while renaming so a right-click inside the
-                <Input> falls through to the native text-edit menu instead of this
-                themed one (radix honors disabled on the trigger without disabling
-                pointer events).
+                preserved. disabled while renaming: the rename <Input> carries its
+                own themed edit menu (EditableContextMenu below, WARDEN-1854), so
+                this trigger must not also claim right-clicks while editing —
+                radix's innermost trigger would open only that one anyway, and
+                keeping this one disabled leaves non-input right-clicks silent
+                rather than popping the row menu mid-rename.
               */}
               <div
                 role="tab"
@@ -171,18 +174,36 @@ export function WorkspaceTabs({ className }: Props) {
                 )}
               >
                 {editing ? (
-                  <Input
-                    ref={inputRef}
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onBlur={commitRename}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
-                      else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
-                    }}
-                    className="h-6 w-28 text-xs px-1.5"
-                    aria-label={`Rename ${ws.name}`}
-                  />
+                  // Themed edit menu on the rename field (WARDEN-1854). Two
+                  // focus mechanisms keep the in-flight draft alive while the
+                  // menu is open (either alone dead-ends the menu — the items
+                  // would no-op on a field that committed itself away):
+                  // (1) onOpenAutoFocus preventDefault (supplied here, not in
+                  // the wrapper — the wrapper bans preventDefault literals)
+                  // stops radix's menu-open focus steal from firing
+                  // onBlur={commitRename} at open; (2) holdBlurWhileOpen holds
+                  // this Input's blur while the menu is open, because radix
+                  // menu items focus THEMSELVES on hover and that steal still
+                  // fires blur → commit → setEditingId(null) unmounts the
+                  // Input mid-interaction (verified live). Deliberate trade:
+                  // with focus kept in the field while the menu is open,
+                  // in-menu keyboard navigation is degraded at this site
+                  // (mouse-first is the primary path; Escape/outside-click
+                  // still dismiss).
+                  <EditableContextMenu contentProps={{ onOpenAutoFocus: (e) => e.preventDefault() }} holdBlurWhileOpen>
+                    <Input
+                      ref={inputRef}
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                        else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+                      }}
+                      className="h-6 w-28 text-xs px-1.5"
+                      aria-label={`Rename ${ws.name}`}
+                    />
+                  </EditableContextMenu>
                 ) : (
                   <Button
                     variant="ghost"

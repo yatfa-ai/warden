@@ -80,6 +80,12 @@ const performanceSection = read('src/components/settings/sections/PerformanceSec
 const telemetrySection = read('src/components/settings/sections/TelemetrySection.tsx');
 const patternsSection = read('src/components/settings/sections/PatternsSection.tsx');
 const snippetsSection = read('src/components/settings/sections/SnippetsSection.tsx');
+const workspaceTabs = read('src/components/WorkspaceTabs.tsx');
+const observerTabs = read('src/components/ObserverTabs.tsx');
+const collectionsSection = read('src/components/CollectionsSection.tsx');
+const savedSessionRows = read('src/components/sidebar/SavedSessionRows.tsx');
+const patternRow = read('src/components/settings/rows/PatternRow.tsx');
+const snippetRow = read('src/components/settings/rows/SnippetRow.tsx');
 
 describe('EditableContextMenu source guards (WARDEN-1830)', () => {
   it('wrapper uses the themed primitive via ContextMenuTrigger asChild', () => {
@@ -167,6 +173,20 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     ['PatternsSection new pattern expression', () => patternsSection, /<EditableContextMenu>\s*<Input\s+value=\{newPatternExpression\}/],
     ['SnippetsSection new snippet name', () => snippetsSection, /<EditableContextMenu>\s*<Input\s+value=\{newSnippetName\}/],
     ['SnippetsSection new snippet text', () => snippetsSection, /<EditableContextMenu>\s*<Textarea\s+value=\{newSnippetText\}/],
+    // WARDEN-1854 — the in-place rename/note fields (radix's innermost trigger
+    // wins, so the field menu shadows the row menu on the field only). The
+    // four conditional-mount fields pass the focus-retention prop; the two
+    // unconditioned Settings rows do not (their menu-open blur commits the
+    // draft — established semantics — and the field never unmounts).
+    ['WorkspaceTabs workspace rename', () => workspaceTabs, /<EditableContextMenu contentProps=\{\{ onOpenAutoFocus: \(e\) => e\.preventDefault\(\) \}\} holdBlurWhileOpen>\s*<Input\s+ref=\{inputRef\}/],
+    ['ObserverTabs session rename', () => observerTabs, /<EditableContextMenu contentProps=\{\{ onOpenAutoFocus: \(e\) => e\.preventDefault\(\) \}\} holdBlurWhileOpen>\s*<Input\s+ref=\{inputRef\}/],
+    ['CollectionsSection collection rename', () => collectionsSection, /<EditableContextMenu contentProps=\{\{ onOpenAutoFocus: \(e\) => e\.preventDefault\(\) \}\} holdBlurWhileOpen>\s*<Input\s+autoFocus\s+value=\{val\}/],
+    ['SavedSessionRows rename', () => savedSessionRows, /<EditableContextMenu contentProps=\{\{ onOpenAutoFocus: \(e\) => e\.preventDefault\(\) \}\} holdBlurWhileOpen>\s*<Input\s+autoFocus\s+value=\{val\}/],
+    ['SavedSessionRows note', () => savedSessionRows, /<EditableContextMenu contentProps=\{\{ onOpenAutoFocus: \(e\) => e\.preventDefault\(\) \}\} holdBlurWhileOpen>\s*<Input\s+autoFocus\s+value=\{noteVal\}/],
+    ['PatternRow name', () => patternRow, /<EditableContextMenu>\s*<Input\s+value=\{nameDraft\}/],
+    ['PatternRow expression', () => patternRow, /<EditableContextMenu>\s*<Input\s+value=\{exprDraft\}/],
+    ['SnippetRow name', () => snippetRow, /<EditableContextMenu>\s*<Input\s+value=\{nameDraft\}/],
+    ['SnippetRow instruction text', () => snippetRow, /<EditableContextMenu>\s*<Textarea\s+value=\{textDraft\}/],
   ];
   for (const [name, src, re] of sites) {
     it(`${name} input is wrapped and imports the wrapper`, () => {
@@ -212,15 +232,52 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     }
   });
 
-  it('Settings number inputs and in-row/secret fields stay unwrapped (WARDEN-1851)', () => {
+  it('Settings number inputs and secret fields stay unwrapped (WARDEN-1851; in-row pattern/snippet fields were wrapped in WARDEN-1854)', () => {
     assert.ok(!/<EditableContextMenu>\s*<Input\s+id="pollIntervalMs"/.test(hostsSection));
     assert.ok(!/<EditableContextMenu>\s*<Input\s+id="connectTimeout"/.test(hostsSection));
     assert.ok(!/<EditableContextMenu>\s*<Input\s+id="observerSessionTimeout"/.test(observerSection));
     assert.ok(!/<EditableContextMenu>\s*<Input\s+id="observerMaxTokens"/.test(observerSection));
     assert.ok(!/<EditableContextMenu>\s*<Input\s+id="terminalFontSize"/.test(appearanceSection));
     assert.ok(!/<EditableContextMenu>\s*<Input\s+id="terminalScrollback"/.test(appearanceSection));
-    assert.ok(!read('src/components/settings/rows/PatternRow.tsx').includes('EditableContextMenu'));
-    assert.ok(!read('src/components/settings/rows/SnippetRow.tsx').includes('EditableContextMenu'));
     assert.ok(!read('src/components/settings/rows/WriteOnlySecretField.tsx').includes('EditableContextMenu'));
+  });
+
+  it('rename/note fields keep focus while the edit menu is open; Settings rows do not (WARDEN-1854)', () => {
+    // The conditional-mount rename fields commit on blur by UNMOUNTING, so the
+    // menu-open focus steal must be prevented or the field unmounts under the
+    // open menu and every item no-ops. Supplied at the site via contentProps —
+    // the wrapper bans preventDefault literals (WARDEN-926 guard above).
+    for (const f of [workspaceTabs, observerTabs, collectionsSection, savedSessionRows]) {
+      assert.match(f, /contentProps=\{\{ onOpenAutoFocus: \(e\) => e\.preventDefault\(\) \}\}/);
+    }
+    assert.strictEqual((savedSessionRows.match(/onOpenAutoFocus: \(e\) => e\.preventDefault\(\)/g) || []).length, 2,
+      'both SavedSessionRows fields (name + note) carry the focus-retention prop');
+    for (const f of [workspaceTabs, observerTabs, collectionsSection]) {
+      assert.strictEqual((f.match(/onOpenAutoFocus: \(e\) => e\.preventDefault\(\)/g) || []).length, 1,
+        'exactly one focus-retention site in this file');
+    }
+    // The unconditioned Settings rows never unmount on commit: the menu-open
+    // blur fires commitName/commitExpr/commitText (established semantics) and
+    // the menu acts on the committed value — no focus-retention prop there.
+    for (const f of [patternRow, snippetRow]) {
+      assert.ok(!f.includes('onOpenAutoFocus'));
+    }
+  });
+
+  it('wrapper forwards contentProps to ContextMenuContent and stays free of preventDefault literals (WARDEN-1854)', () => {
+    assert.match(wrapper, /<ContextMenuContent \{\.\.\.contentProps\}>/);
+    assert.match(wrapper, /contentProps\?: ContextMenuContentProps/);
+    assert.ok(!/preventDefault|stopPropagation/.test(wrapper.replace(/\/\/.*$/gm, '')),
+      'the focus-retention preventDefault must live at the site, never in the wrapper source');
+  });
+
+  it('opt-in holdBlurWhileOpen holds the child blur while the menu is open (WARDEN-1854 hover-focus steal)', () => {
+    // Radix menu items focus themselves on hover; without the hold, that steal
+    // blur-commits a conditional-mount rename field mid-interaction.
+    assert.match(wrapper, /menuOpenRef\.current = open/);
+    assert.match(wrapper, /if \(!menuOpenRef\.current\) childOnBlur\(e\)/);
+    assert.match(wrapper, /holdBlurWhileOpen = false/);
+    // The default is off: unconditional mounts pass their blur through verbatim.
+    assert.match(wrapper, /: childOnBlur/);
   });
 });
