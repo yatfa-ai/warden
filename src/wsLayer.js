@@ -198,6 +198,25 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     // closed meanwhile, or that state is never cleaned up.
     let closed = false;
     let monitorTimer = null;
+    // WARDEN-1856 — THE LIVENESS RULE for the /api/stream frame handlers: after every
+    // await, re-check the applicable liveness predicate before further state mutation or
+    // frame emission. The predicate has TWO SCOPES, and the attach scope MIGRATES at the
+    // commit boundary (settle()):
+    //   • connection scope — `closed`. The close handler runs once, synchronously, so
+    //     any state registered after an await must bail (WARDEN-1836).
+    //   • attach scope, PRE-settle (the resolve/probeSession awaits) — token staleness
+    //     via the `stale()` closure below: a newer attach or a detach invalidated this
+    //     one (WARDEN-1846). `closed` is folded into the same closure.
+    //   • attach scope, POST-settle — ENTRY IDENTITY, `attaches.get(m.id) !== entry`,
+    //     the same predicate that guards onData/onExit/flushOut (WARDEN-365). NEVER
+    //     reuse `stale()` post-settle: settle() DELETES the token, which makes stale()
+    //     VACUOUSLY TRUE — a re-check through it would suppress every successful attach.
+    //     Once committed, only entry identity or connection death can invalidate.
+    // On the attach ERROR paths nothing is committed (no entry exists), so post-settle
+    // the connection scope is the only evaluable predicate — the activity writes there
+    // (and onExit's) are gated on `closed` alone. The guards stay call-site-scoped
+    // (asymmetric guards, WARDEN-110): connection and attach are different domains with
+    // different lifetimes; only the RULE is uniform.
 
     const tickMonitor = async () => {
       if (!monitors.size) return;
@@ -274,6 +293,8 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         const isNew = !monitors.has(id);
         monitors.add(id);
         await resolve(id);
+        // WARDEN-1856 idiom, connection scope: re-check after the await, before the
+        // timer/subscription registration below.
         if (closed) return;
         startMonitor();
         if (isNew) {
@@ -309,8 +330,16 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           } catch { /* fall through; resolve() still has a locate fallback */ }
         }
         const r = await resolve(String(m.id));
-        if (stale()) return;
-        if (r.error) { settle(); send({ type: 'attach_error', id: m.id, error: r.error }); await appendEventSafe({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
+        if (stale()) return; // WARDEN-1856: pre-settle re-check (token staleness + closed — WARDEN-1846)
+        if (r.error) {
+          settle();
+          send({ type: 'attach_error', id: m.id, error: r.error });
+          // WARDEN-1856: the frame is already out; only the activity write can land
+          // stale. Post-settle nothing is committed (no entry exists), so the idiom's
+          // applicable predicate here is the connection scope alone.
+          if (!closed) await appendEventSafe({ type: 'error', error: r.error, context: 'attach', id: m.id });
+          return;
+        }
         const chat = r.chat;
         const cols = Math.max(20, Math.floor(m.cols || 100));
         const rows = Math.max(6, Math.floor(m.rows || 30));
@@ -326,17 +355,17 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         let reason = null;
         try { reason = classifyProbe(await probeSession(chat, cfg)); }
         catch { /* probe threw → leave reason null and attempt a normal attach */ }
-        if (stale()) return;
+        if (stale()) return; // WARDEN-1856: pre-settle re-check (token staleness + closed — WARDEN-1846)
         if (reason === 'host_unreachable') {
           settle();
           send({ type: 'host_unreachable', id: m.id });
-          await appendEventSafe({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+          if (!closed) await appendEventSafe({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container }); // WARDEN-1856: gated append
           return;
         }
         if (reason === 'session_dead') {
           settle();
           send({ type: 'session_dead', id: m.id });
-          await appendEventSafe({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+          if (!closed) await appendEventSafe({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container }); // WARDEN-1856: gated append
           return;
         }
 
@@ -345,7 +374,7 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         try { pty = attachStream(chat, cfg, { cols, rows }); }
         catch (e) {
           send({ type: 'attach_error', id: m.id, error: String((e && e.message) || e) });
-          await appendEventSafe({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
+          if (!closed) await appendEventSafe({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container }); // WARDEN-1856: gated append
           return;
         }
         // WARDEN-365 (defense-in-depth): bind a per-attach `entry` object and gate
@@ -415,9 +444,21 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
           // evidence about the pane that just ended).
           try { paneInputTelemetry?.dropPending(String(m.id)); } catch { /* noop */ }
           send({ type: 'ended', id: m.id, code: exitCode });
-          await appendEventSafe({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
+          // WARDEN-1856: the delete above consumed this entry's identity (a re-check
+          // against the map would be vacuously true), so the append is gated on the
+          // connection scope — the only liveness left that can make it stale.
+          if (!closed) await appendEventSafe({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
         });
         try { await resize(chat, cfg, cols, rows); } catch { /* noop */ }
+        // WARDEN-1856 — post-settle re-check (attach scope: ENTRY IDENTITY — never
+        // stale(), which is vacuously true once settle() deleted the token). resize()
+        // is a real RPC (one ssh round-trip on remote hosts); a detach or a close
+        // landing inside it tears the entry down, and announcing `attached` for the
+        // killed PTY would land the pane on "connected" with no frames ever coming
+        // (its late onExit is identity-suppressed, so no `ended` arrives either).
+        // NO frame of any kind and no orphan tmux client escape this window — the
+        // same contract WARDEN-1846 pinned for the earlier ones.
+        if (closed || attaches.get(m.id) !== entry) return;
         send({ type: 'attached', id: m.id });
         await appendEventSafe({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
       } else if (m.type === 'input') {
@@ -436,6 +477,8 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         const a = attaches.get(m.id);
         if (a) {
           try { a.pty.resize(c, r); } catch { /* noop */ }
+          // WARDEN-1856: no liveness re-check after this await — nothing follows it
+          // (no state mutation, no frame emission), so there is nothing to guard.
           try { await resize(a.chat, cfg, c, r); } catch { /* noop */ }
         }
       } else if (m.type === 'detach') {
