@@ -36,6 +36,7 @@ import { getThemeById } from '@/lib/themes';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { postJson, fetchBounded } from '@/lib/api';
@@ -1463,8 +1464,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       {/* search bar */}
       {showSearch && (
         <div className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted/80 border-b border-border/30 shrink-0">
-          <input autoFocus value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') doSearch('next'); if (e.key === 'Escape') setShowSearch(false); }}
-            placeholder="search…" className="flex-1 bg-background border rounded px-1.5 py-0.5 text-[11px]" />
+          {/* Themed edit menu on the search field (WARDEN-1862): a plain wrap — no
+              extra props at all, because unlike the rename fields this field has no
+              blur-commit and no conditional mount-on-edit (`searchQuery` is plain
+              controlled state, the input stays mounted under the open menu), so the
+              WARDEN-1854 focus-retention machinery is not needed here. Radix opens
+              only the INNERMOST trigger, so this field's Cut·Copy·Paste·Select all
+              menu shadows the outer pane menu exactly as the terminal surface's own
+              inner menu does below — one menu, never both. The field itself is
+              untouched apart from the wrap. */}
+          <EditableContextMenu>
+            <input autoFocus value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') doSearch('next'); if (e.key === 'Escape') setShowSearch(false); }}
+              placeholder="search…" className="flex-1 bg-background border rounded px-1.5 py-0.5 text-[11px]" />
+          </EditableContextMenu>
           <Btn title="prev" onClick={() => doSearch('prev')}>↑</Btn>
           <Btn title="next" onClick={() => doSearch('next')}>↓</Btn>
           <Btn title="close search" onClick={() => setShowSearch(false)}>×</Btn>
