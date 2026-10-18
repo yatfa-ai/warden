@@ -86,6 +86,7 @@ const collectionsSection = read('src/components/CollectionsSection.tsx');
 const savedSessionRows = read('src/components/sidebar/SavedSessionRows.tsx');
 const patternRow = read('src/components/settings/rows/PatternRow.tsx');
 const snippetRow = read('src/components/settings/rows/SnippetRow.tsx');
+const paneTile = read('src/components/PaneTile.tsx');
 
 describe('EditableContextMenu source guards (WARDEN-1830)', () => {
   it('wrapper uses the themed primitive via ContextMenuTrigger asChild', () => {
@@ -207,8 +208,7 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     assert.match(transcript, /if \(e\.key === 'Enter'\) \{\s*e\.preventDefault\(\);\s*stepMatch\(e\.shiftKey \? -1 : 1\);\s*\} else if \(e\.key === 'Escape'\) \{\s*e\.preventDefault\(\);\s*toggleSearch\(\);\s*\}/);
   });
 
-  it('out-of-scope fields stay unwrapped (PaneTile search bar, ui/input.tsx)', () => {
-    assert.ok(!read('src/components/PaneTile.tsx').includes('EditableContextMenu'));
+  it('out-of-scope fields stay unwrapped (ui/input.tsx; PaneTile search bar wrapped in WARDEN-1862)', () => {
     assert.ok(!read('src/components/ui/input.tsx').includes('EditableContextMenu'));
   });
 
@@ -279,5 +279,23 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     assert.match(wrapper, /holdBlurWhileOpen = false/);
     // The default is off: unconditional mounts pass their blur through verbatim.
     assert.match(wrapper, /: childOnBlur/);
+  });
+
+  it('PaneTile in-pane search input is wrapped, plainly (WARDEN-1862)', () => {
+    // The last editable-field gap on the WARDEN-1853 census (deferred there,
+    // enumerated by WARDEN-1859). Plain wrap — NO contentProps / holdBlurWhileOpen:
+    // unlike the rename fields, this field has no onBlur commit and no
+    // conditional mount-on-edit (searchQuery is plain controlled state, the
+    // input stays mounted under the open menu), so the WARDEN-1854
+    // focus-retention machinery is not needed at this site.
+    assert.match(paneTile, /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
+    assert.match(paneTile, /<EditableContextMenu>\s*<input autoFocus value=\{searchQuery\}/);
+    assert.ok(!paneTile.includes('contentProps'), 'no contentProps at this site');
+    assert.ok(!paneTile.includes('holdBlurWhileOpen'), 'no holdBlurWhileOpen at this site');
+    // The raw field is untouched apart from the wrap: Enter still runs the
+    // next-match search, Escape still closes the bar (source guard — right-click
+    // / paste behaviour is verified live in the web dev harness).
+    assert.match(paneTile, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Enter'\) doSearch\('next'\); if \(e\.key === 'Escape'\) setShowSearch\(false\); \}\}/);
+    assert.match(paneTile, /placeholder="search…"/);
   });
 });
