@@ -4,6 +4,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import {
   ContextMenu,
@@ -240,16 +241,33 @@ function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete, on
                 style={{ backgroundColor: color || '#6366f1' }}
               />
               {editing ? (
-                <Input
-                  autoFocus
-                  value={val}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setVal(e.target.value)}
-                  onBlur={commit}
-                  onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(collection.name); setEditing(false); } }}
-                  maxLength={60}
-                  className="h-5 text-[11px] px-1 flex-1 min-w-0"
-                />
+                // Themed edit menu on the rename field (WARDEN-1854). Two
+                // focus mechanisms keep the in-flight draft alive while the
+                // menu is open (either alone dead-ends the menu — the items
+                // would no-op on a field that committed itself away):
+                // (1) onOpenAutoFocus preventDefault (supplied here, not in
+                // the wrapper — the wrapper bans preventDefault literals)
+                // stops radix's menu-open focus steal from firing
+                // onBlur={commit} at open; (2) holdBlurWhileOpen holds this
+                // Input's blur while the menu is open, because radix menu
+                // items focus THEMSELVES on hover and that steal still fires
+                // blur → commit → setEditing(false) unmounts the Input
+                // mid-interaction (verified live). Deliberate trade: with
+                // focus kept in the field while the menu is open, in-menu
+                // keyboard navigation is degraded at this site (mouse-first
+                // is the primary path; Escape/outside-click still dismiss).
+                <EditableContextMenu contentProps={{ onOpenAutoFocus: (e) => e.preventDefault() }} holdBlurWhileOpen>
+                  <Input
+                    autoFocus
+                    value={val}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setVal(e.target.value)}
+                    onBlur={commit}
+                    onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(collection.name); setEditing(false); } }}
+                    maxLength={60}
+                    className="h-5 text-[11px] px-1 flex-1 min-w-0"
+                  />
+                </EditableContextMenu>
               ) : (
                 <span className="flex-1 min-w-0 wrap-anywhere font-medium">{collection.name}</span>
               )}

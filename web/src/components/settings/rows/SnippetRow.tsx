@@ -10,6 +10,7 @@ import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Trash2 } from 'lucide-react';
 import {
   ContextMenu,
@@ -85,19 +86,27 @@ export function SnippetRow({
       <ContextMenuTrigger asChild>
         <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
           <div className="flex items-center gap-2">
-            <Input
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={commitName}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') e.currentTarget.blur();
-                if (e.key === 'Escape') setNameDraft(snippet.name);
-              }}
-              className="h-8 flex-1"
-              placeholder="name"
-              aria-label="Snippet name"
-              maxLength={SNIPPET_NAME_MAX}
-            />
+            {/* Field-level edit menu (WARDEN-1854): radix's innermost trigger wins,
+                so a right-click inside the field opens Cut/Copy/Paste/Select all
+                while the row body keeps the WARDEN-1359 row menu. No focus-retention
+                prop here: this field never unmounts on commit, so the menu-open
+                blur fires commitName (established semantics) and the menu acts on
+                the committed value. */}
+            <EditableContextMenu>
+              <Input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur();
+                  if (e.key === 'Escape') setNameDraft(snippet.name);
+                }}
+                className="h-8 flex-1"
+                placeholder="name"
+                aria-label="Snippet name"
+                maxLength={SNIPPET_NAME_MAX}
+              />
+            </EditableContextMenu>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -107,20 +116,24 @@ export function SnippetRow({
               <Trash2 />
             </Button>
           </div>
-          <Textarea
-            value={textDraft}
-            onChange={(e) => setTextDraft(e.target.value)}
-            onBlur={commitText}
-            onKeyDown={(e) => {
-              // Enter inserts a newline in a Textarea; ⌘/Ctrl+Enter commits.
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.blur(); }
-              if (e.key === 'Escape') setTextDraft(snippet.text);
-            }}
-            className="min-h-[60px] text-sm"
-            placeholder="the instruction to send"
-            aria-label={`${snippet.name} instruction text`}
-            maxLength={SNIPPET_TEXT_MAX}
-          />
+          {/* Field-level edit menu (WARDEN-1854) — see the name field above for
+              why no focus-retention prop is needed on these unconditioned fields. */}
+          <EditableContextMenu>
+            <Textarea
+              value={textDraft}
+              onChange={(e) => setTextDraft(e.target.value)}
+              onBlur={commitText}
+              onKeyDown={(e) => {
+                // Enter inserts a newline in a Textarea; ⌘/Ctrl+Enter commits.
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.blur(); }
+                if (e.key === 'Escape') setTextDraft(snippet.text);
+              }}
+              className="min-h-[60px] text-sm"
+              placeholder="the instruction to send"
+              aria-label={`${snippet.name} instruction text`}
+              maxLength={SNIPPET_TEXT_MAX}
+            />
+          </EditableContextMenu>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>

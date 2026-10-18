@@ -20,6 +20,7 @@
 import { useState } from 'react';
 import { Pencil, StickyNote, Trash2, RotateCw } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { StatusDot } from '@/components/StatusDot';
@@ -198,16 +199,33 @@ export function SavedSessionRow({ chat, focused, justSaved, hostLabel, showHost,
               />
             </span>
             {editing ? (
-              <Input
-                autoFocus
-                value={val}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => setVal(e.target.value)}
-                onBlur={commitRename}
-                onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { setVal(name); setEditing(false); } }}
-                aria-label="rename session"
-                className="h-5 min-w-0 flex-1 px-1 text-[11px]"
-              />
+              // Themed edit menu on the rename field (WARDEN-1854). Two focus
+              // mechanisms keep the in-flight draft alive while the menu is
+              // open (either alone dead-ends the menu — the items would no-op
+              // on a field that committed itself away): (1) onOpenAutoFocus
+              // preventDefault (supplied here, not in the wrapper — the
+              // wrapper bans preventDefault literals) stops radix's menu-open
+              // focus steal from firing onBlur={commitRename} at open;
+              // (2) holdBlurWhileOpen holds this Input's blur while the menu
+              // is open, because radix menu items focus THEMSELVES on hover
+              // and that steal still fires blur → commit → setEditing(false)
+              // unmounts the Input mid-interaction (verified live).
+              // Deliberate trade: with focus kept in the field while the menu
+              // is open, in-menu keyboard navigation is degraded at this site
+              // (mouse-first is the primary path; Escape/outside-click still
+              // dismiss).
+              <EditableContextMenu contentProps={{ onOpenAutoFocus: (e) => e.preventDefault() }} holdBlurWhileOpen>
+                <Input
+                  autoFocus
+                  value={val}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setVal(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { setVal(name); setEditing(false); } }}
+                  aria-label="rename session"
+                  className="h-5 min-w-0 flex-1 px-1 text-[11px]"
+                />
+              </EditableContextMenu>
             ) : (
               <span className="min-w-0 flex-1 wrap-anywhere text-xs leading-tight text-foreground">
                 <HighlightedName name={name} query={query} />
@@ -269,17 +287,28 @@ export function SavedSessionRow({ chat, focused, justSaved, hostLabel, showHost,
           </div>
           {/* the note — a third line in italics, never squeezed onto the metadata line */}
           {noteEditing ? (
-            <Input
-              autoFocus
-              value={noteVal}
-              onClick={(e) => e.stopPropagation()}
-              onChange={(e) => setNoteVal(e.target.value)}
-              onBlur={commitNote}
-              onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }}
-              placeholder="add a note…"
-              maxLength={200}
-              className="ml-[10px] mt-0.5 block h-5 w-[calc(100%-10px)] px-1 text-[10px] text-muted-foreground"
-            />
+            // Themed edit menu on the note field (WARDEN-1854) — same two
+            // focus mechanisms as the rename field above (onOpenAutoFocus
+            // keeps radix's menu-open steal from firing onBlur={commitNote};
+            // holdBlurWhileOpen holds this Input's blur while the menu is
+            // open, because radix menu items focus THEMSELVES on hover and
+            // that steal still fires blur → commit → setNoteEditing(false)
+            // unmounts the Input mid-interaction). Deliberate trade: in-menu
+            // keyboard navigation is degraded here (mouse-first is primary;
+            // Escape/outside-click still dismiss).
+            <EditableContextMenu contentProps={{ onOpenAutoFocus: (e) => e.preventDefault() }} holdBlurWhileOpen>
+              <Input
+                autoFocus
+                value={noteVal}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => setNoteVal(e.target.value)}
+                onBlur={commitNote}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }}
+                placeholder="add a note…"
+                maxLength={200}
+                className="ml-[10px] mt-0.5 block h-5 w-[calc(100%-10px)] px-1 text-[10px] text-muted-foreground"
+              />
+            </EditableContextMenu>
           ) : note ? (
             <span className="ml-[10px] mt-0.5 block wrap-anywhere text-[10px] italic text-muted-foreground" title={note}>{note}</span>
           ) : null}

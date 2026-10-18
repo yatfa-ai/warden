@@ -24,6 +24,13 @@ import { editMenuItems, selectedText, type EditMenuItemId } from '@/lib/editMenu
 
 type EditableEl = HTMLInputElement | HTMLTextAreaElement;
 type EditableProps = React.ComponentProps<'textarea'> | React.ComponentProps<'input'>;
+type ContextMenuContentProps = React.ComponentProps<typeof ContextMenuContent> & {
+  // Radix omits onOpenAutoFocus from the context-menu Content's public types
+  // (it is a MenuContentImpl private prop) but consumes it at runtime — it is
+  // the FocusScope's onMountAutoFocus. Declared here so the rename-field sites
+  // can pass the focus-retention preventDefault type-safely (WARDEN-1854).
+  onOpenAutoFocus?: (event: Event) => void;
+};
 
 /** Insert text over the current selection; execCommand first (undo + onChange), setRangeText fallback. */
 function insertAtSelection(el: EditableEl, text: string) {
@@ -37,12 +44,36 @@ function restoreFocus(el: EditableEl, start: number, end: number) {
   el.setSelectionRange(start, end);
 }
 
-export function EditableContextMenu({ children }: { children: React.ReactElement<EditableProps> }) {
+export function EditableContextMenu({
+  children,
+  contentProps,
+  holdBlurWhileOpen = false,
+}: {
+  children: React.ReactElement<EditableProps>;
+  // Optional props forwarded verbatim to ContextMenuContent. Filled AT THE SITE,
+  // never defaulted here (WARDEN-1854): the conditional-mount rename fields pass
+  // an onOpenAutoFocus that keeps focus in the field while the menu is open, so a
+  // blur-commit rename handler cannot unmount the field out from under the open
+  // menu. All other mounts stay untouched.
+  contentProps?: ContextMenuContentProps;
+  // Opt-in companion to contentProps' focus retention (WARDEN-1854), needed
+  // because radix menu items FOCUS THEMSELVES on hover (react-menu
+  // MenuItemImpl onPointerMove → item.focus()): that hover steal fires the
+  // field's blur even when onOpenAutoFocus kept the field focused at open, and
+  // for a blur-commit handler that unmounts on blur the field would still drop
+  // out from under the open menu (verified live: hover a rename-field menu item
+  // → commit fires → Input unmounts → items no-op). While the menu is open the
+  // child's own onBlur is held; on close it passes through untouched. Default
+  // false so every other mount keeps its exact semantics.
+  holdBlurWhileOpen?: boolean;
+}) {
   const elRef = React.useRef<EditableEl | null>(null);
+  const menuOpenRef = React.useRef(false);
   const [hasSelection, setHasSelection] = React.useState(false);
 
   // Compose our ref with the child's own (Observer's taRef) — React 19: ref is a prop.
   const childRef = (children.props as { ref?: React.Ref<EditableEl> }).ref;
+  const childOnBlur = (children.props as { onBlur?: React.FocusEventHandler<EditableEl> }).onBlur;
   const setRef = React.useCallback((node: EditableEl | null) => {
     elRef.current = node;
     if (typeof childRef === 'function') childRef(node);
@@ -91,14 +122,21 @@ export function EditableContextMenu({ children }: { children: React.ReactElement
   return (
     <ContextMenu
       onOpenChange={(open) => {
+        menuOpenRef.current = open;
         const el = elRef.current;
         if (open && el) setHasSelection((el.selectionStart ?? 0) !== (el.selectionEnd ?? 0));
       }}
     >
       <ContextMenuTrigger asChild disabled={items.length === 0}>
-        {React.cloneElement(children, { ref: setRef } as EditableProps)}
+        {React.cloneElement(children, {
+          ref: setRef,
+          onBlur:
+            holdBlurWhileOpen && childOnBlur
+              ? (e: React.FocusEvent<EditableEl>) => { if (!menuOpenRef.current) childOnBlur(e); }
+              : childOnBlur,
+        } as EditableProps)}
       </ContextMenuTrigger>
-      <ContextMenuContent>
+      <ContextMenuContent {...contentProps}>
         {items.map((it, i) =>
           it.kind === 'separator' ? (
             <ContextMenuSeparator key={`sep-${i}`} />
