@@ -188,6 +188,15 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
     const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
     const attaches = new Map(); // id -> { pty, chat }
     const monitors = new Set(); // chat keys
+    // WARDEN-1860: the ids this connection has REGISTERED a pane-push subscription
+    // for (the monitor handler's post-await subscribe) — the release half of the
+    // subscription pair. Subscription newness is computed against THIS set after
+    // the resolve await (the pre-await `monitors.has` read is stale across the
+    // await: frames are not serialized, so an unmonitor for the same id can
+    // complete — or a second monitor land — before this continuation resumes),
+    // and unmonitor/close drop through it, so add and remove stay paired even
+    // when the frames race. Healthy path: the same keys as `monitors`.
+    const subscribedKeys = new Set();
     // WARDEN-1846: attach awaits refreshHost/resolve/probeSession before it registers in
     // `attaches`, so a per-pane `detach` (or a re-attach) landing in that window found
     // nothing to kill. id -> token of the attach currently in flight; `detach` clears it
@@ -286,31 +295,50 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
       if (!m || typeof m !== 'object') return;
       if (m.type === 'monitor') {
         const id = String(m.id);
-        // Subscribe only on a NEWLY-added pane so monitor/unmonitor stay balanced
-        // per connection (a duplicate monitor must not double-count the ref, or a
-        // later single unmonitor/close would leak the subscription). monitors is a
-        // Set, so has()-before-add tells us whether this is the first watch.
-        const isNew = !monitors.has(id);
         monitors.add(id);
         await resolve(id);
         // WARDEN-1856 idiom, connection scope: re-check after the await, before the
         // timer/subscription registration below.
         if (closed) return;
+        // WARDEN-1860, monitor scope (the third call-site-scoped liveness predicate,
+        // alongside connection `closed` above and the attach path's token staleness):
+        // frames are NOT serialized — an `unmonitor` for this id can run to completion
+        // (monitors.delete + a no-op stopMonitorIfEmpty) while this continuation sits
+        // in `await resolve(id)`. Registering anything for a pane whose watcher left
+        // during that await leaks it: `startMonitor()` would run a 2s interval over a
+        // set that no longer holds the id (a no-op tick — tickMonitor early-returns
+        // before any snapshot — alive until close), and a subscription taken here has
+        // no releaser until the socket closes — the unmonitor already ran and refs in
+        // companion.js have no TTL, so the remote companion would capture and push
+        // that pane at 1Hz for nobody in the meantime. A pane unmonitored during
+        // resolve registers nothing, symmetric to the attach path's `stale()`
+        // (WARDEN-1846).
+        if (!monitors.has(id)) return;
         startMonitor();
-        if (isNew) {
-          // Subscribe this pane's host to pushed deltas (skip-on-tick gate). resolve()
-          // seeded the catalogue, so the chat is findable by key here. Fire-and-forget:
-          // until the delta arrives, capturePanes keeps polling (graceful bootstrap).
+        if (!subscribedKeys.has(id)) {
+          // Subscribe only on a NEWLY-registered pane so monitor/unmonitor stay
+          // balanced per connection: a duplicate monitor must not double-count the
+          // ref, and a monitor→unmonitor→monitor burst mid-resolve (both
+          // continuations stale) must not either — newness is computed HERE, after
+          // the await, against the live registration set. resolve() seeded the
+          // catalogue, so the chat is findable by key here. Fire-and-forget: until
+          // the delta arrives, capturePanes keeps polling (graceful bootstrap).
           const chat = chatCatalog.snapshot().find((c) => c.key === id || c.id === id);
+          subscribedKeys.add(id);
           syncMonitorSubscription(chat, true);
         }
       }
       else if (m.type === 'unmonitor') {
         const id = String(m.id);
-        const wasPresent = monitors.has(id);
         monitors.delete(id);
         stopMonitorIfEmpty();
-        if (wasPresent) {
+        if (subscribedKeys.delete(id)) {
+          // Release exactly the subscriptions this connection registered
+          // (WARDEN-1860): a pane whose monitor never got past `await resolve` has
+          // no entry here, so no release is sent for a subscription that was never
+          // taken — the mirror of the monitor side's post-await newness check. In
+          // the healthy path this is the same condition the pre-await `wasPresent`
+          // read served.
           const chat = chatCatalog.snapshot().find((c) => c.key === id || c.id === id);
           syncMonitorSubscription(chat, false);
         }
@@ -516,11 +544,18 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
       if (isCompanionTransportEnabled()) {
         const known = chatCatalog.snapshot();
         const byHost = {};
-        for (const k of monitors) {
+        for (const k of subscribedKeys) {
           // Match the monitor handler's key||id lookup so a host-prefixed monitor id
           // (chat.id) still resolves, and drop the ref by chat.KEY — subscribePanes
           // keys refs by chat.key (describePanes), so the add/drop stay balanced
           // whatever id form the client sent. (WARDEN-413 reviewer minor finding.)
+          // WARDEN-1860: the release walks the REGISTERED set, not `monitors` — the
+          // two differ exactly on this ticket's raced paths (a pane subscribed after
+          // its unmonitor ran: registered but no longer monitored; a monitor still
+          // inside its resolve await: monitored but nothing registered yet), so
+          // dropping exactly what this connection took is both necessary (a
+          // monitors-only walk would strand the raced ref — the ref map has no TTL)
+          // and precise (it never releases a subscription that was never taken).
           // WARDEN-1390: excluded hosts are dropped from the grouping — no
           // teardown unsubscribe is ever sent to them (zero channel RPCs).
           const chat = known.find((c) => c.key === k || c.id === k);
