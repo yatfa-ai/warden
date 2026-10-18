@@ -460,7 +460,13 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         // same contract WARDEN-1846 pinned for the earlier ones.
         if (closed || attaches.get(m.id) !== entry) return;
         send({ type: 'attached', id: m.id });
-        await appendEventSafe({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
+        // WARDEN-1856: the activity write carries the same pre-write liveness
+        // re-check as every other append in the handler (the five error/ended
+        // appends above) — post-settle scope: ENTRY IDENTITY + connection. An
+        // entry torn down while the continuation was suspended in the resize
+        // await must not land a false `attached` activity event for a pane
+        // that no longer exists.
+        if (!closed && attaches.get(m.id) === entry) await appendEventSafe({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
       } else if (m.type === 'input') {
         const a = attaches.get(m.id);
         if (a) {
