@@ -36,6 +36,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { createKeyedChain } from './chainMutex.js';
 
 const fsp = fs.promises;
 
@@ -110,13 +111,14 @@ async function atomicWriteUnqueued(file, data) {
 // newer write (visible only after a restart). So writes to one path run strictly
 // in call order; different paths stay fully parallel. Same-process only — a
 // separate process (CLI vs server) is out of scope, as documented in config.js.
-// Value = the tail promise of that file's chain; entry is deleted once the tail
-// settles so the map stays bounded by in-flight files.
-const writeQueues = new Map();
+// Chaining, failure isolation and bounded cleanup are the shared chainMutex
+// module's job (WARDEN-1870); this file owns only the resolved-path keying and
+// the write itself.
+const writeChains = createKeyedChain();
 
 /** Number of files with a write queued or in flight (diagnostics / tests). */
 export function pendingWriteCount() {
-  return writeQueues.size;
+  return writeChains.pending();
 }
 
 /**
@@ -126,16 +128,9 @@ export function pendingWriteCount() {
  * only — it never poisons later writers to the same path.
  */
 export function atomicWrite(file, data) {
-  const key = path.resolve(file);
-  const prev = writeQueues.get(key) || Promise.resolve();
-  const run = prev.catch(() => {}).then(() => atomicWriteUnqueued(file, data));
-  // The tail swallows rejection so the chain (and the map cleanup) never produces
-  // an unhandled rejection; `run` itself still rejects for the caller.
-  const tail = run.catch(() => {}).then(() => {
-    if (writeQueues.get(key) === tail) writeQueues.delete(key);
-  });
-  writeQueues.set(key, tail);
-  return run;
+  // Keyed on the RESOLVED path: two spellings of the same file must land on the
+  // same chain, and different paths must stay fully parallel.
+  return writeChains.run(path.resolve(file), () => atomicWriteUnqueued(file, data));
 }
 
 /**

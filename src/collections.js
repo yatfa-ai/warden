@@ -3,6 +3,7 @@
 import path from 'node:path';
 import { dir } from './config.js';
 import { atomicWriteJson, readJsonDefensive } from './persist.js';
+import { createGlobalChain } from './chainMutex.js';
 
 export const collectionsPath = path.join(dir, 'collections.json');
 
@@ -37,23 +38,22 @@ export async function saveCollections(collections) {
 // requests read the same snapshot and last write wins (5 concurrent creates
 // persisted 1; 2 concurrent deletes removed 1; the duplicate-name guard was racy).
 // Mirrors mutateCatalog in config.js: every mutation runs through ONE promise
-// chain and the read happens INSIDE the critical section so each mutation sees the
-// previous one's result. Return a falsy value from `fn` to skip the write. A
-// rejecting mutation does not poison later calls (the chain swallows the failure,
-// while the returned promise still rejects for THIS caller).
+// chain (the shared chainMutex module, WARDEN-1870) and the read happens INSIDE
+// the critical section so each mutation sees the previous one's result. Return a
+// falsy value from `fn` to skip the write. A rejecting mutation does not poison
+// later calls (the chain swallows the failure, while the returned promise still
+// rejects for THIS caller).
 //
 // LIMITATION — IN-PROCESS ONLY, same as mutateCatalog: only the server writes
 // collections.json (src/cli.js does not import this module), so no cross-process
 // ordering is provided and a file lock is deliberately out of scope.
-let collectionsChain = Promise.resolve();
+const collectionsMutex = createGlobalChain();
 export function mutateCollections(fn) {
-  const run = collectionsChain.then(async () => {
+  return collectionsMutex.run(async () => {
     const next = await fn(await loadCollections());
     if (next) await saveCollections(next);
     return next;
   });
-  collectionsChain = run.catch(() => {});
-  return run;
 }
 
 /**
