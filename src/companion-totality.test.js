@@ -1077,13 +1077,16 @@ describe('WARDEN-1412 companion-totality sweep', () => {
         //   binary being probed (see the comment above probeHostReachability).
         validateHost: 1,
       },
-      // ---- class (b) + (c): server.js carries a (b) and a (c) --------------
-      'server.js': {
+      // ---- class (b) + (c): sessionRoutes.js carries a (b) and a (c) -------
+      'sessionRoutes.js': {
+        // WARDEN-1868 — moved verbatim from server.js (the same two call sites
+        //   that row carried). server.js no longer imports any class-(a)
+        //   binding, so its row is gone.
+        //
         // POST /api/companion/uninstall's precheck — a named allow-list
         //   exception: a host whose flag was on and is now off must still be
         //   cleanable, so the endpoint works regardless of toggle state
-        //   (re-asserted as a sweep leg above). probeHostReachability's raw
-        //   fallback no longer lives here — it moved to hostsRoutes.js.
+        //   (re-asserted as a sweep leg above).
         validateHost: 1,
         // WARDEN-1462. detectClaude's default path probes remote hosts through
         // deliverRemoteScript (companion.js :1832) with
