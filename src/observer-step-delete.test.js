@@ -54,6 +54,13 @@ describe('WARDEN-1841 — Observer.step() does not resurrect a session deleted m
     return found;
   }
 
+  // Content of the session's .md transcript ('' when absent or unreadable — e.g.
+  // mid-append), for polling on a transcript block having landed.
+  function mdFor(id) {
+    const md = filesFor(id).find((f) => f.endsWith('.md'));
+    try { return md ? fs.readFileSync(md, 'utf8') : ''; } catch { return ''; }
+  }
+
   it('control: without a delete the turn persists both files and 2 messages', async () => {
     const c = await createSession('Control');
     const obs = new Observer({ hosts: [], llm: {} }, { sid: c.id });
@@ -68,7 +75,21 @@ describe('WARDEN-1841 — Observer.step() does not resurrect a session deleted m
     const c = await createSession('Doomed');
     const obs = new Observer({ hosts: [], llm: {} }, { sid: c.id });
     const turn = obs.step('hi');
-    await new Promise((r) => setTimeout(r, 50));
+    // Wait until the turn's START write landed before deleting: _runTurn's first await
+    // is the create-if-missing user-transcript append (observer.js). If the delete
+    // races that in-flight write, atomicAppend re-creates the .md after deleteSession's
+    // unlinks — observed twice on clean main under full-suite load with the old fixed
+    // 50ms sleep (WARDEN-1873). NOTE: the .md already EXISTS from createSession (a
+    // `# <name>` stub), so the append's completion signal is the user transcript BLOCK
+    // in its content, not the file's existence. Once the block has landed, a later
+    // unlink cannot be resurrected by that same write, and the only remaining write in
+    // the turn is the tail pair, gated by the WARDEN-1841 existence check. The delete
+    // still lands ~250ms before the stubbed LLM answers, so the turn is still
+    // genuinely mid-flight.
+    for (let i = 0; i < 400 && !mdFor(c.id).includes('🧑 user'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.ok(mdFor(c.id).includes('🧑 user'), 'turn-start user transcript append landed');
     await deleteSession(c.id);
     const reply = await turn;
     assert.strictEqual(reply, 'ok', 'the reply is still returned');
