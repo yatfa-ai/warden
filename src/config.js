@@ -4,6 +4,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { deriveDefaults, migrateConfig } from './config-schema.js';
 import { atomicWriteJson, readJsonDefensive, readJsonDefensiveSync } from './persist.js';
+import { createGlobalChain } from './chainMutex.js';
 
 export const dir = path.join(os.homedir(), '.yatfa-warden');
 export const configPath = path.join(dir, 'config.json');
@@ -102,28 +103,25 @@ export async function saveCatalog(list) {
 // 35/60 trials. The /api/spawn window is the widest — it awaits a real tmux/ssh
 // spawn between its load and its save.
 //
-// Every mutation runs through one promise chain, and the read happens INSIDE the
-// critical section so each mutation observes the previous one's result. Passing a
-// pre-read snapshot in would preserve the bug — that is exactly what /api/spawn
-// used to do. Return a falsy value from `fn` to skip the write (e.g. the
-// "entry not found" and "already fresh" branches).
+// Every mutation runs through one promise chain (the shared chainMutex module,
+// WARDEN-1870 — this chain predates it as WARDEN-991), and the read happens
+// INSIDE the critical section so each mutation observes the previous one's
+// result. Passing a pre-read snapshot in would preserve the bug — that is
+// exactly what /api/spawn used to do. Return a falsy value from `fn` to skip
+// the write (e.g. the "entry not found" and "already fresh" branches).
 //
 // LIMITATION — this is IN-PROCESS ONLY. src/cli.js imports the discovery path and
 // runs in a SEPARATE process, so a `warden` CLI invocation running alongside the
 // server is NOT ordered by this queue. All five server-side writers are serialized
 // here (the dominant, reproduced case); closing the cross-process race needs a
 // file lock and is deliberately out of scope.
-let catalogChain = Promise.resolve();
+const catalogMutex = createGlobalChain();
 export function mutateCatalog(fn) {
-  const run = catalogChain.then(async () => {
+  return catalogMutex.run(async () => {
     const next = await fn(await loadCatalog());
     if (next) await saveCatalog(next);
     return next;
   });
-  // A rejecting mutation must not poison the queue for everyone behind it: the
-  // chain swallows the failure while `run` still rejects for THIS caller.
-  catalogChain = run.catch(() => {});
-  return run;
 }
 
 // Stamp a catalog entry's last-known activity timestamp (WARDEN-245). A closed

@@ -28,6 +28,7 @@ import { classifyPane, stripAnsi } from './agentState.js';
 // logDirective (below) is the single point every confirmed send flows through.
 import { appendEvent } from './activity.js';
 import { atomicAppend, atomicWrite } from './persist.js';
+import { createKeyedChain } from './chainMutex.js';
 
 // fs.promises alias — readDirectives is async (WARDEN-828) so serving GET
 // /api/directives does not block the single-threaded event loop on a synchronous
@@ -746,9 +747,13 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
 
 // WARDEN-1867 — per-sid turn chains, shared across Observer instances. The ws layer
 // builds ONE Observer per connection, so a page reload mid-turn or two tabs on the
-// same saved session put two live Observers on one sid; this map serializes their
-// turns (see Observer.step, which both chains onto and cleans up the tail).
-const sidTurnChains = new Map();
+// same saved session put two live Observers on one sid; this chain serializes
+// their turns (see Observer.step). The chain mechanics (chaining, failure
+// isolation, bounded cleanup) live in the shared chainMutex module (WARDEN-1870);
+// the re-sync-under-the-lock discipline — the half WARDEN-1867's first derivation
+// missed — stays in Observer.step, because it is domain discipline, not chain
+// mechanics.
+const turnChains = createKeyedChain();
 
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext, io } = {}) {
@@ -976,12 +981,11 @@ export class Observer {
   // one) keeps the old inline path — there is no session to serialize against.
   async step(userText) {
     if (!this.sid) return this._runTurn(userText);
-    // Cross-instance promise-chain mutex: this turn waits for the previous turn on
-    // the same sid, whatever Observer instance ran it. A failed earlier turn must
-    // not cascade into this one — its own caller already observed that rejection.
-    const prev = sidTurnChains.get(this.sid) || Promise.resolve();
-    const turn = (async () => {
-      try { await prev; } catch { /* previous turn's rejection was delivered to its caller */ }
+    // Cross-instance per-sid chain (shared chainMutex module, WARDEN-1870): this
+    // turn waits for the previous turn on the same sid, whatever Observer instance
+    // ran it. A failed earlier turn must not cascade into this one — the chain
+    // swallows that rejection, which its own caller already observed.
+    return turnChains.run(this.sid, async () => {
       // Re-sync under the lock: serialization alone orders the saves but is NOT
       // sufficient — this Observer's in-memory array is stale even running second.
       // Reload the persisted history so this turn's tail save carries the turns the
@@ -991,15 +995,7 @@ export class Observer {
       const fresh = await getSessionAsync(this.sid);
       if (fresh) this.messages = fresh.messages || [];
       return this._runTurn(userText);
-    })();
-    sidTurnChains.set(this.sid, turn);
-    try {
-      return await turn;
-    } finally {
-      // Drop the map tail only when the finishing link is still the last one; a
-      // queued turn has already replaced it.
-      if (sidTurnChains.get(this.sid) === turn) sidTurnChains.delete(this.sid);
-    }
+    });
   }
 
   async _runTurn(userText) {
