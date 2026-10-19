@@ -323,35 +323,37 @@ export function HostsSection({
             number, which reads as a bug. The affordance is for rows where
             displayed == stored; this one is intentionally out of scope. */}
         <Label htmlFor="pollIntervalMs">Dashboard Refresh Interval (ms)</Label>
-        <Input
-          id="pollIntervalMs"
-          type="number"
-          min={pollBounds.min}
-          max={pollBounds.max}
-          step="5000"
-          value={pollDisplay}
-          onChange={(e) => setPollDraft(e.target.value)}
-          onBlur={() => {
-            // Commit the typed value, clamped into the served band the input
-            // advertises (config.bounds.pollIntervalMs). The untouched case is
-            // the one that matters: a `null` draft means the field was never
-            // edited, and clamping there would rewrite the STORED value
-            // (turning the CLI's 1500ms watch default into 10000ms just
-            // because the user tabbed past). Both this early return and
-            // `commitPollIntervalDraft`'s own null result keep that path
-            // silent. An unparseable draft likewise commits nothing, so
-            // clearing the field and leaving reverts to the stored cadence.
-            if (pollDraft === null) return;
-            const committed = commitPollIntervalDraft(pollDraft, pollBounds);
-            if (committed !== null && committed !== config.pollIntervalMs) {
-              setConfig({ ...config, pollIntervalMs: committed });
-            }
-            // Back to displaying the resolved stored value. Everything committed
-            // above is inside the pass-through band, so the field now shows
-            // exactly what was persisted and what the dashboard runs.
-            setPollDraft(null);
-          }}
-        />
+        <EditableContextMenu>
+          <Input
+            id="pollIntervalMs"
+            type="number"
+            min={pollBounds.min}
+            max={pollBounds.max}
+            step="5000"
+            value={pollDisplay}
+            onChange={(e) => setPollDraft(e.target.value)}
+            onBlur={() => {
+              // Commit the typed value, clamped into the served band the input
+              // advertises (config.bounds.pollIntervalMs). The untouched case is
+              // the one that matters: a `null` draft means the field was never
+              // edited, and clamping there would rewrite the STORED value
+              // (turning the CLI's 1500ms watch default into 10000ms just
+              // because the user tabbed past). Both this early return and
+              // `commitPollIntervalDraft`'s own null result keep that path
+              // silent. An unparseable draft likewise commits nothing, so
+              // clearing the field and leaving reverts to the stored cadence.
+              if (pollDraft === null) return;
+              const committed = commitPollIntervalDraft(pollDraft, pollBounds);
+              if (committed !== null && committed !== config.pollIntervalMs) {
+                setConfig({ ...config, pollIntervalMs: committed });
+              }
+              // Back to displaying the resolved stored value. Everything committed
+              // above is inside the pass-through band, so the field now shows
+              // exactly what was persisted and what the dashboard runs.
+              setPollDraft(null);
+            }}
+          />
+        </EditableContextMenu>
         {isPollDraftOutOfRange(pollDraft, pollBounds) && (
           <p className="text-xs text-destructive">
             Must be between {pollBounds.min} and {pollBounds.max} ms — capped to{' '}
@@ -382,28 +384,30 @@ export function HostsSection({
           <Label htmlFor="connectTimeout">Connect Timeout (seconds)</Label>
           <ConfigResetToDefaultButton label="Connect Timeout (seconds)" path="connectTimeout" config={config} setConfig={setConfig} />
         </div>
-        <Input
-          id="connectTimeout"
-          type="number"
-          min={timeoutBounds.min}
-          max={timeoutBounds.max}
-          value={config.connectTimeout}
-          onChange={(e) =>
-            setConfig({ ...config, connectTimeout: parseInt(e.target.value) || 10 })
-          }
-          onBlur={() => {
-            // Clamp the committed value into the SERVED bounds the input
-            // advertises (config-schema.js's clamp: [1, 60] descriptor,
-            // delivered via GET /api/config) — WARDEN-747's discipline, now
-            // derived instead of hand-copied (WARDEN-1331). connectTimeout is
-            // always a number (onChange coerces via `parseInt || 10`), so no
-            // null guard.
-            const clamped = clampToBounds(config.connectTimeout, timeoutBounds);
-            if (clamped !== config.connectTimeout) {
-              setConfig({ ...config, connectTimeout: clamped });
+        <EditableContextMenu>
+          <Input
+            id="connectTimeout"
+            type="number"
+            min={timeoutBounds.min}
+            max={timeoutBounds.max}
+            value={config.connectTimeout}
+            onChange={(e) =>
+              setConfig({ ...config, connectTimeout: parseInt(e.target.value) || 10 })
             }
-          }}
-        />
+            onBlur={() => {
+              // Clamp the committed value into the SERVED bounds the input
+              // advertises (config-schema.js's clamp: [1, 60] descriptor,
+              // delivered via GET /api/config) — WARDEN-747's discipline, now
+              // derived instead of hand-copied (WARDEN-1331). connectTimeout is
+              // always a number (onChange coerces via `parseInt || 10`), so no
+              // null guard.
+              const clamped = clampToBounds(config.connectTimeout, timeoutBounds);
+              if (clamped !== config.connectTimeout) {
+                setConfig({ ...config, connectTimeout: clamped });
+              }
+            }}
+          />
+        </EditableContextMenu>
         {isOutOfBounds(config.connectTimeout, timeoutBounds) && (
           <p className="text-xs text-destructive">
             Must be between {timeoutBounds.min} and {timeoutBounds.max} seconds — capped to{' '}

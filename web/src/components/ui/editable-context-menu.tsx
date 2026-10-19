@@ -1,15 +1,21 @@
 // EditableContextMenu — the themed right-click edit menu (Cut · Copy · Paste ·
-// Select all) for a single free-text <textarea> OR text-like <input> child
-// (WARDEN-1830, widened to inputs in WARDEN-1837). Electron ships no default
-// context menu, so without this a right-click in a reply box / search field is
-// silent. Do NOT wrap password/number inputs (selectionStart is null there). Built on the existing themed ContextMenu (`ContextMenuTrigger
+// Select all) for a single free-text <textarea>, text-like <input> (WARDEN-1830,
+// widened to inputs in WARDEN-1837) or number <input> child (WARDEN-1864's
+// number-safe branch). Electron ships no default context menu, so without this a
+// right-click in a reply box / search field is silent. Password inputs (secret
+// safety) are never wrapped; number inputs use the number-safe branch — their
+// internal selection is unreadable, so Cut/Copy/Paste run on the whole value
+// (runNumberItems). Built on the existing themed ContextMenu (`ContextMenuTrigger
 // asChild` composes onto the textarea; no hand-rolled menu and no onContextMenu
 // / preventDefault / stopPropagation of its own — WARDEN-926).
 //
-// Selection is read from the element's selectionStart/End, which a text field
-// retains after focus moves to the menu. Paste/Cut go through
+// Text mounts read the selection from the element's selectionStart/End, which a
+// text field retains after focus moves to the menu. Paste/Cut go through
 // document.execCommand so the browser fires a real `input` event (React onChange
-// updates the controlled value) and the native undo stack stays intact.
+// updates the controlled value) and the native undo stack stays intact. A number
+// input exposes NO readable selection (selectionStart is null) and rejects
+// setRangeText (InvalidStateError), so its branch is value-based only and never
+// touches either primitive.
 import * as React from 'react';
 import { toast } from 'sonner';
 import {
@@ -44,6 +50,55 @@ function restoreFocus(el: EditableEl, start: number, end: number) {
   el.setSelectionRange(start, end);
 }
 
+// WARDEN-1864 — the number-safe branch for <input type="number"> children. A
+// number input exposes NO readable internal selection (the internal
+// selectionStart is null — the reason the old contract fenced numbers out) and
+// the ranged-setter primitive THROWS InvalidStateError there, so this branch
+// touches neither: it runs whole-value semantics. Number fields hold short
+// values (a font size, a token budget, an SSH timeout), so value-level
+// semantics are the honest, predictable choice:
+//   Copy        = the whole value.
+//   Cut         = select-all-then-cut: el.select() → clipboard write →
+//                 execCommand('delete'), which fires a real input event so React
+//                 onChange and the native undo stack keep working. If
+//                 'delete' is refused the value is left intact (no ranged
+//                 fallback — it would throw here).
+//   Paste       = execCommand('insertText') ONLY — inserts at the internal
+//                 caret without reading it; a refused insert leaves the value
+//                 untouched. Chromium drops non-numeric pastes on a number
+//                 input, and the section's onBlur clamps still run on the same
+//                 real input event.
+//   Select all  = el.select().
+async function runNumberItems(id: EditMenuItemId, el: HTMLInputElement) {
+  if (id === 'copy') {
+    if (el.value) await copyWithToast(el.value);
+  } else if (id === 'cut') {
+    if (el.value && (await copyWithToast(el.value))) {
+      el.focus();
+      el.select();
+      document.execCommand('delete');
+    }
+  } else if (id === 'paste') {
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      toast.error('Paste failed — clipboard unavailable');
+      return;
+    }
+    if (!text) return;
+    el.focus();
+    document.execCommand('insertText', false, text);
+  } else {
+    el.focus();
+    el.select();
+  }
+}
+
+function isNumberInput(el: EditableEl): el is HTMLInputElement {
+  return el instanceof HTMLInputElement && el.type === 'number';
+}
+
 export function EditableContextMenu({
   children,
   contentProps,
@@ -70,6 +125,11 @@ export function EditableContextMenu({
   const elRef = React.useRef<EditableEl | null>(null);
   const menuOpenRef = React.useRef(false);
   const [hasSelection, setHasSelection] = React.useState(false);
+  // WARDEN-1864 — number-mode state, sampled when the menu opens: a number child
+  // has no readable selection, so item enablement keys on the field's VALUE
+  // instead (editMenuItems' numberValue variant).
+  const [numberMode, setNumberMode] = React.useState(false);
+  const [numberValue, setNumberValue] = React.useState('');
 
   // Compose our ref with the child's own (Observer's taRef) — React 19: ref is a prop.
   const childRef = (children.props as { ref?: React.Ref<EditableEl> }).ref;
@@ -81,7 +141,14 @@ export function EditableContextMenu({
   }, [childRef]);
 
   const { disabled, readOnly } = children.props;
-  const items = editMenuItems({ hasSelection, readOnly, disabled });
+  const items = editMenuItems({
+    hasSelection,
+    readOnly,
+    disabled,
+    // WARDEN-1864: on a number child the selection is unreadable — the menu
+    // keys Cut/Copy enablement on the value sampled at open instead.
+    numberValue: numberMode ? numberValue : undefined,
+  });
   // Keep the tree shape STABLE when disabled (trigger `disabled`, no content) so a
   // disabled↔enabled flip (Observer !conn, QuickReply sending) never remounts the
   // textarea and drops its focus.
@@ -89,6 +156,10 @@ export function EditableContextMenu({
   const run = async (id: EditMenuItemId) => {
     const el = elRef.current;
     if (!el) return;
+    if (isNumberInput(el)) {
+      await runNumberItems(id, el);
+      return;
+    }
     const start = el.selectionStart ?? 0;
     const end = el.selectionEnd ?? 0;
     const sel = selectedText(el.value, start, end);
@@ -124,7 +195,12 @@ export function EditableContextMenu({
       onOpenChange={(open) => {
         menuOpenRef.current = open;
         const el = elRef.current;
-        if (open && el) setHasSelection((el.selectionStart ?? 0) !== (el.selectionEnd ?? 0));
+        if (open && el) {
+          setHasSelection((el.selectionStart ?? 0) !== (el.selectionEnd ?? 0));
+          const numeric = isNumberInput(el);
+          setNumberMode(numeric);
+          setNumberValue(numeric ? el.value : '');
+        }
       }}
     >
       <ContextMenuTrigger asChild disabled={items.length === 0}>

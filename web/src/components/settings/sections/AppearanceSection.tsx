@@ -169,19 +169,21 @@ export function AppearanceSection(props: AppearanceSectionProps) {
           <Label htmlFor="terminalFontSize">Terminal font size</Label>
           <ClientPrefResetToDefaultButton label="Terminal font size" prefKey="terminalFontSize" value={terminalFontSize} setter={setTerminalFontSize} />
         </div>
-        <Input
-          id="terminalFontSize"
-          type="number"
-          min="8"
-          max="24"
-          step="1"
-          value={terminalFontSize}
-          onChange={(e) => setTerminalFontSize(parseInt(e.target.value, 10) || 14)}
-          onBlur={(e) => {
-            const n = parseInt(e.target.value, 10);
-            setTerminalFontSize(Number.isNaN(n) ? 14 : Math.max(8, Math.min(24, n)));
-          }}
-        />
+        <EditableContextMenu>
+          <Input
+            id="terminalFontSize"
+            type="number"
+            min="8"
+            max="24"
+            step="1"
+            value={terminalFontSize}
+            onChange={(e) => setTerminalFontSize(parseInt(e.target.value, 10) || 14)}
+            onBlur={(e) => {
+              const n = parseInt(e.target.value, 10);
+              setTerminalFontSize(Number.isNaN(n) ? 14 : Math.max(8, Math.min(24, n)));
+            }}
+          />
+        </EditableContextMenu>
         <p className="text-xs text-muted-foreground">
           Applies to all terminal panes (8–24). Use the A− / A+ buttons on any pane to adjust the same value.
         </p>
@@ -261,19 +263,21 @@ export function AppearanceSection(props: AppearanceSectionProps) {
           <Label htmlFor="terminalScrollback">Terminal scrollback (lines)</Label>
           <ClientPrefResetToDefaultButton label="Terminal scrollback (lines)" prefKey="terminalScrollback" value={terminalScrollback} setter={setTerminalScrollback} />
         </div>
-        <Input
-          id="terminalScrollback"
-          type="number"
-          min="100"
-          max="100000"
-          step="100"
-          value={terminalScrollback}
-          onChange={(e) => setTerminalScrollback(parseInt(e.target.value, 10) || 10000)}
-          onBlur={(e) => {
-            const n = parseInt(e.target.value, 10);
-            setTerminalScrollback(Number.isNaN(n) ? 10000 : Math.max(100, Math.min(100000, n)));
-          }}
-        />
+        <EditableContextMenu>
+          <Input
+            id="terminalScrollback"
+            type="number"
+            min="100"
+            max="100000"
+            step="100"
+            value={terminalScrollback}
+            onChange={(e) => setTerminalScrollback(parseInt(e.target.value, 10) || 10000)}
+            onBlur={(e) => {
+              const n = parseInt(e.target.value, 10);
+              setTerminalScrollback(Number.isNaN(n) ? 10000 : Math.max(100, Math.min(100000, n)));
+            }}
+          />
+        </EditableContextMenu>
         <p className="text-xs text-muted-foreground">
           Maximum lines each terminal pane keeps in memory (100–100000). Applies to new panes; existing panes pick up the change when reopened. Default 10000.
         </p>

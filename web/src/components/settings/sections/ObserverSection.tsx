@@ -97,33 +97,35 @@ export function ObserverSection({
           <Label htmlFor="observerSessionTimeout">Session Auto-stop (minutes)</Label>
           <ConfigResetToDefaultButton label="Session Auto-stop (minutes)" path="observerSessionTimeout" config={config} setConfig={setConfig} />
         </div>
-        <Input
-          id="observerSessionTimeout"
-          type="number"
-          min={sessionTimeoutBounds.min}
-          max={sessionTimeoutBounds.max}
-          step="1"
-          value={config.observerSessionTimeout ?? ''}
-          onChange={(e) =>
-            setConfig({
-              ...config,
-              observerSessionTimeout: e.target.value ? parseInt(e.target.value) : null,
-            })
-          }
-          onBlur={() => {
-            // Clamp the committed value into the SERVED bounds the input
-            // advertises (config-schema.js's clamp: [1, 180] descriptor) —
-            // WARDEN-867's discipline, now derived instead of hand-copied
-            // (WARDEN-1331). Null is the disable path and stays null; only
-            // clamp when a value is present.
-            const v = config.observerSessionTimeout;
-            if (v != null) {
-              const clamped = clampToBounds(v, sessionTimeoutBounds);
-              if (clamped !== v) setConfig({ ...config, observerSessionTimeout: clamped });
+        <EditableContextMenu>
+          <Input
+            id="observerSessionTimeout"
+            type="number"
+            min={sessionTimeoutBounds.min}
+            max={sessionTimeoutBounds.max}
+            step="1"
+            value={config.observerSessionTimeout ?? ''}
+            onChange={(e) =>
+              setConfig({
+                ...config,
+                observerSessionTimeout: e.target.value ? parseInt(e.target.value) : null,
+              })
             }
-          }}
-          placeholder="Disabled when empty"
-        />
+            onBlur={() => {
+              // Clamp the committed value into the SERVED bounds the input
+              // advertises (config-schema.js's clamp: [1, 180] descriptor) —
+              // WARDEN-867's discipline, now derived instead of hand-copied
+              // (WARDEN-1331). Null is the disable path and stays null; only
+              // clamp when a value is present.
+              const v = config.observerSessionTimeout;
+              if (v != null) {
+                const clamped = clampToBounds(v, sessionTimeoutBounds);
+                if (clamped !== v) setConfig({ ...config, observerSessionTimeout: clamped });
+              }
+            }}
+            placeholder="Disabled when empty"
+          />
+        </EditableContextMenu>
         {config.observerSessionTimeout != null && isOutOfBounds(config.observerSessionTimeout, sessionTimeoutBounds) && (
           <p className="text-xs text-destructive">
             Must be between {sessionTimeoutBounds.min} and {sessionTimeoutBounds.max} minutes — capped to{' '}
@@ -202,32 +204,34 @@ export function ObserverSection({
             <Label htmlFor="observerMaxTokens">Max output tokens</Label>
             <ConfigResetToDefaultButton label="Observer max output tokens" path="llm.maxTokens" config={config} setConfig={setConfig} />
           </div>
-          <Input
-            id="observerMaxTokens"
-            type="number"
-            min={maxTokensBounds.min}
-            step="1"
-            value={config.llm.maxTokens ?? ''}
-            onChange={(e) => {
-              const n = parseInt(e.target.value, 10);
-              setConfig({ ...config, llm: { ...config.llm, maxTokens: e.target.value === '' || Number.isNaN(n) ? null : n } });
-            }}
-            placeholder="2048 (default)"
-            onBlur={() => {
-              // Floor at the SERVED min (the bound the input advertises —
-              // config-schema.js's llm.maxTokens clamp descriptor). `0`/negative
-              // used to be silently refused by the backend's `value > 0` guard
-              // while PUT /api/config still answered { ok: true } (WARDEN-925);
-              // the backend now clamps instead (WARDEN-1331) and this onBlur
-              // mirrors it. Null is the use-the-default (2048) path and stays
-              // null. Nested under `llm`, so the setter spreads config.llm like
-              // the onChange above.
-              const v = config.llm.maxTokens;
-              if (v != null && maxTokensBounds.min !== undefined && v < maxTokensBounds.min) {
-                setConfig({ ...config, llm: { ...config.llm, maxTokens: maxTokensBounds.min } });
-              }
-            }}
-          />
+          <EditableContextMenu>
+            <Input
+              id="observerMaxTokens"
+              type="number"
+              min={maxTokensBounds.min}
+              step="1"
+              value={config.llm.maxTokens ?? ''}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                setConfig({ ...config, llm: { ...config.llm, maxTokens: e.target.value === '' || Number.isNaN(n) ? null : n } });
+              }}
+              placeholder="2048 (default)"
+              onBlur={() => {
+                // Floor at the SERVED min (the bound the input advertises —
+                // config-schema.js's llm.maxTokens clamp descriptor). `0`/negative
+                // used to be silently refused by the backend's `value > 0` guard
+                // while PUT /api/config still answered { ok: true } (WARDEN-925);
+                // the backend now clamps instead (WARDEN-1331) and this onBlur
+                // mirrors it. Null is the use-the-default (2048) path and stays
+                // null. Nested under `llm`, so the setter spreads config.llm like
+                // the onChange above.
+                const v = config.llm.maxTokens;
+                if (v != null && maxTokensBounds.min !== undefined && v < maxTokensBounds.min) {
+                  setConfig({ ...config, llm: { ...config.llm, maxTokens: maxTokensBounds.min } });
+                }
+              }}
+            />
+          </EditableContextMenu>
           {config.llm.maxTokens != null && isOutOfBounds(config.llm.maxTokens, maxTokensBounds) && (
             <p className="text-xs text-destructive">
               Must be at least {maxTokensBounds.min} — capped to {maxTokensBounds.min} on blur.

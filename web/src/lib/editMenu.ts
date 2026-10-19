@@ -17,15 +17,22 @@ export type EditMenuItem =
   | { kind: 'item'; id: EditMenuItemId; label: string; disabled: boolean }
   | { kind: 'separator' };
 
-export function editMenuItems({ hasSelection, readOnly, disabled }: {
+export function editMenuItems({ hasSelection, readOnly, disabled, numberValue }: {
   hasSelection: boolean;
   readOnly?: boolean;
   disabled?: boolean;
+  // WARDEN-1864 — the number-safe variant: a <input type="number"> child exposes
+  // NO readable internal selection (selectionStart is null), so a mount on one
+  // passes `numberValue: el.value` instead and enablement keys on the VALUE
+  // (empty value → Cut and Copy disabled) rather than on a selection that can
+  // never be read. Omitted (the default) = the text-mount semantics above.
+  numberValue?: string;
 }): EditMenuItem[] {
   if (disabled) return [];
+  const hasContent = numberValue === undefined ? hasSelection : numberValue !== '';
   return [
-    { kind: 'item', id: 'cut', label: 'Cut', disabled: !hasSelection || !!readOnly },
-    { kind: 'item', id: 'copy', label: 'Copy', disabled: !hasSelection },
+    { kind: 'item', id: 'cut', label: 'Cut', disabled: !hasContent || !!readOnly },
+    { kind: 'item', id: 'copy', label: 'Copy', disabled: !hasContent },
     { kind: 'item', id: 'paste', label: 'Paste', disabled: !!readOnly },
     { kind: 'separator' },
     { kind: 'item', id: 'select-all', label: 'Select all', disabled: false },
