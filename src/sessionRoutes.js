@@ -371,7 +371,7 @@ export function createSessionRouter({ cfg, local, resolve, preflightTmux, save, 
         // routing predicate reads) AND survives a restart, instead of one or the
         // other.
         await save(cfg);
-      afterSave(cfg, afterSaveDeps);
+        afterSave(cfg, afterSaveDeps);
       }
       res.json({ ok: true, excluded: persisted });
     } catch (e) {
