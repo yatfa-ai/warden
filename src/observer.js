@@ -744,6 +744,12 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
   }
 }
 
+// WARDEN-1867 — per-sid turn chains, shared across Observer instances. The ws layer
+// builds ONE Observer per connection, so a page reload mid-turn or two tabs on the
+// same saved session put two live Observers on one sid; this map serializes their
+// turns (see Observer.step, which both chains onto and cleans up the tail).
+const sidTurnChains = new Map();
+
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext, io } = {}) {
     this.cfg = cfg;
@@ -958,7 +964,45 @@ export class Observer {
   }
 
   // Run one user turn; returns the observer's final text. Tool calls loop internally.
+  //
+  // Serialized per sid: two connections can observe the SAME saved session (a page
+  // reload mid-turn — the old socket's Observer keeps running its turn server-side
+  // while the fresh connection builds a new Observer from disk — or two tabs), and
+  // each turn rewrites the WHOLE {sid}.json at its tail. Without serialization the
+  // tail saves race and the last writer replaces the file with a stale array,
+  // silently erasing the other connection's completed turn (the append-only .md
+  // transcript keeps it, so the transcript viewer and chat history visibly disagree).
+  // An Observer with no sid (none exists in production: the ws layer always hands
+  // one) keeps the old inline path — there is no session to serialize against.
   async step(userText) {
+    if (!this.sid) return this._runTurn(userText);
+    // Cross-instance promise-chain mutex: this turn waits for the previous turn on
+    // the same sid, whatever Observer instance ran it. A failed earlier turn must
+    // not cascade into this one — its own caller already observed that rejection.
+    const prev = sidTurnChains.get(this.sid) || Promise.resolve();
+    const turn = (async () => {
+      try { await prev; } catch { /* previous turn's rejection was delivered to its caller */ }
+      // Re-sync under the lock: serialization alone orders the saves but is NOT
+      // sufficient — this Observer's in-memory array is stale even running second.
+      // Reload the persisted history so this turn's tail save carries the turns the
+      // other connection completed since this Observer loaded. On a deleted session
+      // this reads null and leaves the array untouched; the tail existence guard in
+      // _runTurn then skips the write-back (WARDEN-1841, no ghost-resurrect).
+      const fresh = await getSessionAsync(this.sid);
+      if (fresh) this.messages = fresh.messages || [];
+      return this._runTurn(userText);
+    })();
+    sidTurnChains.set(this.sid, turn);
+    try {
+      return await turn;
+    } finally {
+      // Drop the map tail only when the finishing link is still the last one; a
+      // queued turn has already replaced it.
+      if (sidTurnChains.get(this.sid) === turn) sidTurnChains.delete(this.sid);
+    }
+  }
+
+  async _runTurn(userText) {
     this.messages.push({ role: 'user', content: userText });
     if (this.sid) await appendTranscript(this.sid, 'user', userText);
     let finalText = '';
