@@ -2,6 +2,7 @@
 // from SettingsPage (WARDEN-664); behavior is unchanged.
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
+import { EditableContextMenu } from '@/components/ui/editable-context-menu';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { SettingsSection } from '../SettingsSection';
@@ -58,32 +59,34 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
               <ConfigResetToDefaultButton label="Fleet threshold (tokens)" path="tokenBudgetThresholdTokens" config={config} setConfig={setConfig} />
             )}
           </div>
-          <Input
-            id="tokenBudgetThresholdTokens"
-            type="number"
-            min={fleetBounds.min}
-            step="100000"
-            disabled={gated}
-            value={config.tokenBudgetThresholdTokens ?? ''}
-            onChange={(e) =>
-              setConfig({
-                ...config,
-                tokenBudgetThresholdTokens: e.target.value ? parseInt(e.target.value) : null,
-              })
-            }
-            onBlur={() => {
-              // Floor at the SERVED min (the bound the input advertises) —
-              // mirrors the backend flooredNumber guard. These fields are
-              // null-able (empty = use the default), so only clamp when a
-              // value is actually present. WARDEN-1331: bound derived, not
-              // hand-copied.
-              const v = config.tokenBudgetThresholdTokens;
-              if (v != null && isOutOfBounds(v, fleetBounds)) {
-                setConfig({ ...config, tokenBudgetThresholdTokens: clampToBounds(v, fleetBounds) });
+          <EditableContextMenu>
+            <Input
+              id="tokenBudgetThresholdTokens"
+              type="number"
+              min={fleetBounds.min}
+              step="100000"
+              disabled={gated}
+              value={config.tokenBudgetThresholdTokens ?? ''}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  tokenBudgetThresholdTokens: e.target.value ? parseInt(e.target.value) : null,
+                })
               }
-            }}
-            placeholder="Default 2,000,000"
-          />
+              onBlur={() => {
+                // Floor at the SERVED min (the bound the input advertises) —
+                // mirrors the backend flooredNumber guard. These fields are
+                // null-able (empty = use the default), so only clamp when a
+                // value is actually present. WARDEN-1331: bound derived, not
+                // hand-copied.
+                const v = config.tokenBudgetThresholdTokens;
+                if (v != null && isOutOfBounds(v, fleetBounds)) {
+                  setConfig({ ...config, tokenBudgetThresholdTokens: clampToBounds(v, fleetBounds) });
+                }
+              }}
+              placeholder="Default 2,000,000"
+            />
+          </EditableContextMenu>
           <p className={cn('text-xs text-muted-foreground', dim)}>
             Total tokens spent by sessions active in the window before the fleet alarm
             fires. Leave empty for the default (2,000,000).
@@ -104,30 +107,32 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
               <ConfigResetToDefaultButton label="Window (hours)" path="tokenBudgetWindowHours" config={config} setConfig={setConfig} />
             )}
           </div>
-          <Input
-            id="tokenBudgetWindowHours"
-            type="number"
-            min={windowBounds.min}
-            step="1"
-            disabled={gated}
-            value={config.tokenBudgetWindowHours ?? ''}
-            onChange={(e) =>
-              setConfig({
-                ...config,
-                tokenBudgetWindowHours: e.target.value ? parseInt(e.target.value) : null,
-              })
-            }
-            onBlur={() => {
-              // Floor at the SERVED min — mirrors the backend flooredNumber
-              // guard. Null-able (empty = use default), so only clamp when
-              // non-null. (WARDEN-747 discipline, WARDEN-1331 derivation.)
-              const v = config.tokenBudgetWindowHours;
-              if (v != null && isOutOfBounds(v, windowBounds)) {
-                setConfig({ ...config, tokenBudgetWindowHours: clampToBounds(v, windowBounds) });
+          <EditableContextMenu>
+            <Input
+              id="tokenBudgetWindowHours"
+              type="number"
+              min={windowBounds.min}
+              step="1"
+              disabled={gated}
+              value={config.tokenBudgetWindowHours ?? ''}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  tokenBudgetWindowHours: e.target.value ? parseInt(e.target.value) : null,
+                })
               }
-            }}
-            placeholder="Default 24"
-          />
+              onBlur={() => {
+                // Floor at the SERVED min — mirrors the backend flooredNumber
+                // guard. Null-able (empty = use default), so only clamp when
+                // non-null. (WARDEN-747 discipline, WARDEN-1331 derivation.)
+                const v = config.tokenBudgetWindowHours;
+                if (v != null && isOutOfBounds(v, windowBounds)) {
+                  setConfig({ ...config, tokenBudgetWindowHours: clampToBounds(v, windowBounds) });
+                }
+              }}
+              placeholder="Default 24"
+            />
+          </EditableContextMenu>
           <p className={cn('text-xs text-muted-foreground', dim)}>
             Which sessions count: those active in the last N hours. Each contributes its
             full lifetime token total (the existing meter), not just turns within the
@@ -147,30 +152,32 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
               <ConfigResetToDefaultButton label="Per-session threshold (tokens)" path="tokenBudgetPerSessionThresholdTokens" config={config} setConfig={setConfig} />
             )}
           </div>
-          <Input
-            id="tokenBudgetPerSessionThresholdTokens"
-            type="number"
-            min={perSessionBounds.min}
-            step="100000"
-            disabled={gated}
-            value={config.tokenBudgetPerSessionThresholdTokens ?? ''}
-            onChange={(e) =>
-              setConfig({
-                ...config,
-                tokenBudgetPerSessionThresholdTokens: e.target.value ? parseInt(e.target.value) : null,
-              })
-            }
-            onBlur={() => {
-              // Floor at the SERVED min — mirrors the backend flooredNumber
-              // guard. Null-able (empty = use default / disable), so only clamp
-              // when non-null; clearing the field stays null, the disable path.
-              const v = config.tokenBudgetPerSessionThresholdTokens;
-              if (v != null && isOutOfBounds(v, perSessionBounds)) {
-                setConfig({ ...config, tokenBudgetPerSessionThresholdTokens: clampToBounds(v, perSessionBounds) });
+          <EditableContextMenu>
+            <Input
+              id="tokenBudgetPerSessionThresholdTokens"
+              type="number"
+              min={perSessionBounds.min}
+              step="100000"
+              disabled={gated}
+              value={config.tokenBudgetPerSessionThresholdTokens ?? ''}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  tokenBudgetPerSessionThresholdTokens: e.target.value ? parseInt(e.target.value) : null,
+                })
               }
-            }}
-            placeholder="Default 1,000,000"
-          />
+              onBlur={() => {
+                // Floor at the SERVED min — mirrors the backend flooredNumber
+                // guard. Null-able (empty = use default / disable), so only clamp
+                // when non-null; clearing the field stays null, the disable path.
+                const v = config.tokenBudgetPerSessionThresholdTokens;
+                if (v != null && isOutOfBounds(v, perSessionBounds)) {
+                  setConfig({ ...config, tokenBudgetPerSessionThresholdTokens: clampToBounds(v, perSessionBounds) });
+                }
+              }}
+              placeholder="Default 1,000,000"
+            />
+          </EditableContextMenu>
           <p className={cn('text-xs text-muted-foreground', dim)}>
             Catch the specific runaway: when any single session's lifetime total crosses
             this, Warden names it in the alert. Empty disables the per-session alarm

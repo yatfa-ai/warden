@@ -100,6 +100,12 @@ export function SettingsSection(props) { return { stub: 'SettingsSection', props
 // presentation over the same \`config\`/\`setConfig\` this suite already drives,
 // and the clamp behaviour under test never reads it.
 export function ConfigResetToDefaultButton(props) { return { stub: 'ConfigResetToDefaultButton', props }; }
+// WARDEN-1864 — the themed right-click edit menu the section's number inputs now
+// render inside. Stubbed like the other UI atoms: the clamp behaviour under test
+// never reads it, and as a component element it is never INVOKED here — the
+// section is called directly, so the jsx runtime only records it as an element
+// type on the walked tree (its hooks never run).
+export function EditableContextMenu(props) { return { stub: 'EditableContextMenu', props }; }
 `;
 
 let src = readFileSync(sectionPath, 'utf8');
@@ -116,6 +122,9 @@ src = src
   .replace(/from\s+(['"])\.\.\/SettingsSection\1/g, "from './ui-stubs.mjs'")
   // WARDEN-1276 — the reset-to-default affordance (a real runtime import).
   .replace(/from\s+(['"])\.\.\/rows\/ResetToDefaultButton\1/g, "from './ui-stubs.mjs'")
+  // WARDEN-1864 — the edit-menu wrapper around each threshold input (a real
+  // runtime import; stubbed above, never invoked).
+  .replace(/from\s+(['"])@\/components\/ui\/editable-context-menu\1/g, "from './ui-stubs.mjs'")
   // WARDEN-1331 — the clamp now comes from the real pure helper module. Keep
   // the REAL numericBounds.ts in the loop (it is import-free, so it transforms
   // standalone): the blur handlers under test delegate to it, and stubbing a

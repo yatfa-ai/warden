@@ -47,6 +47,19 @@ describe('editMenuItems (WARDEN-1830)', () => {
     const labels = editMenuItems({ hasSelection: true }).filter((i) => i.kind === 'item').map((i) => i.label);
     assert.deepEqual(labels, ['Cut', 'Copy', 'Paste', 'Select all']);
   });
+
+  it('number mode keys Cut/Copy enablement on the value, not the (unreadable) selection (WARDEN-1864)', () => {
+    // A value present behaves like a selection: everything enabled.
+    assert.deepEqual(state(editMenuItems({ hasSelection: false, numberValue: '42' })), { cut: false, copy: false, paste: false, 'select-all': false });
+    // An empty value disables Cut and Copy only — Paste and Select all stay.
+    assert.deepEqual(state(editMenuItems({ hasSelection: false, numberValue: '' })), { cut: true, copy: true, paste: false, 'select-all': false });
+    // readOnly still disables Cut and Paste as in text mode.
+    assert.deepEqual(state(editMenuItems({ hasSelection: false, numberValue: '42', readOnly: true })), { cut: true, copy: false, paste: true, 'select-all': false });
+    // disabled still returns no menu at all.
+    assert.deepEqual(editMenuItems({ hasSelection: false, numberValue: '42', disabled: true }), []);
+    // Omitting numberValue leaves the text-mount semantics byte-identical.
+    assert.deepEqual(state(editMenuItems({ hasSelection: false })), { cut: true, copy: true, paste: false, 'select-all': false });
+  });
 });
 
 describe('selectedText (WARDEN-1830)', () => {
@@ -80,6 +93,8 @@ const performanceSection = read('src/components/settings/sections/PerformanceSec
 const telemetrySection = read('src/components/settings/sections/TelemetrySection.tsx');
 const patternsSection = read('src/components/settings/sections/PatternsSection.tsx');
 const snippetsSection = read('src/components/settings/sections/SnippetsSection.tsx');
+const attentionThresholdsSection = read('src/components/settings/sections/AttentionThresholdsSection.tsx');
+const tokenBudgetSection = read('src/components/settings/sections/TokenBudgetSection.tsx');
 const workspaceTabs = read('src/components/WorkspaceTabs.tsx');
 const observerTabs = read('src/components/ObserverTabs.tsx');
 const collectionsSection = read('src/components/CollectionsSection.tsx');
@@ -223,23 +238,22 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     assert.match(gitBadges, /<\/EditableContextMenu>\s*\{\(searching \|\| searchLoading\) && \(\s*<Button/);
   });
 
-  it('Settings surfaces wrap exactly the 18 text-like fields and import the wrapper in each file (WARDEN-1851)', () => {
+  it('Settings surfaces wrap exactly the 18 WARDEN-1851 text fields plus the 6 WARDEN-1864 number fields in these 10 files (24 wraps)', () => {
     const files = [settingsPage, hostsSection, newChatsSection, notificationsSection, observerSection, appearanceSection, performanceSection, telemetrySection, patternsSection, snippetsSection];
-    assert.strictEqual(files.reduce((n, f) => n + (f.match(/<EditableContextMenu>/g) || []).length, 0), 18);
+    assert.strictEqual(files.reduce((n, f) => n + (f.match(/<EditableContextMenu>/g) || []).length, 0), 24);
     for (const f of files) {
       assert.match(f, /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
       assert.ok(!f.includes('onContextMenu={'));
     }
   });
 
-  it('Settings number inputs and secret fields stay unwrapped (WARDEN-1851; in-row pattern/snippet fields were wrapped in WARDEN-1854)', () => {
-    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="pollIntervalMs"/.test(hostsSection));
-    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="connectTimeout"/.test(hostsSection));
-    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="observerSessionTimeout"/.test(observerSection));
-    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="observerMaxTokens"/.test(observerSection));
-    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="terminalFontSize"/.test(appearanceSection));
-    assert.ok(!/<EditableContextMenu>\s*<Input\s+id="terminalScrollback"/.test(appearanceSection));
+  it('Settings secret fields stay unwrapped; the number inputs are now wrapped via the number-safe branch (WARDEN-1864)', () => {
+    // The password/secret exclusion stands (cut/copy of a secret is a hazard):
     assert.ok(!read('src/components/settings/rows/WriteOnlySecretField.tsx').includes('EditableContextMenu'));
+    // ...and no wrapped child anywhere in the Settings sections is type=password:
+    for (const f of [settingsPage, hostsSection, newChatsSection, notificationsSection, observerSection, appearanceSection, performanceSection, telemetrySection, patternsSection, snippetsSection, attentionThresholdsSection, tokenBudgetSection]) {
+      assert.ok(!/<EditableContextMenu[^>]*>\s*<Input[^>]*type="password"/.test(f), 'a password input must never be EditableContextMenu-wrapped');
+    }
   });
 
   it('rename/note fields keep focus while the edit menu is open; Settings rows do not (WARDEN-1854)', () => {
@@ -297,5 +311,92 @@ describe('EditableContextMenu text-input support (WARDEN-1837)', () => {
     // / paste behaviour is verified live in the web dev harness).
     assert.match(paneTile, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Enter'\) doSearch\('next'\); if \(e\.key === 'Escape'\) setShowSearch\(false\); \}\}/);
     assert.match(paneTile, /placeholder="search…"/);
+  });
+});
+
+describe('EditableContextMenu number-input support (WARDEN-1864)', () => {
+  // The wrapper's old contract fenced number inputs out ("selectionStart is
+  // null there") — an engineering limit of the text path, not a product
+  // verdict. The number branch runs whole-value semantics and never touches
+  // the selection/ranged primitives a number input rejects.
+  const numberBranchStart = wrapper.indexOf('function runNumberItems');
+  const numberBranchEnd = wrapper.indexOf('\nexport', numberBranchStart);
+  const numberBranch = wrapper.slice(numberBranchStart, numberBranchEnd).replace(/\/\/.*$/gm, '');
+
+  it('wrapper detects a type="number" child and dispatches it to the number branch', () => {
+    assert.ok(numberBranchStart !== -1, 'runNumberItems present');
+    assert.match(wrapper, /function isNumberInput/);
+    assert.match(wrapper.replace(/\/\/.*$/gm, ''), /el\.type === 'number'/);
+    assert.match(wrapper, /if \(isNumberInput\(el\)\) \{\s*await runNumberItems\(id, el\);\s*return;\s*\}/);
+  });
+
+  it('number branch: no selection/ranged primitive reachable (both throw or read null on number inputs)', () => {
+    assert.ok(numberBranch.length > 0, 'number branch slice is non-empty');
+    assert.ok(!/setRangeText|selectionStart|selectionEnd/.test(numberBranch),
+      'the number branch must not call setRangeText (throws InvalidStateError) or read selectionStart/End (null)');
+  });
+
+  it('number branch: copy/cut run on the whole value; paste is insertText-only; select-all selects', () => {
+    assert.match(numberBranch, /copyWithToast\(el\.value\)/);
+    assert.match(numberBranch, /el\.select\(\)/);
+    assert.match(numberBranch, /execCommand\('delete'\)/);
+    // Paste goes through execCommand('insertText') ONLY — no ranged fallback.
+    assert.match(numberBranch, /execCommand\('insertText', false, text\)/);
+    assert.match(numberBranch, /navigator\.clipboard\.readText\(\)/);
+    assert.match(numberBranch, /toast\.error\('Paste failed — clipboard unavailable'\)/);
+  });
+
+  it('number items are enabled from the value sampled at menu open (WARDEN-1864)', () => {
+    const code = wrapper.replace(/\/\/.*$/gm, '');
+    assert.match(code, /numberValue: numberMode \? numberValue : undefined/);
+    assert.match(code, /setNumberMode\(numeric\)/);
+    assert.match(code, /setNumberValue\(numeric \? el\.value : ''\)/);
+  });
+
+  it('contract comment: password inputs stay excluded; number inputs use the number-safe branch', () => {
+    assert.match(wrapper, /Password inputs \(secret\s*\n\/\/\s*safety\) are never wrapped; number inputs use the number-safe branch/);
+  });
+
+  const sites = [
+    ['AppearanceSection font size', () => appearanceSection, /<EditableContextMenu>\s*<Input\s+id="terminalFontSize"/],
+    ['AppearanceSection scrollback', () => appearanceSection, /<EditableContextMenu>\s*<Input\s+id="terminalScrollback"/],
+    ['AttentionThresholdsSection warning threshold', () => attentionThresholdsSection, /<EditableContextMenu>\s*<Input\s+id="healthWarningThresholdMin"/],
+    ['AttentionThresholdsSection critical threshold', () => attentionThresholdsSection, /<EditableContextMenu>\s*<Input\s+id="healthCriticalThresholdMin"/],
+    ['HostsSection poll interval', () => hostsSection, /<EditableContextMenu>\s*<Input\s+id="pollIntervalMs"/],
+    ['HostsSection connect timeout', () => hostsSection, /<EditableContextMenu>\s*<Input\s+id="connectTimeout"/],
+    ['ObserverSection session timeout', () => observerSection, /<EditableContextMenu>\s*<Input\s+id="observerSessionTimeout"/],
+    ['ObserverSection max output tokens', () => observerSection, /<EditableContextMenu>\s*<Input\s+id="observerMaxTokens"/],
+    ['TokenBudgetSection fleet threshold', () => tokenBudgetSection, /<EditableContextMenu>\s*<Input\s+id="tokenBudgetThresholdTokens"/],
+    ['TokenBudgetSection window hours', () => tokenBudgetSection, /<EditableContextMenu>\s*<Input\s+id="tokenBudgetWindowHours"/],
+    ['TokenBudgetSection per-session threshold', () => tokenBudgetSection, /<EditableContextMenu>\s*<Input\s+id="tokenBudgetPerSessionThresholdTokens"/],
+  ];
+  for (const [name, src, re] of sites) {
+    it(`${name} number input is wrapped and imports the wrapper`, () => {
+      assert.match(src(), re);
+      assert.match(src(), /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
+      assert.ok(!src().includes('onContextMenu={'));
+    });
+  }
+
+  it('the 11 number fields are wrapped across the 5 Settings sections (17 wraps: 3+2+5+4+3)', () => {
+    // 3 in AppearanceSection (1 text + 2 number), 2 in AttentionThresholds,
+    // 5 in HostsSection (3 text + 2 number), 4 in ObserverSection (2 text + 2
+    // number), 3 in TokenBudgetSection — of which exactly 11 are the number
+    // mounts this ticket wraps (the per-site rows above pin each by id).
+    const files = [appearanceSection, attentionThresholdsSection, hostsSection, observerSection, tokenBudgetSection];
+    assert.strictEqual(files.reduce((n, f) => n + (f.match(/<EditableContextMenu>/g) || []).length, 0), 17);
+    for (const f of files) {
+      assert.match(f, /import \{ EditableContextMenu \} from '@\/components\/ui\/editable-context-menu'/);
+      assert.ok(!f.includes('onContextMenu={'));
+    }
+  });
+
+  it('handlers are untouched: the wrap adds no onChange/onKeyDown/onBlur and the onBlur clamps keep their file (WARDEN-1864)', () => {
+    // Spot-pins of the clamp seams the ticket forbids touching — the suite
+    // green unmodified is the fuller check (pollIntervalDraft.test.mjs pins
+    // the draft bounds; connectTimeout keeps its enforced [1, 60] clamp).
+    assert.match(hostsSection, /onChange=\{\(e\) => setPollDraft\(e\.target\.value\)\}/);
+    assert.match(hostsSection, /const clamped = clampToBounds\(config\.connectTimeout, timeoutBounds\);/);
+    assert.match(observerSection, /const clamped = clampToBounds\(v, sessionTimeoutBounds\);/);
   });
 });
