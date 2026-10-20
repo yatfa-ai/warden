@@ -106,12 +106,10 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
       c.send({ type: 'input', id, data: 'echo WARDEN1385\r' });
       const url = `http://127.0.0.1:${serverModule.server.address().port}/api/diagnostics/pane-latency`;
       let body = null;
-      const start = Date.now();
-      while (Date.now() - start < 4000) {
+      await pollUntil(async () => {
         body = await (await fetch(url)).json();
-        if (body.ledger.some((r) => r.pane === id)) break;
-        await new Promise((r) => setTimeout(r, 50));
-      }
+        return body.ledger.some((r) => r.pane === id);
+      }, { what: 'a ledger row for the pane', timeout: 4000, interval: 50, resolveAnyway: true });
       assert.ok(body.ledger.some((r) => r.pane === id), 'ledger row for the pane after typing');
       const row = body.ledger.find((r) => r.pane === id);
       assert.equal(row.samples, 1);
@@ -144,12 +142,8 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
       await runLocalTmux(['send-keys', '-t', session, '-l', 'echo MARK_A_ONE\r']);
       await runLocalTmux(['send-keys', '-t', session, '-l', 'echo MARK_B_TWO\r']);
       await runLocalTmux(['send-keys', '-t', session, '-l', 'echo MARK_C_THREE\r']);
-      const start = Date.now();
-      while (Date.now() - start < 5000) {
-        const joined = c.ofType('pty').slice(ptyBaseline).map((m) => m.data).join('');
-        if (joined.includes('MARK_C_THREE')) break;
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      await pollUntil(() => c.ofType('pty').slice(ptyBaseline).map((m) => m.data).join('').includes('MARK_C_THREE'),
+        { what: 'MARK_C_THREE in the pane output', timeout: 5000, interval: 25, resolveAnyway: true });
       const joined = c.ofType('pty').slice(ptyBaseline).map((m) => m.data).join('');
       const a = joined.indexOf('MARK_A_ONE');
       const b = joined.indexOf('MARK_B_TWO');
@@ -180,10 +174,8 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
       // satisfy this wait), then allow the note call to land.
       const ptyBaseline = c.ofType('pty').length;
       await runLocalTmux(['send-keys', '-t', session, '-l', 'echo EXTERNAL\r']);
-      const start = Date.now();
-      while (Date.now() - start < 4000 && c.ofType('pty').length <= ptyBaseline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      await pollUntil(() => c.ofType('pty').length > ptyBaseline,
+        { what: 'a pty frame after the external send-keys', timeout: 4000, interval: 25, resolveAnyway: true });
       await new Promise((r) => setTimeout(r, 150));
       const after = tel.windowSnapshot();
       const rtCount = after.operations.find((o) => o.operation === 'pane-input-roundtrip')?.count ?? 0;

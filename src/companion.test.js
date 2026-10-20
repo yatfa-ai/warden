@@ -5111,12 +5111,8 @@ function realBinaryTransport() {
         // only the assertion needs to be wrap-agnostic).
         const norm = (s) => (s || '').replace(/\r?\n/g, '');
         // Wait for the initial push (the watcher ticks ~1s; allow headroom).
-        // RESOLVE-ANYWAY preserved (the one resolve-anyway caller named in
-        // testWait.js's contract): pollUntil throws at its deadline, but the
-        // trailing assert below carries the diagnostic, so the deadline throw is
-        // swallowed here and the assert fires either way.
         await pollUntil(() => events.some((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_FIRST')),
-          { what: 'the initial paneDelta push', timeout: 4000, interval: 50 }).catch(() => {});
+          { what: 'the initial paneDelta push', timeout: 4000, interval: 50, resolveAnyway: true });
         const initial = events.find((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_FIRST'));
         assert.ok(initial, 'initial paneDelta pushed the pane content');
         assert.strictEqual(initial.event, 'paneDelta');
@@ -5125,7 +5121,7 @@ function realBinaryTransport() {
         // changed pane — this is the push that lets the monitor tick skip polling.
         spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_PUSH_SECOND'], { encoding: 'utf8' });
         await pollUntil(() => events.some((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_SECOND')),
-          { what: 'a content change to push a new paneDelta', timeout: 4000, interval: 50 }).catch(() => {});
+          { what: 'a content change to push a new paneDelta', timeout: 4000, interval: 50, resolveAnyway: true });
         const changed = events.find((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_SECOND'));
         assert.ok(changed, 'a content change pushed a new paneDelta within ~one tick');
 
