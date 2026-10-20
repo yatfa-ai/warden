@@ -26,15 +26,19 @@ const jsonPath = (id) => { assertSessionId(id); return path.join(DIR, `${id}.jso
 const mdPath = (id) => { assertSessionId(id); return path.join(DIR, `${id}.md`); };
 const ensureDir = () => fs.promises.mkdir(DIR, { recursive: true });
 
-// One shared per-sid serialization chain for the whole-file writers on {sid}.json
-// (WARDEN-1874). renameSession (here) and Observer.step (observer.js) each rewrite
-// the ENTIRE file, so on one sid they must never overlap: a rename snapshot read
-// before a turn completed mid-window reverts that turn's messages when written back
-// (silent loss — the append-only .md keeps the turn, so chat history and the
-// transcript viewer visibly disagree). Both modules import THIS ONE instance: two
-// private per-module keyed chains would never serialize each other, and the
-// dangerous pair is cross-module. Key = sid; chain mechanics (chaining, failure
-// isolation, bounded cleanup) are chainMutex.js's contract. The second half of the
+// One shared per-sid serialization chain for EVERY mutation of the {sid}.json /
+// {sid}.md file family (WARDEN-1874, WARDEN-1878). renameSession (here) and
+// Observer.step (observer.js) each rewrite the ENTIRE file, so on one sid they
+// must never overlap: a rename snapshot read before a turn completed mid-window
+// reverts that turn's messages when written back (silent loss — the append-only
+// .md keeps the turn, so chat history and the transcript viewer visibly
+// disagree). deleteSession (here) is the third member: its unlinks are the undo
+// of create-if-missing writers, so an unordered DELETE racing the turn-start
+// appendTranscript, the tail saveMessages, or a rename resurrects a ghost
+// session. All three modules import THIS ONE instance: two private per-module
+// keyed chains would never serialize each other, and the dangerous pairs are
+// cross-module. Key = sid; chain mechanics (chaining, failure isolation,
+// bounded cleanup) are chainMutex.js's contract. The second half of the
 // fix — re-reading the file INSIDE the critical section and mutating the fresh
 // object — is domain discipline and lives at each call site (renameSession below,
 // Observer.step in observer.js).
@@ -179,8 +183,22 @@ export async function renameSession(id, rawName) {
 
 export async function deleteSession(id) {
   if (!isValidSessionId(id)) return;
-  await removeFile(jsonPath(id));
-  await removeFile(mdPath(id));
+  // Serialized per sid against Observer.step's turn-start appendTranscript, its
+  // tail saveMessages, and renameSession on the SAME shared chain: all three write
+  // {sid}.json/{sid}.md create-if-missing, so an unordered delete is undone by any
+  // write already past its existence check — the append re-creates the .md
+  // (observed twice on clean main, WARDEN-1873), the tail save resurrects a full
+  // ghost .json (WARDEN-1841's residual TOCTOU), renameSession writes a renamed
+  // ghost. Either ordering then ends correct: the delete queued behind a turn
+  // unlinks what the turn wrote; ahead of one, the turn's under-lock re-sync reads
+  // null and its WARDEN-1841 guard skips the write-back. That guard stays as
+  // defense-in-depth: it also covers the documented cross-process limitation
+  // (the chain is in-process only — a second app process on the same files
+  // directory is not ordered by this, like every chain fix before it).
+  return sessionChains.run(id, async () => {
+    await removeFile(jsonPath(id));
+    await removeFile(mdPath(id));
+  });
 }
 
 // Persist the raw LLM message history (so a reconnect resumes the conversation).
