@@ -11,6 +11,7 @@ import {
   _resetPaneDeltaStateForTests,
   _getPaneSubscriptionsForTests,
 } from './companion.js';
+import { sleep } from './testWait.js';
 
 /**
  * WARDEN-1860 — /api/stream monitor: an `unmonitor` landing while the same
@@ -54,7 +55,6 @@ import {
 const HOST = 'prod';
 const RESOLVE_DELAY = 600;
 const SETTLE_AT = 100; // when the racing frames land, still inside the resolve await
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 describe('WARDEN-1860 — /api/stream monitor: stale unmonitor during resolve', () => {
   let httpServer, port, saved, tempHome, chat;

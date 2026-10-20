@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { pollUntil } from './testWait.js';
 
 describe('GET /api/agent-states — pane-state classification over open panes (WARDEN-344)', () => {
   let httpServer, baseUrl;
@@ -70,7 +71,6 @@ describe('GET /api/agent-states — pane-state classification over open panes (W
     // wait until the stuck pane holds the repeating block, and until bash has printed
     // its prompt so send-keys lands. A setup timeout THROWS with the actual capture so
     // a slow box reads as a clear setup failure, not a mysterious 'idle' assertion.
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const capture = (name) => {
       const r = spawnSync('tmux', ['capture-pane', '-t', name, '-p', '-S', '-10', '-E', '-'], { stdio: ['ignore', 'pipe', 'ignore'] });
       return String(r.stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -80,16 +80,12 @@ describe('GET /api/agent-states — pane-state classification over open panes (W
       return lines.length >= 6 && lines.every((l) => l === STUCK_LINE);
     };
     const waitReady = () => capture(WAIT_SESSION).some((l) => l.includes('Press enter to continue'));
-    const waitFor = async (pred, what, timeoutMs = 3000) => {
-      for (const start = Date.now(); Date.now() - start < timeoutMs; await sleep(50)) {
-        if (pred()) return true;
-      }
-      throw new Error(`${what} never stabilized; last capture: ${JSON.stringify(capture(STUCK_SESSION))} / ${JSON.stringify(capture(WAIT_SESSION))}`);
-    };
-    await waitFor(stuckReady, 'stuck pane');
-    await waitFor(() => capture(WAIT_SESSION).some((l) => l.includes('$') || l.includes('#')), 'bash prompt');
+    // The last capture is the diagnostic context (describe) on a setup timeout.
+    const lastCaptures = () => `last capture: ${JSON.stringify(capture(STUCK_SESSION))} / ${JSON.stringify(capture(WAIT_SESSION))}`;
+    await pollUntil(stuckReady, { what: 'stuck pane to stabilize', timeout: 3000, interval: 50, describe: lastCaptures });
+    await pollUntil(() => capture(WAIT_SESSION).some((l) => l.includes('$') || l.includes('#')), { what: 'bash prompt', timeout: 3000, interval: 50, describe: lastCaptures });
     spawnSync('tmux', ['send-keys', '-t', WAIT_SESSION, 'printf "Press enter to continue\\n"', 'Enter'], { stdio: 'ignore' });
-    await waitFor(waitReady, 'wait prompt');
+    await pollUntil(waitReady, { what: 'wait prompt', timeout: 3000, interval: 50, describe: lastCaptures });
 
     // Dynamic import AFTER HOME is set → catalog/config resolve under tempHome.
     const { app } = await import('./server.js');

@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { createLoopMonitor, instrumentSyncIo } from './loop-monitor.js';
+import { sleep } from './testWait.js';
 
 /**
  * LIVE verification of the server stall monitor (WARDEN-977) — real timers, a
@@ -31,8 +32,6 @@ function blockLoop(ms) {
   const shared = new Int32Array(new SharedArrayBuffer(4));
   Atomics.wait(shared, 0, 0, ms);
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let tempDir;
 let bigFile;

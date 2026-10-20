@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import WebSocket from 'ws';
+import { pollUntil } from './testWait.js';
 
 /**
  * Observer WebSocket model-echo test (WARDEN-874).
@@ -33,17 +34,7 @@ function connectObserve(wsUrl) {
   const msgs = [];
   ws.on('message', (raw) => { try { msgs.push(JSON.parse(raw.toString())); } catch { /* ignore */ } });
   const opened = new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
-  // Resolve once the first message of `type` arrives.
-  const waitFor = async (type, timeoutMs = 4000) => {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const found = msgs.find((m) => m.type === type);
-      if (found) return found;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error(`timed out waiting for ${type}; saw ${JSON.stringify(msgs)}`);
-  };
-  return { ws, msgs, opened, waitFor };
+  return { ws, msgs, opened };
 }
 
 describe('/api/observe echoes resolveModel() (WARDEN-874)', () => {
@@ -98,12 +89,16 @@ describe('/api/observe echoes resolveModel() (WARDEN-874)', () => {
     // the bar shows `model: observer-test-model`, never the raw tagged form.
     assert.strictEqual(expected, 'observer-test-model', 'resolveModel() strips the [1m] tag');
 
-    const { ws, msgs, opened, waitFor } = connectObserve(wsUrl);
+    const { ws, msgs, opened } = connectObserve(wsUrl);
     await opened;
 
     try {
-      const sessionCreated = await waitFor('session_created');
-      const history = await waitFor('history');
+      // Both waits resolve with the message itself; the observed stream is the
+      // diagnostic context (describe) on a timeout.
+      const sessionCreated = await pollUntil(() => msgs.find((m) => m.type === 'session_created'),
+        { what: 'session_created', timeout: 4000, describe: () => `saw ${JSON.stringify(msgs)}` });
+      const history = await pollUntil(() => msgs.find((m) => m.type === 'history'),
+        { what: 'history', timeout: 4000, describe: () => `saw ${JSON.stringify(msgs)}` });
 
       // The connect guard must NOT have fired (no credentials error).
       assert.ok(!msgs.some((m) => m.type === 'error'), `unexpected error frame: ${JSON.stringify(msgs)}`);

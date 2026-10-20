@@ -63,6 +63,7 @@ import { remoteClaudeSessionsDetail } from './claudeSessions.js';
 import { runGit } from './gitRoutes.js';
 import { cmdDash } from './cli.js';
 import { setupWsLayer } from './wsLayer.js';
+import { pollUntil } from './testWait.js';
 
 const TEST_VER = 'abc123';
 const TEST_MANIFEST = {
@@ -597,15 +598,6 @@ describe('WARDEN-1390 wsLayer legs: pane subscriptions never touch an excluded h
     return { ws, opened };
   }
 
-  async function waitFor(cond, what, timeoutMs = 5000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (cond()) return;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error(`timed out waiting for ${what}`);
-  }
-
   it('monitor on the excluded host: no subscribePanes write, no subscription state', async () => {
     await seedChannel(EXCLUDED);
     assert.strictEqual(_getPaneSubscriptionsForTests()[EXCLUDED], undefined, 'precondition: nothing subscribed');
@@ -626,7 +618,7 @@ describe('WARDEN-1390 wsLayer legs: pane subscriptions never touch an excluded h
     const conn = connect();
     await conn.opened;
     conn.ws.send(JSON.stringify({ type: 'monitor', id: `${OTHER}:mac-agent` }));
-    await waitFor(() => (_getPaneSubscriptionsForTests()[OTHER] !== undefined), 'the non-excluded host to be subscribed');
+    await pollUntil(() => (_getPaneSubscriptionsForTests()[OTHER] !== undefined), { what: 'the non-excluded host to be subscribed' });
     const subWrites = channel.transport.writes.filter((w) => w.method === 'subscribePanes');
     assert.ok(subWrites.length > 0, 'the subscribePanes RPC rode the channel');
     conn.ws.close();
@@ -643,10 +635,10 @@ describe('WARDEN-1390 wsLayer legs: pane subscriptions never touch an excluded h
     const conn = connect();
     await conn.opened;
     conn.ws.send(JSON.stringify({ type: 'monitor', id: `${OTHER}:mac-agent` }));
-    await waitFor(() => (_getPaneSubscriptionsForTests()[OTHER] !== undefined), 'mac-agent subscribed');
+    await pollUntil(() => (_getPaneSubscriptionsForTests()[OTHER] !== undefined), { what: 'mac-agent subscribed' });
     conn.ws.close();
-    await waitFor(() => otherWrites().filter((w) => w.method === 'unsubscribePanes').length > otherUnsubBefore,
-      'the non-excluded host to be unsubscribed on close');
+    await pollUntil(() => otherWrites().filter((w) => w.method === 'unsubscribePanes').length > otherUnsubBefore,
+      { what: 'the non-excluded host to be unsubscribed on close' });
     assert.strictEqual(_getPaneSubscriptionsForTests()[EXCLUDED], undefined,
       'the excluded host stayed out of the grouping AND out of the subscription map');
   });

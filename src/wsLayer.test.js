@@ -7,6 +7,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { runLocalTmux } from './ssh.js';
+import { pollUntil, sleep } from './testWait.js';
 
 /**
  * Handler-contract tests for setupWsLayer (src/wsLayer.js) — the two WebSocket
@@ -41,18 +42,6 @@ const LOCAL = '(local)';
 const tmuxPresent = (() => {
   try { execFileSync('tmux', ['-V'], { stdio: ['ignore', 'ignore', 'ignore'] }); return true; } catch { return false; }
 })();
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitFor(fn, { timeout = 5000, interval = 25, msg = 'condition' } = {}) {
-  const start = Date.now();
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() - start > timeout) throw new Error(`timed out (${timeout}ms) waiting for ${msg}`);
-    await sleep(interval);
-  }
-}
 
 const uniq = () => Math.random().toString(36).slice(2, 8);
 
@@ -103,7 +92,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     if (!r.ok) return [];
     return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
   }
-  const waitClients = (session, pred, msg) => waitFor(async () => { const c = await clients(session); return pred(c) ? c : null; }, { msg: msg || 'tmux clients' });
+  const waitClients = (session, pred, msg) => pollUntil(async () => { const c = await clients(session); return pred(c) ? c : null; }, { what: msg || 'tmux clients' });
 
   async function startWs(cfg) {
     const { setupWsLayer } = await import('./wsLayer.js');
@@ -185,7 +174,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       find: (type, pred = () => true) => frames.find((f) => f.type === type && pred(f)),
       all: (type, pred = () => true) => frames.filter((f) => f.type === type && pred(f)),
       // open + wait for the Observer to be wired (history frame = handler registered)
-      async ready() { await opened; await waitFor(() => api.find('history'), { msg: 'history frame' }); return api; },
+      async ready() { await opened; await pollUntil(() => api.find('history'), { what: 'history frame' }); return api; },
     };
     return api;
   }
@@ -195,8 +184,8 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
   // Wait until the server has REGISTERED the pending gate (the directive_proposed
   // activity event is written before pending.set; pad slightly past it).
   async function awaitProposed(c, directive) {
-    const f = await waitFor(() => c.find('directive_proposed', (x) => x.directive === directive), { msg: `directive_proposed ${directive}` });
-    await waitFor(async () => (await eventsOf('directive_proposed', (e) => e.directive === directive)).length > 0, { msg: 'directive_proposed event' });
+    const f = await pollUntil(() => c.find('directive_proposed', (x) => x.directive === directive), { what: `directive_proposed ${directive}` });
+    await pollUntil(async () => (await eventsOf('directive_proposed', (e) => e.directive === directive)).length > 0, { what: 'directive_proposed event' });
     await sleep(100);
     return f;
   }
@@ -205,7 +194,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     const c = await openObserve(confirmSrv.port).ready();
     try {
       c.send({ type: 'user', text: 'hello', panes: [] });
-      await waitFor(() => c.find('done'), { msg: 'done' });
+      await pollUntil(() => c.find('done'), { what: 'done' });
       const iThinking = c.frames.findIndex((f) => f.type === 'thinking');
       const iDone = c.frames.findIndex((f) => f.type === 'done');
       assert.ok(iThinking >= 0, `no thinking frame: ${JSON.stringify(c.frames.map((f) => f.type))}`);
@@ -218,7 +207,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     const c = openObserve(confirmSrv.port, '?sid=..%2Fevil');
     await c.opened;
     try {
-      await waitFor(() => c.find('error'), { msg: 'error frame' });
+      await pollUntil(() => c.find('error'), { what: 'error frame' });
       assert.strictEqual(c.find('error').error, 'invalid session id');
       assert.strictEqual(c.find('history'), undefined);
     } finally { c.ws.close(); }
@@ -240,7 +229,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       assert.strictEqual(ev.role, 'claude');
       assert.strictEqual(ev.host, LOCAL);
       c.send({ type: 'gate_decision', requestId: f.requestId, approved: false });
-      await waitFor(() => c.find('done'), { msg: 'turn end' });
+      await pollUntil(() => c.find('done'), { what: 'turn end' });
     } finally { c.ws.close(); }
   });
 
@@ -252,7 +241,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       c.send({ type: 'user', text: 'tell victim', panes: [] });
       const f = await awaitProposed(c, directive);
       c.send({ type: 'gate_decision', requestId: f.requestId, approved: false });
-      await waitFor(() => c.find('done'), { msg: 'turn end' });
+      await pollUntil(() => c.find('done'), { what: 'turn end' });
       c.send({ type: 'gate_decision', requestId: f.requestId, approved: false }); // replay of the same decision
       await sleep(400);
       const rej = await eventsOf('directive_rejected', (e) => e.directive === directive);
@@ -272,8 +261,8 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       c.send({ type: 'user', text: 'tell victim', panes: [] });
       const f = await awaitProposed(c, directive);
       c.send({ type: 'gate_decision', requestId: f.requestId, approved: true });
-      await waitFor(async () => (await eventsOf('directive_sent', (e) => e.directive === directive)).length, { msg: 'directive_sent' });
-      await waitFor(() => c.find('done'), { msg: 'turn end' });
+      await pollUntil(async () => (await eventsOf('directive_sent', (e) => e.directive === directive)).length, { what: 'directive_sent' });
+      await pollUntil(() => c.find('done'), { what: 'turn end' });
       await sleep(200);
       assert.strictEqual((await eventsOf('directive_rejected', (e) => e.directive === directive)).length, 0, 'an approved directive must not log a rejection');
     } finally { c.ws.close(); }
@@ -288,7 +277,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       c.send({ type: 'user', text: 'tell victim', panes: [] });
       const f = await awaitProposed(c, original);
       c.send({ type: 'gate_decision', requestId: f.requestId, approved: true, edited });
-      await waitFor(async () => (await eventsOf('directive_sent', (e) => e.directive === edited)).length, { msg: 'directive_sent with edited text' });
+      await pollUntil(async () => (await eventsOf('directive_sent', (e) => e.directive === edited)).length, { what: 'directive_sent with edited text' });
       assert.strictEqual((await eventsOf('directive_sent', (e) => e.directive === original)).length, 0, 'the original text must not be what was sent');
     } finally { c.ws.close(); }
   });
@@ -311,8 +300,8 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
         queueDirective(directive);
         c.send({ type: 'user', text: 'tell victim', panes: [] });
         // directive_sent records the (untrimmed) directive text that reached the pane
-        await waitFor(async () => (await eventsOf('directive_sent', (e) => e.directive === directive)).length, { msg: `auto-sent ${JSON.stringify(directive)}` });
-        await waitFor(() => c.find('done'), { msg: 'turn end' });
+        await pollUntil(async () => (await eventsOf('directive_sent', (e) => e.directive === directive)).length, { what: `auto-sent ${JSON.stringify(directive)}` });
+        await pollUntil(() => c.find('done'), { what: 'turn end' });
         assert.strictEqual(c.find('directive_proposed'), undefined, `${JSON.stringify(directive)} must not be gated in auto-safe`);
         assert.strictEqual((await eventsOf('directive_proposed', (e) => e.directive === directive)).length, 0);
       } finally { c.ws.close(); }
@@ -329,7 +318,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
         assert.strictEqual(f.directive, directive);
         assert.strictEqual((await eventsOf('directive_sent', (e) => e.directive === directive)).length, 0, 'gated, not auto-sent');
         c.send({ type: 'gate_decision', requestId: f.requestId, approved: false });
-        await waitFor(() => c.find('done'), { msg: 'turn end' });
+        await pollUntil(() => c.find('done'), { what: 'turn end' });
       } finally { c.ws.close(); }
     }
   });
@@ -342,7 +331,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       c.send({ type: 'user', text: 'tell victim', panes: [] });
       const f = await awaitProposed(c, directive);
       c.send({ type: 'gate_decision', requestId: f.requestId, approved: false });
-      await waitFor(() => c.find('done'), { msg: 'turn end' });
+      await pollUntil(() => c.find('done'), { what: 'turn end' });
     } finally { c.ws.close(); }
   });
 
@@ -357,7 +346,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       ws, msgs, opened,
       send: (o) => ws.send(JSON.stringify(o)),
       ofType: (type, id) => msgs.filter((m) => m.type === type && (id === undefined || m.id === id)),
-      waitN: (type, id, n = 1, timeout = 5000) => waitFor(() => (api.ofType(type, id).length >= n ? api.ofType(type, id) : null), { timeout, msg: `${n}× ${type} ${id ?? ''}` }),
+      waitN: (type, id, n = 1, timeout = 5000) => pollUntil(() => (api.ofType(type, id).length >= n ? api.ofType(type, id) : null), { timeout, what: `${n}× ${type} ${id ?? ''}` }),
     };
     return api;
   }
@@ -367,7 +356,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     let err = null;
     ws.on('error', (e) => { err = e; });
     try {
-      await waitFor(() => err, { timeout: 3000, msg: 'upgrade refusal' });
+      await pollUntil(() => err, { timeout: 3000, what: 'upgrade refusal' });
     } finally { ws.terminate(); }
   });
 
@@ -390,7 +379,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     await c.opened;
     try {
       c.send({ type: 'monitor', id: 12345 });
-      await waitFor(() => resolveCalls.length > 0, { msg: 'resolve call' });
+      await pollUntil(() => resolveCalls.length > 0, { what: 'resolve call' });
       assert.strictEqual(resolveCalls[0], '12345');
       assert.strictEqual(typeof resolveCalls[0], 'string');
     } finally { c.ws.close(); }
@@ -419,7 +408,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       c.send({ type: 'monitor', id: a.key });
       await c.waitN('snapshot', a.key);
       c.send({ type: 'monitor', id: b.key });
-      await waitFor(() => resolveCalls.includes(b.key), { msg: 'second resolve' });
+      await pollUntil(() => resolveCalls.includes(b.key), { what: 'second resolve' });
       await sleep(700); // well inside the 2s beat: a re-entered startMonitor would tick NOW
       assert.strictEqual(c.ofType('snapshot', b.key).length, 0, 'second monitor must wait for the shared timer beat');
       await c.waitN('snapshot', b.key, 1, 4000); // …and then it is served by it
@@ -434,7 +423,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
       const [f] = await c.waitN('attach_error', id);
       assert.match(f.error, /no chat matches/);
-      const ev = await waitFor(async () => (await eventsOf('error', (e) => e.context === 'attach' && e.id === id))[0], { msg: 'attach error event' });
+      const ev = await pollUntil(async () => (await eventsOf('error', (e) => e.context === 'attach' && e.id === id))[0], { what: 'attach error event' });
       assert.match(ev.error, /no chat matches/);
     } finally { c.ws.close(); }
   });
@@ -446,7 +435,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     try {
       c.send({ type: 'attach', id: chat.id, cols: 80, rows: 24 });
       await c.waitN('attached', chat.id);
-      const ev = await waitFor(async () => (await eventsOf('attached', (e) => e.id === chat.id))[0], { msg: 'attached event' });
+      const ev = await pollUntil(async () => (await eventsOf('attached', (e) => e.id === chat.id))[0], { what: 'attached event' });
       assert.strictEqual(ev.host, LOCAL);
       assert.ok('container' in ev);
       await waitClients(chat.session, (cl) => cl.length === 1, 'one client');
@@ -480,7 +469,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
     try {
       c.send({ type: 'attach', id: chat.id, cols: 80, rows: 24 });
       await c.waitN('session_dead', chat.id);
-      const ev = await waitFor(async () => (await eventsOf('error', (e) => e.context === 'attach' && e.id === chat.id))[0], { msg: 'session dead event' });
+      const ev = await pollUntil(async () => (await eventsOf('error', (e) => e.context === 'attach' && e.id === chat.id))[0], { what: 'session dead event' });
       assert.strictEqual(ev.error, 'session dead');
       assert.strictEqual(ev.host, LOCAL);
       assert.ok('container' in ev);
@@ -499,7 +488,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       await c.waitN('attached', chat.id);
       const token = `ECHO-${uniq()}`;
       c.send({ type: 'input', id: chat.id, data: `${token}\r` });
-      await waitFor(() => c.ofType('pty', chat.id).some((f) => f.data.includes(token)), { msg: 'pty echo' });
+      await pollUntil(() => c.ofType('pty', chat.id).some((f) => f.data.includes(token)), { what: 'pty echo' });
     } finally { c.ws.close(); }
   });
 
@@ -530,7 +519,7 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       await runLocalTmux(['kill-session', '-t', chat.session]);
       const [f] = await c.waitN('ended', chat.id);
       assert.ok(Number.isInteger(f.code), `ended.code must be a number, got ${JSON.stringify(f.code)}`);
-      const ev = await waitFor(async () => (await eventsOf('ended', (e) => e.id === chat.id))[0], { msg: 'ended event' });
+      const ev = await pollUntil(async () => (await eventsOf('ended', (e) => e.id === chat.id))[0], { what: 'ended event' });
       assert.strictEqual(ev.host, LOCAL);
       assert.ok(Number.isInteger(ev.code));
       assert.ok('container' in ev);

@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { pollUntil } from './testWait.js';
 
 /**
  * WARDEN-1841 — Observer.step() must not re-create a session deleted mid-turn.
@@ -135,9 +136,8 @@ describe('WARDEN-1841/1878 — a mid-turn DELETE is never resurrected by the ses
     // the turn is the tail pair, gated by the WARDEN-1841 existence check. The delete
     // still lands ~250ms before the stubbed LLM answers, so the turn is still
     // genuinely mid-flight.
-    for (let i = 0; i < 400 && !mdFor(c.id).includes('🧑 user'); i++) {
-      await new Promise((r) => setTimeout(r, 5));
-    }
+    await pollUntil(() => mdFor(c.id).includes('🧑 user'),
+      { what: 'the turn-start user transcript append to land', timeout: 2000, interval: 5 });
     assert.ok(mdFor(c.id).includes('🧑 user'), 'turn-start user transcript append landed');
     await deleteSession(c.id);
     const reply = await turn;

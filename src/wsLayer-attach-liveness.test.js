@@ -7,6 +7,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { runLocalTmux } from './ssh.js';
+import { pollUntil, sleep } from './testWait.js';
 
 /**
  * WARDEN-1856 — /api/stream attach: the FINAL liveness window.
@@ -43,18 +44,7 @@ const LOCAL = '(local)';
 const tmuxPresent = (() => {
   try { execFileSync('tmux', ['-V'], { stdio: ['ignore', 'ignore', 'ignore'] }); return true; } catch { return false; }
 })();
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SETTLE = 1000; // gate release → resize RPC completes → continuation has run
-
-async function waitFor(fn, { timeout = 5000, interval = 25, msg = 'condition' } = {}) {
-  const start = Date.now();
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() - start > timeout) throw new Error(`timed out (${timeout}ms) waiting for ${msg}`);
-    await sleep(interval);
-  }
-}
 
 describe('WARDEN-1856 — /api/stream attach liveness in the final-resize window', { skip: !tmuxPresent && 'tmux not installed' }, () => {
   let httpServer, port, saved, tempHome, shimDir, realTmux, readEvents, session, chat, uniq;
@@ -88,7 +78,7 @@ describe('WARDEN-1856 — /api/stream attach liveness in the final-resize window
     if (!r.ok) return [];
     return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
   }
-  const waitClient = (n, msg) => waitFor(async () => (await clients()).length === n, { msg });
+  const waitClient = (n, msg) => pollUntil(async () => (await clients()).length === n, { what: msg });
 
   const eventsOf = async (type, pred = () => true) => (await readEvents()).filter((e) => e.type === type && pred(e));
   const armGate = () => fs.writeFileSync(GATE(), '');
@@ -208,7 +198,10 @@ describe('WARDEN-1856 — /api/stream attach liveness in the final-resize window
       assert.deepStrictEqual(await eventsOf('attached', (e) => e.id === chat.id).then((a) => a.length), 1,
         'exactly one attached activity event may be written');
     } finally { releaseGate(); ws.close(); }
-    for (let i = 0; i < 40 && (await clients()).length; i++) await sleep(50);
+    await pollUntil(async () => !(await clients()).length, {
+      what: 'orphan clients to drain after the socket close', timeout: 2000, interval: 50,
+      describe: async () => `still attached: ${JSON.stringify(await clients())}`,
+    });
     assert.deepStrictEqual(await clients(), [], 'no orphan client may survive the socket close');
   });
 
@@ -221,10 +214,10 @@ describe('WARDEN-1856 — /api/stream attach liveness in the final-resize window
       ws.send(attachFrame());
       await waitClient(1, 'the attach PTY client');
       releaseGate();
-      await waitFor(() => frames.some((f) => f.type === 'attached' && f.id === chat.id), { msg: 'attached frame' });
+      await pollUntil(() => frames.some((f) => f.type === 'attached' && f.id === chat.id), { what: 'attached frame' });
       assert.strictEqual(frames.filter((f) => f.type === 'attached' && f.id === chat.id).length, 1,
         'a live attach must still announce exactly once through the gated window');
-      const ev = await waitFor(async () => (await eventsOf('attached', (e) => e.id === chat.id))[0], { msg: 'attached event' });
+      const ev = await pollUntil(async () => (await eventsOf('attached', (e) => e.id === chat.id))[0], { what: 'attached event' });
       assert.strictEqual(ev.host, LOCAL);
       assert.ok('container' in ev);
     } finally { releaseGate(); ws.close(); }

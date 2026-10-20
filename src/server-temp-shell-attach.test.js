@@ -6,6 +6,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { runLocalTmux } from './ssh.js';
+import { pollUntil } from './testWait.js';
 
 /**
  * WARDEN-1422 QA round 4 — the unnamed-shell "Couldn't attach" blocker,
@@ -59,15 +60,7 @@ function connect(wsUrl, id) {
   const opened = new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   const send = (obj) => ws.send(JSON.stringify(obj));
   const ofType = (type) => msgs.filter((m) => m.type === type && m.id === id);
-  const waitForN = async (type, n, timeoutMs = 5000) => {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (ofType(type).length >= n) return ofType(type);
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error(`timed out waiting for ${n}× ${type}; saw ${ofType(type).length}. all msgs: ${JSON.stringify(msgs)}`);
-  };
-  return { ws, msgs, opened, send, ofType, waitForN };
+  return { ws, msgs, opened, send, ofType };
 }
 
 const postJson = (baseUrl, body) => fetch(`${baseUrl}/api/spawn`, {
@@ -160,7 +153,7 @@ describe('unnamed shell attach resolves without a host hint — WARDEN-1422 QA r
       // No `host` field — the shape the broken client sent after keying
       // paneHost by the composite id. resolve() must still find the temp.
       c.send({ type: 'attach', id: chat.key, cols: 80, rows: 24 });
-      await c.waitForN('attached', 1);
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 5000, describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` });
       assert.equal(c.ofType('attach_error').length, 0,
         `no attach_error expected; got ${JSON.stringify(c.ofType('attach_error'))} — ` +
         'the bare-id resolve must re-read the on-disk catalog the spawn appended to');
@@ -183,7 +176,7 @@ describe('unnamed shell attach resolves without a host hint — WARDEN-1422 QA r
     await c.opened;
     try {
       c.send({ type: 'attach', id: chat.key, cols: 80, rows: 24 });
-      await c.waitForN('attached', 1);
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 5000, describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` });
       assert.equal(c.ofType('attach_error').length, 0);
     } finally {
       c.ws.close();
@@ -199,7 +192,7 @@ describe('unnamed shell attach resolves without a host hint — WARDEN-1422 QA r
     await c.opened;
     try {
       c.send({ type: 'attach', id: chat.key, host: LOCAL, cols: 80, rows: 24 });
-      await c.waitForN('attached', 1);
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 5000, describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` });
       assert.equal(c.ofType('attach_error').length, 0);
     } finally {
       c.ws.close();

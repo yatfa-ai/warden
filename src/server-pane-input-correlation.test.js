@@ -6,6 +6,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { runLocalTmux } from './ssh.js';
+import { pollUntil } from './testWait.js';
 
 /**
  * Integration test for the WARDEN-1385 pane-input correlation through the REAL
@@ -37,15 +38,7 @@ function connect(wsUrl, id) {
   const opened = new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   const send = (obj) => ws.send(JSON.stringify(obj));
   const ofType = (type) => msgs.filter((m) => m.type === type && m.id === id);
-  const waitForN = async (type, n, timeoutMs = 4000) => {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (ofType(type).length >= n) return ofType(type);
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error(`timed out waiting for ${n}× ${type}; saw ${ofType(type).length}`);
-  };
-  return { ws, msgs, opened, send, ofType, waitForN };
+  return { ws, msgs, opened, send, ofType };
 }
 
 describe('pane-input telemetry correlation (real server + local PTY)', { skip: !tmuxPresent && 'tmux not installed' }, () => {
@@ -106,7 +99,7 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await c.waitForN('attached', 1);
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}` });
       // The attach itself triggers a full pane repaint, so pty frames may fly
       // before any keystroke — poll the REAL diagnostics endpoint until the
       // correlation for OUR keystroke lands (the ledger row names the pane).
@@ -142,7 +135,7 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await c.waitForN('attached', 1);
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}` });
       // Three rapid outputs land inside (or across) 8ms coalescing windows;
       // whatever the batching, the concatenated byte stream must preserve the
       // per-pane order exactly — xterm is chunk-boundary-agnostic, but NEVER
@@ -179,7 +172,7 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await c.waitForN('attached', 1);
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}` });
       const before = tel.windowSnapshot();
       const beforeRt = before.operations.find((o) => o.operation === 'pane-input-roundtrip')?.count ?? 0;
       // Generate output WITHOUT typing over the WS: an external tmux send-keys.

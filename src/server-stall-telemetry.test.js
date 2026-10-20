@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { pollUntil, sleep } from './testWait.js';
 
 /**
  * Integration test for the SERVER-STALL telemetry channel (WARDEN-1278), driven
@@ -71,20 +72,6 @@ async function captureStderr(fn) {
   return lines;
 }
 
-/**
- * Settle the async appendStall write the callback fires and forgets. When the
- * caller knows how many journal entries it expects, poll (bounded) until they
- * land — a fixed sleep alone races the fire-and-forget append under full-suite
- * load. The 50ms tail is kept so a late stray append is still caught.
- */
-const settle = async (expected = null) => {
-  const deadline = Date.now() + 5000;
-  while (expected !== null && readJournal().length < expected && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  await new Promise((r) => setTimeout(r, 50));
-};
-
 before(async () => {
   originalCompanionEnv = process.env.WARDEN_COMPANION_TRANSPORT;
   originalHome = process.env.HOME;
@@ -138,7 +125,10 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
         attribution: [{ label: 'GET /api/claude-sessions', overlapMs: 5900, open: false, durationMs: 5900 }],
         syncTotals: [{ label: 'fs.readFileSync', calls: 812, totalMs: 5800 }],
       }));
-      await settle(journalBefore + 2);
+      // Settle the fire-and-forget appendStall write (bounded poll); the 50ms tail still catches a late stray append.
+      await pollUntil(() => readJournal().length >= journalBefore + 2,
+        { what: 'stall journal entries to land', timeout: 5000, interval: 10, describe: () => `journal holds ${readJournal().length} entries` });
+      await sleep(50); // late-stray tail
     });
 
     const window = serverStallTelemetry.flushNow();
@@ -164,7 +154,10 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
       loopMonitor._deliverStall(STALL({
         attribution: [{ label: 'GET /api/chats/myproject-researcher', overlapMs: 4000, open: false, durationMs: 4000 }],
       }));
-      await settle(journalBefore + 1);
+      // Settle the fire-and-forget appendStall write (bounded poll); the 50ms tail still catches a late stray append.
+      await pollUntil(() => readJournal().length >= journalBefore + 1,
+        { what: 'stall journal entries to land', timeout: 5000, interval: 10, describe: () => `journal holds ${readJournal().length} entries` });
+      await sleep(50); // late-stray tail
     });
     const window = serverStallTelemetry.flushNow();
     const serialized = JSON.stringify(window);
@@ -181,7 +174,10 @@ describe('server-stall telemetry through the REAL setOnStall callback (WARDEN-12
     const journalBefore = readJournal().length;
     await captureStderr(async () => {
       loopMonitor._deliverStall(STALL({ lagMs: 9000 }));
-      await settle(journalBefore + 1);
+      // Settle the fire-and-forget appendStall write (bounded poll); the 50ms tail still catches a late stray append.
+      await pollUntil(() => readJournal().length >= journalBefore + 1,
+        { what: 'stall journal entries to land', timeout: 5000, interval: 10, describe: () => `journal holds ${readJournal().length} entries` });
+      await sleep(50); // late-stray tail
     });
     assert.equal(serverStallTelemetry.flushNow(), null, 'nothing was collected');
     // And nothing was PARKED either: re-enabling must not resurrect it.
@@ -197,7 +193,10 @@ describe('the owner\'s three LOCAL channels are untouched by the telemetry fold'
     const record = STALL({ lagMs: 4200 });
     const lines = await captureStderr(async () => {
       loopMonitor._deliverStall(record);
-      await settle(before + 1);
+      // Settle the fire-and-forget appendStall write (bounded poll); the 50ms tail still catches a late stray append.
+      await pollUntil(() => readJournal().length >= before + 1,
+        { what: 'stall journal entries to land', timeout: 5000, interval: 10, describe: () => `journal holds ${readJournal().length} entries` });
+      await sleep(50); // late-stray tail
     });
     assert.equal(lines.length, 1, 'exactly one stderr line, as before');
     assert.match(lines[0], /^\[warden:stall\] server event loop blocked 4200ms/);
@@ -217,7 +216,10 @@ describe('the owner\'s three LOCAL channels are untouched by the telemetry fold'
     const record = STALL({ lagMs: 4200 });
     const lines = await captureStderr(async () => {
       loopMonitor._deliverStall(record);
-      await settle(before + 1);
+      // Settle the fire-and-forget appendStall write (bounded poll); the 50ms tail still catches a late stray append.
+      await pollUntil(() => readJournal().length >= before + 1,
+        { what: 'stall journal entries to land', timeout: 5000, interval: 10, describe: () => `journal holds ${readJournal().length} entries` });
+      await sleep(50); // late-stray tail
     });
     assert.equal(lines.length, 1, 'consent has no effect on the local channels');
     assert.match(lines[0], /^\[warden:stall\] server event loop blocked 4200ms/);
@@ -237,7 +239,10 @@ describe('the owner\'s three LOCAL channels are untouched by the telemetry fold'
       const before = readJournal().length;
       const lines = await captureStderr(async () => {
         loopMonitor._deliverStall(STALL({ lagMs: 7777 }));
-        await settle(before + 1);
+        // Settle the fire-and-forget appendStall write (bounded poll); the 50ms tail still catches a late stray append.
+        await pollUntil(() => readJournal().length >= before + 1,
+          { what: 'stall journal entries to land', timeout: 5000, interval: 10, describe: () => `journal holds ${readJournal().length} entries` });
+        await sleep(50); // late-stray tail
       });
       assert.equal(lines.length, 1, 'the stderr line still fired');
       assert.match(lines[0], /blocked 7777ms/);

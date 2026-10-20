@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { pollUntil } from './testWait.js';
 
 /**
  * WARDEN-1874 — renameSession's whole-file {sid}.json read-modify-write races
@@ -78,14 +79,6 @@ describe('WARDEN-1874 — a rename racing an observer turn loses neither the tur
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
-  async function waitFor(predicate, timeoutMs = 2000) {
-    const start = Date.now();
-    while (!(await predicate())) {
-      if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
-      await new Promise((r) => setTimeout(r, 2));
-    }
-  }
-
   function userTexts(messages) {
     return messages.filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content);
   }
@@ -111,7 +104,8 @@ describe('WARDEN-1874 — a rename racing an observer turn loses neither the tur
     // Issue the rename only once turn 2's tail save has entered the write queue —
     // its read then resolves against the PRE-turn-2 file while the save's write is
     // still in flight, and its write queues behind the save (issue order).
-    await waitFor(async () => pendingWriteCount() > 0);
+    await pollUntil(async () => pendingWriteCount() > 0,
+      { what: "turn 2's tail save to enter the write queue", timeout: 2000, interval: 2 });
     const renamed = await renameSession(c.id, 'Renamed mid-save');
     await turn;
     jsonRenameDelayMs = 0;

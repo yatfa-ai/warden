@@ -7,6 +7,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { runLocalTmux } from './ssh.js';
+import { pollUntil, sleep } from './testWait.js';
 
 /**
  * WARDEN-1836 — /api/stream: a socket that closes while a monitor/attach frame is
@@ -24,7 +25,6 @@ const LOCAL = '(local)';
 const tmuxPresent = (() => {
   try { execFileSync('tmux', ['-V'], { stdio: ['ignore', 'ignore', 'ignore'] }); return true; } catch { return false; }
 })();
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const RESOLVE_DELAY = 600;
 const CLOSE_AT = 100;
 
@@ -54,6 +54,19 @@ describe('WARDEN-1836 — /api/stream closed-socket guard after awaits', () => {
     const r = await runLocalTmux(['list-clients', '-t', session, '-F', '#{client_width}x#{client_height}']);
     if (!r.ok) return [];
     return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  }
+
+  // Wait for any clients the attach/detach churn left behind to drain (2s budget,
+  // 50ms steps). DEVIATION NAMED (WARDEN-1877): the old bare `drain()` loop failed
+  // SILENT when a leaked client outlived it; under pollUntil the deadline throws
+  // with the leaked clients named — strictly more informative, same red-on-bug
+  // (the asserting call sites still assert the drained state right after; the one
+  // bare teardown `drain()` at the end of the file now fails loud via this throw).
+  async function drain() {
+    return pollUntil(async () => !(await clients()).length, {
+      what: 'orphan clients to drain after the close', timeout: 2000, interval: 50,
+      describe: async () => `still attached: ${JSON.stringify(await clients())}`,
+    });
   }
 
   async function newSession() {
@@ -132,7 +145,7 @@ describe('WARDEN-1836 — /api/stream closed-socket guard after awaits', () => {
     await sleep(RESOLVE_DELAY + 1500);
     assert.strictEqual((await clients()).length, 1, 'an open socket must attach exactly one client');
     ws.close();
-    for (let i = 0; i < 40 && (await clients()).length; i++) await sleep(50);
+    await drain();
     assert.deepStrictEqual(await clients(), []);
   });
   // WARDEN-1846 — a per-pane `detach` (socket still OPEN) landing while `attach` is
@@ -140,7 +153,6 @@ describe('WARDEN-1836 — /api/stream closed-socket guard after awaits', () => {
   const collect = (ws) => { const frames = []; ws.on('message', (d) => { try { frames.push(JSON.parse(String(d))); } catch { /* noop */ } }); return frames; };
   const attachFrame = () => JSON.stringify({ type: 'attach', id: chat.id, cols: 80, rows: 24 });
   const detachFrame = () => JSON.stringify({ type: 'detach', id: chat.id });
-  const drain = async () => { for (let i = 0; i < 40 && (await clients()).length; i++) await sleep(50); };
 
   it('attach: a detach landing mid-resolve (socket open) spawns no client and sends no attached frame', { skip: !tmuxPresent && 'tmux not installed' }, async () => {
     await newSession();
@@ -178,13 +190,13 @@ describe('WARDEN-1836 — /api/stream closed-socket guard after awaits', () => {
     await newSession();
     const ws = await open();
     ws.send(attachFrame());
-    for (let i = 0; i < 60 && !(await clients()).length; i++) await sleep(50);
+    await pollUntil(async () => (await clients()).length, { what: 'the attach client to appear', timeout: 3000, interval: 50 });
     assert.strictEqual((await clients()).length, 1);
     ws.send(detachFrame());
     await drain();
     assert.deepStrictEqual(await clients(), [], 'detach after attached must kill the client');
     ws.send(attachFrame()); // a fresh attach after detach still works
-    for (let i = 0; i < 60 && !(await clients()).length; i++) await sleep(50);
+    await pollUntil(async () => (await clients()).length, { what: 'the fresh attach client to appear', timeout: 3000, interval: 50 });
     assert.strictEqual((await clients()).length, 1);
     ws.close();
     await drain();

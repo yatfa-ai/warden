@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { probeSession } from './tmux.js';
 import { runLocalTmux, shellQuote } from './ssh.js';
 import { classifyProbe } from './sessionRecovery.js';
+import { pollUntil } from './testWait.js';
 
 /**
  * Tests for the dead/unreachable session recovery path (WARDEN-231).
@@ -296,11 +297,9 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     assert.strictEqual((await runLocalTmux(['has-session', '-t', claudeSession])).ok, true);
     // The fake claude writes its invocation ($0) to the marker once it starts.
     // Poll briefly — hasSession returning true slightly races the echo flushing.
-    let invoked = '';
-    for (let i = 0; i < 50 && !invoked; i++) {
-      try { invoked = fs.readFileSync(marker, 'utf8').trim(); } catch { /* not written yet */ }
-      if (!invoked) await new Promise((r) => setTimeout(r, 20));
-    }
+    const invoked = await pollUntil(() => {
+      try { return fs.readFileSync(marker, 'utf8').trim(); } catch { return ''; }
+    }, { what: 'the fake claude invocation marker to be written', timeout: 1000, interval: 20 });
     assert.strictEqual(invoked, fakeClaude, `respawn must spawn the resolved absolute path, not bare \`claude\` (got ${JSON.stringify(invoked)})`);
     assert.ok(invoked.startsWith(path.dirname(fakeClaude)), 'spawned path is the resolved absolute fake-claude, not a bare word');
   });
