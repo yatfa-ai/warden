@@ -16,7 +16,7 @@ import { shellQuote } from './ssh.js';
 import { deliverRemoteScript } from './companion.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
-import { getSession, getSessionAsync, saveMessages, appendTranscript } from './sessions.js';
+import { getSession, getSessionAsync, saveMessages, appendTranscript, sessionChains } from './sessions.js';
 // The pane-state classifier was extracted into agentState.js (WARDEN-344) so the
 // proactive attention surfaces can reach it without this Observer's LLM. Re-imported
 // here unchanged — read_chats still classifies panes with the exact same
@@ -28,7 +28,6 @@ import { classifyPane, stripAnsi } from './agentState.js';
 // logDirective (below) is the single point every confirmed send flows through.
 import { appendEvent } from './activity.js';
 import { atomicAppend, atomicWrite } from './persist.js';
-import { createKeyedChain } from './chainMutex.js';
 
 // fs.promises alias — readDirectives is async (WARDEN-828) so serving GET
 // /api/directives does not block the single-threaded event loop on a synchronous
@@ -745,16 +744,6 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
   }
 }
 
-// WARDEN-1867 — per-sid turn chains, shared across Observer instances. The ws layer
-// builds ONE Observer per connection, so a page reload mid-turn or two tabs on the
-// same saved session put two live Observers on one sid; this chain serializes
-// their turns (see Observer.step). The chain mechanics (chaining, failure
-// isolation, bounded cleanup) live in the shared chainMutex module (WARDEN-1870);
-// the re-sync-under-the-lock discipline — the half WARDEN-1867's first derivation
-// missed — stays in Observer.step, because it is domain discipline, not chain
-// mechanics.
-const turnChains = createKeyedChain();
-
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext, io } = {}) {
     this.cfg = cfg;
@@ -981,11 +970,15 @@ export class Observer {
   // one) keeps the old inline path — there is no session to serialize against.
   async step(userText) {
     if (!this.sid) return this._runTurn(userText);
-    // Cross-instance per-sid chain (shared chainMutex module, WARDEN-1870): this
-    // turn waits for the previous turn on the same sid, whatever Observer instance
-    // ran it. A failed earlier turn must not cascade into this one — the chain
-    // swallows that rejection, which its own caller already observed.
-    return turnChains.run(this.sid, async () => {
+    // Cross-instance per-sid chain: this turn waits for the previous turn on the
+    // same sid, whatever Observer instance ran it. A failed earlier turn must not
+    // cascade into this one — the chain swallows that rejection, which its own
+    // caller already observed. The chain is the shared per-sid {sid}.json writer
+    // chain exported by sessions.js (WARDEN-1870 extracted the mechanics into
+    // chainMutex.js; WARDEN-1874 made the instance shared with renameSession, so
+    // turn saves and renames on one sid serialize too — a private observer-only
+    // chain could never order that cross-module pair).
+    return sessionChains.run(this.sid, async () => {
       // Re-sync under the lock: serialization alone orders the saves but is NOT
       // sufficient — this Observer's in-memory array is stale even running second.
       // Reload the persisted history so this turn's tail save carries the turns the
