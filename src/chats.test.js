@@ -7,6 +7,7 @@ import os from 'node:os';
 import { resolveChat, resolveChatWithRefresh, comparePinned, compareChats, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, discoverAll, capturePanes, DISCOVER_SCRIPT } from './chats.js';
 import { applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, _resetPaneDeltaStateForTests } from './companion.js';
 import { buildChat, windowActivityToMs } from './chatMeta.js';
+import { sleep } from './testWait.js';
 
 // ----------------------------- capturePanes routing -------------------------
 // WARDEN-276: under WARDEN_COMPANION_TRANSPORT=1, REMOTE hosts route capture-pane
@@ -39,8 +40,6 @@ function uniqueSession() {
   function makeLocalChat(session) {
     return { host: '(local)', id: `(local):${session}`, key: session, container: null, session };
   }
-
-  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
   // `node --test src` runs many tmux-spawning files concurrently on one default
   // tmux socket, so a server start/exit race can make new-session fail or
