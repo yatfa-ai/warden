@@ -99,7 +99,7 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', describe: () => `saw ${c.ofType('attached').length}` });
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}` });
       // The attach itself triggers a full pane repaint, so pty frames may fly
       // before any keystroke — poll the REAL diagnostics endpoint until the
       // correlation for OUR keystroke lands (the ledger row names the pane).
@@ -135,7 +135,7 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', describe: () => `saw ${c.ofType('attached').length}` });
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}` });
       // Three rapid outputs land inside (or across) 8ms coalescing windows;
       // whatever the batching, the concatenated byte stream must preserve the
       // per-pane order exactly — xterm is chunk-boundary-agnostic, but NEVER
@@ -172,7 +172,7 @@ describe('pane-input telemetry correlation (real server + local PTY)', { skip: !
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', describe: () => `saw ${c.ofType('attached').length}` });
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}` });
       const before = tel.windowSnapshot();
       const beforeRt = before.operations.find((o) => o.operation === 'pane-input-roundtrip')?.count ?? 0;
       // Generate output WITHOUT typing over the WS: an external tmux send-keys.

@@ -96,9 +96,9 @@ describe('/api/observe echoes resolveModel() (WARDEN-874)', () => {
       // Both waits resolve with the message itself; the observed stream is the
       // diagnostic context (describe) on a timeout.
       const sessionCreated = await pollUntil(() => msgs.find((m) => m.type === 'session_created'),
-        { what: 'session_created', describe: () => `saw ${JSON.stringify(msgs)}` });
+        { what: 'session_created', timeout: 4000, describe: () => `saw ${JSON.stringify(msgs)}` });
       const history = await pollUntil(() => msgs.find((m) => m.type === 'history'),
-        { what: 'history', describe: () => `saw ${JSON.stringify(msgs)}` });
+        { what: 'history', timeout: 4000, describe: () => `saw ${JSON.stringify(msgs)}` });
 
       // The connect guard must NOT have fired (no credentials error).
       assert.ok(!msgs.some((m) => m.type === 'error'), `unexpected error frame: ${JSON.stringify(msgs)}`);

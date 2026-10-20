@@ -117,12 +117,12 @@ describe('stream attach lifecycle identity guard (real server + local PTY)', { s
     await c.opened;
     try {
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` }); // PTY is live + bound
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` }); // PTY is live + bound
       assert.strictEqual(c.ofType('ended').length, 0, 'no ended before the session ends');
       // Killing the tmux session makes the `tmux attach` viewer PTY exit cleanly
       // — a natural exit of the live entry (not a pty.kill()).
       await runLocalTmux(['kill-session', '-t', session]);
-      await pollUntil(() => c.ofType('ended').length >= 1, { what: '1× ended', describe: () => `saw ${c.ofType('ended').length}. all msgs: ${JSON.stringify(c.msgs)}` });
+      await pollUntil(() => c.ofType('ended').length >= 1, { what: '1× ended', timeout: 4000, describe: () => `saw ${c.ofType('ended').length}. all msgs: ${JSON.stringify(c.msgs)}` });
       // Drain any trailing events, then assert the SINGLE natural exit produced
       // exactly one ended (no doubling from any path).
       await new Promise((r) => setTimeout(r, 500));
@@ -138,14 +138,14 @@ describe('stream attach lifecycle identity guard (real server + local PTY)', { s
     try {
       // --- attach PTY1 ---
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` });
+      await pollUntil(() => c.ofType('attached').length >= 1, { what: '1× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` });
       // --- detach: server pty.kill()s PTY1 (onExit fires async, later) + deletes ---
       c.send({ type: 'detach', id });
       // Tiny gap so the detach handler (sync, no await) has run before attach2.
       await new Promise((r) => setTimeout(r, 25));
       // --- reattach PTY2 under the SAME id (this is the Retry path) ---
       c.send({ type: 'attach', id, cols: 80, rows: 24 });
-      await pollUntil(() => c.ofType('attached').length >= 2, { what: '2× attached', describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` }); // second attach bound a fresh PTY
+      await pollUntil(() => c.ofType('attached').length >= 2, { what: '2× attached', timeout: 4000, describe: () => `saw ${c.ofType('attached').length}. all msgs: ${JSON.stringify(c.msgs)}` }); // second attach bound a fresh PTY
       // Give PTY1's late kill()-induced onExit time to fire. On the unpatched
       // (asymmetric) guard this sends a spurious ended here; the fixed guard
       // (early return on identity mismatch) suppresses it entirely.
@@ -159,7 +159,7 @@ describe('stream attach lifecycle identity guard (real server + local PTY)', { s
       // sent an ended nor `delete`d PTY2's entry. Killing the tmux session makes
       // PTY2 exit naturally; that must be the ONLY ended for the whole sequence.
       await runLocalTmux(['kill-session', '-t', session]);
-      await pollUntil(() => c.ofType('ended').length >= 1, { what: '1× ended', describe: () => `saw ${c.ofType('ended').length}. all msgs: ${JSON.stringify(c.msgs)}` });
+      await pollUntil(() => c.ofType('ended').length >= 1, { what: '1× ended', timeout: 4000, describe: () => `saw ${c.ofType('ended').length}. all msgs: ${JSON.stringify(c.msgs)}` });
       // Drain so any hypothetical orphaned/stale PTY onExit would land here too.
       await new Promise((r) => setTimeout(r, 800));
       assert.strictEqual(

@@ -60,7 +60,8 @@ describe('WARDEN-1836 — /api/stream closed-socket guard after awaits', () => {
   // 50ms steps). DEVIATION NAMED (WARDEN-1877): the old bare `drain()` loop failed
   // SILENT when a leaked client outlived it; under pollUntil the deadline throws
   // with the leaked clients named — strictly more informative, same red-on-bug
-  // (every drain call site still asserts the drained state right after).
+  // (the asserting call sites still assert the drained state right after; the one
+  // bare teardown `drain()` at the end of the file now fails loud via this throw).
   async function drain() {
     return pollUntil(async () => !(await clients()).length, {
       what: 'orphan clients to drain after the close', timeout: 2000, interval: 50,
