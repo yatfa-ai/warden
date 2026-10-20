@@ -52,17 +52,40 @@ import path from 'node:path';
 import { deliverRemoteScript } from './companion.js';
 import { shellQuote, detectClaude } from './ssh.js';
 import { remoteClaudeSessionsDetail, buildRemoteSessionScript, buildSessionReadScript } from './claudeSessions.js';
-import { readTranscriptPhase, buildTranscriptTailScript } from './observer.js';
 
-// server.js reads config/catalog and rotates activity logs at module load, so
-// redirect HOME before the single import (the file-exists.test.js discipline).
+// EVERY import that reaches activity.js / server.js is DYNAMIC, BELOW the HOME
+// redirect, because BOTH module-load side effects pin the real home otherwise
+// (WARDEN-1884):
+//   - server.js fires its module-load `await rotateEvents()` against
+//     activity.js's DIR/FILE — with real-home pins that permanently DELETES
+//     >7-day-old events from the real ~/.yatfa-warden/activity.jsonl on
+//     every run (blind RMW: anything the live server appends in between is
+//     destroyed with it);
+//   - observer.js transitively imports activity.js (whose DIR/FILE pin
+//     os.homedir() at module evaluation), so a STATIC observer.js import —
+//     hoisted above the redirect by ESM — would freeze those pins to the
+//     real home before the line below ran.
+// companion.js / ssh.js / claudeSessions.js have no module-load homedir pins
+// and stay static. (the file-exists.test.js discipline.)
 const TEMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-1284-home-'));
 process.env.HOME = TEMP_HOME;
+const { readTranscriptPhase, buildTranscriptTailScript, DIRECTIVES_LOG } = await import('./observer.js');
 const {
   readChatFile, remoteFileExists, remoteSearchClaudeSessions,
   remoteReadSessionTranscript, preflightTmux,
   buildReadFileScript, buildFileExistsScript, buildSessionSearchScript,
 } = await import('./server.js');
+// Positive control (mirrors observer-send-directive.test.js): the module-load
+// pins must live in the temp home, or the redirect failed and every write —
+// including server.js's module-load rotate — would run against the real data
+// dir. DIRECTIVES_LOG is observer.js's exported homedir pin, evaluated in the
+// same load as the activity.js DIR/FILE it transitively imports; and
+// server.js's module-load rotateEvents() mkdirs the activity DIR, so the
+// `.yatfa-warden` dir must materialize under TEMP_HOME and nowhere else.
+assert.ok(DIRECTIVES_LOG.startsWith(TEMP_HOME),
+  'observer/activity data paths must be redirected into the temp HOME');
+assert.ok(fs.existsSync(path.join(TEMP_HOME, '.yatfa-warden')),
+  'module-load rotateEvents must have created the activity dir under the temp HOME, not the real one');
 
 after(() => {
   try { fs.rmSync(TEMP_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }
