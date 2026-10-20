@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import {
   atomicWrite, atomicWriteJson, atomicAppend, removeFile, readJsonDefensive, readJsonDefensiveSync,
 } from './persist.js';
+import { createKeyedChain } from './chainMutex.js';
 
 const DIR = path.join(os.homedir(), '.yatfa-warden', 'sessions');
 // Session ids reach this module from client-controlled input (PATCH/DELETE
@@ -24,6 +25,20 @@ function assertSessionId(id) {
 const jsonPath = (id) => { assertSessionId(id); return path.join(DIR, `${id}.json`); };
 const mdPath = (id) => { assertSessionId(id); return path.join(DIR, `${id}.md`); };
 const ensureDir = () => fs.promises.mkdir(DIR, { recursive: true });
+
+// One shared per-sid serialization chain for the whole-file writers on {sid}.json
+// (WARDEN-1874). renameSession (here) and Observer.step (observer.js) each rewrite
+// the ENTIRE file, so on one sid they must never overlap: a rename snapshot read
+// before a turn completed mid-window reverts that turn's messages when written back
+// (silent loss — the append-only .md keeps the turn, so chat history and the
+// transcript viewer visibly disagree). Both modules import THIS ONE instance: two
+// private per-module keyed chains would never serialize each other, and the
+// dangerous pair is cross-module. Key = sid; chain mechanics (chaining, failure
+// isolation, bounded cleanup) are chainMutex.js's contract. The second half of the
+// fix — re-reading the file INSIDE the critical section and mutating the fresh
+// object — is domain discipline and lives at each call site (renameSession below,
+// Observer.step in observer.js).
+export const sessionChains = createKeyedChain();
 
 // Async + durable (WARDEN-831): JSON files are written atomically (temp + fsync +
 // rename) and read defensively (a corrupt session file is backed up, never silently
@@ -130,23 +145,36 @@ export async function renameSession(id, rawName) {
   const name = normalizeSessionName(rawName);
   if (!name) throw new Error('session name is required');
   if (!isValidSessionId(id)) return null;
-  const s = await getSessionAsync(id);
-  if (!s) return null;
-  s.name = name;
-  s.updatedAt = Date.now();
-  await atomicWriteJson(jsonPath(id), s);
-  // Rename the md heading too (best-effort — a missing/unreadable md is ignored).
-  try {
-    const md = await fs.promises.readFile(mdPath(id), 'utf8');
-    // The replacement MUST be a function, not a string: as a string, `$&`, `` $` ``,
-    // `$'` and `$<n>` in a user-supplied name are interpreted as replacement patterns
-    // rather than literal text. `$'` is the worst of them — it re-injects everything
-    // after the match, i.e. the whole transcript body, and since the read-back above
-    // returns the file this line writes, every rename would double it. A replacer function
-    // disables pattern interpretation entirely (WARDEN-1044).
-    await atomicWrite(mdPath(id), md.replace(/^# .*/m, () => `# ${name}`));
-  } catch { /* md missing or unreadable — ignore */ }
-  return s;
+  // Serialized per sid against Observer.step's tail save on the SAME shared chain
+  // (WARDEN-1874): this used to be an unsynchronized whole-file read-modify-write,
+  // so a rename whose write landed after a turn completed mid-window reverted that
+  // turn's messages to the read-time array.
+  return sessionChains.run(id, async () => {
+    // Re-sync under the lock: the session is read HERE, inside the critical
+    // section, so the name is applied to the freshest on-disk object and the
+    // whole-file write carries every turn completed while this rename waited
+    // (serialization alone is not enough — the same lesson every sibling fix
+    // landed: WARDEN-988/991, 1675, 1734, 1867). A session deleted mid-flight
+    // still reads null: return null, write nothing (WARDEN-1841, no
+    // ghost-resurrect).
+    const s = await getSessionAsync(id);
+    if (!s) return null;
+    s.name = name;
+    s.updatedAt = Date.now();
+    await atomicWriteJson(jsonPath(id), s);
+    // Rename the md heading too (best-effort — a missing/unreadable md is ignored).
+    try {
+      const md = await fs.promises.readFile(mdPath(id), 'utf8');
+      // The replacement MUST be a function, not a string: as a string, `$&`, `` $` ``,
+      // `$'` and `$<n>` in a user-supplied name are interpreted as replacement patterns
+      // rather than literal text. `$'` is the worst of them — it re-injects everything
+      // after the match, i.e. the whole transcript body, and since the read-back above
+      // returns the file this line writes, every rename would double it. A replacer function
+      // disables pattern interpretation entirely (WARDEN-1044).
+      await atomicWrite(mdPath(id), md.replace(/^# .*/m, () => `# ${name}`));
+    } catch { /* md missing or unreadable — ignore */ }
+    return s;
+  });
 }
 
 export async function deleteSession(id) {
