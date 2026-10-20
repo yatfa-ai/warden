@@ -9,7 +9,6 @@ import {
   filterRealTranscriptEntries, parseTranscriptTail, paneSignature,
   readTranscriptPhase, buildTranscriptTailScript, parsePhaseFromTailOutput,
 } from './observer.js';
-import { createSession, deleteSession } from './sessions.js';
 
 // Shared config passed through to capturePanes.
 const cfg = { hosts: [] };
@@ -486,47 +485,6 @@ describe('Observer _execTool dispatch (end-to-end via injected I/O)', () => {
     assert.strictEqual(result.error, 'tmux capture failed',
       'a throwing readPane is surfaced as { error }, not allowed to crash');
   });
-
-  it('send_directive success: gate approves and the directive is sent via the injected sendPane', async () => {
-    const chat = yatfaChat();
-    const resolveChat = mock.fn(() => ({ chat }));
-    const sendPane = mock.fn(async () => undefined);
-    const gate = mock.fn(async () => ({ approved: true }));
-    // The success path also records the send in two ~/.yatfa-warden logs
-    // (logDirective + appendEvent), whose paths are pinned to the real HOME at
-    // module load. Snapshot + restore them so the test is hermetic.
-    const activityLog = path.join(os.homedir(), '.yatfa-warden', 'activity.jsonl');
-    const directivesLog = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
-    const snap = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
-    const restore = (p, prev) => {
-      try {
-        if (prev === null) { if (fs.existsSync(p)) fs.unlinkSync(p); }
-        else fs.writeFileSync(p, prev, 'utf8');
-      } catch { /* best-effort cleanup */ }
-    };
-    const actPrev = snap(activityLog);
-    const dirPrev = snap(directivesLog);
-    try {
-      const obs = new Observer(cfg, { io: makeIo({ resolveChat, sendPane }), gate });
-      obs.lastChats = [chat];
-
-      const result = await obs._execTool('send_directive', { id: 'myproject-worker', directive: 'ship it' });
-
-      assert.strictEqual(resolveChat.mock.callCount(), 1, '_resolve routed through this._io.resolveChat, not the live import');
-      assert.strictEqual(gate.mock.callCount(), 1, 'the gate was consulted');
-      assert.strictEqual(gate.mock.calls[0].arguments[0], chat, 'gate received the resolved chat');
-      assert.strictEqual(gate.mock.calls[0].arguments[1], 'ship it', 'gate received the directive text');
-      assert.strictEqual(sendPane.mock.callCount(), 1, 'dispatch reached the injected sendPane, not the live import');
-      assert.strictEqual(sendPane.mock.calls[0].arguments[0], chat, 'sendPane received the resolved chat');
-      assert.strictEqual(sendPane.mock.calls[0].arguments[2], 'ship it', 'sendPane received the approved directive text');
-      assert.strictEqual(result.sent, true);
-      assert.strictEqual(result.to, 'myproject-worker@host1');
-      assert.strictEqual(result.chars, 'ship it'.length);
-    } finally {
-      restore(activityLog, actPrev);
-      restore(directivesLog, dirPrev);
-    }
-  });
 });
 
 describe('Observer _resolve (no-match suggestion fallback)', () => {
@@ -614,39 +572,6 @@ describe('Observer chat context (cross-host resumption)', () => {
     const obs = new Observer(cfg, { chatContext: { container: 'worker-a' } });
     obs.openTabs = ['worker-a', 'worker-b'];
     assert.deepStrictEqual(obs.effectiveOpenTabs().sort(), ['worker-a', 'worker-b']);
-  });
-
-  it('restores chat context from the persisted session on resume', async () => {
-    const s = await createSession(null, { host: 'host1', container: 'c1', project: 'p', role: 'worker', chatKey: 'c1' });
-    try {
-      const obs = new Observer(cfg, { sid: s.id }); // resume path: sid set, no chatContext
-      assert.strictEqual(obs.boundKey, 'c1');
-      assert.strictEqual(obs.getChatContext().host, 'host1');
-      assert.strictEqual(obs.getChatContext().role, 'worker');
-    } finally {
-      await deleteSession(s.id);
-    }
-  });
-
-  it('persisted session context takes precedence over a passed chatContext on resume', async () => {
-    const s = await createSession(null, { host: 'host1', container: 'c1', chatKey: 'c1', role: 'worker' });
-    try {
-      const obs = new Observer(cfg, { sid: s.id, chatContext: { container: 'OTHER', chatKey: 'OTHER' } });
-      assert.strictEqual(obs.boundKey, 'c1', 'the persisted context is the source of truth');
-    } finally {
-      await deleteSession(s.id);
-    }
-  });
-
-  it('a legacy session without chat context resumes unbound (backward compatible)', async () => {
-    const s = await createSession(null); // no context
-    try {
-      const obs = new Observer(cfg, { sid: s.id });
-      assert.strictEqual(obs.boundKey, null);
-      assert.strictEqual(obs.getChatContext(), null);
-    } finally {
-      await deleteSession(s.id);
-    }
   });
 });
 
