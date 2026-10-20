@@ -7,7 +7,7 @@ import os from 'node:os';
 import { resolveChat, resolveChatWithRefresh, comparePinned, compareChats, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, discoverAll, capturePanes, DISCOVER_SCRIPT } from './chats.js';
 import { applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, _resetPaneDeltaStateForTests } from './companion.js';
 import { buildChat, windowActivityToMs } from './chatMeta.js';
-import { sleep } from './testWait.js';
+import { pollUntil, sleep } from './testWait.js';
 
 // ----------------------------- capturePanes routing -------------------------
 // WARDEN-276: under WARDEN_COMPANION_TRANSPORT=1, REMOTE hosts route capture-pane
@@ -60,14 +60,14 @@ function uniqueSession() {
 
   // Re-capture until every chat's pane contains its expected marker (bounded:
   // 5s deadline, 50ms step) so a slow shell init does not yield a one-shot blank
-  // capture. Returns the last capture either way; callers still assert strictly.
+  // capture. resolveAnyway: the LAST capture is returned either way; callers
+  // still assert strictly.
   async function captureUntilMarkers(chats, markerFor, { deadlineMs = 5000, stepMs = 50 } = {}) {
-    const deadline = Date.now() + deadlineMs;
     let out = await capturePanes(chats, {});
-    while (!chats.every((c) => out[c.id] && out[c.id].includes(markerFor(c))) && Date.now() < deadline) {
-      await sleep(stepMs);
+    await pollUntil(async () => {
       out = await capturePanes(chats, {});
-    }
+      return chats.every((c) => out[c.id] && out[c.id].includes(markerFor(c)));
+    }, { what: 'every pane carrying its expected marker', timeout: deadlineMs, interval: stepMs, resolveAnyway: true });
     return out;
   }
 
