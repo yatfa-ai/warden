@@ -126,6 +126,29 @@ test('a check-start mid-download does not reset the download', () => {
   assert.equal(core.reduceUpdateState(d, { type: 'check-start' }), d);
 });
 
+test('manual-path available is sticky: survives check-start', () => {
+  const a = st({ silent: false, status: 'available', version: '0.1.105', downloadUrl: 'https://x/y' });
+  assert.equal(core.reduceUpdateState(a, { type: 'check-start' }), a);
+});
+
+test('manual-path available survives error, recording the message and lastCheckedAt', () => {
+  const a = st({ silent: false, status: 'available', version: '0.1.105', downloadUrl: 'https://x/y' });
+  const s = core.reduceUpdateState(a, { type: 'error', message: 'HTTP 503', at: 42 });
+  assert.deepEqual(
+    [s.status, s.version, s.downloadUrl, s.error, s.lastCheckedAt],
+    ['available', '0.1.105', 'https://x/y', 'HTTP 503', 42],
+  );
+});
+
+test('a sticky available is still replaced by not-available, a newer available, or downloaded', () => {
+  const a = st({ silent: false, status: 'available', version: '0.1.105', downloadUrl: 'https://x/y', error: 'HTTP 503' });
+  const gone = core.reduceUpdateState(a, { type: 'not-available', at: 7 });
+  assert.deepEqual([gone.status, gone.version, gone.downloadUrl, gone.error], ['up-to-date', null, null, null]);
+  const newer = core.reduceUpdateState(a, { type: 'available', version: '0.1.106', downloadUrl: 'https://x/z' });
+  assert.deepEqual([newer.status, newer.version, newer.downloadUrl, newer.error], ['available', '0.1.106', 'https://x/z', null]);
+  assert.equal(core.reduceUpdateState(a, { type: 'downloaded', version: '0.1.105' }).status, 'ready');
+});
+
 // ---------------------------------------------------- manual-result wording
 test('describeManualResult is honest in every state, including up to date', () => {
   const d = (status, extra = {}) => core.describeManualResult(st({ status, ...extra }));
@@ -260,6 +283,20 @@ test('manual path: same version → up to date; unreadable / failing feed → qu
   assert.equal((await u.checkNow()).status, 'up-to-date');
   body = 'garbage'; assert.equal((await u.checkNow()).status, 'error');
   fail = true; assert.match((await u.checkNow()).error, /503/);
+});
+
+test('manual path: a successful check followed by a failing re-check keeps status "available"', async () => {
+  let fail = false;
+  const { u, states } = mk({ platform: 'darwin', fetchText: async () => { if (fail) throw new Error('HTTP 503'); return 'version: 0.1.105\n'; } });
+  assert.equal((await u.checkNow()).status, 'available');
+  fail = true;
+  const s = await u.checkNow();
+  assert.equal(s.status, 'available');
+  assert.equal(u.getState().status, 'available');
+  assert.equal(u.getState().version, '0.1.105');
+  assert.match(u.getState().error, /503/);
+  assert.ok(!states.slice(states.indexOf('available')).includes('checking'), 'chip never drops to checking');
+  assert.ok(!states.slice(states.indexOf('available')).includes('error'));
 });
 
 test('Linux without APPIMAGE takes the manual path', () => {
