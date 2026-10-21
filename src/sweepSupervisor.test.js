@@ -8,15 +8,9 @@ import assert from 'node:assert/strict';
 
 import { createSweepSupervisor } from './sweepSupervisor.js';
 import { loopMonitor } from './loop-monitor.js';
+import { deferred } from './testGate.js';
 
 const INTERVAL = 1000;
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
-  return { promise, resolve, reject };
-}
 
 function setup(t, opts = {}) {
   t.mock.timers.enable({ apis: ['setInterval'] });

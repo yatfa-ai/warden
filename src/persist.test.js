@@ -14,6 +14,7 @@ import {
   readJsonDefensiveSync,
   corruptBackupPath,
 } from './persist.js';
+import { deferred } from './testGate.js';
 
 // Real-I/O tests against a unique temp dir: the atomic rename + corrupt-backup
 // semantics are exactly what this ticket adds, so we exercise them for real
@@ -108,11 +109,10 @@ describe('atomicWrite per-file ordering', () => {
   it('different files are not serialized against each other; queue entries are cleaned up', async () => {
     const slow = file('slow.json');
     const fast = file('fast.json');
-    let release;
-    const gate = new Promise((r) => { release = r; });
+    const gate = deferred();
     const realOpen = fs.promises.open;
     const m = mock.method(fs.promises, 'open', async (p, ...rest) => {
-      if (String(p).includes('slow.json')) await gate; // deliberately slow first writer
+      if (String(p).includes('slow.json')) await gate.promise; // deliberately slow first writer
       return realOpen.call(fs.promises, p, ...rest);
     });
     try {
@@ -123,11 +123,11 @@ describe('atomicWrite per-file ordering', () => {
       assert.strictEqual(fs.existsSync(slow), false);
       await new Promise((r) => setImmediate(r)); // let fast's queue entry clean up
       assert.strictEqual(pendingWriteCount(), 1); // only slow still tracked
-      release();
+      gate.resolve();
       await slowP;
       assert.strictEqual(fs.readFileSync(slow, 'utf8'), 'slow');
     } finally {
-      release();
+      gate.resolve();
       m.mock.restore();
     }
     await new Promise((r) => setImmediate(r));

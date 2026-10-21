@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBudgetTick } from './budgetTick.js';
+import { deferred } from './testGate.js';
 
 // Direct spec for createBudgetTick (WARDEN-1688 moved it verbatim out of
 // server.js; WARDEN-1711 pins it). The 7 suites that reach it through server.js
@@ -136,14 +137,13 @@ describe('createBudgetTick — sessionCache fan-out', () => {
 
 describe('createBudgetTick — re-entrancy guard', () => {
   it('makes a concurrent tick a no-op, reports isRunning, and allows a later tick', async () => {
-    let release;
-    const gate = new Promise((r) => { release = r; });
+    const gate = deferred();
     const ctx = setup({ script: [quiet] });
     let n = 0;
     ctx.sessionCache.snapshot = async (hosts, limit, opts) => {
       ctx.sessionCache.calls.push({ hosts, limit, opts });
       n += 1;
-      if (n === 1) await gate;
+      if (n === 1) await gate.promise;
       return quiet;
     };
 
@@ -154,7 +154,7 @@ describe('createBudgetTick — re-entrancy guard', () => {
     assert.equal(ctx.sessionCache.calls.length, 1, 'the overlapping tick did not start a second sweep');
     assert.equal(ctx.tick.isRunning(), true);
 
-    release();
+    gate.resolve();
     await first;
     assert.equal(ctx.tick.isRunning(), false, 'finally resets the guard');
     await ctx.tick.tickBudget(ctx.deps);

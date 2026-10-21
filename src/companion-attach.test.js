@@ -32,6 +32,7 @@ import {
 } from './companion.js';
 import { attachStream } from './tmux.js';
 import { buildAttachCommand, buildAttachRemoteScript, shellQuote } from './ssh.js';
+import { deferred } from './testGate.js';
 
 const ORIG_COMPANION_ENV = process.env.WARDEN_COMPANION_TRANSPORT;
 
@@ -344,13 +345,12 @@ describe('CompanionAttachSession: the IPty surface server.js consumes', () => {
   it('write() before the ACK is QUEUED and replayed, not dropped (typing into a connecting pane)', async () => {
     const sent = [];
     const { channel } = attachChannel({ sent });
-    let release;
-    const start = new Promise((r) => { release = r; });
-    const s = new CompanionAttachSession('prod', start);
+    const start = deferred();
+    const s = new CompanionAttachSession('prod', start.promise);
     s.write('early\n');
     await settle();
     assert.strictEqual(sent.filter((c) => c.method === 'attachInput').length, 0, 'nothing can be sent before a sid exists');
-    release({ channel, sid: 'a1' });
+    start.resolve({ channel, sid: 'a1' });
     await settle();
     const input = sent.find((c) => c.method === 'attachInput');
     assert.ok(input, 'the queued keystroke was replayed once the session went live');
@@ -360,12 +360,12 @@ describe('CompanionAttachSession: the IPty surface server.js consumes', () => {
   it('resize() sends attachResize; a pre-ACK burst COALESCES to the last size', async () => {
     const sent = [];
     const { channel } = attachChannel({ sent });
-    let release;
-    const s = new CompanionAttachSession('prod', new Promise((r) => { release = r; }));
+    const start = deferred();
+    const s = new CompanionAttachSession('prod', start.promise);
     s.resize(80, 24);
     s.resize(100, 30);
     s.resize(132, 50);
-    release({ channel, sid: 'a1' });
+    start.resolve({ channel, sid: 'a1' });
     await settle();
     const resizes = sent.filter((c) => c.method === 'attachResize');
     assert.strictEqual(resizes.length, 1, 'replaying intermediate sizes would just churn SIGWINCH at a newly-live terminal');
@@ -498,10 +498,10 @@ describe('WARDEN-365 race discipline survives the companion wrapper (AC #3)', ()
   it('kill() while still CONNECTING tears down the session the ACK is about to deliver (no host-side leak)', async () => {
     const sent = [];
     const { channel } = attachChannel({ sent });
-    let release;
-    const s = new CompanionAttachSession('prod', new Promise((r) => { release = r; }));
+    const start = deferred();
+    const s = new CompanionAttachSession('prod', start.promise);
     s.kill(); // detached before the ACK landed
-    release({ channel, sid: 'a1' });
+    start.resolve({ channel, sid: 'a1' });
     await settle();
     const kills = sent.filter((c) => c.method === 'attachKill');
     assert.strictEqual(kills.length, 1, 'the late-arriving session must be killed, not leaked with its tmux client');
