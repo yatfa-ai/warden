@@ -7,7 +7,7 @@ import { isCompanionTransportEnabled, isCompanionExcludedHost, hasSession as com
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
-const ALLOWED_KEYS = new Set([
+export const ALLOWED_KEYS = new Set([
   'Escape', 'C-c', 'C-d', 'C-u', 'C-k', 'Enter', 'Tab', 'BSpace',
   'Up', 'Down', 'Left', 'Right', 'Home', 'End', 'PageUp', 'PageDown',
   'Space', 'F1', 'F2',

@@ -440,16 +440,16 @@ describe('POST /api/key', () => {
     assert.deepEqual(calls(), [['send-keys', '-t', 'alpha', 'Enter']]);
   });
 
-  it('a missing key is rejected with `unsupported key ""` and never reaches tmux', async () => {
+  it('a missing key is rejected with 400 `unsupported key ""` and never reaches tmux', async () => {
     const r = await postJson('/api/key', { id: 'alpha' });
-    assert.equal(r.status, 500);
+    assert.equal(r.status, 400);
     assert.ok(r.body.error.startsWith('unsupported key ""'), r.body.error);
     assert.deepEqual(calls(), []);
   });
 
-  it('a disallowed key name surfaces verbatim in the rejection message', async () => {
+  it('a disallowed key name is rejected with 400 and surfaces verbatim in the message', async () => {
     const r = await postJson('/api/key', { id: 'alpha', key: 'nope' });
-    assert.equal(r.status, 500);
+    assert.equal(r.status, 400);
     assert.ok(r.body.error.startsWith('unsupported key "nope"'), r.body.error);
   });
 
