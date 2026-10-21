@@ -117,6 +117,10 @@ function initialState({ currentVersion, enabled, silent }) {
  *  - 'disabled' (dev/unpackaged) is terminal: nothing ever leaves it.
  *  - 'ready' (a downloaded update is pending) is sticky: a later check, a late
  *    error or a not-available can never clobber it — the update is on disk.
+ *  - 'available' (the manual path's only update affordance) is sticky against
+ *    check-start/error: a periodic or manual re-check, or a transient failure of
+ *    one, must not erase the known update. A later 'available' (newer),
+ *    'not-available' (withdrawn release) or 'downloaded' still replaces it.
  *  - an 'available' version that is not strictly newer than the running one is
  *    treated as up to date (belt-and-braces over the feed).
  */
@@ -125,7 +129,7 @@ function reduceUpdateState(state, event) {
   if (state.status === 'ready' && event.type !== 'downloaded') return state;
   switch (event.type) {
     case 'check-start':
-      if (state.status === 'downloading') return state;
+      if (state.status === 'downloading' || state.status === 'available') return state;
       return { ...state, status: 'checking', error: null };
     case 'available': {
       if (!isNewerVersion(state.currentVersion, event.version)) {
@@ -151,6 +155,9 @@ function reduceUpdateState(state, event) {
       return { ...state, status: 'up-to-date', version: null, percent: null, downloadUrl: null, error: null, lastCheckedAt: event.at ?? state.lastCheckedAt };
     case 'error': {
       const message = String(event.message || 'update check failed').slice(0, 300);
+      // A known manual-path update survives a failed re-check: keep the chip,
+      // just record the quiet error and when the check happened.
+      if (state.status === 'available') return { ...state, error: message, lastCheckedAt: event.at ?? state.lastCheckedAt };
       // A failed download keeps knowing which version it was after; a failed
       // check just records the quiet error.
       return { ...state, status: 'error', error: message, percent: null, lastCheckedAt: event.at ?? state.lastCheckedAt };
