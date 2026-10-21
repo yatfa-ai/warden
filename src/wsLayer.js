@@ -114,6 +114,11 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
 
     let reqCounter = 0;
     const pending = new Map();
+    // WARDEN-1893: set by the close handler. A turn is not cancelled when its socket
+    // closes, so `gate` can still run afterwards; the close handler's one-shot sweep of
+    // `pending` never sees a resolver registered after it, so `gate` re-checks this
+    // flag itself (after its await) instead of parking on a socket that cannot approve.
+    let obsClosed = false;
     const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
 
     const obs = new Observer(cfg, {
@@ -140,6 +145,11 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         // handler can append a `directive_rejected` event (approved sends are
         // recorded in observer.js at logDirective, which also covers auto-safe).
         const meta = { directive, container: chat.container, host: chat.host, role: chat.role };
+        // WARDEN-1893: checked AFTER the appendEventSafe await (a close can land during it)
+        // and immediately before registering the resolver. The directive_proposed event is
+        // already appended above; the closed socket just never gets to approve it, so the
+        // turn gets a decline, finishes, and releases the shared per-sid chain.
+        if (obsClosed) return { approved: false };
         return new Promise((resolveDecision) => pending.set(requestId, { resolve: resolveDecision, meta }));
       },
     });
@@ -168,7 +178,10 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
         }
       }
     });
-    ws.on('close', () => { for (const [, entry] of pending) entry.resolve({ approved: false }); });
+    ws.on('close', () => {
+      obsClosed = true;
+      for (const [, entry] of pending) entry.resolve({ approved: false });
+    });
   });
 
   // Pane stream WS: live PTY attach (interactive) + monitor snapshots. tmux is the
