@@ -40,6 +40,7 @@ import { resize, attachStream, probeSession } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
 import { subscribePanes, unsubscribePanes, isCompanionTransportEnabled, isCompanionExcludedHost } from './companion.js';
 import { loopMonitor } from './loop-monitor.js';
+import { isAllowedOrigin, isAllowedHost, boundHostOf } from './originGuard.js';
 
 // The host sentinel for "run on this machine, not over SSH" (mirrors server.js's
 // LOCAL — duplicated rather than imported to keep this a leaf module; the test suites
@@ -189,6 +190,13 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
   // tmux session lives on). Local chats attach to a local tmux, remotes over ssh.
   const streamWss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
+    // WARDEN-1896 — cross-site WebSocket hijack / DNS rebinding guard. Runs BEFORE
+    // routing so a forged Origin or Host never reaches either connection handler.
+    if (!isAllowedOrigin(req.headers.origin) || !isAllowedHost(req.headers.host, boundHostOf(server))) {
+      try { socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch { /* socket already gone */ }
+      socket.destroy();
+      return;
+    }
     const p = (req.url || '').split('?')[0];
     const route = (w) => w.handleUpgrade(req, socket, head, (ws) => w.emit('connection', ws, req));
     if (p === '/api/observe') route(wss);
