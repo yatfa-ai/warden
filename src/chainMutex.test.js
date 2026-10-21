@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createKeyedChain, createGlobalChain } from './chainMutex.js';
+import { deferred } from './testGate.js';
 
 // WARDEN-1870 — pins for the shared chain-mutex module. The four predecessor
 // chains (persist.js writeQueues, config.js catalogChain, collections.js
@@ -17,17 +18,12 @@ import { createKeyedChain, createGlobalChain } from './chainMutex.js';
 // Macrotask boundary: guarantees every queued microtask (chain links, tail
 // cleanup) has flushed before an assertion reads state.
 const settle = () => new Promise((r) => setImmediate(r));
-const defer = () => {
-  let resolve;
-  const promise = new Promise((r) => { resolve = r; });
-  return { promise, resolve };
-};
 
 describe('createKeyedChain', () => {
   it('queues same-key calls and runs them strictly in issue order', async () => {
     const chain = createKeyedChain();
     const order = [];
-    const gate = defer();
+    const gate = deferred();
     const p1 = chain.run('a', async () => {
       order.push('1-start');
       await gate.promise;
@@ -49,7 +45,7 @@ describe('createKeyedChain', () => {
 
   it('runs different keys fully in parallel (a blocked key stalls no other key)', async () => {
     const chain = createKeyedChain();
-    const gate = defer();
+    const gate = deferred();
     const blocked = chain.run('slow', async () => {
       await gate.promise;
       return 'slow';
@@ -84,8 +80,8 @@ describe('createKeyedChain', () => {
 
   it('pending() counts keys with work in flight and cleans up settled tails (1 -> 0)', async () => {
     const chain = createKeyedChain();
-    const g1 = defer();
-    const g2 = defer();
+    const g1 = deferred();
+    const g2 = deferred();
     assert.strictEqual(chain.pending(), 0);
     const p1 = chain.run('f1', async () => { await g1.promise; });
     const p2 = chain.run('f2', async () => { await g2.promise; });
@@ -103,7 +99,7 @@ describe('createKeyedChain', () => {
 
   it('keeps a queued call pending until its turn: a queued link holds the key', async () => {
     const chain = createKeyedChain();
-    const gate = defer();
+    const gate = deferred();
     const p1 = chain.run('k', async () => { await gate.promise; });
     const p2 = chain.run('k', () => {});
     await settle();
@@ -119,7 +115,7 @@ describe('createGlobalChain', () => {
   it('serializes every call through one implicit key, in issue order', async () => {
     const chain = createGlobalChain();
     const order = [];
-    const gate = defer();
+    const gate = deferred();
     const p1 = chain.run(async () => {
       order.push('1-start');
       await gate.promise;

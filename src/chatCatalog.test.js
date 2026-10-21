@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { createChatCatalogCache } from './chatCatalog.js';
+import { deferred } from './testGate.js';
 
 /**
  * The in-memory chat catalogue owner — WARDEN-1206.
@@ -186,14 +187,14 @@ describe('createChatCatalogCache — the in-memory catalogue owner (WARDEN-1206)
     });
 
     it('reports `checking` while a discover for that host is in flight', async () => {
-      let release;
-      const discover = (host) => new Promise((r) => { release = () => r({ host, chats: [] }); });
+      const gate = deferred();
+      const discover = (host) => gate.promise.then(() => ({ host, chats: [] }));
       const cache = createChatCatalogCache({ discover, catalog: fakeCatalog([]) });
 
       const p = cache.refreshHost('h1', {});
       assert.strictEqual(cache.hostState('h1').checking, true, 'in flight → checking');
       assert.strictEqual(cache.hostState('h1').known, false, 'in flight is not yet an answer');
-      release();
+      gate.resolve();
       await p;
       assert.strictEqual(cache.hostState('h1').checking, false, 'settled → no longer checking');
     });

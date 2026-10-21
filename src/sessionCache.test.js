@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createSessionCache, completeSessionRows, SESSION_CACHE_MAX_AGE_MS } from './sessionCache.js';
+import { deferred } from './testGate.js';
 
 /**
  * The cross-host session-list owner — WARDEN-1208.
@@ -86,14 +87,6 @@ function fakeLocal(n) {
   return fn;
 }
 
-/** A manually-released promise, so concurrency is driven by control flow rather
- *  than by wall-clock sleeps. */
-function openGate() {
-  let release;
-  const promise = new Promise((r) => { release = r; });
-  return { promise, release };
-}
-
 /** Build a cache with a hand-advanced clock. Returns the cache plus a `tick`. */
 function makeCache(opts = {}) {
   const clock = { t: 0 };
@@ -116,7 +109,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // ran their own Promise.allSettled over the same hosts, so two overlapping
       // readers produced TWO enumerations per host. One owner with a per-host
       // in-flight promise makes the second reader JOIN the first.
-      const gate = new Map([['h1', openGate().promise]]);
+      const gate = new Map([['h1', deferred().promise]]);
       const remote = fakeRemote({ h1: 3, h2: 2 });
       const local = fakeLocal(2);
       const { cache } = makeCache({ fetchLocal: local, fetchRemote: remote });
@@ -228,10 +221,10 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // flight must not join it and then compute the fleet budget from 41 rows —
       // that is a wrong NUMBER, not merely a slow response. It also must not launch
       // a competing second ssh child. So: no wait, and the short slot is DISCLOSED.
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ h1: 300 }, { gate: new Map([['h1', gate.promise]]) });
       // settleMs is LARGE, not 5: the route read races the settle window, and
-      // this test's completion must be driven by `gate.release()`, never by the
+      // this test's completion must be driven by `gate.resolve()`, never by the
       // timer. With a 5ms window the route read resolves cold (`sessions: []`)
       // whenever the setImmediate + sweep snapshot below outlast 5ms of wall
       // clock — which is exactly how CI on a slower runner failed it
@@ -244,7 +237,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       await new Promise((r) => setImmediate(r));             // let it register in-flight
       const sweepRead = cache.snapshot(['h1'], 100, { wait: true }); // needs 100
 
-      gate.release();
+      gate.resolve();
       const [route, sweep] = await Promise.all([routeRead, sweepRead]);
 
       assert.strictEqual(remote.countFor('h1'), 1,
@@ -263,7 +256,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // factual claim about the user's machines. A host we have merely not looked
       // at yet must never be merged away as zero rows (the WARDEN-89 / WARDEN-1200
       // false-empty defect two finished tickets just removed).
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ slow: 7 }, { gate: new Map([['slow', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 5 });
 
@@ -274,13 +267,13 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.strictEqual(snap[0].at, null, 'a slot that never landed has no freshness stamp');
       assert.strictEqual(snap[0].unreachable, false,
         'pending is NOT unreachable — we have no evidence about this machine either way');
-      gate.release();
+      gate.resolve();
     });
 
     it('distinguishes "not looked at yet" from "looked, and this host has no sessions"', async () => {
       // The distinction the whole design turns on, asserted directly: both answers
       // carry `sessions: []`, and they mean opposite things.
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ slow: 1, empty: 0 }, { gate: new Map([['slow', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 5 });
 
@@ -292,18 +285,18 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.strictEqual(snap.empty.known, true, 'and this one we HAVE read — it is genuinely empty');
       assert.strictEqual(snap.empty.pending, false,
         'a real empty answer is not pending; it is the answer');
-      gate.release();
+      gate.resolve();
     });
 
     it('a pending host FILLS IN on a later read (it resolves itself)', async () => {
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ slow: 4 }, { gate: new Map([['slow', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 5 });
 
       const first = await cache.snapshot(['slow'], 40);
       assert.strictEqual(first[0].known, false);
 
-      gate.release();
+      gate.resolve();
       await new Promise((r) => setImmediate(r));
       const second = await cache.snapshot(['slow'], 40);
 
@@ -318,7 +311,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // The defect in one assertion: on origin/main this read could not answer
       // until the LAST host settled, so `slow` would have held h1/h2/(local)
       // hostage for its full 15s SSH timeout.
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ h1: 3, h2: 4, slow: 9 }, { gate: new Map([['slow', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(2), fetchRemote: remote, settleMs: 5 });
 
@@ -328,7 +321,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.strictEqual(snap.h2.sessions.length, 4, 'h2 answered and is delivered');
       assert.strictEqual(snap[LOCAL].sessions.length, 2, 'the local archive too');
       assert.strictEqual(snap.slow.pending, true, 'only the slow host is missing, and it says so');
-      gate.release();
+      gate.resolve();
     });
 
     it('a permanently-slow host does NOT charge its settle window to every later read', async () => {
@@ -336,7 +329,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // A host with a fetch in flight at nearly every read would otherwise make every
       // request pay the settle window forever — the same "one bad host taxes the whole
       // response" shape this cache exists to remove, just smaller.
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ wedged: 1 }, { gate: new Map([['wedged', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 500 });
 
@@ -348,12 +341,12 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.ok(joinerMs < 250,
         `a joiner must not re-spend the settle window (took ${joinerMs}ms of a 500ms window)`);
       assert.strictEqual(remote.countFor('wedged'), 1, 'and it did not stack a second fetch');
-      gate.release();
+      gate.resolve();
     });
 
     it('the settle window is SHARED, not per-host — response cost is O(1) in fleet size', async () => {
       // What makes adding hosts safe: five cold slow hosts cost ONE window, not five.
-      const g = openGate();
+      const g = deferred();
       const hosts = ['s1', 's2', 's3', 's4', 's5'];
       const gate = new Map(hosts.map((h) => [h, g.promise]));
       const remote = fakeRemote(Object.fromEntries(hosts.map((h) => [h, 1])), { gate });
@@ -365,7 +358,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
 
       assert.ok(ms < 400 * 2, `five cold hosts must cost ONE settle window, not five (took ${ms}ms)`);
       assert.strictEqual(remote.calls.length, 5, 'all five were still scheduled concurrently');
-      g.release();
+      g.resolve();
     });
   });
 
@@ -567,11 +560,11 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // The budget is a NUMBER. A settle-bounded sweep would compute fleet spend
       // from whichever hosts happened to be fast, under-counting silently — worse
       // than being slow, since nobody is waiting on this beat anyway.
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ slow: 6 }, { gate: new Map([['slow', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(2), fetchRemote: remote, settleMs: 1 });
 
-      setTimeout(() => gate.release(), 15);
+      setTimeout(() => gate.resolve(), 15);
       const snap = byHost(await cache.snapshot([LOCAL, 'slow'], 100, { wait: true }));
 
       assert.strictEqual(snap.slow.sessions.length, 6, 'the sweep waited for the slow host');
@@ -632,7 +625,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // EXISTS and is SHORT, so the fixture below builds exactly that: fill at 41,
       // let it go stale, hold the REFRESH open, then have the sweep arrive.
       let calls = 0;
-      const gate = openGate();
+      const gate = deferred();
       // Only the SECOND fetch is held open — the first must land to fill the slot.
       const fetchRemote = async (host, limit) => {
         calls += 1;
@@ -671,7 +664,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.deepStrictEqual(completeSessionRows(sweep), [],
         'a truncated host contributes NO rows — "no spend from it this tick", not under-counted spend');
 
-      gate.release();
+      gate.resolve();
       // The route read, by contrast, KEEPS its rows: it got the window it asked
       // for, and it renders a list rather than computing a number.
       const route = await routeRead;
@@ -683,7 +676,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // `known: false` (never looked) and `known: true, sessions: []` (looked, empty)
       // are different facts. Both contribute zero rows to the budget — but only the
       // second is a claim about the machine.
-      const gate = openGate();
+      const gate = deferred();
       const remote = fakeRemote({ cold: 5, empty: 0 }, { gate: new Map([['cold', gate.promise]]) });
       const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 1 });
 
@@ -696,7 +689,7 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.deepStrictEqual(completeSessionRows([joiner.cold, joiner.empty]), [],
         'neither contributes spend, for two different reasons');
 
-      gate.release();
+      gate.resolve();
       await first;
     });
 

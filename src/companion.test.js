@@ -54,6 +54,7 @@ import {
 } from './companion.js';
 import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize, send as tmuxSend, sendKey as tmuxSendKey } from './tmux.js';
 import { pollUntil } from './testWait.js';
+import { deferred } from './testGate.js';
 import { classifyProbe } from './sessionRecovery.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
@@ -2384,11 +2385,11 @@ describe('companion transport status (WARDEN-878)', () => {
     // active once the bootstrap completes. Only the PROBE (the first runFn call) is
     // deferred; the reap (WARDEN-904) is a later best-effort runFn call and must
     // resolve immediately so the bootstrap completes.
-    let resolveProbe;
+    const probe = deferred();
     let firstRun = true;
     const { deps } = fakeDeps({
       run: () => firstRun
-        ? (firstRun = false, new Promise((resolve) => { resolveProbe = resolve; }))
+        ? (firstRun = false, probe.promise)
         : Promise.resolve({ ok: true, stdout: '', stderr: '' }),
     });
     const pending = getChannel('prod-booting', {}, deps);
@@ -2397,7 +2398,7 @@ describe('companion transport status (WARDEN-878)', () => {
     await new Promise((r) => setImmediate(r));
     assert.strictEqual(getCompanionStatus('prod-booting').state, 'bootstrapping');
     // Release the probe so the bootstrap finishes (and the channel teardown stays clean).
-    resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+    probe.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
     assert.deepStrictEqual(getCompanionStatus('prod-booting'), { state: 'active', version: TEST_VER });
   });
@@ -2424,15 +2425,15 @@ describe('companion transport status (WARDEN-878)', () => {
     first.kill(); // simulate the ssh process exiting
     // Only the PROBE (first runFn call of the re-bootstrap) is deferred; the reap
     // (WARDEN-904) is a later best-effort runFn call and resolves immediately.
-    let resolveProbe;
+    const probe = deferred();
     let firstRun = true;
     deps.run = () => firstRun
-      ? (firstRun = false, new Promise((resolve) => { resolveProbe = resolve; }))
+      ? (firstRun = false, probe.promise)
       : Promise.resolve({ ok: true, stdout: '', stderr: '' });
     const pending = getChannel('prod-redead', {}, deps);
     await new Promise((r) => setImmediate(r));
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'bootstrapping');
-    resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+    probe.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
   });
@@ -2582,11 +2583,11 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
   });
 
   it('a superseded bootstrap registers no death listener: its kill writes nothing (twin of the WARDEN-1390 release race)', async () => {
-    let resolveProbe;
+    const probe = deferred();
     let firstRun = true;
     const { deps } = fakeDeps({
       run: () => firstRun
-        ? (firstRun = false, new Promise((resolve) => { resolveProbe = resolve; }))
+        ? (firstRun = false, probe.promise)
         : Promise.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }),
     });
     const pending = getChannel('prod-twin', {}, deps); // bootstrap in flight
@@ -2594,7 +2595,7 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
     assert.strictEqual(getCompanionStatus('prod-twin').state, 'bootstrapping', 'precondition: in flight');
 
     applyCompanionExclusions(['prod-twin']); // the release drops the in-flight promise
-    resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+    probe.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending; // the twin settles: identity check fails → killed WITHOUT registering
     applyCompanionExclusions([]); // lift the exclusion so the raw map is readable
     assert.strictEqual(_channelCacheHasForTests('prod-twin'), false, 'no cache entry');
@@ -3532,19 +3533,19 @@ describe('pingProbe() — reachability over a live channel, never a bootstrap (W
   it('declines while a bootstrap is in flight (not ours to await, not ours to stack on)', async () => {
     // Hazard (companion.test.js history): a run() stub that never resolves hangs
     // the whole file — defer ONLY the first call, resolve everything after.
-    let resolveFirst;
+    const first = deferred();
     let firstRun = true;
     const { deps } = fakeDeps({
       run: (...a) => {
         if (!firstRun) return Promise.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
         firstRun = false;
-        return new Promise((r) => { resolveFirst = () => r({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }); });
+        return first.promise;
       },
     });
     const pending = getChannel('prod', {}, deps); // bootstrap in flight → status 'bootstrapping'
     const res = await pingProbe('prod');
     assert.strictEqual(res, null, 'the probe neither awaits nor stacks on the in-flight bootstrap');
-    resolveFirst();
+    first.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
     // After the bootstrap lands, the SAME probe rides the now-live channel.
     const after = await pingProbe('prod');

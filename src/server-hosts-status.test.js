@@ -9,6 +9,7 @@ import {
   HOST_STATUS_MAX_AGE_MS,
   HOST_PROBE_TIMEOUT_MS,
 } from './hostStatus.js';
+import { deferred } from './testGate.js';
 
 /**
  * Tests for the /api/hosts/status feature.
@@ -316,13 +317,6 @@ describe('/api/hosts/status companion field (WARDEN-878)', () => {
 // re-probe (the "first-open cliff"), the wait does not scale with host count,
 // and one bad host degrades only its own entry.
 // ---------------------------------------------------------------------------
-
-/** A probe whose settlement the test controls. */
-function deferred() {
-  let resolve;
-  const promise = new Promise((r) => { resolve = r; });
-  return { promise, resolve };
-}
 
 describe('checkHost — bounded probe (opts.timeoutMs)', () => {
   it('reports offline with a timeout error when validateHost outlives the bound', async () => {
