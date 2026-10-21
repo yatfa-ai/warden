@@ -1,5 +1,5 @@
 import express from 'express';
-import { read as readPane, send as sendPane, sendKey } from './tmux.js';
+import { read as readPane, send as sendPane, sendKey, ALLOWED_KEYS } from './tmux.js';
 import { capturePanes } from './chats.js';
 import { resolvePaneContainer, projectFromContainerResolution } from './paneContainer.js';
 import { deliverPastedImage } from './pasteImage.js';
@@ -89,7 +89,13 @@ export function createPaneRouter({ cfg, resolve, chatCatalog }) {
   router.post('/api/key', async (req, res) => {
     const r = await resolve(String(req.body?.id || ''));
     if (r.error) return res.status(404).json(r);
-    try { await sendKey(r.chat, cfg, String(req.body?.key || '')); res.json({ ok: true }); }
+    // A missing / misspelled / non-allow-listed key is caller input, not a server
+    // failure: answer 400 so request telemetry (ok = status < 500) does not count
+    // it as one. sendKey keeps its own check (the JS-side trust boundary); genuine
+    // transport/tmux failures still reach the catch below -> 500.
+    const key = String(req.body?.key || '');
+    if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: `unsupported key "${key.slice(0, 40)}"` });
+    try { await sendKey(r.chat, cfg, key); res.json({ ok: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
