@@ -585,3 +585,59 @@ export function installRendererErrorCapture(): void {
     if (event && event.reason != null) forwardRendererError(event.reason);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Auto-update bridge (WARDEN-1887). The update machinery lives in MAIN; the
+// renderer only displays state and relays two user gestures. Same three-context
+// feature detection as everything above: `window.wardenUpdate` exists only in
+// the packaged/Electron app, so `npm run dev` and `node web/smoke.cjs` get a
+// no-op everywhere here. Nothing takes a URL — main opens the one it recorded.
+// ---------------------------------------------------------------------------
+export type UpdateStatus =
+  | 'disabled' | 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'up-to-date' | 'error';
+
+export interface UpdateState {
+  status: UpdateStatus;
+  currentVersion: string | null;
+  version: string | null;
+  percent: number | null;
+  silent: boolean;
+  downloadUrl: string | null;
+  error: string | null;
+  lastCheckedAt: number | null;
+}
+
+interface WardenUpdateBridge {
+  getState: () => Promise<UpdateState | null>;
+  checkNow: () => Promise<UpdateState | null>;
+  installNow: () => Promise<boolean>;
+  openDownload: () => Promise<boolean>;
+  onState: (cb: (s: UpdateState) => void) => () => void;
+}
+
+function updateBridge(): WardenUpdateBridge | undefined {
+  return (window as unknown as { wardenUpdate?: WardenUpdateBridge }).wardenUpdate;
+}
+
+export async function getUpdateState(): Promise<UpdateState | null> {
+  try { return (await updateBridge()?.getState()) ?? null; } catch { return null; }
+}
+
+export async function installUpdateNow(): Promise<boolean> {
+  try { return (await updateBridge()?.installNow()) ?? false; } catch { return false; }
+}
+
+export async function openUpdateDownload(): Promise<boolean> {
+  try { return (await updateBridge()?.openDownload()) ?? false; } catch { return false; }
+}
+
+export function onUpdateState(cb: (s: UpdateState) => void): () => void {
+  const b = updateBridge();
+  if (!b || typeof b.onState !== 'function') return () => {};
+  try {
+    return b.onState(cb) ?? (() => {});
+  } catch (e) {
+    console.warn('[warden:electron] onUpdateState failed', e);
+    return () => {};
+  }
+}

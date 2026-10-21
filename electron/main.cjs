@@ -94,6 +94,11 @@ const { summarizeStalls, formatStallSummary } = require('./stall-summary.cjs');
 // machine is never reported as a blocked one. Pure/testable (suspend-clock.test.mjs);
 // main.cjs wires the live events.
 const { createSuspendClock } = require('./suspend-clock.cjs');
+// Auto-update (WARDEN-1887): the pure core + the injectable controller. The
+// live electron-updater is required LAZILY inside getAutoUpdater (silent path
+// only, packaged only) so dev runs and the macOS manual path never load it.
+const updaterCore = require('./updater-core.cjs');
+const { createUpdater } = require('./updater.cjs');
 
 // --- Single-instance lock (WARDEN-1346) ----------------------------------------
 // Warden is a SINGLE-INSTANCE app: every instance shares one backend port
@@ -781,9 +786,97 @@ async function showStallDiagnostics() {
   }
 }
 
-// Install the application menu. Called once from app.whenReady(), replacing the
+
+// --- Auto-update wiring (WARDEN-1887) -----------------------------------------
+// The orchestration lives in updater.cjs (unit-tested); this block only supplies
+// the live Electron/network APIs and the UI surfaces (menu item, native dialog,
+// renderer push). Inert unless app.isPackaged: `npm run dev` / `electron .` never
+// construct anything that touches the network.
+let updater = null;
+let lastMenuUpdateLabel = null;
+
+async function fetchTextWithTimeout(url, { timeoutMs }) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'User-Agent': 'yatfa-warden-updater' } });
+    if (!res.ok) throw new Error(`update feed HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function installAutoUpdater() {
+  try {
+    updater = createUpdater({
+      currentVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+      platform: process.platform,
+      env: process.env,
+      getAutoUpdater: () => require('electron-updater').autoUpdater,
+      fetchText: fetchTextWithTimeout,
+      log: (...a) => console.warn('[warden:updater]', ...a),
+      onStateChange: (state) => {
+        sendToRenderer('update:state', state);
+        // Reflect a pending update in the menu label ("Restart to Apply…").
+        const label = updaterCore.menuLabelFor(state);
+        if (label !== lastMenuUpdateLabel) installApplicationMenu();
+      },
+    });
+    updater.start();
+  } catch (e) {
+    // An updater failure must never stop the app from booting.
+    console.warn('[warden:updater] install failed', e);
+    updater = null;
+  }
+}
+
+// Help ▸ Check for Updates… — reports honestly, including "up to date".
+async function manualUpdateCheck() {
+  try {
+    if (!updater) {
+      await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+        type: 'info', title: 'Check for Updates', buttons: ['OK'], noLink: true,
+        ...updaterCore.describeManualResult({ status: 'disabled', currentVersion: app.getVersion() }),
+      });
+      return;
+    }
+    const state = await updater.checkNow();
+    const r = updaterCore.describeManualResult(state);
+    const buttons = r.action ? [r.actionLabel, 'Later'] : ['OK'];
+    const res = await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+      type: 'info', title: 'Check for Updates', message: r.message, detail: r.detail,
+      buttons, defaultId: 0, cancelId: buttons.length - 1, noLink: true,
+    });
+    if (res && res.response === 0 && r.action === 'install') updater.installNow();
+    if (res && res.response === 0 && r.action === 'download') await openUpdateDownload();
+  } catch (e) {
+    console.warn('[warden:updater] manual check failed', e);
+  }
+}
+
+// The URL comes from main's own state — never from the renderer — and is
+// re-validated as https before it reaches shell.openExternal.
+async function openUpdateDownload() {
+  const url = updater && updater.getState().downloadUrl;
+  if (typeof url !== 'string' || !/^https:\/\//i.test(url)) return false;
+  try { await shell.openExternal(url); return true; } catch (e) {
+    console.warn('[warden:updater] openExternal failed', e);
+    return false;
+  }
+}
+
+ipcMain.handle('update:get-state', () => (updater ? updater.getState() : null));
+ipcMain.handle('update:check', async () => (updater ? updater.checkNow() : null));
+ipcMain.handle('update:install', () => (updater ? updater.installNow() : false));
+ipcMain.handle('update:open-download', () => openUpdateDownload());
+
+// Install the application menu. Called from app.whenReady() (and re-run when the
+// update state changes the menu label), replacing the
 // stock template for every window in the app.
 function installApplicationMenu() {
+  lastMenuUpdateLabel = updaterCore.menuLabelFor(updater ? updater.getState() : null);
   try {
     // The macOS About panel's contents (what the `role: 'about'` item renders).
     // Name + version only — the same no-invented-destinations rule as the
@@ -799,6 +892,7 @@ function installApplicationMenu() {
         buildMenuTemplate({
           platform: process.platform,
           appName: 'Yatfa Warden',
+          updateLabel: updaterCore.menuLabelFor(updater ? updater.getState() : null),
           handlers: {
             // WARDEN-1333: the template wraps every window-targeting action
             // below with this restore-first guard (Open Data Folder is the one
@@ -811,6 +905,9 @@ function installApplicationMenu() {
             // subscription → those contexts are byte-unaffected.
             openSettings: () => sendToRenderer('menu:open-settings'),
             showAbout: () => showAboutDialog(),
+            // WARDEN-1887: Help ▸ Check for Updates… (also the apply gesture
+            // while a downloaded update is pending).
+            checkForUpdates: () => { void manualUpdateCheck(); },
             showStallDiagnostics: () => { void showStallDiagnostics(); },
             openDataFolder: () => { void openDataFolder(); },
             // Window > Maximize / Restore (Windows/Linux only — macOS keeps
@@ -1561,6 +1658,10 @@ app.whenReady().then(async () => {
   // swallows its own errors, so this can never block boot.
   installApplicationMenu();
 
+  // WARDEN-1887 — packaged-only background update checks (startup delay +
+  // periodic timer); a no-op in dev/unpackaged runs.
+  installAutoUpdater();
+
   // WARDEN-1508 — arm main's process-memory sampler (unref'd timers; inert
   // while operational-metrics consent is off).
   processMemoryProducer.start();
@@ -1712,6 +1813,7 @@ app.whenReady().then(async () => {
 });
 
 function cleanup() {
+  try { if (updater) updater.stop(); } catch {}
   // Tear down the telemetry taps so no listener outlives quit (defensive; the
   // process is exiting anyway).
   try { telemetry.dispose(); } catch {}

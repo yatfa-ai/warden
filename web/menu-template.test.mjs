@@ -61,6 +61,7 @@ function buildWithSpies(platform) {
     handlers: {
       openSettings: spy('openSettings'),
       showAbout: spy('showAbout'),
+      checkForUpdates: spy('checkForUpdates'),
       showStallDiagnostics: spy('showStallDiagnostics'),
       openDataFolder: spy('openDataFolder'),
       toggleMaximize: spy('toggleMaximize'),
@@ -382,6 +383,7 @@ function buildWithOrder(platform) {
       ensureMainWindowVisible: () => order.push('ensure'),
       openSettings: () => order.push('openSettings'),
       showAbout: () => order.push('showAbout'),
+      checkForUpdates: () => order.push('checkForUpdates'),
       showStallDiagnostics: () => order.push('showStallDiagnostics'),
       openDataFolder: () => order.push('openDataFolder'),
       toggleMaximize: () => order.push('toggleMaximize'),
@@ -396,6 +398,7 @@ const WINDOW_TARGETING_ITEMS = [
   ['Settings…', 'openSettings', ['darwin', 'win32', 'linux']],
   ['Stall Diagnostics…', 'showStallDiagnostics', ['darwin', 'win32', 'linux']],
   ['About Yatfa Warden', 'showAbout', ['win32', 'linux']],
+  ['Check for Updates…', 'checkForUpdates', ['darwin', 'win32', 'linux']],
   ['Maximize / Restore', 'toggleMaximize', ['win32', 'linux']],
   // WARDEN-1356 — Select All acts on the renderer's focus, so it inherits the
   // reach wrap like every other window-targeting item. This is the STATED

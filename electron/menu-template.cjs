@@ -45,6 +45,8 @@
  *   - openDataFolder()     shell.openPath on ~/.yatfa-warden/
  *   - toggleMaximize()     maximize/restore the live window (Windows/Linux Window menu;
  *                          macOS uses role:'zoom', which AppKit handles natively)
+ *   - checkForUpdates()    manual update check / apply (WARDEN-1887); reports honestly,
+ *                          including "you're up to date"
  *   - selectAll()          push 'menu:select-all' to the renderer (Edit ▸ Select All —
  *                          see the Edit-submenu comment for why it is not a role)
  * @returns {Array<object>} a Menu.buildFromTemplate-compatible template
@@ -90,7 +92,15 @@ const REACHABILITY_EXEMPT = new Map([
   ['openDataFolder', 'opens the OS file manager, not the app window'],
 ]);
 
-function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warden', handlers = {} } = {}) {
+function buildMenuTemplate({
+  platform = process.platform,
+  appName = 'Yatfa Warden',
+  handlers = {},
+  // The update item's label (WARDEN-1887): "Check for Updates…" normally, and
+  // "Restart to Apply Update (x.y.z)…" while a downloaded update is pending —
+  // main rebuilds the menu when that state changes (updater-core menuLabelFor).
+  updateLabel = 'Check for Updates…',
+} = {}) {
   const isMac = platform === 'darwin';
   const noop = () => {};
 
@@ -117,6 +127,7 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
   const openDataFolder = reach('openDataFolder', handlers.openDataFolder);
   const toggleMaximize = reach('toggleMaximize', handlers.toggleMaximize);
   const selectAll = reach('selectAll', handlers.selectAll);
+  const checkForUpdates = reach('checkForUpdates', handlers.checkForUpdates);
 
   // The Settings item. On macOS the platform convention puts Preferences in the
   // APP menu (Cmd+,); on Windows/Linux it belongs in File (Ctrl+,). Same handler,
@@ -129,6 +140,11 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
 
   // Diagnostics items — shared by the macOS Help menu and the Windows/Linux Help
   // menu, so the two platform variants can never drift apart.
+  // The update item sits FIRST in Help on every platform — it is the "natural
+  // home next to About" for Windows/Linux (About is the last Help item there)
+  // and the conventional spot on macOS (whose About is in the app menu).
+  const updateItem = { label: updateLabel, click: () => checkForUpdates() };
+
   const diagnosticsItems = [
     { label: 'Stall Diagnostics…', click: () => showStallDiagnostics() },
     { label: 'Open Data Folder', click: () => openDataFolder() },
@@ -277,8 +293,8 @@ function buildMenuTemplate({ platform = process.platform, appName = 'Yatfa Warde
     label: 'Help',
     role: 'help',
     submenu: isMac
-      ? [...diagnosticsItems]
-      : [...diagnosticsItems, { type: 'separator' }, { label: `About ${appName}`, click: () => showAbout() }],
+      ? [updateItem, { type: 'separator' }, ...diagnosticsItems]
+      : [updateItem, { type: 'separator' }, ...diagnosticsItems, { type: 'separator' }, { label: `About ${appName}`, click: () => showAbout() }],
   });
 
   return template;
