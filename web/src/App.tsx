@@ -36,6 +36,7 @@ import { PanelToggleButtons } from '@/components/PanelToggleButtons';
 import { PanelLayoutSync } from '@/components/PanelLayoutSync';
 import { AppearanceSync } from '@/components/AppearanceSync';
 import { AppMenuBridge } from '@/components/AppMenuBridge';
+import { UpdateBanner } from '@/components/UpdateBanner';
 import { PaneActivitySync } from '@/components/PaneActivitySync';
 import { AttentionBadge } from '@/components/AttentionBadge';
 import { ReturnBanner } from '@/components/ReturnBanner';
@@ -1369,6 +1370,7 @@ function App() {
       <PanelLayoutSync />
       <AppearanceSync />
       <AppMenuBridge />
+      <UpdateBanner />
       <PaneActivitySync />
       <GlobalSearchHost onOpenChat={openChat} />
       <ConfirmDialog

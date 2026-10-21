@@ -157,3 +157,22 @@ contextBridge.exposeInMainWorld('wardenTelemetry', {
   // wire's last line of defense.
   reportFeatureUsage: (snapshot) => ipcRenderer.send('telemetry:renderer-usage', snapshot),
 });
+
+// Auto-update bridge (WARDEN-1887). The update machinery lives in MAIN; the
+// renderer only DISPLAYS state and relays two user gestures. Deliberately no URL
+// parameter anywhere: 'openDownload' opens the URL main itself recorded, so a
+// compromised renderer cannot aim it elsewhere. Absent in `npm run dev` + smoke
+// (the web layer feature-detects it).
+contextBridge.exposeInMainWorld('wardenUpdate', {
+  getState: () => ipcRenderer.invoke('update:get-state'),
+  checkNow: () => ipcRenderer.invoke('update:check'),
+  installNow: () => ipcRenderer.invoke('update:install'),
+  openDownload: () => ipcRenderer.invoke('update:open-download'),
+  onState: (cb) => {
+    const listener = (_event, state) => {
+      try { cb(state); } catch { /* a renderer callback must never crash main */ }
+    };
+    ipcRenderer.on('update:state', listener);
+    return () => ipcRenderer.removeListener('update:state', listener);
+  },
+});
