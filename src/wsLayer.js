@@ -140,18 +140,32 @@ export function setupWsLayer({ server, cfg, resolve, chatCatalog, paneInputTelem
 
         // Otherwise, require confirmation
         const requestId = String(++reqCounter);
+        // WARDEN-1900: the resolver is registered BEFORE directive_proposed is sent. A client
+        // that answers straight away (scripted / loopback) would otherwise land its
+        // gate_decision while we are still awaiting the activity append below, find no
+        // `pending` entry, and be silently dropped — an approve then degrades to a decline.
+        // Stash the directive meta alongside the resolver so the gate_decision handler can
+        // append a `directive_rejected` event (approved sends are recorded in observer.js
+        // at logDirective, which also covers auto-safe).
+        const meta = { directive, container: chat.container, host: chat.host, role: chat.role };
+        let settled = false;
+        const decision = new Promise((resolveDecision) => pending.set(requestId, {
+          resolve: (v) => { settled = true; resolveDecision(v); },
+          meta,
+        }));
         send({ type: 'directive_proposed', requestId, container: chat.container, host: chat.host, role: chat.role, directive });
         await appendEventSafe({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
-        // Stash the directive meta alongside the resolver so the gate_decision
-        // handler can append a `directive_rejected` event (approved sends are
-        // recorded in observer.js at logDirective, which also covers auto-safe).
-        const meta = { directive, container: chat.container, host: chat.host, role: chat.role };
-        // WARDEN-1893: checked AFTER the appendEventSafe await (a close can land during it)
-        // and immediately before registering the resolver. The directive_proposed event is
-        // already appended above; the closed socket just never gets to approve it, so the
-        // turn gets a decline, finishes, and releases the shared per-sid chain.
-        if (obsClosed) return { approved: false };
-        return new Promise((resolveDecision) => pending.set(requestId, { resolve: resolveDecision, meta }));
+        // WARDEN-1893: a close can land during the append. The close handler's one-shot
+        // sweep releases entries registered before it (ours is), but a socket that was
+        // ALREADY closed when this gate started never sweeps again — so re-check here.
+        // The directive_proposed event is already appended; the closed socket just never
+        // gets to approve it, so the turn gets a decline, finishes, and releases the
+        // shared per-sid chain. A decision that already arrived (settled) is honoured.
+        if (obsClosed && !settled) {
+          pending.delete(requestId);
+          return { approved: false };
+        }
+        return decision;
       },
     });
     send({ type: 'history', name: obs.name, items: obs.serializeForUi(), chatContext: obs.getChatContext(), model: resolveModel() });
