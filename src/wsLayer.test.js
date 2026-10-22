@@ -181,8 +181,8 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
   const queueDirective = (directive) => llmQueue.push({
     content: [{ type: 'tool_use', id: `tu-${uniq()}`, name: 'send_directive', input: { id: victim, directive } }],
   });
-  // Wait until the server has REGISTERED the pending gate (the directive_proposed
-  // activity event is written before pending.set; pad slightly past it).
+  // Wait until the directive_proposed frame + activity event are out (the resolver is
+  // registered BEFORE the frame is sent since WARDEN-1900; the pad is just settle time).
   async function awaitProposed(c, directive) {
     const f = await pollUntil(() => c.find('directive_proposed', (x) => x.directive === directive), { what: `directive_proposed ${directive}` });
     await pollUntil(async () => (await eventsOf('directive_proposed', (e) => e.directive === directive)).length > 0, { what: 'directive_proposed event' });
@@ -280,6 +280,35 @@ describe('setupWsLayer handler contracts (real http server + real WebSocket + lo
       await pollUntil(async () => (await eventsOf('directive_sent', (e) => e.directive === edited)).length, { what: 'directive_sent with edited text' });
       assert.strictEqual((await eventsOf('directive_sent', (e) => e.directive === original)).length, 0, 'the original text must not be what was sent');
     } finally { c.ws.close(); }
+  });
+
+  it('observe: WARDEN-1900 — a gate_decision sent synchronously on receipt of directive_proposed is honoured in 30/30 trials (approve sends, reject records directive_rejected)', async () => {
+    const N = 30;
+    for (let i = 0; i < N; i++) {
+      const approve = i % 2 === 0;
+      const directive = `race ${approve ? 'approve' : 'reject'} ${i} ${uniq()}`;
+      const c = openObserve(confirmSrv.port);
+      // Reply from inside the message handler, i.e. ~0ms after the frame arrives.
+      c.ws.on('message', (d) => {
+        let f; try { f = JSON.parse(String(d)); } catch { return; }
+        if (f.type === 'directive_proposed' && f.directive === directive) {
+          c.send({ type: 'gate_decision', requestId: f.requestId, approved: approve });
+        }
+      });
+      await c.ready();
+      try {
+        queueDirective(directive);
+        c.send({ type: 'user', text: 'tell victim', panes: [] });
+        await pollUntil(() => c.find('done'), { what: `done (trial ${i}, ${approve ? 'approve' : 'reject'})` });
+        if (approve) {
+          await pollUntil(async () => (await eventsOf('directive_sent', (e) => e.directive === directive)).length, { what: `directive_sent (trial ${i})` });
+          assert.strictEqual((await eventsOf('directive_rejected', (e) => e.directive === directive)).length, 0, `trial ${i}: approve must not log a rejection`);
+        } else {
+          await pollUntil(async () => (await eventsOf('directive_rejected', (e) => e.directive === directive)).length, { what: `directive_rejected (trial ${i})` });
+          assert.strictEqual((await eventsOf('directive_sent', (e) => e.directive === directive)).length, 0, `trial ${i}: reject must not send`);
+        }
+      } finally { c.ws.close(); }
+    }
   });
 
   it('observe: closing the socket declines a pending directive — it is never sent', async () => {
