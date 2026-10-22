@@ -84,3 +84,18 @@ export function hostGuardMiddleware(getBoundHost) {
     res.status(403).type('text/plain').send('Forbidden: unexpected Host header');
   };
 }
+
+// WARDEN-1902 — HTTP Origin guard for state-changing routes. Browsers send
+// CORS-simple requests (text/plain or body-less cross-site POSTs) with NO
+// preflight and the server executes them even though the response is unreadable;
+// the Host guard does not stop this (the attacker posts to 127.0.0.1/localhost,
+// an allowed Host). Safe methods pass; every other method needs an allowed (or
+// absent) Origin. No CORS headers, no tokens.
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+export function originGuardMiddleware() {
+  return (req, res, next) => {
+    if (SAFE_METHODS.has(String(req.method).toUpperCase())) return next();
+    if (isAllowedOrigin(req.headers.origin)) return next();
+    res.status(403).type('text/plain').send('Forbidden: unexpected Origin header');
+  };
+}
