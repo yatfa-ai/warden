@@ -1,5 +1,5 @@
 import express from 'express';
-import { readChatFile, resolveLocalFile, probeRemoteFile } from './chatFiles.js';
+import { readChatFile, resolveLocalFile, probeRemoteFile, probeContainerFile } from './chatFiles.js';
 import { searchLocalRaw, buildSearchScript, parseSearchOutput } from './workspaceSearch.js';
 import { runInContext, gitCwd } from './gitRoutes.js';
 
@@ -68,7 +68,7 @@ export function createChatFileRouter({ resolve, fileExistsTelemetry, local }) {
     const finishProbe = (kind, ok) =>
       fileExistsTelemetry.recordProbe(kind, Date.now() - probeStart, ok);
 
-    if (chat.host === local) {
+    if (!chat.container && chat.host === local) {
       const exists = resolveLocalFile(cwd, filePath).ok;
       finishProbe('local', exists);
       return res.json({ exists });
@@ -79,7 +79,10 @@ export function createChatFileRouter({ resolve, fileExistsTelemetry, local }) {
     // timeout, script failure) answers `{ exists: false, failed: true }` so the
     // renderer can tell it from a conclusive absence and not cache it, and the
     // telemetry files it in a separate failure bucket instead of "absent".
-    const probe = await probeRemoteFile(chat.host, cwd, filePath);
+    // WARDEN-1908: container chats (local OR remote host) probe inside the container.
+    const probe = chat.container
+      ? await probeContainerFile(chat, filePath)
+      : await probeRemoteFile(chat.host, cwd, filePath);
     const elapsed = Date.now() - probeStart;
     if (probe.state === 'failed') {
       fileExistsTelemetry.recordRemoteFailure(probe.reason, elapsed);
