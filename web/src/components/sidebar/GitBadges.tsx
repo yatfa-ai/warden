@@ -1241,7 +1241,8 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
               owner/repo (or the raw URL for a non-web remote) deep-link to the repo's
               web home; when HEAD tracks an upstream, that ref links to its branch too.
               stopPropagation on each anchor keeps a click from toggling the popover —
-              target="_blank" opens the system browser (mirrors MarkdownBody.tsx's <a>). */}
+              target="_blank" is routed to the system browser by the Electron main
+              process's setWindowOpenHandler (electron/external-nav.cjs, WARDEN-1906). */}
           {/* WARDEN-1014: a failed /api/git-remote leaves primaryRemote null, so the
               origin row (and every deep link derived from it) silently vanished —
               identical to a repo with no web-resolvable remote. Say so instead. */}
