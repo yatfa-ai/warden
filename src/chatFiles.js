@@ -8,6 +8,7 @@ import os from 'node:os';
 import { shellQuote } from './ssh.js';
 import { isWithinResolvedCwd, CWD_CONTAINMENT_CASE } from './pathContainment.js';
 import { deliverRemoteScript } from './companion.js';
+import { runInContext } from './gitTransport.js';
 
 const LOCAL = '(local)';
 
@@ -206,6 +207,22 @@ function mapReadScriptError(out) {
 // correctness improvement with zero spec regression.
 export async function readChatFile(chat, filePath, deps = {}) {
   const cwd = chat.cwd || '.';
+  // WARDEN-1908: a yatfa docker-agent chat's cwd is an IN-CONTAINER path, so the
+  // host-fs branch below (local) and the bare host `bash -lc` (remote) both read
+  // the WRONG filesystem. Deliver the same guarded script inside the container
+  // via runInContext (docker exec — local or over the remote transport), exactly
+  // as /api/search-files and the git routes do. This precedes the LOCAL check so
+  // a local-container chat never touches the warden machine's own fs. The script
+  // keeps the realpath + cwd-containment + 1MB + binary-extension guards.
+  if (chat.container) {
+    const result = await runInContext(chat, buildReadFileScript(cwd, filePath), { timeout: 10000 }, deps);
+    if (!result.ok) {
+      const out = `${result.stdout || ''}${result.stderr || ''}`;
+      return { ok: false, ...mapReadScriptError(out) };
+    }
+    if (isBinaryBlob(result.stdout)) return { ok: false, status: 400, error: 'cannot read binary files' };
+    return { ok: true, content: result.stdout };
+  }
   if (chat.host === LOCAL) {
     const resolved = resolveLocalFile(cwd, filePath);
     if (!resolved.ok) return { ok: false, status: resolved.status, error: resolved.error };
@@ -307,6 +324,25 @@ const FILE_EXISTS_ABSENT_MARKER =
   /(^|\n)ERROR (invalid path|file not found|path must be within working directory|path is a directory|not a file)\s*(\n|$)/;
 
 export async function probeRemoteFile(host, cwd, filePath, deps = {}) {
+  return probeFileVia(
+    (opts) => deliverRemoteScript(host, buildFileExistsScript(cwd, filePath), opts, {}, deps),
+    deps,
+  );
+}
+
+// WARDEN-1908 — the container-aware twin of probeRemoteFile: delivers the SAME
+// buildFileExistsScript inside the chat's container via runInContext (docker
+// exec, local or remote), keeping the identical three-state contract, deadline
+// and grace. Used by /api/file-exists for any chat with a `container`.
+export async function probeContainerFile(chat, filePath, deps = {}) {
+  const cwd = chat.cwd || '.';
+  return probeFileVia(
+    (opts) => runInContext(chat, buildFileExistsScript(cwd, filePath), opts, deps),
+    deps,
+  );
+}
+
+async function probeFileVia(deliver, deps) {
   const timeoutMs = deps.probeTimeoutMs ?? REMOTE_FILE_EXISTS_TIMEOUT_MS;
   const graceMs = deps.probeDeadlineGraceMs ?? REMOTE_FILE_EXISTS_DEADLINE_GRACE_MS;
   const started = Date.now();
@@ -317,7 +353,7 @@ export async function probeRemoteFile(host, cwd, filePath, deps = {}) {
   let result;
   try {
     result = await Promise.race([
-      (async () => deliverRemoteScript(host, buildFileExistsScript(cwd, filePath), { timeout: timeoutMs }, {}, deps))().catch(() => undefined),
+      (async () => deliver({ timeout: timeoutMs }))().catch(() => undefined),
       deadline,
     ]);
   } finally {
