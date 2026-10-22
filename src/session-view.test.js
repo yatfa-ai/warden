@@ -9,6 +9,8 @@ import {
   transcriptWindow,
   buildSessionReadScript,
   parseSessionReadOutput,
+  alignOlderPageCursor,
+  readLocalSessionTranscript,
 } from './claudeSessions.js';
 
 /**
@@ -403,13 +405,16 @@ describe('parseSessionReadOutput', () => {
     // Exact stdout an older-page ranged read emits: ___SZ + ___BODY and NO ___HEAD
     // (cwd is first-page-only). before=900000 on a 1MB file → window [500000,900000],
     // prevCursor=500000, hasMore=true.
-    const body = jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'older' }] } }) + '\n';
+    // A window starting mid-file begins with the tail of a line ('tail-of-prev"}}\n',
+    // 17 bytes, unparseable): prevCursor is line-aligned past it (WARDEN-1912).
+    const partial = 'tail-of-prev"}}\n';
+    const body = partial + jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'older' }] } }) + '\n';
     const stdout = `___SZ\t1000000\n\n___BODY\n${body}`;
     const view = parseSessionReadOutput(stdout, { before: 900000 });
     assert.strictEqual(view.messages.length, 1);
     assert.strictEqual(view.messages[0].text, 'older');
     assert.strictEqual(view.cwd, '', 'older page has no head window → no cwd');
-    assert.strictEqual(view.prevCursor, 500000);
+    assert.strictEqual(view.prevCursor, 500000 + Buffer.byteLength(partial));
     assert.strictEqual(view.hasMore, true);
     assert.strictEqual(view.truncated, false, 'older page is not byte-truncated (bounded by construction)');
   });
@@ -420,6 +425,90 @@ describe('parseSessionReadOutput', () => {
     const view = parseSessionReadOutput(stdout, { before: 300000 });
     assert.strictEqual(view.hasMore, false);
     assert.strictEqual(view.prevCursor, 0);
+  });
+});
+
+// ---- line-aligned older-page cursor (WARDEN-1912) ----
+const assistantLine = (text) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+const idxOf = (t) => { const m = /MSG(\d+)/.exec(t || ''); return m ? Number(m[1]) : null; };
+
+// Emulates buildSessionReadScript's stdout for a file buffer (first page or ranged).
+function simulateRemoteRead(buf, before) {
+  const MAX = 400_000;
+  const size = buf.length;
+  if (before != null) {
+    const start = Math.max(0, before - MAX);
+    const body = buf.subarray(start, Math.min(before, size)).toString('utf8');
+    return `___SZ\t${size}\n\n___BODY\n${body}`;
+  }
+  const head = buf.subarray(0, Math.min(size, 8192)).toString('utf8');
+  const body = buf.subarray(Math.max(0, size - MAX)).toString('utf8');
+  return `___SZ\t${size}\n___HEAD\n${head}\n___BODY\n${body}`;
+}
+
+async function pageAll(readPage, total) {
+  const seen = [];
+  let before = null;
+  let last = Infinity;
+  for (let guard = 0; guard < 30; guard++) {
+    const view = await readPage(before);
+    seen.push(...view.messages.map((m) => idxOf(m.text)));
+    if (!view.hasMore) break;
+    assert.ok(view.prevCursor < last, `cursor strictly decreases (${view.prevCursor} < ${last})`);
+    last = view.prevCursor;
+    before = view.prevCursor;
+  }
+  const sorted = seen.slice().sort((a, b) => a - b);
+  assert.strictEqual(new Set(seen).size, seen.length, 'no duplicates');
+  assert.deepStrictEqual(sorted, Array.from({ length: total }, (_, i) => i), 'every message on exactly one page');
+}
+
+describe('line-aligned prevCursor (WARDEN-1912)', () => {
+  const lines = Array.from({ length: 12 }, (_, i) => assistantLine(`MSG${String(i).padStart(2, '0')} ` + 'y'.repeat(100_000)));
+  const fileBuf = Buffer.from(lines.join('\n') + '\n');
+
+  it('local reader recovers every message of ~100KB-line pages', async () => {
+    const dir = path.join(tempHome, '.claude', 'projects', 'projAlign');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'sess-align.jsonl'), fileBuf);
+    await pageAll((b) => readLocalSessionTranscript('sess-align', b == null ? {} : { before: b }), 12);
+  });
+
+  it('remote parser recovers every message from constructed script output', async () => {
+    await pageAll(async (b) => parseSessionReadOutput(simulateRemoteRead(fileBuf, b), b == null ? {} : { before: b }), 12);
+  });
+
+  it('handles multibyte characters split by the window start (remote == local cursors)', async () => {
+    const mb = Array.from({ length: 12 }, (_, i) => assistantLine(`MSG${String(i).padStart(2, '0')} ` + 'é€😀'.repeat(15_000)));
+    const buf = Buffer.from(mb.join('\n') + '\n');
+    const dir = path.join(tempHome, '.claude', 'projects', 'projAlign');
+    fs.writeFileSync(path.join(dir, 'sess-align-mb.jsonl'), buf);
+    await pageAll((b) => readLocalSessionTranscript('sess-align-mb', b == null ? {} : { before: b }), 12);
+    await pageAll(async (b) => parseSessionReadOutput(simulateRemoteRead(buf, b), b == null ? {} : { before: b }), 12);
+  });
+
+  it('a single giant line leaves prevCursor unchanged and paging terminates', async () => {
+    const buf = Buffer.from(assistantLine('MSG00 ' + 'z'.repeat(1_000_000)) + '\n');
+    const dir = path.join(tempHome, '.claude', 'projects', 'projAlign');
+    fs.writeFileSync(path.join(dir, 'sess-align-giant.jsonl'), buf);
+    const first = await readLocalSessionTranscript('sess-align-giant', {});
+    assert.strictEqual(first.prevCursor, buf.length - 400_000, 'raw start kept (no usable newline)');
+    assert.strictEqual(first.hasMore, true);
+    const remote = parseSessionReadOutput(simulateRemoteRead(buf, null));
+    assert.strictEqual(remote.prevCursor, buf.length - 400_000);
+    let before = first.prevCursor; let guard = 0;
+    while (guard++ < 10) {
+      const v = await readLocalSessionTranscript('sess-align-giant', { before });
+      if (!v.hasMore) break;
+      assert.ok(v.prevCursor < before, 'cursor still decreases');
+      before = v.prevCursor;
+    }
+    assert.ok(guard < 10, 'terminated');
+  });
+
+  it('alignOlderPageCursor keeps the raw start for a first-page (start 0) window', () => {
+    const win = { start: 0, end: 100, prevCursor: 0, hasMore: false };
+    assert.deepStrictEqual(alignOlderPageCursor(win, 10), { prevCursor: 0, skipBytes: 0 });
   });
 });
 
@@ -527,7 +616,7 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
     assert.strictEqual(small.prevCursor, 0);
   });
 
-  it('pages a long transcript backwards until the start — no overlap, near-full coverage (WARDEN-510)', async () => {
+  it('pages a long transcript backwards until the start — no overlap, full coverage (WARDEN-510, WARDEN-1912)', async () => {
     const idxOf = (text) => {
       const m = /idx:(\d+)/.exec(text || '');
       return m ? Number(m[1]) : null;
@@ -564,9 +653,9 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
     // (3) No overlap: every index is unique (byte windows are disjoint by construction).
     const seen = new Set(ordered);
     assert.strictEqual(seen.size, ordered.length, 'no duplicate index across pages');
-    // (4) Coverage: nearly the full set recovered — loss is bounded by the page count
-    //     (≤1 boundary split per page), the documented residual for byte paging.
-    assert.ok(seen.size >= 500 - pages.length, `recovered ${seen.size}/500 (tolerance for boundary splits)`);
+    // (4) Coverage: EVERY index recovered — the cursor is line-aligned (WARDEN-1912),
+    //     so no record is lost to a mid-line page boundary.
+    assert.strictEqual(seen.size, 500, `recovered ${seen.size}/500`);
     // (5) Every recovered index is a real one in [0, 500).
     for (const i of seen) assert.ok(i >= 0 && i < 500, `recovered index in range (${i})`);
   });

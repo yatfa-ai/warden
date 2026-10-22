@@ -487,7 +487,10 @@ export function extractTranscriptMessage(line) {
 // when it does fire WITHIN a single page it is a known residual (≤ the oldest few
 // messages of that one window are dropped), accepted because encoding both a byte
 // cursor AND a message index would over-complicate the paging contract. The byte
-// paging in transcriptWindow fully solves the common case.
+// paging in transcriptWindow fully solves the common case. Page BOUNDARIES lose
+// nothing: alignOlderPageCursor moves each page's prevCursor to a line boundary, so
+// the record straddling a boundary is read whole by the next-older page (the one
+// exception — a single line wider than a whole window — has no boundary to align to).
 export function buildTranscriptView(headText, bodyText) {
   const cwd = parseJsonlHead(headText || '').cwd;
   const messages = [];
@@ -526,6 +529,25 @@ export function transcriptWindow(size, before) {
   const end = before == null ? size : Math.min(before, size);
   const start = Math.max(0, end - SESSION_VIEW_MAX_BYTES);
   return { start, end, prevCursor: start, hasMore: start > 0 };
+}
+
+// Align an older-page cursor to a JSONL line boundary (WARDEN-1912). A window
+// [start, end] with start > 0 begins somewhere INSIDE a line, so its raw `start`
+// used as the next `before` would cut that line in half: the head of it ends the
+// next-older page and the tail starts this one, and neither half parses. Instead the
+// cursor becomes the byte offset of the first COMPLETE line in this window, the
+// first (partial) line is not parsed here, and the next-older window [.., cursor]
+// ends exactly on a line boundary so it contains the straddling line whole.
+// `headBytes` is the byte length of this window's body up to and including its first
+// '\n' (or -1 when it has none). Returns { prevCursor, skipBytes }: skipBytes is how
+// much of the body to drop before parsing. Termination guard: when there is no '\n',
+// or the only '\n' is the window's final byte (a single line wider than the window),
+// aligning would not move the cursor backwards, so the raw start is kept.
+export function alignOlderPageCursor(win, headBytes) {
+  if (win.start > 0 && headBytes > 0 && win.start + headBytes < win.end) {
+    return { prevCursor: win.start + headBytes, skipBytes: headBytes };
+  }
+  return { prevCursor: win.prevCursor, skipBytes: 0 };
 }
 
 // Resolve a local session JSONL by id across every project dir (the session id IS
@@ -578,7 +600,11 @@ export async function readLocalSessionTranscript(id, opts = {}) {
       if (blen > 0) {
         const bbuf = Buffer.alloc(blen);
         await fh.read(bbuf, 0, blen, win.start);
-        bodyText = bbuf.toString('utf8');
+        // Offsets are BYTES: find the first newline on the Buffer, not the string.
+        const nl = bbuf.indexOf(0x0a);
+        const aligned = alignOlderPageCursor(win, nl === -1 ? -1 : nl + 1);
+        win.prevCursor = aligned.prevCursor;
+        bodyText = bbuf.subarray(aligned.skipBytes).toString('utf8');
       }
     } finally {
       await fh.close();
@@ -671,6 +697,21 @@ export function parseSessionReadOutput(stdout, opts = {}) {
   const szm = stdout.match(/^___SZ\t(\d+)/);
   const size = szm ? Number(szm[1]) : 0;
   const win = transcriptWindow(size, before);
+  // Line-align the cursor (WARDEN-1912). The remote script needs no change: it is
+  // already byte-ranged. The body arrives decoded, so measure the first line's BYTE
+  // length from the string. A window cut inside a multibyte char decodes its (≤3)
+  // leading orphan continuation bytes to one U+FFFD each (3 bytes, but 1 original
+  // byte), so those are counted as 1 byte apiece.
+  const nlChar = bodyText.indexOf('\n');
+  if (win.start > 0 && nlChar !== -1) {
+    const first = bodyText.slice(0, nlChar + 1);
+    const orphans = /^\uFFFD{1,3}/.exec(first);
+    const orphanLen = orphans ? orphans[0].length : 0;
+    const headBytes = Buffer.byteLength(first.slice(orphanLen)) + orphanLen;
+    const aligned = alignOlderPageCursor(win, headBytes);
+    win.prevCursor = aligned.prevCursor;
+    bodyText = bodyText.slice(aligned.skipBytes ? nlChar + 1 : 0);
+  }
   // First page only: flag byte-truncation when the file exceeds the body cap. Older
   // pages are bounded by construction; their `truncated` reflects only the
   // within-window message cap (buildTranscriptView).
