@@ -31,6 +31,7 @@ const {
 // temp names + a per-target generation gate so the last-REQUESTED snapshot is
 // always what lands.
 const { createAtomicFileWriter } = require('./atomic-persist.cjs');
+const { classifyNavigation } = require('./external-nav.cjs');
 // Telemetry SOURCE layer (WARDEN-463) — turns main-process failure/freeze
 // signals into consent-gated base-tier events routed to `record()`. Off by
 // default; see the wiring block in app.whenReady() below. Pure/testable logic
@@ -1246,6 +1247,28 @@ function createWindow() {
   }
 
   win = new BrowserWindow(opts);
+
+  // WARDEN-1906: Electron's default for window.open / <a target="_blank"> is a
+  // SECOND in-app BrowserWindow on the remote page. Route every such navigation
+  // through classifyNavigation: http(s) goes to the OS browser, nothing ever
+  // opens in-app, and the app's own origin is never navigated away from.
+  const appOrigin = `http://${HOST}:${PORT}`;
+  const openExternally = (url) => {
+    if (classifyNavigation(url, appOrigin) === 'external') {
+      shell.openExternal(url).catch(() => {});
+    }
+  };
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
+    return { action: 'deny' };
+  });
+  const guardNavigation = (event, url) => {
+    if (classifyNavigation(url, appOrigin) === 'allow') return;
+    event.preventDefault();
+    openExternally(url);
+  };
+  win.webContents.on('will-navigate', guardNavigation);
+  win.webContents.on('will-redirect', guardNavigation);
   // We persist maximize but never fullscreen, so always start un-fullscreened
   // and then re-apply the saved maximize flag.
   win.setFullScreen(false);
