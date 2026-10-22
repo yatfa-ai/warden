@@ -78,7 +78,7 @@ import { createBudgetTick } from './budgetTick.js';
 import { isBinaryFile, isBinaryBlob, readWorkingTreeFile } from './chatFiles.js';
 // WARDEN-1381 — the WebSocket layer (observe wss + streamWss + the upgrade router).
 import { setupWsLayer } from './wsLayer.js';
-import { hostGuardMiddleware, boundHostOf } from './originGuard.js';
+import { hostGuardMiddleware, originGuardMiddleware, boundHostOf } from './originGuard.js';
 import { createSweepSupervisor } from './sweepSupervisor.js';
 import { loopMonitor, instrumentSyncIo, formatStallLine } from './loop-monitor.js';
 // WARDEN-1406 — the SAME pure suspend-window tracker electron/main.cjs uses,
@@ -159,6 +159,7 @@ app.use((req, res, next) => {
 // handler. The bound address is read lazily from the http server so a deliberate
 // non-loopback startServer(port, host) bind keeps working.
 app.use(hostGuardMiddleware(() => boundHostOf(server)));
+app.use(originGuardMiddleware());
 app.use(express.json({ limit: '1mb' }));
 
 // Curated label for a request path: warden's routes are static, but a label must
