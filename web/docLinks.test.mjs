@@ -128,4 +128,29 @@ test('a Windows-drive-style C:\\ path returns null (scheme regex)', () => {
   assert.equal(resolveDocRelative('docs/README.md', 'C:\\Users\\x\\README.md'), null);
 });
 
+console.log('\npercent-decoding (WARDEN-1914)');
+test('%20 decodes to a space', () => {
+  assert.equal(resolveDocRelative('docs/README.md', './my%20notes.md'), 'docs/my notes.md');
+});
+test('non-ASCII %C3%A9 decodes to é', () => {
+  assert.equal(resolveDocRelative('docs/README.md', './caf%C3%A9.md'), 'docs/café.md');
+});
+test('encoded directory segment decodes', () => {
+  assert.equal(resolveDocRelative('docs/README.md', 'sub%20dir/a.md'), 'docs/sub dir/a.md');
+});
+test('malformed escapes do not throw and keep the raw name', () => {
+  assert.equal(resolveDocRelative('docs/README.md', '%zz.md'), 'docs/%zz.md');
+  assert.equal(resolveDocRelative('docs/README.md', '100%.md'), 'docs/100%.md');
+});
+test('%2e%2e does not become a traversal', () => {
+  assert.equal(resolveDocRelative('docs/README.md', '%2e%2e/x.md'), 'docs/%2e%2e/x.md');
+  assert.equal(resolveDocRelative('docs/README.md', '%2e/x.md'), 'docs/%2e/x.md');
+});
+test('%2F does not split a segment', () => {
+  assert.equal(resolveDocRelative('docs/README.md', 'a%2Fb.md'), 'docs/a%2Fb.md');
+});
+test('real .. clamp unchanged alongside encoded segments', () => {
+  assert.equal(resolveDocRelative('docs/README.md', '../../my%20x.md'), 'my x.md');
+});
+
 console.log(`\n${passed} passed`);

@@ -83,15 +83,34 @@ export function resolveDocRelative(baseFilePath: string, href: string): string |
     }
     stack.push(seg);
   }
-  for (const seg of pathPart.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') {
+  for (const rawSeg of pathPart.split('/')) {
+    // `.` / `..` / empty are judged on the RAW segment so decoding can never
+    // introduce a traversal (`%2e%2e` stays a literal segment, not a `..`).
+    if (rawSeg === '' || rawSeg === '.') continue;
+    if (rawSeg === '..') {
       if (stack.length > 0) stack.pop();
       continue;
     }
-    stack.push(seg);
+    stack.push(decodeSegment(rawSeg));
   }
   return stack.join('/');
+}
+
+// react-markdown percent-encodes hrefs (`my notes.md` -> `my%20notes.md`), but
+// the server reads the literal on-disk name, so decode each segment. Never
+// throws (malformed escape -> raw segment) and never lets decoding change the
+// path structure: a decoded segment that contains `/` or becomes `.`/`..`
+// keeps its original undecoded form.
+function decodeSegment(seg: string): string {
+  if (!seg.includes('%')) return seg;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
+  if (decoded.includes('/') || decoded === '.' || decoded === '..') return seg;
+  return decoded;
 }
 
 // The directory portion of a cwd-relative file path (the doc's containing dir),
