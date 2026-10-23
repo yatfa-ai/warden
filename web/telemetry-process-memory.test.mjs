@@ -378,7 +378,7 @@ test('processAgeMs grows across windows and resets for a fresh process', () => {
 // =========================================================================
 
 const mainSrc = readFileSync(join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
-const serverSrc = readFileSync(join(__dirname, '..', 'src', 'server.js'), 'utf8');
+const serverSrc = readFileSync(join(__dirname, '..', 'src', 'serverTelemetry.js'), 'utf8');
 
 test('wiring: main routes the server IPC message to the server-path receipt and arms the sampler', () => {
   assert.match(mainSrc, /msg\.type === 'telemetry-process-memory'[\s\S]{0,80}recordServerProcessMemoryWindow\(msg\.snapshot\)/);
