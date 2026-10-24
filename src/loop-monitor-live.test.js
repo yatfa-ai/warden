@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { createLoopMonitor, instrumentSyncIo } from './loop-monitor.js';
-import { sleep } from './testWait.js';
+import { sleep, pollUntil } from './testWait.js';
 
 /**
  * LIVE verification of the server stall monitor (WARDEN-977) — real timers, a
@@ -73,8 +73,14 @@ describe('live: a real multi-second block is observed with a plausible duration'
       const span = monitor.begin('GET /api/config');
       blockLoop(1200);
       monitor.end(span);
-      // Let the late heartbeat tick actually run.
-      await sleep(250);
+      // Wait for the late heartbeat tick to actually run — as long as it needs
+      // under load, then fall through to the asserts below, which remain the
+      // diagnosis if the producer was starved.
+      await pollUntil(() => stalls.length >= 1, {
+        what: 'the stall to be recorded',
+        timeout: 5000,
+        resolveAnyway: true,
+      });
 
       assert.ok(stalls.length >= 1, 'a 1200ms block of the loop must be reported');
       assert.equal(stalls.length, 1, `exactly one stall expected, got ${stalls.length}`);
@@ -143,7 +149,11 @@ describe('live: the sync-I/O probe attributes a stall to the real blocking call'
       assert.equal(buf.length, 8 * 1024 * 1024, 'the instrumented read returns real contents');
       blockLoop(900);
       monitor.end(span);
-      await sleep(250);
+      await pollUntil(() => stalls.length >= 1, {
+        what: 'the stall to be recorded',
+        timeout: 5000,
+        resolveAnyway: true,
+      });
 
       assert.ok(stalls.length >= 1, 'the blocked window must be reported');
       const labels = stalls[0].attribution.map((a) => a.label);
@@ -197,7 +207,11 @@ describe('live: the sync-I/O probe attributes a stall to the real blocking call'
       assert.equal(buf[0], 7, 'the instrumented positional read returns real bytes');
       blockLoop(900);
       monitor.end(span);
-      await sleep(250);
+      await pollUntil(() => stalls.length >= 1, {
+        what: 'the stall to be recorded',
+        timeout: 5000,
+        resolveAnyway: true,
+      });
 
       assert.ok(stalls.length >= 1, 'the blocked window must be reported');
       const recorded = monitor._spans().map((s) => s.label);

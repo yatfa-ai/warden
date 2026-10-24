@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+import { pollUntil } from './testWait.js';
+
 /**
  * HTTP integration tests for GET /api/diagnostics/stalls (WARDEN-977), run
  * against the REAL Express app from src/server.js.
@@ -136,8 +138,12 @@ describe('GET /api/diagnostics/stalls', () => {
 describe('request labeling (the attribution half, wired into the app)', () => {
   it('labels each request with method + route path for stall attribution', async () => {
     await fetch(`${baseUrl}/api/diagnostics/stalls`);
-    // Give the response 'close' event a turn so the span is closed.
-    await new Promise((r) => setTimeout(r, 20));
+    // Wait for the response 'close' event to close the span — as long as it
+    // needs under load, then fall through to the asserts below.
+    await pollUntil(
+      () => loopMonitor._spans().find((s) => s.label === 'GET /api/diagnostics/stalls' && s.end !== null),
+      { what: "the request's span to close (the response 'close' event)", timeout: 2000, resolveAnyway: true },
+    );
     const spans = loopMonitor._spans();
     const span = spans.find((s) => s.label === 'GET /api/diagnostics/stalls');
     assert.ok(span, `expected a labeled span; ring holds ${JSON.stringify(spans.map((s) => s.label))}`);
@@ -149,7 +155,10 @@ describe('request labeling (the attribution half, wired into the app)', () => {
     // Warden's routes are static, but the label is written to the stall log and
     // printed to stderr, so an unmatched path must not become a text channel.
     await fetch(`${baseUrl}/no such route/${'x'.repeat(120)}`);
-    await new Promise((r) => setTimeout(r, 20));
+    await pollUntil(
+      () => loopMonitor._spans().find((s) => s.label.startsWith('GET /no') && s.end !== null),
+      { what: "the unmatched request's span to close (the response 'close' event)", timeout: 2000, resolveAnyway: true },
+    );
     const labels = loopMonitor._spans().map((s) => s.label);
     const odd = labels.find((l) => l.startsWith('GET /no'));
     assert.ok(odd, `expected the unmatched request to be labeled; got ${JSON.stringify(labels)}`);
