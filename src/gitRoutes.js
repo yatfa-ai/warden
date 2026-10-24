@@ -830,6 +830,8 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
   //     → 'git diff failed' — the honest generic failure, agreeing with git-log
   //   worktree on an unborn HEAD (fresh repo, no commits)
   //     → 'no commits yet ...'
+  //   worktree on a broken repo (non-git/deleted cwd, dead transport)
+  //     → 'git diff failed' — the same honest generic failure (WARDEN-1930)
   // mirroring how every other git route tolerates a non-git/no-upstream repo.
   router.get('/api/git-range-diff', async (req, res) => {
     const range = String(req.query.range || '');
@@ -858,9 +860,10 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
         // (WARDEN-235). `git diff @{u}..HEAD` exits non-zero when no upstream is
         // configured (or HEAD is detached) → surfaced as a clean user-facing error
-        // rather than a 500. For worktree (`git diff HEAD`) the realistic non-zero is
-        // an unborn HEAD (fresh repo, no commits) — unrelated to upstream, so the error
-        // is range-aware: it says so rather than misleadingly claiming "no upstream".
+        // rather than a 500. For worktree (`git diff HEAD`) a non-zero is either an
+        // unborn HEAD (fresh repo, no commits) or a broken repo (non-git/deleted cwd,
+        // dead transport) — so the error is classified, not invented: the range-aware
+        // wording is kept only where it is true.
         const r = await runGit(chat, ['diff', rangeRev], cwd);
         if (!r.ok) {
           // Consult classifyGitFailure before choosing a cause — the SAME gate
@@ -872,13 +875,16 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
           // human to `git branch --set-upstream` for a repo that isn't there —
           // and would disagree with the git-log pane for the same repo. 'unborn'
           // KEEPS the tracking message: an unborn HEAD also has no @{u}, and the
-          // route's spec pins that message for it (worktree keeps its own
-          // range-aware wording).
+          // route's spec pins that message for it (the worktree leg applies the
+          // same gate — its range-aware wording survives only for 'unborn';
+          // WARDEN-1930).
           const kind = await classifyGitFailure(chat, cwd);
           return res.json({
             diff: null,
             error: range === 'worktree'
-              ? 'no commits yet (nothing to compare against HEAD)'
+              ? kind === 'unborn'
+                ? 'no commits yet (nothing to compare against HEAD)'
+                : 'git diff failed'
               : kind === 'broken' ? 'git diff failed'
               : 'no upstream configured',
           });
