@@ -26,6 +26,8 @@ import { spawnSync } from 'node:child_process';
  *   - output capped at 1MB via capDiff (the shared guard, asserted via the route)
  *   - invalid range value → clean error, not 500
  *   - unknown id → 404; non-git cwd → { diff: null, error: ... }, not 500
+ *   - broken repo (non-git cwd) on ANY range → 'git diff failed', 200 not 500 —
+ *     never 'no upstream configured' or 'no commits yet ...' (WARDEN-1227/1930)
  *
  * The remote (SSH) path reuses the same `git diff <range>` invocation; its logic is
  * covered indirectly. Driving a real SSH host in CI is out of scope.
@@ -419,8 +421,11 @@ describe('/api/git-range-diff invalid range / unknown id / non-git (never a 500)
     // human "no upstream configured" for a repository that is not there. The
     // route must now consult classifyGitFailure (the same gate /api/git-log
     // applies) and report the honest generic failure for a 'broken' repo, so the
-    // git-log and range-diff panes agree about one repository.
-    for (const range of ['outgoing', 'incoming']) {
+    // git-log and range-diff panes agree about one repository. WARDEN-1930 closes
+    // the remaining cell: the worktree leg answered 'no commits yet (nothing to
+    // compare against HEAD)' on ANY failure — an invented "fresh repo" claim that
+    // disagreed with the git-log pane about the same repository.
+    for (const range of ['outgoing', 'incoming', 'worktree']) {
       const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-nongit&range=${range}`);
       assert.strictEqual(res.status, 200);
       const body = await res.json();
@@ -431,6 +436,11 @@ describe('/api/git-range-diff invalid range / unknown id / non-git (never a 500)
         body.error,
         'no upstream configured',
         `range=${range}: a broken repo must not be reported as a missing upstream`,
+      );
+      assert.notStrictEqual(
+        body.error,
+        'no commits yet (nothing to compare against HEAD)',
+        `range=${range}: a broken repo must not be reported as a fresh repo with no commits`,
       );
     }
   });
