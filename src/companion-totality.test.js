@@ -522,10 +522,11 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       await guard(unsubscribePanes(HOST, ['totkey'], {}), 15000, 'unsubscribePanes');
       assert.ok(wireCount('unsubscribePanes') > beforeUnsub);
       _resetPaneDeltaStateForTests();
-      // The WS gate that drives these ops (wsLayer.js syncMonitorSubscription +
-      // the close-handler grouping) is exercised at this op level because the
-      // ws layer's per-connection state is not importable; its gate composition
-      // (toggle + LOCAL + exclusion) is pinned by companion.test.js.
+      // The WS gate that drives these ops (streamConnection.js syncMonitorSubscription
+      // + the close-handler grouping — moved from wsLayer.js, WARDEN-1933) is
+      // exercised at this op level because the stream layer's per-connection state
+      // is not importable; its gate composition (toggle + LOCAL + exclusion) is
+      // pinned by companion.test.js.
     });
 
     it('invariant: the seeded channel survived every ON leg — one channel, zero side channels', () => {
@@ -583,7 +584,8 @@ describe('WARDEN-1412 companion-totality sweep', () => {
   //     'Host unreachable' (it does not quote ssh) — the ON/OFF states are
   //     still perfectly distinguishable (ok:true vs ok:false).
   //   • the subscription ops bootstrap on demand (they have no production
-  //     caller with the toggle off — wsLayer's gate refuses first, asserted on
+  //     caller with the toggle off — the stream connection's gate
+  //     (streamConnection.js) refuses first, asserted on
   //     reconcilePaneSubscriptions below) — so the direct op's OFF signature is
   //     the RAW ssh failure arriving INSIDE the companion bootstrap envelope.
   // -------------------------------------------------------------------------
@@ -812,7 +814,7 @@ describe('WARDEN-1412 companion-totality sweep', () => {
     it('pane-push subscriptions OFF — the production trigger is a no-op gate (reconcile returns [])', async () => {
       const beforeSub = wireCount('subscribePanes');
       const results = await guard(reconcilePaneSubscriptions([SUB_CHAT], {}), 20000, 'reconcile OFF');
-      assert.deepStrictEqual(results, [], 'the toggle-off gate issues nothing (wsLayer.js:216 refuses upstream)');
+      assert.deepStrictEqual(results, [], 'the toggle-off gate issues nothing (streamConnection.js:143 refuses upstream)');
       assert.strictEqual(wireCount('subscribePanes'), beforeSub);
     });
 
@@ -855,7 +857,7 @@ describe('WARDEN-1412 companion-totality sweep', () => {
       'paneContainer.js': 2,// import + runWalk's remote route
       'pasteImage.js': 2,   // import + deliverPastedImage's remote gate (the WARDEN-1348 site)
       'tmux.js': 11,        // import + read/send/sendKey/hasSession/probeSession/resize/spawn/kill/attachStream/attachInteractive
-      'wsLayer.js': 3,      // import + syncMonitorSubscription + close-handler grouping
+      'streamConnection.js': 3, // import + syncMonitorSubscription + close-handler grouping (moved from wsLayer.js, WARDEN-1933)
     };
 
     it('every non-test src file matches its census row, and no unlisted file grew a gate', () => {
