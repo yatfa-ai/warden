@@ -61,7 +61,7 @@ printf '%s' "$kind" > "$f.kind"
 printf '%s' "$cmd" > "$f.cmd"
 safe=$(printf '%s' "$host" | tr -c 'a-zA-Z0-9' '_')
 file="${cannedDir}/$safe/$kind"
-if [ -f "$file" ]; then cat "$file"; exit 0; fi
+if [ -f "$file" ]; then cat "$file"; if [ -f "$file.exit" ]; then exit "$(cat "$file.exit")"; fi; exit 0; fi
 echo "ssh: Could not resolve hostname $host: Name or service not known" >&2
 exit 255
 `;
@@ -348,6 +348,28 @@ describe('GET /api/claude-sessions-search', () => {
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.results.map((x) => x.sessionId), ['g1']);
     assert.equal(callsOf('u@down', 'search').length, 1, 'the failing host was attempted');
+  });
+
+  it('discloses a transport-failed host as unreachableHosts without blanking the reachable fleet (WARDEN-1938)', async () => {
+    cfg.hosts = ['u@dead', 'u@good'];
+    can('u@good', 'search', searchOut([{ id: 'g1', mt: 1000 }]));
+    // u@dead has no canned file → the shim answers "ssh: Could not resolve
+    // hostname" + exit 255, a TRANSPORT failure (isTransportFailure true).
+    const r = await get('/api/claude-sessions-search?q=needle');
+    assert.equal(r.status, 200, 'a partial fleet is a partial SUCCESS, never a 500');
+    assert.deepEqual(r.body.results.map((x) => x.sessionId), ['g1'], 'the reachable fleet is never blanked');
+    assert.deepEqual(r.body.unreachableHosts, ['u@dead']);
+    assert.equal('error' in r.body, false, 'a partial search is not an error — it has its own disclosure key');
+  });
+
+  it('names only transport failures unreachable — a command failure (non-zero exit, real stdout) degrades to empty (WARDEN-1938)', async () => {
+    cfg.hosts = ['u@cmdfail'];
+    can('u@cmdfail', 'search', 'the command ran and printed this');
+    fs.writeFileSync(path.join(cannedDir, safeName('u@cmdfail'), 'search.exit'), '3');
+    const r = await get('/api/claude-sessions-search?q=needle');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { results: [] },
+      'no disclosure key: a command result is not an unreachable host (the -all scope discipline)');
   });
 
   it('caps each host at 20 results and the merged list at 50', async () => {
