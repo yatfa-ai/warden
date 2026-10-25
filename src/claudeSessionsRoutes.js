@@ -14,7 +14,7 @@ import {
   localClaudeSessions, remoteClaudeSessionsDetail,
   mergeAndPaginateSessions,
   readLocalSessionTranscript, parseSessionReadOutput,
-  searchLocalClaudeSessions, remoteSearchClaudeSessions, remoteReadSessionTranscript,
+  searchLocalClaudeSessions, remoteSearchClaudeSessionsDetail, remoteReadSessionTranscript,
   SESSION_SEARCH_PER_HOST, SESSION_SEARCH_GLOBAL,
 } from './claudeSessions.js';
 
@@ -164,16 +164,54 @@ export function createClaudeSessionsRouter({ cfg, sessionCache, local }) {
 
   // GET /api/claude-sessions-search?q= — full-content search across EVERY host's
   // JSONL archive, returning recency-ranked matches (incl. sessions outside the
-  // top-40 list). One unreachable host degrades to "no matches from it" via
-  // Promise.allSettled — it never fails the whole search. Response shape:
-  //   { results: [{ host, sessionId, cwd, summary, snippet, mtime }] }
+  // top-40 list). One unreachable host degrades to "no matches from it" — it never
+  // fails the whole search, and this stays a 200 even with every remote host down
+  // (the WARDEN-1200 lesson: never replace a false-empty with a false-total-
+  // failure). Response shape:
+  //   { results: [{ host, sessionId, cwd, summary, snippet, mtime }],
+  //     unreachableHosts?: ['u@dead'] }
+  //
+  // WARDEN-1938 — THE DISCLOSURE THIS ROUTE WAS MISSING. It predates the error-
+  // channel fixes (W-161, Jul 9; the -all route got the treatment in WARDEN-1195/
+  // 1196/1200) and for months its failure was destroyed TWO layers below this
+  // handler: `remoteSearchClaudeSessions` answered a dead tunnel with a bare `[]`,
+  // so every host "fulfilled" and allSettled's rejection bucket stayed empty NOT
+  // because hosts can't fail but because the failure was laundered downstream.
+  // With zero matches overall the UI then rendered a confident "No past
+  // conversations matched" that could be a lie. The per-host leg now calls the
+  // DETAIL variant (the WARDEN-1196 split, applied to the search twin) and
+  // `unreachableHosts` names the hosts we could not search — ADDITIVE and OMITTED
+  // when the fleet is fully reachable, so a healthy response is byte-identical to
+  // before this change (the whole-body deepEqual route test stays green
+  // unmodified), and the client reads the disclosure from the same success branch
+  // that parses `results`.
+  //
+  // Scope discipline, shared with the -all route above: LOCAL is a filesystem read
+  // and can never be unreachable; a remote host answering with a non-zero exit and
+  // real stdout is a COMMAND failure — `isTransportFailure` returns false on
+  // non-empty stdout — so it still degrades to the empty list and is NOT named
+  // unreachable. Deliberately NOT a top-level `error` key: a partial fleet is a
+  // partial SUCCESS (see the -all route's comment), not a whole-read failure.
   router.get('/api/claude-sessions-search', async (req, res) => {
     const q = String(req.query.q || '').trim();
     if (!q) return res.status(400).json({ error: 'query required' });
     const hosts = [LOCAL, ...cfg.hosts];
     const settled = await Promise.allSettled(hosts.map(async (host) => {
-      const sessions = host === LOCAL ? await searchLocalClaudeSessions(q) : await remoteSearchClaudeSessions(host, q);
-      return { host, sessions: sessions.slice(0, SESSION_SEARCH_PER_HOST) };
+      if (host === LOCAL) {
+        return { host, sessions: (await searchLocalClaudeSessions(q)).slice(0, SESSION_SEARCH_PER_HOST) };
+      }
+      // Belt-and-braces: in production the helper answers a dead transport with a
+      // not-ok RESULT (never a throw), but if it ever did throw there would be no
+      // result to classify — the same "we could not search it" a not-ok transport
+      // failure names, so disclose it the same way rather than silently blanking
+      // the host. (LOCAL is deliberately outside this catch: it cannot throw its
+      // way into an "unreachable" claim.)
+      try {
+        const { sessions, unreachable } = await remoteSearchClaudeSessionsDetail(host, q);
+        return { host, sessions: sessions.slice(0, SESSION_SEARCH_PER_HOST), unreachable };
+      } catch {
+        return { host, sessions: [], unreachable: true };
+      }
     }));
     const all = settled
       .filter((r) => r.status === 'fulfilled')
@@ -181,7 +219,13 @@ export function createClaudeSessionsRouter({ cfg, sessionCache, local }) {
         host: r.value.host, sessionId: s.id, cwd: s.cwd, summary: s.summary, snippet: s.snippet, mtime: s.mtime,
       })));
     all.sort((a, b) => b.mtime - a.mtime);
-    res.json({ results: all.slice(0, SESSION_SEARCH_GLOBAL) });
+    const unreachableHosts = settled
+      .filter((r) => r.status === 'fulfilled' && r.value.unreachable)
+      .map((r) => r.value.host);
+    res.json({
+      results: all.slice(0, SESSION_SEARCH_GLOBAL),
+      ...(unreachableHosts.length ? { unreachableHosts } : {}),
+    });
   });
 
   // GET /api/claude-session?id=&host=&before= — read-only transcript of ONE past

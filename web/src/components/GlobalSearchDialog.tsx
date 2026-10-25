@@ -175,6 +175,10 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
   const [includeSessions, setIncludeSessions] = useState(false);
   const [sessionResults, setSessionResults] = useState<SessionSearchResult[]>([]);
   const [sessionSearching, setSessionSearching] = useState(false);
+  // WARDEN-1938: hosts the server could not search, when the fleet's answer is
+  // PARTIAL. Empty = fully reachable = byte-identical rendering to before this
+  // key existed (the server omits `unreachableHosts` on a healthy response).
+  const [sessionUnreachableHosts, setSessionUnreachableHosts] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   // WARDEN-1049: generation counter for doSearch (the PANE leg). The session leg
   // below is a debounced effect and keeps its own `cancelled` flag — an effect has
@@ -199,6 +203,7 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
       setIncludeSessions(false);
       setSessionResults([]);
       setSessionSearching(false);
+      setSessionUnreachableHosts([]);
       // A superseded pane response no longer runs doSearch's `finally`, so the
       // pane spinner is cleared here (the session leg already resets its own
       // above) — otherwise closing mid-search leaves the dialog stuck "searching".
@@ -269,17 +274,20 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
   // WARDEN-89 (silent-error discipline): unlike OpenChatBrowserPage (which
   // swallows failures into a console.error), this dialog already has an error
   // banner, so a total failure (all hosts down / a server 500) surfaces via
-  // setError rather than collapsing into a fake "No results found". The server's
-  // own Promise.allSettled still absorbs a per-host outage into partial results,
-  // so this banner only fires on a true request-level failure.
+  // setError rather than collapsing into a fake "No results found". A PER-HOST
+  // outage is a different, lesser event: since WARDEN-1938 the server discloses
+  // it additively (`unreachableHosts`) while still returning 200 + the reachable
+  // hosts' rows, so this banner keeps firing only on a true request-level failure
+  // and the partial case is annotated in the group header below instead.
   useEffect(() => {
     // When opted out (the default) or the query is empty, never hit the endpoint
     // — behavior identical to today (no extra requests, no regression).
-    if (!includeSessions) { setSessionResults([]); setSessionSearching(false); return; }
+    if (!includeSessions) { setSessionResults([]); setSessionSearching(false); setSessionUnreachableHosts([]); return; }
     const q = query.trim();
-    if (!q) { setSessionResults([]); setSessionSearching(false); return; }
+    if (!q) { setSessionResults([]); setSessionSearching(false); setSessionUnreachableHosts([]); return; }
     setSessionSearching(true);
     setSessionResults([]);
+    setSessionUnreachableHosts([]);
     let cancelled = false;
     const t = setTimeout(async () => {
       setError(null); // fresh attempt — clear any prior banner (mirrors doSearch)
@@ -289,12 +297,21 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
         // Parsed before the ok-gate, same soft-error-at-200 rationale as doSearch.
         const data = await readErrorBody(res);
         if (!res.ok || data.error) {
-          if (!cancelled) { setError(data.error || 'Session search failed'); setSessionResults([]); }
+          if (!cancelled) { setError(data.error || 'Session search failed'); setSessionResults([]); setSessionUnreachableHosts([]); }
         } else {
-          if (!cancelled) setSessionResults(Array.isArray(data.results) ? data.results : []);
+          // WARDEN-1938: the same success branch already parses the whole body, so
+          // the additive `unreachableHosts` key is reachable here without touching
+          // the error path — a partial fleet stays a SUCCESS, annotated, never the
+          // destructive banner.
+          if (!cancelled) {
+            setSessionResults(Array.isArray(data.results) ? data.results : []);
+            setSessionUnreachableHosts(Array.isArray(data.unreachableHosts)
+              ? data.unreachableHosts.filter((h): h is string => typeof h === 'string')
+              : []);
+          }
         }
       } catch (e) {
-        if (!cancelled) { setError(e instanceof Error ? e.message : 'Session search failed'); setSessionResults([]); }
+        if (!cancelled) { setError(e instanceof Error ? e.message : 'Session search failed'); setSessionResults([]); setSessionUnreachableHosts([]); }
       } finally {
         if (!cancelled) setSessionSearching(false);
       }
@@ -414,7 +431,17 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
                     <span className="font-normal text-muted-foreground/70">searching session content…</span>
                   )}
                 </div>
-                {!sessionSearching && sessionResults.length === 0 && !error && query.trim() && (
+                {/* WARDEN-1938: the partial-fleet note — its own small, non-destructive
+                    line (never the error banner: a partial search is a partial SUCCESS).
+                    Only when the search has finished AND the server named hosts it could
+                    not search; absent when the fleet is fully reachable, so the group
+                    renders byte-identically to before in the healthy case. */}
+                {!sessionSearching && sessionUnreachableHosts.length > 0 && (
+                  <div className="text-[11px] text-amber-600 dark:text-amber-500 px-1 pb-1">
+                    Partial — unreachable: {sessionUnreachableHosts.join(', ')}
+                  </div>
+                )}
+                {!sessionSearching && sessionResults.length === 0 && !error && query.trim() && sessionUnreachableHosts.length === 0 && (
                   <div className="text-xs text-muted-foreground px-1 py-1">No past conversations matched</div>
                 )}
                 {sessionResults.map((s, idx) => (

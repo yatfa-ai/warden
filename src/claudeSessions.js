@@ -16,7 +16,12 @@
 // The full-content session-SEARCH helpers (searchLocalClaudeSessions,
 // buildSessionSearchScript, remoteSearchClaudeSessions + the SESSION_SEARCH_*
 // caps) and the remote transcript-delivery leg (remoteReadSessionTranscript)
-// also live here (WARDEN-1548). They depend on the shared workspace-search
+// also live here (WARDEN-1548). Since WARDEN-1938 the search's remote leg is
+// split like the listing's (WARDEN-1196): remoteSearchClaudeSessions keeps its
+// frozen bare-array contract as a thin projection of
+// remoteSearchClaudeSessionsDetail, whose `{ sessions, unreachable }` shape is
+// what /api/claude-sessions-search reads to disclose a host it could not
+// search. They depend on the shared workspace-search
 // infrastructure (streamBoundedSearch / parseSearchOutput) in ./workspaceSearch.js;
 // since WARDEN-1501 moved that infra out of server.js the dependency is
 // one-directional (no cycle). server.js re-exports these helpers so every
@@ -880,20 +885,16 @@ done`;
 // ___SNIP line (the bounded matched line, cleaned server-side via snippetFromLine
 // so the snippet stays human-readable regardless of where grep matched).
 //
-// WARDEN-1284 (companion transport): the search script is delivered through
-// `deliverRemoteScript`, so under the toggle it rides the persistent companion
-// channel instead of a fresh un-pooled ssh handshake per search. PARITY: the
-// script is still built ONCE by buildSessionSearchScript and delivered
-// byte-for-byte by either transport. `deps` is the shared routing test seam;
-// exported so the routing is assertable without real ssh.
-export async function remoteSearchClaudeSessions(host, q, deps = {}) {
-  const needle = q.toLowerCase();
-  const res = await deliverRemoteScript(host, buildSessionSearchScript(q), { timeout: 15000 }, {}, deps);
-  if (!res.ok) return [];
+// SINGLE BODY (WARDEN-1938): extracted verbatim from remoteSearchClaudeSessions so
+// the bare variant and the failure-channel variant below share ONE ___S/___SNIP/___E
+// state machine and cannot drift — the same single-body discipline the
+// remoteClaudeSessions / remoteClaudeSessionsDetail pair follows. `needle` is the
+// already-lowercased query (snippetFromLine matches case-insensitively against it).
+export function parseSessionSearchOutput(stdout, needle) {
   const out = [];
   let cur = null;
   const buf = [];
-  for (const line of res.stdout.split('\n')) {
+  for (const line of String(stdout || '').split('\n')) {
     const sm = line.match(/^___S\t(\S+)\t(\d+)/);
     if (sm) { cur = { id: sm[1], mtime: Number(sm[2]) * 1000, snippet: '' }; buf.length = 0; continue; }
     const snm = line.match(/^___SNIP\t(.*)$/);
@@ -910,6 +911,43 @@ export async function remoteSearchClaudeSessions(host, q, deps = {}) {
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out.slice(0, SESSION_SEARCH_PER_HOST);
+}
+
+// WARDEN-1938: the failure-channel variant of the search twin, mirroring
+// remoteClaudeSessionsDetail above VERBATIM in shape (WARDEN-1196's split, applied
+// to the search). `/api/claude-sessions-search` needs to tell "this host has no
+// matches" apart from "I could not search this host" — the exact distinction the
+// -all route has carried since WARDEN-1200, which this search route predates
+// (W-161) and never got: its helper answered a dead tunnel with a bare `[]`, so a
+// partial-fleet search rendered as a complete one.
+//
+// `deps` is the same shared routing seam as the bare variant
+// (isCompanionTransportEnabled / execInContext / run), forwarded untouched so the
+// routing tests keep driving either entry point. WARDEN-1284 (companion transport)
+// still governs the delivery itself: the script is built ONCE by
+// buildSessionSearchScript and delivered byte-for-byte by either transport, and
+// `isTransportFailure` reads the identical result shape from both.
+//
+// @returns `{ sessions, unreachable }`. `unreachable` is true ONLY for a transport
+//          failure (`isTransportFailure` returns FALSE when stdout is non-empty, so
+//          a host that ran the command and exited non-zero is a COMMAND failure and
+//          still degrades to the empty list — the -all route's scope discipline);
+//          `sessions` is always an array (empty on any failure), so a caller that
+//          ignores the flag behaves exactly as before.
+export async function remoteSearchClaudeSessionsDetail(host, q, deps = {}) {
+  const res = await deliverRemoteScript(host, buildSessionSearchScript(q), { timeout: 15000 }, {}, deps);
+  if (!res.ok) return { sessions: [], unreachable: isTransportFailure(res) };
+  return { sessions: parseSessionSearchOutput(res.stdout, q.toLowerCase()), unreachable: false };
+}
+
+// CONTRACT FROZEN (the companion-exec-legs leg-3 suite): returns a BARE ARRAY,
+// empty on any failure — transport or otherwise — and keeps its `deps` routing
+// seam. Now a thin projection of `remoteSearchClaudeSessionsDetail` above, which is
+// where a caller that needs to distinguish an unreachable host goes; behaviour here
+// is byte-identical to before that split (WARDEN-1938).
+export async function remoteSearchClaudeSessions(host, q, deps = {}) {
+  const { sessions } = await remoteSearchClaudeSessionsDetail(host, q, deps);
+  return sessions;
 }
 
 // Deliver the session-transcript read script to a REMOTE host (leg 4 of
