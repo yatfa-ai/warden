@@ -145,31 +145,17 @@ function captureBounds(prev, liveBounds, isMaximized) {
   };
 }
 
-// The next state to persist after a maximize/unmaximize transition, or null to
-// skip. Only flips the `maximized` flag, preserving the last normal bounds so
-// un-maximizing later restores them.
-function captureMaximized(prev, isMaximized) {
-  if (!rememberIsActive(prev)) return null;
-  return {
-    remember: true,
-    closeToTray: closeToTrayIsActive(prev),
-    x: prev && typeof prev.x === 'number' ? prev.x : undefined,
-    y: prev && typeof prev.y === 'number' ? prev.y : undefined,
-    width: prev && typeof prev.width === 'number' ? prev.width : DEFAULT_WIDTH,
-    height: prev && typeof prev.height === 'number' ? prev.height : DEFAULT_HEIGHT,
-    maximized: isMaximized === true,
-  };
-}
-
-// Return the state to persist when the user toggles the preference, flipping
-// `remember` while preserving any previously-captured bounds (so re-enabling
-// after disabling reapplies the last arrangement, subject to the on-screen
-// clamp at createWindow time). Preserves the independent `closeToTray` flag so
-// toggling remember-bounds cannot wipe close-to-tray (and vice versa).
-function withRemember(prev, remember) {
+// The single carry-forward of every persisted field from `prev` (WARDEN-1950).
+// saveWindowState() does a full-file overwrite with whatever a capture/with*
+// function returns, so each state-constructing function must carry EVERY field
+// forward or it silently wipes it (WARDEN-330 had to thread closeToTray through
+// each by hand). Building the object here, once, means a new persisted field is
+// added in exactly one place; callers override just the field they change.
+// Private (not exported). Tolerates a null/undefined `prev` (no saved state).
+function carryState(prev) {
   const base = prev || {};
   return {
-    remember: remember === true,
+    remember: rememberIsActive(base),
     closeToTray: closeToTrayIsActive(base),
     x: typeof base.x === 'number' ? base.x : undefined,
     y: typeof base.y === 'number' ? base.y : undefined,
@@ -179,21 +165,29 @@ function withRemember(prev, remember) {
   };
 }
 
+// The next state to persist after a maximize/unmaximize transition, or null to
+// skip. Only flips the `maximized` flag, preserving the last normal bounds so
+// un-maximizing later restores them. (`remember` is true here by the guard.)
+function captureMaximized(prev, isMaximized) {
+  if (!rememberIsActive(prev)) return null;
+  return { ...carryState(prev), maximized: isMaximized === true };
+}
+
+// Return the state to persist when the user toggles the preference, flipping
+// `remember` while preserving any previously-captured bounds (so re-enabling
+// after disabling reapplies the last arrangement, subject to the on-screen
+// clamp at createWindow time). Preserves the independent `closeToTray` flag so
+// toggling remember-bounds cannot wipe close-to-tray (and vice versa).
+function withRemember(prev, remember) {
+  return { ...carryState(prev), remember: remember === true };
+}
+
 // Return the state to persist when the user toggles close-to-tray (WARDEN-330),
 // flipping the flag while preserving the `remember` flag and any captured
 // bounds (so disabling close-to-tray never drops the remembered arrangement).
 // Mirrors withRemember's shape contract.
 function withCloseToTray(prev, closeToTray) {
-  const base = prev || {};
-  return {
-    remember: base.remember !== false,
-    closeToTray: closeToTray === true,
-    x: typeof base.x === 'number' ? base.x : undefined,
-    y: typeof base.y === 'number' ? base.y : undefined,
-    width: typeof base.width === 'number' ? base.width : DEFAULT_WIDTH,
-    height: typeof base.height === 'number' ? base.height : DEFAULT_HEIGHT,
-    maximized: base.maximized === true,
-  };
+  return { ...carryState(prev), closeToTray: closeToTray === true };
 }
 
 module.exports = {
