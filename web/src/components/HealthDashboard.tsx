@@ -423,7 +423,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   // Per-agent 24h activity series for the row sparklines (WARDEN-299), joined by
   // `container`. Memoized on `activitySeries` ONLY — the 24h series refreshes on
   // its own ~60s cadence, so the 10s /api/health tick above never recomputes it
-  // (the per-row join is a plain O(1) Map lookup in renderSparkline).
+  // (the per-row join is a plain O(1) Map lookup in AgentRow.tsx's renderSparkline).
   const agentActivity = useMemo(() => buildAgentActivity(activitySeries), [activitySeries]);
   const bucketCount = activitySeries?.buckets.length ?? 0;
 
