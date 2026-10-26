@@ -1,6 +1,6 @@
 import express from 'express';
 import { readChatFile, resolveLocalFile, probeRemoteFile, probeContainerFile } from './chatFiles.js';
-import { searchLocalRaw, buildSearchScript, parseSearchOutput } from './workspaceSearch.js';
+import { searchLocalRawResult, buildSearchScript, parseSearchOutput } from './workspaceSearch.js';
 import { runInContext, gitCwd } from './gitRoutes.js';
 
 // Chat working-directory file routes (/api/read-file, /api/file-exists,
@@ -114,7 +114,11 @@ export function createChatFileRouter({ resolve, fileExistsTelemetry, local }) {
       let error = null;
       if (!chat.container && chat.host === local) {
         // manual-LOCAL: stream git/rg/grep on the host fs, bounded at the source.
-        raw = await searchLocalRaw(cwd, query);
+        // A failed run (spawn error / zero-line timeout / git-grep exit 128) must NOT
+        // masquerade as "no matches" — same channel as the container leg (WARDEN-1952).
+        const found = await searchLocalRawResult(cwd, query);
+        if (found.failed) error = 'search failed';
+        raw = found.raw;
       } else {
         // container (local+remote) or manual-remote: buildSearchScript delivered
         // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)

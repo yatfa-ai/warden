@@ -117,7 +117,25 @@ async function hasBinary(bin) {
 // remote path which builds a shell string for SSH. Returns the bounded raw stdout
 // in the same `path:line:text` format the remote produces, so parseSearchOutput
 // parses both paths identically. Exported for direct unit testing of the bound.
-export function streamBoundedSearch(bin, args, cwd, opts = {}) {
+//
+// streamBoundedSearchResult (WARDEN-1952) is the failure-aware core: it resolves
+// `{ raw, failed, reason }` so a caller can tell "the tool ran and found nothing"
+// from "the tool could not run / could not finish". `failed` is true ONLY when
+// there is nothing to show AND the run did not end cleanly:
+//   - the spawn `error` event (ENOENT / EACCES / …)            reason 'spawn'
+//   - the timeout fired with ZERO lines gathered                reason 'timeout'
+//   - `close` with a non-null exit code outside {0,1} that we did NOT cause
+//     (`!stopped`) and zero lines collected (git grep exit 128, rg/grep exit 2)
+//                                                               reason 'exit <code>'
+// It never flags a result that already holds lines (rg/grep exit 2 with partial
+// hits keeps its real results), and never flags our own cap-triggered SIGTERM.
+// Exit 1 = genuine "no matches" for git grep/rg/grep → failed:false, raw ''.
+// streamBoundedSearch stays the string-returning wrapper (byte-identical).
+export async function streamBoundedSearch(bin, args, cwd, opts = {}) {
+  return (await streamBoundedSearchResult(bin, args, cwd, opts)).raw;
+}
+
+export function streamBoundedSearchResult(bin, args, cwd, opts = {}) {
   const maxResults = opts.maxResults ?? SEARCH_MAX_RESULTS;
   const transferLen = opts.transferLen ?? SEARCH_TRANSFER_LINE_LEN;
   const timeout = opts.timeout ?? SEARCH_STREAM_TIMEOUT_MS;
@@ -132,14 +150,17 @@ export function streamBoundedSearch(bin, args, cwd, opts = {}) {
     let settled = false;
     const cap = (s) => (s.length > transferLen ? s.slice(0, transferLen) : s);
     let timer = null;
-    const done = (val) => {
-      if (!settled) { settled = true; if (timer) clearTimeout(timer); resolve(val); }
+    const done = (failure = null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ raw: lines.join('\n'), failed: failure !== null, reason: failure });
     };
     const stop = () => { stopped = true; try { child.kill('SIGTERM'); } catch {} };
     // WARDEN-1752: a hung child may never close its pipes, so on expiry we stop()
     // it and settle IMMEDIATELY with the partial lines gathered so far rather
     // than waiting on 'close'.
-    if (timeout > 0) timer = setTimeout(() => { stop(); done(lines.join('\n')); }, timeout);
+    if (timeout > 0) timer = setTimeout(() => { stop(); done(lines.length === 0 ? 'timeout' : null); }, timeout);
 
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
@@ -168,13 +189,16 @@ export function streamBoundedSearch(bin, args, cwd, opts = {}) {
     // tool's diagnostics never spam the server console (mirrors runLocalSearch).
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', () => {});
-    child.on('error', () => done('')); // ENOENT (tool absent) / spawn failure → no results
-    child.on('close', () => {
+    child.on('error', () => done('spawn')); // ENOENT (tool absent) / spawn failure → failed, no results
+    child.on('close', (code) => {
       // Flush a trailing newline-less line ONLY on natural EOF. When we `stop()`-ed
       // at the cap, `buf` still holds the rest of that chunk — it must NOT be flushed
       // (it would push past maxResults, chunk-delivery-dependent and flaky).
       if (!stopped && !skipping && buf) lines.push(cap(buf));
-      done(lines.join('\n'));
+      // Exit 0/1 = matches / no matches. Anything else with nothing collected and
+      // not caused by our own stop() is a real failure (e.g. git grep 128).
+      const failedExit = !stopped && lines.length === 0 && code !== null && code !== 0 && code !== 1;
+      done(failedExit ? `exit ${code}` : null);
     });
   });
 }
@@ -185,10 +209,17 @@ export function streamBoundedSearch(bin, args, cwd, opts = {}) {
 // plain grep, only when cwd is not a git worktree. Output is bounded AT THE SOURCE
 // by streamBoundedSearch (line count + per-line transfer cap) — never by a
 // spawnSync maxBuffer — so a many-match search returns its real (≤30) results
-// instead of ENOBUFS→''. Returns '' for no matches / spawn failure and never
-// throws (matches git-status/git-log). Exported so the local path has test
+// instead of ENOBUFS→''. Returns the bounded raw string ('' for no matches AND for
+// spawn failure — use searchLocalRawResult to tell them apart) and never throws. Exported so the local path has test
 // coverage parity with the remote buildSearchScript.
 export async function searchLocalRaw(cwd, query) {
+  return (await searchLocalRawResult(cwd, query)).raw;
+}
+
+// Failure-aware twin of searchLocalRaw (WARDEN-1952): same git/rg/grep selection,
+// resolves `{ raw, failed, reason }` from streamBoundedSearchResult so the route
+// can answer error:'search failed' instead of a confident "No results found".
+export async function searchLocalRawResult(cwd, query) {
   // Gate the rg/grep fallback to non-repos (mirrors remote `if git rev-parse…`).
   // rev-parse output is tiny ("true"), and runLocalSearch is async + bounded by a
   // 10s timeout, so this probe never blocks the event loop.
@@ -196,11 +227,11 @@ export async function searchLocalRaw(cwd, query) {
   const insideRepo = gitCheck.ok && (gitCheck.stdout.trim() === 'true');
   if (insideRepo) {
     // git grep: status 1 = no matches (yields ''); 0 = matches. -I skips binaries.
-    return streamBoundedSearch('git', ['grep', '-n', '-I', '-F', '--', query], cwd);
+    return streamBoundedSearchResult('git', ['grep', '-n', '-I', '-F', '--', query], cwd);
   }
   // Not a git repo → ripgrep (fast, respects .gitignore) then plain grep. -F = literal.
   if (await hasBinary('rg')) {
-    return streamBoundedSearch('rg', ['--line-number', '--no-heading', '-F', '--', query, '.'], cwd);
+    return streamBoundedSearchResult('rg', ['--line-number', '--no-heading', '-F', '--', query, '.'], cwd);
   }
-  return streamBoundedSearch('grep', ['-rn', '-I', '-F', '--', query, '.'], cwd);
+  return streamBoundedSearchResult('grep', ['-rn', '-I', '-F', '--', query, '.'], cwd);
 }

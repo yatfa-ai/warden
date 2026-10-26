@@ -76,7 +76,7 @@ import { createSweepSupervisor } from './sweepSupervisor.js';
 import { loopMonitor } from './loop-monitor.js';
 import { createLoopWiring } from './loopWiring.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
-export { parseSearchLine, parseSearchOutput, buildSearchScript, streamBoundedSearch, searchLocalRaw } from './workspaceSearch.js';
+export { parseSearchLine, parseSearchOutput, buildSearchScript, streamBoundedSearch, streamBoundedSearchResult, searchLocalRaw, searchLocalRawResult } from './workspaceSearch.js';
 // WARDEN-1548: the Claude-session search + transcript-delivery helpers live in claudeSessions.js;
 // re-exported so every `server.X` consumer is untouched.
 export { searchLocalClaudeSessions, remoteSearchClaudeSessions, buildSessionSearchScript, remoteReadSessionTranscript } from './claudeSessions.js';
