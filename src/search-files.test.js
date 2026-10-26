@@ -19,7 +19,7 @@ const SERVER = path.join(__dirname, 'server.js');
 // activity logs at module load) touches only a temp dir, never the real
 // ~/.yatfa-warden. Top-level await lets us import AFTER setting HOME.
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-home-'));
-const { buildSearchScript, parseSearchOutput, searchLocalRaw, streamBoundedSearch } = await import('./server.js');
+const { buildSearchScript, parseSearchOutput, searchLocalRaw, searchLocalRawResult, streamBoundedSearch, streamBoundedSearchResult } = await import('./server.js');
 
 // --- Syntax guard: server.js MUST compile ---------------------------------
 // Mirrors read-file.test.js: `node --check` parses without executing, a clean
@@ -459,5 +459,77 @@ describe('searchLocalRaw (local streamed path — parity with remote)', () => {
     const raw = await searchLocalRaw(tmp, 'LINEOKEN');
     const firstLine = raw.split('\n')[0];
     assert.ok(firstLine.length <= 1000, `raw line not capped at source: ${firstLine.length}`);
+  });
+});
+
+// WARDEN-1952 — the local leg's failure channel. A run that could not run / could
+// not finish must resolve failed:true so the route answers error:'search failed'
+// instead of a confident "No results found"; a genuine no-match must NOT.
+describe('streamBoundedSearchResult / searchLocalRawResult (failure channel)', () => {
+  let tmp;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-fail-'));
+    spawnSync('git', ['-c', 'init.defaultBranch=main', 'init', '-q', tmp]);
+    fs.writeFileSync(path.join(tmp, 'app.js'), 'return "needle";\n');
+    spawnSync('git', ['-C', tmp, 'add', 'app.js']);
+  });
+
+  it('corrupt git index (git grep exit 128, empty stdout) → failed:true', async () => {
+    fs.writeFileSync(path.join(tmp, '.git', 'index'), 'garbage\n');
+    const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(probe.stdout.trim(), 'true', 'precondition: git branch must be taken');
+    const r = await searchLocalRawResult(tmp, 'needle');
+    assert.equal(r.failed, true);
+    assert.equal(r.raw, '');
+    assert.match(r.reason, /exit 128/);
+  });
+
+  it('genuine no-match (git grep exit 1) → failed:false, raw empty', async () => {
+    const r = await searchLocalRawResult(tmp, 'zzz_no_such_token_zzz');
+    assert.deepEqual({ raw: r.raw, failed: r.failed }, { raw: '', failed: false });
+  });
+
+  it('matches → failed:false and searchLocalRaw string return is the same raw', async () => {
+    const r = await searchLocalRawResult(tmp, 'needle');
+    assert.equal(r.failed, false);
+    assert.equal(r.raw, await searchLocalRaw(tmp, 'needle'));
+    assert.equal(parseSearchOutput(r.raw).length, 1);
+  });
+
+  it('absent binary (spawn error) → failed:true; wrapper still resolves ""', async () => {
+    const r = await streamBoundedSearchResult('warden-no-such-binary-xyz', [], tmp);
+    assert.equal(r.failed, true);
+    assert.equal(r.reason, 'spawn');
+    assert.equal(await streamBoundedSearch('warden-no-such-binary-xyz', [], tmp), '');
+  });
+
+  it('timeout with ZERO lines → failed:true', async () => {
+    const r = await streamBoundedSearchResult('sleep', ['5'], tmp, { timeout: 100 });
+    assert.equal(r.failed, true);
+    assert.equal(r.reason, 'timeout');
+  });
+
+  it('timeout WITH partial lines → failed:false, partial kept', async () => {
+    const r = await streamBoundedSearchResult('sh', ['-c', 'echo a:1:x; sleep 5'], tmp, { timeout: 300 });
+    assert.equal(r.failed, false);
+    assert.equal(r.raw, 'a:1:x');
+  });
+
+  it('exit 2 with zero lines → failed:true (rg/grep incomplete search)', async () => {
+    const r = await streamBoundedSearchResult('sh', ['-c', 'exit 2'], tmp);
+    assert.equal(r.failed, true);
+    assert.equal(r.reason, 'exit 2');
+  });
+
+  it('exit 2 WITH lines → failed:false (partial hits keep real results)', async () => {
+    const r = await streamBoundedSearchResult('sh', ['-c', 'echo a:1:x; exit 2'], tmp);
+    assert.equal(r.failed, false);
+    assert.equal(r.raw, 'a:1:x');
+  });
+
+  it('our own cap-triggered SIGTERM → failed:false', async () => {
+    const r = await streamBoundedSearchResult('yes', ['a:1:x'], tmp, { maxResults: 3 });
+    assert.equal(r.failed, false);
+    assert.equal(r.raw.split('\n').length, 3);
   });
 });

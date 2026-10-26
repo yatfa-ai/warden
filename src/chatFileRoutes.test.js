@@ -10,7 +10,7 @@ import express from 'express';
 // /api/file-exists, /api/search-files): path/query trimming, the 400/404
 // mapping, the file-exists three-state + telemetry hand-offs, the search-files
 // local / container / remote split and its failure channels. The helpers the
-// handlers call (readChatFile, resolveLocalFile, probeRemoteFile, searchLocalRaw,
+// handlers call (readChatFile, resolveLocalFile, probeRemoteFile, searchLocalRawResult,
 // buildSearchScript, runInContext) have their own suites; those are reached here
 // only through the real router, over real HTTP, on a bare express() app with an
 // injected `resolve` and a recording telemetry stub (no server.js import).
@@ -308,6 +308,18 @@ describe('POST /api/search-files', () => {
     assert.equal(r.body.results[0].line, 1);
     assert.match(r.body.results[0].text, /needle/);
     assert.equal(readLog(), '');
+  });
+
+  it('manual-local repo whose git index is corrupt (git grep exit 128) → error "search failed", not a confident empty (WARDEN-1952)', async () => {
+    const badDir = path.join(tmpRoot, 'badrepo');
+    fs.mkdirSync(badDir);
+    fs.writeFileSync(path.join(badDir, 'a.txt'), 'needle\n');
+    execFileSync('git', ['init', '-q'], { cwd: badDir });
+    fs.writeFileSync(path.join(badDir, '.git', 'index'), 'garbage\n');
+    chats.set('bad', { host: LOCAL, cwd: badDir });
+    const r = await post('/api/search-files', { id: 'bad', query: 'needle' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { results: [], query: 'needle', error: 'search failed' });
   });
 
   it('local container chat → docker exec <box> bash -lc, results parsed into {file,line,text}', async () => {
