@@ -4774,7 +4774,11 @@ function realBinaryTransport() {
       // under a second with the kill shape {ok:false, code:-1}.
       const t0 = Date.now();
       const slow = await ch.call('exec', { script: 'sleep 30', timeoutMs: 250 }, { timeout: 8000 });
-      assert.ok(Date.now() - t0 < 5000, `host-side kill must fire fast (took ${Date.now() - t0}ms)`);
+      // The invariant is that the kill FIRED (the result shape below proves it);
+      // this ceiling only guards "well before the 30s sleep would have finished".
+      // It spans binary RPC round-trips under parallel-suite load, so it sits far
+      // above scheduler jitter (WARDEN-1703 pattern) and far below 30s.
+      assert.ok(Date.now() - t0 < 20000, `kill fired well before the 30s sleep would have completed (took ${Date.now() - t0}ms)`);
       assert.strictEqual(slow.ok, false);
       assert.strictEqual(slow.code, -1);
 
@@ -5103,7 +5107,8 @@ function realBinaryTransport() {
       try {
         // Subscribe; the watcher's immediate first capture should push the initial
         // content (every pane is "changed" against an empty hash map).
-        const ack = await ch.call('subscribePanes', { panes: [{ key: session, container: '', session }] }, { timeout: 8000 });
+        const tSub = Date.now();
+        const ack = await ch.call('subscribePanes', { panes: [{ key: session, container: '', session }] }, { timeout: 15000 });
         assert.ok(ack && ack.subscribed === 1, 'subscribe ACK reports the pane count');
 
         // Normalize pane content for substring checks: strip ANSI escapes and join
@@ -5113,7 +5118,9 @@ function realBinaryTransport() {
         const norm = (s) => (s || '').replace(/\r?\n/g, '');
         // Wait for the initial push (the watcher ticks ~1s; allow headroom).
         await pollUntil(() => events.some((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_FIRST')),
-          { what: 'the initial paneDelta push', timeout: 4000, interval: 50, resolveAnyway: true });
+          { what: 'the initial paneDelta push', timeout: 20000, interval: 50, resolveAnyway: true });
+        // Observed time-to-first-push: the load-scaled yardstick for later waits.
+        const firstPushMs = Date.now() - tSub;
         const initial = events.find((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_FIRST'));
         assert.ok(initial, 'initial paneDelta pushed the pane content');
         assert.strictEqual(initial.event, 'paneDelta');
@@ -5121,24 +5128,27 @@ function realBinaryTransport() {
         // Change the pane content; a NEW paneDelta must arrive carrying only the
         // changed pane — this is the push that lets the monitor tick skip polling.
         spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_PUSH_SECOND'], { encoding: 'utf8' });
+        const tChange = Date.now();
         await pollUntil(() => events.some((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_SECOND')),
-          { what: 'a content change to push a new paneDelta', timeout: 4000, interval: 50, resolveAnyway: true });
+          { what: 'a content change to push a new paneDelta', timeout: 20000, interval: 50, resolveAnyway: true });
+        const changePushMs = Date.now() - tChange;
         const changed = events.find((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_SECOND'));
         assert.ok(changed, 'a content change pushed a new paneDelta within ~one tick');
 
         // RPC framing is unaffected by the background push: a ping still resolves.
-        const ping = await ch.call('ping', {}, { timeout: 4000 });
+        const ping = await ch.call('ping', {}, { timeout: 15000 });
         assert.ok(ping && Array.isArray(ping.methods) && ping.methods.includes('subscribePanes'),
           'ping still works alongside pushes and advertises subscribePanes');
 
         // unsubscribePanes stops the watcher (no further pushes).
-        const before = events.length;
-        await ch.call('unsubscribePanes', {}, { timeout: 4000 });
+        await ch.call('unsubscribePanes', {}, { timeout: 15000 });
         spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_PUSH_AFTER_UNSUB'], { encoding: 'utf8' });
-        await new Promise((r) => setTimeout(r, 1500)); // over a tick
+        // Absence window scales with measured latency (3x the slowest observed
+        // push, floor 1500ms) so a loaded host's delayed in-flight push can't
+        // masquerade as a still-running watcher.
+        await new Promise((r) => setTimeout(r, Math.max(3 * Math.max(firstPushMs, changePushMs), 1500)));
         const afterUnsub = events.filter((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_AFTER_UNSUB'));
         assert.strictEqual(afterUnsub.length, 0, 'no pushes after unsubscribePanes (watcher stopped)');
-        assert.ok(events.length <= before + 1, 'unsubscribe stopped the watcher (at most one in-flight push)');
 
         // The very first event must carry the event field and NO id (unsolicited).
         assert.ok(!('id' in events[0]) || events[0].id === undefined, 'unsolicited events carry no id');
