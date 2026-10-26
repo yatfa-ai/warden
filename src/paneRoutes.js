@@ -189,7 +189,19 @@ export function createPaneRouter({ cfg, resolve, chatCatalog }) {
         });
       }
 
-      res.json({ results, query });
+      // WARDEN-1945: capturePanes OMITS a chat from its map on every failure path,
+      // so name the searched-for chats that never came back — otherwise a dead host
+      // / vanished session renders as a confident "No results found". Additive:
+      // the key is omitted when every pane was captured (healthy body unchanged),
+      // and a partial answer stays HTTP 200.
+      const unsearched = chats.filter((c) => !Object.prototype.hasOwnProperty.call(captures, c.id));
+      res.json({
+        results,
+        query,
+        ...(unsearched.length
+          ? { unsearchedPanes: unsearched.map((c) => ({ key: c.key, host: c.host, name: c.name || c.key })) }
+          : {}),
+      });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

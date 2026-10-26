@@ -25,6 +25,7 @@ import { fetchBounded, readErrorBody } from '@/lib/api';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { useOpenPanes, useTimestampFormat } from '@/lib/uiStore';
 import { getFeatureUsageSampler } from '@/lib/featureUsageTelemetry';
+import { parseUnsearchedPanes, formatUnsearchedPanes, type UnsearchedPane } from '@/lib/unsearchedPanes';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 // A pane grep hit from /api/search-pane (the default, instant leg). Renamed from
@@ -179,6 +180,10 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
   // PARTIAL. Empty = fully reachable = byte-identical rendering to before this
   // key existed (the server omits `unreachableHosts` on a healthy response).
   const [sessionUnreachableHosts, setSessionUnreachableHosts] = useState<string[]>([]);
+  // WARDEN-1945: panes the server could not capture (so NOT searched) when the
+  // pane leg's answer is PARTIAL. Empty = fully searched = rendering identical to
+  // before the key existed (the server omits `unsearchedPanes` when healthy).
+  const [unsearchedPanes, setUnsearchedPanes] = useState<UnsearchedPane[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   // WARDEN-1049: generation counter for doSearch (the PANE leg). The session leg
   // below is a debounced effect and keeps its own `cancelled` flag — an effect has
@@ -204,6 +209,7 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
       setSessionResults([]);
       setSessionSearching(false);
       setSessionUnreachableHosts([]);
+      setUnsearchedPanes([]);
       // A superseded pane response no longer runs doSearch's `finally`, so the
       // pane spinner is cleared here (the session leg already resets its own
       // above) — otherwise closing mid-search leaves the dialog stuck "searching".
@@ -232,6 +238,7 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
     const isLatest = claimLatest(searchGen);
     setSearching(true);
     setError(null);
+    setUnsearchedPanes([]);
     try {
       // WARDEN-1144: bounded — gates `searching`. `claimLatest` supersedes a
       // STALE result; it cannot end an unsettled wait, so the newest search's own
@@ -248,13 +255,16 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
       if (!res.ok || data.error) {
         setError(data.error || 'Search failed');
         setResults([]);
+        setUnsearchedPanes([]);
       } else {
         setResults(Array.isArray(data.results) ? data.results : []);
+        setUnsearchedPanes(parseUnsearchedPanes(data.unsearchedPanes));
       }
     } catch (e) {
       if (!isLatest()) return;
       setError(e instanceof Error ? e.message : 'Search failed');
       setResults([]);
+      setUnsearchedPanes([]);
     } finally {
       // Guarded like every other write: a superseded response that clears the
       // spinner turns off the indicator for the search still running behind it.
@@ -373,7 +383,7 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
             <Input
               ref={inputRef}
               value={query}
-              onChange={(e) => { setQuery(e.target.value); setError(null); }}
+              onChange={(e) => { setQuery(e.target.value); setError(null); if (!e.target.value.trim()) setUnsearchedPanes([]); }}
               onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
               placeholder="Search across all panes..."
             />
@@ -403,7 +413,16 @@ export function GlobalSearchDialog({ open, onClose, onFocusPane, onJumpToMatch, 
             region flexes with the viewport instead of a fixed pixel height. */}
         <ScrollArea className="h-[40vh] w-full rounded-md border">
           <div className="p-2">
-            {results.length === 0 && !searching && !error && !sessionsShowing && (
+            {/* WARDEN-1945: partial pane search — a small non-destructive note (never
+                the error banner: a partial search is a partial SUCCESS), and the
+                "No results found" line below is suppressed while it stands, since
+                the unsearched panes may hold the match. */}
+            {!searching && !error && unsearchedPanes.length > 0 && (
+              <div className="text-[11px] text-amber-600 dark:text-amber-500 px-1 pb-1">
+                Partial — could not search: {formatUnsearchedPanes(unsearchedPanes)}
+              </div>
+            )}
+            {results.length === 0 && !searching && !error && !sessionsShowing && unsearchedPanes.length === 0 && (
               <div className="text-muted-foreground text-center py-8 text-sm">
                 {query.trim() ? 'No results found' : 'Enter a query to search across open panes'}
               </div>

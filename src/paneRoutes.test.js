@@ -624,9 +624,20 @@ describe('GET /api/search-pane', () => {
       assert.equal(r.status, 200);
       assert.equal(r.body.results.length, 4, 'only the healthy pane\u2019s matches survive');
       assert.ok(r.body.results.every((row) => row.name === 'idalpha'));
+      // WARDEN-1945: the omitted pane is DISCLOSED, not silently dropped.
+      assert.deepEqual(r.body.unsearchedPanes, [
+        { key: 'alpha', host: LOCAL, name: 'alpha' },
+      ], 'names exactly the chat whose capture failed');
     } finally {
       clearFailTarget();
     }
+  });
+
+  it('a fully captured search has NO unsearchedPanes key (healthy body byte-identical)', async () => {
+    const r = await get('/api/search-pane?query=needle&panes=alpha');
+    assert.equal(r.status, 200);
+    assert.ok(!Object.prototype.hasOwnProperty.call(r.body, 'unsearchedPanes'));
+    assert.deepEqual(Object.keys(r.body).sort(), ['query', 'results']);
   });
 
   it('multiple panes keys union every matching chat', async () => {
