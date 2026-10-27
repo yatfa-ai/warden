@@ -446,7 +446,7 @@ test('the two readers agree on the diff for every shape — one implementation, 
 // --- 10. STATIC GUARD: the BlameHash popover (WARDEN-1194) --------------------
 //
 // The same reasoning as section 7, at the site this ticket is about. `BlameHash`
-// (FileViewer.tsx) is the popover behind EVERY hash in both the Blame and the
+// (FileViewerParts.tsx) is the popover behind EVERY hash in both the Blame and the
 // History view, and it was the sole remaining raw path-bearing read of these
 // routes: an `r.ok` gate and then `j.diff` straight off an unchecked body, so the
 // 200-with-{error} half fell through to the popover's definitive empty state,
@@ -464,7 +464,7 @@ test('the two readers agree on the diff for every shape — one implementation, 
 // unit test; what IS checkable is the structural invariant each bug WAS.
 
 const FILE_VIEWER = readFileSync(
-  resolve(__dirname, 'src/components/FileViewer.tsx'),
+  resolve(__dirname, 'src/components/FileViewerParts.tsx'),
   'utf8',
 );
 
@@ -570,7 +570,7 @@ test('no path-bearing /api/git-show read bypasses the seam (success criterion 6)
   // hands it to the seam (a `readFileDiff*(...)` call, or a `buildUrl` thunk for
   // DiffInspectRow, which reads through the seam on the site's behalf).
   for (const [name, source] of [
-    ['FileViewer.tsx', FILE_VIEWER],
+    ['FileViewerParts.tsx', FILE_VIEWER],
     ['GitBadges.tsx', GIT_BADGES],
   ]) {
     for (const m of source.matchAll(/\/api\/git-(?:show|stash-show)\?/g)) {
