@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
  * and that no bare navigator.clipboard sneaks in (it fails silently in Electron).
  */
 
-const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'src', 'components', 'sidebar', 'GitBadges.tsx');
+const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'src', 'components', 'sidebar', 'GitRepoDetails.tsx');
 const text = fs.readFileSync(SRC, 'utf8');
 
 /** The slice of `text` from `startMarker` up to (not including) `endMarker`. */
@@ -52,7 +52,7 @@ const payloadFor = (content, label) => {
   return m[1].trim();
 };
 
-describe('GitBadges declares a themed context menu per stash / reflog / branch row (WARDEN-1649)', () => {
+describe('GitRepoDetails declares a themed context menu per stash / reflog / branch row (WARDEN-1649)', () => {
   it('has one ContextMenuTrigger asChild per list row type on top of the commit/file ones', () => {
     assert.ok((text.match(/<ContextMenuTrigger asChild>/g) || []).length >= 5);
   });

@@ -4133,8 +4133,8 @@ test('sourceControlView is NOT persisted: absent from STORE_PERSISTED_KEYS, OBS_
   assert.ok(!('sourceControlView' in loadObs()));
   assert.equal(createUiStore().getState().sourceControlView, null, 'never seeded');
 });
-test('source-shape guard: GitBadges no longer declares useState for expandedHash/grepInput, restores via fetchShow, and leaves the stash cell local (WARDEN-1798)', () => {
-  const src = readFileSync(join(__dirname, 'src', 'components', 'sidebar', 'GitBadges.tsx'), 'utf8');
+test('source-shape guard: GitRepoDetails no longer declares useState for expandedHash/grepInput, restores via fetchShow, and leaves the stash cell local (WARDEN-1798)', () => {
+  const src = readFileSync(join(__dirname, 'src', 'components', 'sidebar', 'GitRepoDetails.tsx'), 'utf8');
   assert.ok(!/const \[expandedHash, setExpandedHash\] = useState/.test(src), 'a restored local cell would reintroduce the Settings round-trip reset');
   assert.ok(!/const \[grepInput, setGrepInput\] = useState/.test(src), 'a restored local cell would reintroduce the Settings round-trip reset');
   assert.match(src, /const expandedHash = useSourceControlExpandedHash\(chatId\)/);

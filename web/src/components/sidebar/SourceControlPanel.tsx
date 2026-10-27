@@ -26,7 +26,8 @@ import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { cn } from '@/lib/utils';
-import { GitChangedFile, GitRepoSummary, GitRepoDetails } from './GitBadges';
+import { GitChangedFile, GitRepoSummary } from './GitBadges';
+import { GitRepoDetails } from './GitRepoDetails';
 import { groupGitFiles } from '@/lib/sourceControl';
 import type { GitCommit, GitFile, DiffStat } from './types';
 

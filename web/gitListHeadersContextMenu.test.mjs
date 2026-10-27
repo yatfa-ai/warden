@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
  * bare navigator.clipboard is used.
  */
 
-const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'src', 'components', 'sidebar', 'GitBadges.tsx');
+const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'src', 'components', 'sidebar', 'GitRepoDetails.tsx');
 const text = fs.readFileSync(SRC, 'utf8');
 
 function between(startMarker, endMarker, from = 0) {
@@ -44,8 +44,10 @@ const itemLabels = (content) => [...content.matchAll(/>([^<>{}]+)<\/ContextMenuI
 describe('GitRepoDetails commit-list section headers declare themed context menus (WARDEN-1707)', () => {
   it('declares three header triggers on top of the pre-existing five <ContextMenuTrigger asChild> row/file ones', () => {
     // 8 = 5 row/file + 3 commit-list headers (WARDEN-1707); WARDEN-1715 added 4 more
-    // section-header triggers (uncommitted / stash / reflog / branches) → 12.
-    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 12);
+    // section-header triggers (uncommitted / stash / reflog / branches) → 12 in the
+    // original GitBadges.tsx; 2 of those (GitChangedFile / CommitFile) stayed there when
+    // GitRepoDetails was split out (WARDEN-1976), leaving 10 here.
+    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 10);
   });
 
   it('wraps ONLY the header div in each trigger — never the list, so CommitRow keeps its own menu', () => {
