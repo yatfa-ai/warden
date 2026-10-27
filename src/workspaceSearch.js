@@ -77,11 +77,23 @@ export function parseSearchOutput(raw, maxResults = SEARCH_MAX_RESULTS, maxLineL
 //     exit-1-no-match (else grep needlessly re-walks the tree on every miss).
 //   cut -c1-1000 — bound each line's transfer over SSH (a committed minified
 //     bundle is one multi-MB line) before head bounds the line COUNT.
+//   exit status (WARDEN-1963) — `head`'s status would always win, so a tool that
+//     FAILED (corrupt .git/index → git grep exit 128) read as a clean empty run and
+//     the dialog said "No results found". The tool's PIPESTATUS[0] is propagated as
+//     the script's exit code ONLY when it is not 0 (match) / 1 (no match) / 141
+//     (SIGPIPE from head) AND the tool emitted ZERO lines. A rg/grep exit 2 that
+//     accompanies real partial hits (unreadable subdir) keeps returning them, since
+//     the route drops stdout on a failed run.
 // `git grep -n -I` searches only tracked files (skips node_modules/dist/.git)
 // and skips binaries (-I). git rev-parse gates the rg/grep fallback to non-repos.
 export function buildSearchScript(cwd, query) {
   const q = shellQuote(query);
-  return `cd ${shellQuote(cwd)} 2>/dev/null || exit 0; set +o pipefail; if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git grep -n -I -F -- ${q}; elif command -v rg >/dev/null 2>&1; then rg --line-number --no-heading -F -- ${q} .; else grep -rnI -F -- ${q} .; fi | cut -c1-${SEARCH_TRANSFER_LINE_LEN} | head -n ${SEARCH_MAX_RESULTS}`;
+  // The pipeline runs inside $( … ) so PIPESTATUS[0] — the search tool's OWN status,
+  // which `head` would otherwise mask — can be read immediately after it and
+  // appended as the last line (WARDEN-1963). Escapes: `\\n` is a bash-side newline
+  // (a bare `\n` in this template literal would be a JS newline) and `\${` keeps
+  // bash's PIPESTATUS expansion from being a JS interpolation.
+  return `cd ${shellQuote(cwd)} 2>/dev/null || exit 0; set +o pipefail; r=$(if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git grep -n -I -F -- ${q}; elif command -v rg >/dev/null 2>&1; then rg --line-number --no-heading -F -- ${q} .; else grep -rnI -F -- ${q} .; fi | cut -c1-${SEARCH_TRANSFER_LINE_LEN} | head -n ${SEARCH_MAX_RESULTS}; printf '\\n%s' "\${PIPESTATUS[0]}"); s=\${r##*$'\\n'}; b=\${r%$'\\n'*}; printf '%s' "$b"; [ -n "$b" ] || [ "$s" -le 1 ] || [ "$s" -eq 141 ] || exit "$s"; exit 0`;
 }
 
 // Async, non-blocking wrapper for tiny local PROBE commands only (git rev-parse,

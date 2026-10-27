@@ -104,7 +104,7 @@ describe('buildSearchScript (remote SSH script) — security must-haves', () => 
 function runScript(cwd, query) {
   const script = buildSearchScript(cwd, query);
   const r = spawnSync('bash', ['-lc', script], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
-  return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '' };
+  return { ok: r.status === 0, status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
 describe('buildSearchScript under bash (real git repo)', () => {
@@ -226,6 +226,66 @@ describe('buildSearchScript under bash (real git repo)', () => {
     const out = parseSearchOutput(r.stdout || '');
     assert.ok(out.length > 0, 'results must NOT be silently dropped under pipefail');
     assert.ok(out.length <= 30);
+  });
+
+  it('corrupt .git/index (git grep exit 128) → script exits non-zero, not a confident empty (WARDEN-1963)', () => {
+    fs.writeFileSync(path.join(tmp, '.git', 'index'), 'garbage\n');
+    const r = runScript(tmp, 'needle');
+    assert.equal(r.ok, false, 'a failed git grep must not read as a clean empty run');
+    assert.equal(r.status, 128);
+    assert.equal(r.stdout, '');
+  });
+
+  it('exit status is the TOOL\'s: match → 0, genuine no-match (git grep exit 1) → 0 (WARDEN-1963)', () => {
+    assert.equal(runScript(tmp, 'needle').status, 0);
+    assert.equal(runScript(tmp, 'zzz_no_such_token_zzz').status, 0);
+  });
+
+  it('non-repo cwd → grep/rg fallback: no match stays exit 0 (WARDEN-1963)', () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-plain-'));
+    fs.writeFileSync(path.join(plain, 'x.txt'), 'hello\n');
+    assert.equal(runScript(plain, 'zzz_nope').status, 0);
+    const hit = runScript(plain, 'hello');
+    assert.equal(hit.status, 0);
+    assert.equal(parseSearchOutput(hit.stdout).length, 1);
+  });
+
+  it('non-repo fallback tool failing with ZERO lines (grep exit 2, unreadable dir) → non-zero (WARDEN-1963)', function () {
+    if (process.getuid && process.getuid() === 0) return; // root reads everything
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-plain-'));
+    const sub = path.join(plain, 'locked');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, 'f.txt'), 'SECRETTOKEN\n');
+    fs.chmodSync(sub, 0o000);
+    try {
+      const r = runScript(plain, 'SECRETTOKEN');
+      assert.equal(r.ok, false);
+      assert.equal(r.status, 2);
+    } finally { fs.chmodSync(sub, 0o755); }
+  });
+
+  it('rg/grep exit 2 WITH real partial hits keeps returning them (exit 0) (WARDEN-1963 design decision)', () => {
+    if (process.getuid && process.getuid() === 0) return;
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-plain-'));
+    fs.writeFileSync(path.join(plain, 'ok.txt'), 'PARTIALTOKEN\n');
+    const sub = path.join(plain, 'locked');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, 'f.txt'), 'PARTIALTOKEN\n');
+    fs.chmodSync(sub, 0o000);
+    try {
+      const r = runScript(plain, 'PARTIALTOKEN');
+      assert.equal(r.status, 0);
+      assert.equal(parseSearchOutput(r.stdout).length, 1);
+    } finally { fs.chmodSync(sub, 0o755); }
+  });
+
+  it('>30 matches under a hostile outer `set -o pipefail` still exits 0 with exactly 30 lines (WARDEN-1963)', () => {
+    for (let i = 0; i < 3000; i++) fs.writeFileSync(path.join(tmp, `m${i}.js`), 'MANYTOKEN\n');
+    spawnSync('git', ['-C', tmp, 'add', '.']);
+    const script = `set -o pipefail; ${buildSearchScript(tmp, 'MANYTOKEN')}`;
+    const r = spawnSync('bash', ['-lc', script], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.split('\n').filter(Boolean).length, 30);
   });
 
   it('treats the query as a LITERAL substring (-F), not a regex', () => {

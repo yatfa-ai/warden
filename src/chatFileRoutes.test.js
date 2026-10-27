@@ -63,6 +63,9 @@ const DOCKER_SHIM = `#!/bin/bash
 case "$2" in
   mybox) echo "a.js:3:hello world" ;;
   failbox) printf 'partial.js:1:leftover\\n'; exit 1 ;;
+  # realbox: actually run the delivered script (last argv) so the route is
+  # exercised against the REAL buildSearchScript exit status (WARDEN-1963).
+  realbox) exec bash -lc "\${@: -1}" ;;
   *) exit 0 ;;
 esac
 `;
@@ -360,6 +363,28 @@ describe('POST /api/search-files', () => {
     chats.set('c', { host: LOCAL, container: 'failbox', cwd: '/srv/proj' });
     const r = await post('/api/search-files', { id: 'c', query: 'leftover' });
     assert.deepEqual(r.body, { results: [], query: 'leftover', error: 'search failed' });
+  });
+
+  it('container chat whose repo has a corrupt .git/index → the REAL script exits 128 → {results:[], query, error:"search failed"} (WARDEN-1963)', async () => {
+    const badDir = path.join(tmpRoot, 'badrepo2');
+    fs.mkdirSync(badDir);
+    fs.writeFileSync(path.join(badDir, 'a.txt'), 'needle\n');
+    execFileSync('git', ['init', '-q'], { cwd: badDir });
+    fs.writeFileSync(path.join(badDir, '.git', 'index'), 'garbage\n');
+    chats.set('rb', { host: LOCAL, container: 'realbox', cwd: badDir });
+    const r = await post('/api/search-files', { id: 'rb', query: 'needle' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { results: [], query: 'needle', error: 'search failed' });
+  });
+
+  it('container chat, healthy repo through the REAL script → results (negative control) (WARDEN-1963)', async () => {
+    chats.set('rg', { host: LOCAL, container: 'realbox', cwd: gitDir });
+    const r = await post('/api/search-files', { id: 'rg', query: 'needle' });
+    assert.deepEqual(r.body.results.map((x) => x.file), ['a.txt']);
+    assert.equal('error' in r.body, false);
+    chats.set('rn', { host: LOCAL, container: 'realbox', cwd: gitDir });
+    const none = await post('/api/search-files', { id: 'rn', query: 'zzz_absent_zzz' });
+    assert.deepEqual(none.body, { results: [], query: 'zzz_absent_zzz' });
   });
 
   it('a transport that throws → 200 generic "search failed", no internals leaked', async () => {
