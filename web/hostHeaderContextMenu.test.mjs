@@ -12,7 +12,9 @@ import { fileURLToPath } from 'node:url';
  * verified live, not here.
  */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const text = fs.readFileSync(path.join(HERE, 'src', 'components', 'HealthDashboard.tsx'), 'utf8');
+const text = fs.readFileSync(path.join(HERE, 'src', 'components', 'fleet-health', 'AgentGroups.tsx'), 'utf8');
+// The ConfirmDialog + its removeCompanionHost state stay in HealthDashboard.tsx.
+const dash = fs.readFileSync(path.join(HERE, 'src', 'components', 'HealthDashboard.tsx'), 'utf8');
 
 // The host-group block: from the hostGroups.map to the agents-beneath marker.
 const mapStart = text.indexOf('hostGroups.map(group');
@@ -83,8 +85,8 @@ describe('Fleet Health host header declares a themed context menu (WARDEN-1667)'
 
   it('never deletes directly — routes through the existing ConfirmDialog state', () => {
     assert.ok(!/removeCompanion\(/.test(content), 'menu must not call a delete directly');
-    assert.match(text, /removeCompanionHost/);
-    assert.match(text, /<ConfirmDialog/);
+    assert.match(dash, /removeCompanionHost/);
+    assert.match(dash, /<ConfirmDialog/);
   });
 
   it('has no hand-rolled onContextMenu handler on the header (WARDEN-926)', () => {
