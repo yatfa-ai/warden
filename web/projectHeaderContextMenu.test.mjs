@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
  * live, not here.
  */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const text = fs.readFileSync(path.join(HERE, 'src', 'components', 'HealthDashboard.tsx'), 'utf8');
+const text = fs.readFileSync(path.join(HERE, 'src', 'components', 'fleet-health', 'AgentGroups.tsx'), 'utf8');
 
 const mapStart = text.indexOf('projectGroups.map(group');
 assert.ok(mapStart !== -1, 'projectGroups.map not found');

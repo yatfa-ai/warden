@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
  * live, not here.
  */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const text = fs.readFileSync(path.join(HERE, 'src', 'components', 'HealthDashboard.tsx'), 'utf8');
+const text = fs.readFileSync(path.join(HERE, 'src', 'components', 'fleet-health', 'AgentGroups.tsx'), 'utf8');
 
 const branchStart = text.indexOf("groupBy === 'health' ? (");
 assert.ok(branchStart !== -1, "groupBy === 'health' ? ( not found");
