@@ -41,6 +41,9 @@ describe('POST /api/paste-image — clipboard image → the agent\u2019s filesys
     originalHome = process.env.HOME;
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paste-http-'));
     process.env.HOME = tempHome;
+    // Per-process paste dir (WARDEN-1959): paneRoutes.test.js runs in a parallel
+    // process and must not be able to collide with this file's deliveries.
+    process.env.WARDEN_PASTE_DIR = path.join(tempHome, 'paste');
     const wdir = path.join(tempHome, '.yatfa-warden');
     fs.mkdirSync(wdir, { recursive: true });
     fs.writeFileSync(path.join(wdir, 'config.json'), JSON.stringify({ hosts: [] }) + '\n');
@@ -61,6 +64,7 @@ describe('POST /api/paste-image — clipboard image → the agent\u2019s filesys
   after(async () => {
     killSession();
     if (httpServer) await new Promise((res) => httpServer.close(res));
+    delete process.env.WARDEN_PASTE_DIR;
     if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
@@ -151,7 +155,7 @@ describe('POST /api/paste-image — clipboard image → the agent\u2019s filesys
     assert.match(body.marker, /PNG 1×1/);
     // The destination is the fixed, predictable, agent-READABLE directory the
     // roadmap requires — not a per-user path warden cannot know the agent shares.
-    assert.ok(body.path.startsWith('/tmp/warden/paste/'), body.path);
+    assert.ok(body.path.startsWith(`${process.env.WARDEN_PASTE_DIR}/`), body.path);
     fs.rmSync(body.path, { force: true });
 
     // An EMPTY body on a RESOLVABLE pane is a 400 — the case the unresolved-id

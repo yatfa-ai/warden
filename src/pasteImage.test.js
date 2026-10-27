@@ -16,6 +16,7 @@ import {
   deliverPastedImage,
   prunePasteDir,
   PASTE_DIR,
+  localPasteDir,
   PASTE_RETENTION_MS,
   MAX_RETAINED_PASTES,
   CLOSE_GRACE_MS,
@@ -381,6 +382,28 @@ function fakeChild() {
   child.kill = () => { child.killed = true; };
   return child;
 }
+
+describe('localPasteDir — WARDEN_PASTE_DIR override (WARDEN-1959)', () => {
+  const saved = process.env.WARDEN_PASTE_DIR;
+  const restore = () => { if (saved === undefined) delete process.env.WARDEN_PASTE_DIR; else process.env.WARDEN_PASTE_DIR = saved; };
+
+  it('with no override, POSIX hosts get the fixed PASTE_DIR (the marker path users see)', () => {
+    delete process.env.WARDEN_PASTE_DIR;
+    try {
+      if (process.platform !== 'win32') assert.equal(localPasteDir(), '/tmp/warden/paste');
+      if (process.platform !== 'win32') assert.equal(localPasteDir(), PASTE_DIR);
+    } finally { restore(); }
+  });
+
+  it('an override is honoured at call time; an empty one falls back to the default', () => {
+    try {
+      process.env.WARDEN_PASTE_DIR = '/somewhere/else';
+      assert.equal(localPasteDir(), '/somewhere/else');
+      process.env.WARDEN_PASTE_DIR = '';
+      assert.notEqual(localPasteDir(), '');
+    } finally { restore(); }
+  });
+});
 
 describe('deliverPastedImage — local, no container: a direct write', () => {
   it('writes the file and returns a marker naming it', async () => {

@@ -82,7 +82,14 @@ export const PASTE_DIR = '/tmp/warden/paste';
 // Where a LOCAL, container-less write lands. POSIX hosts get the identical
 // PASTE_DIR so the marker path a user sees is the same string everywhere; only
 // Windows (no /tmp) diverges to the OS temp dir.
+//
+// WARDEN_PASTE_DIR is an explicit override, read at CALL time. Production sets
+// nothing, so the marker path a user sees is unchanged; the test suites point
+// it at a per-process temp dir so two files running in parallel `node --test`
+// processes never share (or swap out) one hard-coded directory (WARDEN-1959).
 export function localPasteDir() {
+  const override = process.env.WARDEN_PASTE_DIR;
+  if (override) return override;
   return process.platform === 'win32' ? path.join(os.tmpdir(), 'warden', 'paste') : PASTE_DIR;
 }
 
