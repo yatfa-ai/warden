@@ -51,6 +51,11 @@ const originalEnv = {
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-paneRoutes-'));
 process.env.HOME = path.join(tmpRoot, 'home');
+// A PER-PROCESS paste dir (WARDEN-1959): `node --test` runs files in parallel
+// processes and paste-image-http.test.js posts into the paste dir too, so this
+// file must never share (or swap out) the production /tmp/warden/paste.
+const PASTE_DIR_FOR_TEST = path.join(tmpRoot, 'paste');
+process.env.WARDEN_PASTE_DIR = PASTE_DIR_FOR_TEST;
 fs.mkdirSync(process.env.HOME, { recursive: true });
 delete process.env.WARDEN_COMPANION_TRANSPORT;
 
@@ -212,6 +217,7 @@ after(async () => {
   clearPaneContainerCache();
   process.env.PATH = originalEnv.PATH;
   process.env.HOME = originalEnv.HOME;
+  delete process.env.WARDEN_PASTE_DIR;
   if (originalEnv.COMPANION === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
   else process.env.WARDEN_COMPANION_TRANSPORT = originalEnv.COMPANION;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -480,7 +486,7 @@ describe('POST /api/paste-image', () => {
     const r = await postRaw('/api/paste-image?id=alpha', PNG_1x1, 'image/png');
     assert.equal(r.status, 200);
     assert.equal(r.body.ok, true);
-    assert.ok(r.body.path.startsWith('/tmp/warden/paste/paste-'), r.body.path);
+    assert.ok(r.body.path.startsWith(`${PASTE_DIR_FOR_TEST}/paste-`), r.body.path);
     assert.ok(r.body.path.endsWith('.png'), r.body.path);
     assert.equal(fs.existsSync(r.body.path), true, 'the delivered file must exist');
     assert.equal(fs.readFileSync(r.body.path).equals(PNG_1x1), true, 'delivered bytes must equal the posted image');
@@ -501,21 +507,20 @@ describe('POST /api/paste-image', () => {
 
   it('an unwritable destination is a 500 carrying the write error', async () => {
     await prewarmWalk('alpha', { tree: false });
-    const pasteDir = '/tmp/warden/paste';
-    const backup = `${pasteDir}.paneRoutes-bak-${process.pid}`;
-    let renamed = false;
+    // Point the (per-process) paste dir at a REGULAR FILE so mkdir/write fail
+    // deterministically. Nothing shared is touched: the path is private to this
+    // process, so the paste-image-http suite (and the production
+    // /tmp/warden/paste) are never swapped out.
+    const blocker = path.join(tmpRoot, 'paste-blocker');
+    fs.writeFileSync(blocker, 'a regular file, not the paste directory');
+    process.env.WARDEN_PASTE_DIR = blocker;
     try {
-      // Swap the paste DIRECTORY for a regular file so mkdir/write fail
-      // deterministically, then put the directory back (kept as short as
-      // possible — the paste-image-http suite shares this path).
-      if (fs.existsSync(pasteDir)) { fs.renameSync(pasteDir, backup); renamed = true; }
-      fs.writeFileSync(pasteDir, 'a regular file, not the paste directory');
       const r = await postRaw('/api/paste-image?id=alpha', PNG_1x1, 'image/png');
       assert.equal(r.status, 500);
       assert.ok(r.body.error.startsWith('write failed: '), `expected the write-failure channel, got: ${r.body.error}`);
     } finally {
-      fs.rmSync(pasteDir, { force: true });
-      if (renamed) fs.renameSync(backup, pasteDir);
+      process.env.WARDEN_PASTE_DIR = PASTE_DIR_FOR_TEST;
+      fs.rmSync(blocker, { force: true });
     }
   });
 
