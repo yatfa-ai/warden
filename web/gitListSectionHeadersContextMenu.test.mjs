@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
  * checks.
  */
 
-const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'src', 'components', 'sidebar', 'GitBadges.tsx');
+const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'src', 'components', 'sidebar', 'GitRepoDetails.tsx');
 const text = fs.readFileSync(SRC, 'utf8');
 
 function between(startMarker, endMarker, from = 0) {
@@ -41,8 +41,8 @@ const reflogMenu = between(HDR + '0.5 flex items-center justify-between gap-2 px
 const branchMenu = between(HDR + '0.5 flex items-center justify-between gap-2 px-0.5">\n                    <span className="truncate text-[10px] font-medium text-muted-foreground">⎇ branches', '</ContextMenu>');
 
 describe('GitRepoDetails uncommitted / stash / reflog / branch section headers declare themed context menus (WARDEN-1715)', () => {
-  it('has 12 <ContextMenuTrigger asChild> in total (8 + the four new headers)', () => {
-    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 12);
+  it('has 10 <ContextMenuTrigger asChild> in total (12 before the WARDEN-1976 split; 2 stayed in GitBadges.tsx)', () => {
+    assert.strictEqual((text.match(/<ContextMenuTrigger asChild>/g) || []).length, 10);
   });
 
   it('wraps ONLY the header div in each trigger — never the <ul>/rows', () => {
