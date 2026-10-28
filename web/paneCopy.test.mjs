@@ -1,5 +1,5 @@
 // Tests for the terminal pane's copy routine — copySelectionToClipboard in
-// src/components/PaneTile.tsx (WARDEN-1244).
+// src/lib/paneClipboard.ts (WARDEN-1244; extracted from PaneTile.tsx, WARDEN-1996).
 //
 // THE BUG: the pane copied the xterm selection by issuing
 // document.execCommand('copy') and DISCARDING the boolean. execCommand can
@@ -17,11 +17,9 @@
 //   - success stays SILENT (no new noise on the happy path);
 //   - an empty selection stays a no-op (de-select never clobbers/toasts).
 //
-// HOW THIS LOADS THE REAL CODE: PaneTile.tsx can't be imported in Node (React,
-// xterm, sonner, the @/ alias), and this repo deliberately keeps the pane's
-// copy implementation IN the component (WARDEN-1244 scopes it there; the
-// shared src/lib/clipboard.ts helper is out of bounds and the pane doesn't
-// call it). So this suite extracts the function TEXT from the live source —
+// HOW THIS LOADS THE REAL CODE: src/lib/paneClipboard.ts can't be imported in
+// Node (sonner, the @/ alias), and the pane's copy implementation deliberately
+// does not use the shared src/lib/clipboard.ts helper. So this suite extracts the function TEXT from the live source —
 // it can never test a stale copy; a rename or reshape that defeats the regex
 // fails loudly here — then runs it through the same OXC-transpile-to-temp-
 // `.mjs` + dynamic import() harness clipboard.test.mjs / paneAttach.test.mjs
@@ -45,15 +43,17 @@ import assert from 'node:assert/strict';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const paneTilePath = resolve(__dirname, 'src/components/PaneTile.tsx');
 const src = readFileSync(paneTilePath, 'utf8');
+const paneClipboardPath = resolve(__dirname, 'src/lib/paneClipboard.ts');
+const clipSrc = readFileSync(paneClipboardPath, 'utf8');
 
 // --- Extract the REAL copySelectionToClipboard (TS -> ESM via OXC) -----------
-// Module-level function: starts at column 0 with `function copySelectionTo…`
+// Module-level function: starts at column 0 with `export function copySelectionTo…`
 // and ends at the first column-0 `}` (its body's braces are all indented).
-const fnMatch = src.match(/^function copySelectionToClipboard\([^)]*\)[^{]*\{[\s\S]*?^\}/m);
+const fnMatch = clipSrc.match(/^export function copySelectionToClipboard\([^)]*\)[^{]*\{[\s\S]*?^\}/m);
 if (!fnMatch) {
-  throw new Error('copySelectionToClipboard not found in PaneTile.tsx — moved or renamed? Update this test.');
+  throw new Error('copySelectionToClipboard not found in paneClipboard.ts — moved or renamed? Update this test.');
 }
-const { code } = await transformWithOxc(fnMatch[0], paneTilePath, {});
+const { code } = await transformWithOxc(fnMatch[0].replace(/^export /, ''), paneClipboardPath, {});
 
 // Bind `toast` (imported from 'sonner' in the real file) to a global sink the
 // tests reset and read, so the extracted function closes over the mock.
@@ -194,7 +194,7 @@ console.log('\nstatic wiring guard — all three entry points, no stale pref');
 // ticket calls out; only a source guard can see it).
 test('exactly three call sites, each passing notifyErrorsRef.current', () => {
   const calls = [...src.matchAll(/copySelectionToClipboard\(/g)];
-  assert.equal(calls.length, 4, '1 definition + 3 call sites (copy-on-select, Ctrl/Cmd+C, menu)');
+  assert.equal(calls.length, 3, '3 call sites (copy-on-select, Ctrl/Cmd+C, menu); the definition lives in paneClipboard.ts');
   const viaRef = [...src.matchAll(/copySelectionToClipboard\(\s*(?:term|termRef\.current)!?,\s*notifyErrorsRef\.current\s*\)/g)];
   assert.equal(viaRef.length, 3, 'every call site must pass the ref-read pref');
 });

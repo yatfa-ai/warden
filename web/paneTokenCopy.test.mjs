@@ -51,15 +51,17 @@ import assert from 'node:assert/strict';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const paneTilePath = resolve(__dirname, 'src/components/PaneTile.tsx');
 const src = readFileSync(paneTilePath, 'utf8');
+const paneClipboardPath = resolve(__dirname, 'src/lib/paneClipboard.ts');
+const clipSrc = readFileSync(paneClipboardPath, 'utf8');
 
 // --- Extract the REAL copyTokenToClipboard (TS -> ESM via OXC) --------------
 // Module-level async function: starts at column 0 and ends at the first
 // column-0 `}` (its body's braces are all indented).
-const fnMatch = src.match(/^async function copyTokenToClipboard\([^)]*\)[^{]*\{[\s\S]*?^\}/m);
+const fnMatch = clipSrc.match(/^export async function copyTokenToClipboard\([^)]*\)[^{]*\{[\s\S]*?^\}/m);
 if (!fnMatch) {
-  throw new Error('copyTokenToClipboard not found in PaneTile.tsx — moved or renamed? Update this test.');
+  throw new Error('copyTokenToClipboard not found in paneClipboard.ts — moved or renamed? Update this test.');
 }
-const { code } = await transformWithOxc(fnMatch[0], paneTilePath, {});
+const { code } = await transformWithOxc(fnMatch[0].replace(/^export /, ''), paneClipboardPath, {});
 
 // Bind the two imported names the extracted function closes over — `copyText`
 // (from @/lib/clipboard) and `toast` (from sonner) — to global sinks the tests
