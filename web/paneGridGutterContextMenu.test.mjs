@@ -16,7 +16,10 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(resolve(__dirname, 'src', 'components', 'PaneGrid.tsx'), 'utf8');
-const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+const src = strip(raw);
+// WARDEN-2002: the reset logic moved into the usePaneGridResize hook.
+const hookSrc = strip(readFileSync(resolve(__dirname, 'src', 'lib', 'usePaneGridResize.ts'), 'utf8'));
 
 const TRIGGER_THEN_SEP = /<ContextMenuTrigger asChild>\s*<div(?:\s+key=\{[^}]*\})?\s+role="separator"/g;
 
@@ -53,7 +56,7 @@ test('(c) double-click handlers are still wired', () => {
   assert.ok(src.includes("onDoubleClick={resetAxis('col')}"));
   assert.ok(src.includes("onDoubleClick={resetAxis('row')}"));
   assert.ok(src.includes('onDoubleClick={resetBothAxes}'));
-  const wrappers = src.slice(src.indexOf('const resetAxis ='));
+  const wrappers = hookSrc.slice(hookSrc.indexOf('const resetAxis ='));
   assert.ok(/const resetAxis = [^\n]*\n\s*e\.stopPropagation\(\);\s*applyResetAxis\(axis\)/.test(wrappers));
   assert.ok(/const resetBothAxes = [^\n]*\n\s*e\.stopPropagation\(\);\s*applyResetBothAxes\(\)/.test(wrappers));
 });
@@ -62,9 +65,9 @@ test('(d) menu selects go through the shared reset path that commits the ratios'
   assert.ok(src.includes("onSelect={() => applyResetAxis('col')}"));
   assert.ok(src.includes("onSelect={() => applyResetAxis('row')}"));
   assert.ok(src.includes('onSelect={() => applyResetBothAxes()}'));
-  const axis = src.slice(src.indexOf('const applyResetAxis ='), src.indexOf('const resetAxis ='));
+  const axis = hookSrc.slice(hookSrc.indexOf('const applyResetAxis ='), hookSrc.indexOf('const resetAxis ='));
   assert.ok(/pushedRef\.current\.col = eq;[\s\S]*onPaneColRatiosChange\(eq\)/.test(axis), 'col commit');
   assert.ok(/pushedRef\.current\.row = eq;[\s\S]*onPaneRowRatiosChange\(eq\)/.test(axis), 'row commit');
-  const both = src.slice(src.indexOf('const applyResetBothAxes ='), src.indexOf('const resetBothAxes ='));
+  const both = hookSrc.slice(hookSrc.indexOf('const applyResetBothAxes ='), hookSrc.indexOf('const resetBothAxes ='));
   assert.ok(both.includes('onPaneColRatiosChange(eqCol)') && both.includes('onPaneRowRatiosChange(eqRow)'), 'both commit');
 });
