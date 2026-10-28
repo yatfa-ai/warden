@@ -275,10 +275,12 @@ await test('NEVER claims when the pane has no terminal (disposed / not yet open)
 console.log('PaneTile wiring — BOTH entry points, and no image bytes in the pty');
 
 const pane = readFileSync(paneTilePath, 'utf8');
+// pasteIntoTerm itself lives in lib/paneClipboard.ts (WARDEN-1996); the call sites stay in PaneTile.tsx.
+const clip = readFileSync(join(libDir, 'paneClipboard.ts'), 'utf8');
 
 await test('pasteIntoTerm tries the IMAGE before either text read', async () => {
-  const fn = pane.match(/^async function pasteIntoTerm\([\s\S]*?^\}/m);
-  assert.ok(fn, 'pasteIntoTerm not found in PaneTile.tsx — moved or renamed? Update this test.');
+  const fn = clip.match(/^export async function pasteIntoTerm\([\s\S]*?^\}/m);
+  assert.ok(fn, 'pasteIntoTerm not found in paneClipboard.ts — moved or renamed? Update this test.');
   const body = fn[0];
   const imageAt = body.indexOf('readClipboardImage');
   const textAt = body.indexOf('readText');
@@ -289,13 +291,13 @@ await test('pasteIntoTerm tries the IMAGE before either text read', async () => 
 await test('the image branch RETURNS before the text path — never both', async () => {
   // An image paste that also pasted the clipboard's text flavour would put a
   // caption into the pane behind the marker.
-  const fn = pane.match(/^async function pasteIntoTerm\([\s\S]*?^\}/m)[0];
+  const fn = clip.match(/^export async function pasteIntoTerm\([\s\S]*?^\}/m)[0];
   const branch = fn.slice(fn.indexOf('if (image)'), fn.indexOf('readText'));
   assert.ok(/\breturn;/.test(branch), 'the image branch falls through to the text path');
 });
 
 await test('a delivery failure toasts and pastes NOTHING', async () => {
-  const fn = pane.match(/^async function pasteIntoTerm\([\s\S]*?^\}/m)[0];
+  const fn = clip.match(/^export async function pasteIntoTerm\([\s\S]*?^\}/m)[0];
   const fail = fn.slice(fn.indexOf('if (!res.ok)'), fn.indexOf('term.paste(res.marker'));
   assert.ok(/toast\.error/.test(fail), 'no error toast on a failed delivery');
   assert.ok(!/term\.paste/.test(fail), 'a marker is pasted on the FAILURE leg');
@@ -305,7 +307,7 @@ await test('a delivery failure toasts and pastes NOTHING', async () => {
 
 await test('ONLY the marker is pasted — the blob never reaches term.paste', async () => {
   // Acceptance criterion 6, made grep-able: image bytes never cross the pty.
-  const fn = pane.match(/^async function pasteIntoTerm\([\s\S]*?^\}/m)[0];
+  const fn = clip.match(/^export async function pasteIntoTerm\([\s\S]*?^\}/m)[0];
   const pastes = [...fn.matchAll(/term\.paste\(([^)]*)\)/g)].map((m) => m[1]);
   assert.deepEqual(pastes.sort(), ['res.marker!', 't', 'ta.value']);
   assert.ok(!/term\.paste\(\s*(image|blob)/.test(fn));
