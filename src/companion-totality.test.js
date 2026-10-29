@@ -1030,7 +1030,11 @@ describe('WARDEN-1412 companion-totality sweep', () => {
         // `run as defaultRun` (:33) reaches the tree through the injection
         // rebind `deps.run ?? defaultRun`.
         run: 3,          // :969 bootstrapChannel, :1219 uninstallCompanion, :1805 deliverRemoteScript's raw path
-        buildSshArgv: 2, // :564 spawnPersistentChannel, :638 streamFileToHost — the upload/channel legs
+      },
+      // WARDEN-2014: the two raw buildSshArgv legs moved here verbatim from companion.js
+      // (the RPC transport layer extraction) — same sites, same class (a).
+      'companionTransport.js': {
+        buildSshArgv: 2, // spawnPersistentChannel, streamFileToHost — the upload/channel legs
       },
       // ---- class (b): gated toggle-off branches --------------------------
       'chats.js': {
