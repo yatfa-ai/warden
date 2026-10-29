@@ -676,4 +676,45 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
     assert.strictEqual(body.hasMore, false);
     assert.strictEqual(body.prevCursor, 0);
   });
+
+  // WARDEN-2026: a non-ENOENT read failure must reach the route's 500/{error} channel
+  // instead of being swallowed into an empty (false end-of-history) view. Root bypasses
+  // mode bits, so the unreadable-file cases cannot be exercised there.
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const skipRoot = isRoot ? 'running as root: chmod 000 does not block reads' : false;
+
+  it('returns 500 with a non-empty error for an unreadable transcript, first page and before=<n> (WARDEN-2026)', { skip: skipRoot }, async () => {
+    const fp = writeSession(tempHome, 'projU', 'sess-view-unreadable', [
+      { type: 'user', cwd: '/repo/unreadable', message: { role: 'user', content: 'hi' } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'there' }] } },
+    ], 5000);
+    fs.chmodSync(fp, 0o000);
+    try {
+      for (const qs of ['', '&before=10']) {
+        const res = await fetch(`${baseUrl}/api/claude-session?id=sess-view-unreadable${qs}`);
+        assert.strictEqual(res.status, 500, `unreadable file${qs} must be 500, not an empty 200`);
+        const body = await res.json();
+        assert.ok(typeof body.error === 'string' && body.error.length > 0, 'error message present');
+        assert.strictEqual(body.messages, undefined, 'no empty messages view is served');
+      }
+    } finally {
+      fs.chmodSync(fp, 0o644);
+    }
+  });
+
+  it('readLocalSessionTranscript rejects (does not return an empty view) for an unreadable file (WARDEN-2026)', { skip: skipRoot }, async () => {
+    const fp = writeSession(tempHome, 'projU', 'sess-view-unreadable-direct', [
+      { type: 'user', cwd: '/repo/unreadable', message: { role: 'user', content: 'hi' } },
+    ], 5001);
+    fs.chmodSync(fp, 0o000);
+    try {
+      await assert.rejects(() => readLocalSessionTranscript('sess-view-unreadable-direct', {}), { code: 'EACCES' });
+    } finally {
+      fs.chmodSync(fp, 0o644);
+    }
+  });
+
+  it('readLocalSessionTranscript still returns {notFound: true} for an unknown id (WARDEN-2026)', async () => {
+    assert.deepStrictEqual(await readLocalSessionTranscript('sess-does-not-exist', {}), { notFound: true });
+  });
 });
