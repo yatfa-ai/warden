@@ -575,6 +575,8 @@ async function findLocalSessionFile(id) {
 // it reads the OLDER window [start, before] instead of the tail and SKIPS the head
 // read (cwd is only needed on the first page — the caller already has it). The
 // response carries prevCursor/hasMore so the caller can page further back.
+// A read failure other than ENOENT (e.g. EACCES) is thrown, never swallowed into an
+// empty view; ENOENT (file vanished mid-read) is {notFound}.
 export async function readLocalSessionTranscript(id, opts = {}) {
   const before = opts.before;
   const file = await findLocalSessionFile(id);
@@ -614,7 +616,13 @@ export async function readLocalSessionTranscript(id, opts = {}) {
     } finally {
       await fh.close();
     }
-  } catch { /* noop — empty windows yield an empty message list */ }
+  } catch (err) {
+    // The file vanished between findLocalSessionFile and open/stat: same answer as
+    // an unknown id. Any other failure (EACCES, EIO, ...) must NOT masquerade as an
+    // empty transcript — rethrow so the route's catch answers 500 {error}.
+    if (err && err.code === 'ENOENT') return { notFound: true };
+    throw err;
+  }
   const view = buildTranscriptView(headText, bodyText);
   if (byteTruncated) view.truncated = true;
   view.prevCursor = win.prevCursor;
