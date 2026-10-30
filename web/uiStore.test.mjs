@@ -27,24 +27,23 @@
 //      must not be able to move another — including the singleton.
 //
 // Run: node uiStore.test.mjs   (or: npm test, from web/)
-import { transformWithOxc } from 'vite';
-import { readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { emitUiStoreGraph, emitModule, localStorageMemory } from './uiStoreTestHarness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // --- Polyfill localStorage (Node has none) BEFORE loading either module ------
 // uiStore.ts seeds itself from loadUi() at module load, so the polyfill must
-// exist first — exactly as it must in the browser.
-const mem = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
-  setItem: (k, v) => { mem.set(k, String(v)); },
-  removeItem: (k) => { mem.delete(k); },
-  clear: () => { mem.clear(); },
-};
+// exist first — exactly as it must in the browser. The polyfill (and its
+// backing Map, exposed as localStorageMemory) lives in uiStoreTestHarness.mjs
+// alongside the uiStore emit graph it once was hand-copied beside, so a new
+// `@/lib` VALUE import in uiStore.ts is handled in that ONE file. `mem` aliases
+// that SAME Map — test fixtures below seed/assert through it and `reset`
+// clears it — so keeping the identity shared is what keeps the isolation real.
+const mem = localStorageMemory;
 const reset = () => mem.clear();
 
 // --- Load the REAL modules (TS -> ESM via the OXC transform Vite bundles) ----
@@ -53,22 +52,12 @@ const reset = () => mem.clear();
 // the importing file, so the transpiled module must sit under web/'s
 // node_modules ancestry to find it.
 const tmpDir = mkdtempSync(join(__dirname, '.uistore-test-'));
-const emit = (relPath, outName, rewrite = (c) => c) => {
-  const absPath = resolve(__dirname, relPath);
-  return transformWithOxc(readFileSync(absPath, 'utf8'), absPath, {})
-    .then(({ code }) => writeFileSync(join(tmpDir, outName), rewrite(code)));
-};
-await emit('src/lib/themes.ts', 'themes.mjs');
-await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
-await emit('src/lib/layout.ts', 'layout.mjs');
-await emit('src/lib/paneAttach.ts', 'paneAttach.mjs');
-await emit('src/lib/selection.ts', 'selection.mjs');
-await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/selection', './selection.mjs').replaceAll('@/lib/themes', './themes.mjs'));
+await emitUiStoreGraph(tmpDir);
 // WARDEN-1362: quickReply.ts is pure + dependency-free (its lone `import type` is
 // erased at transpile — same harness quickReply.test.mjs uses), so it emits clean
 // here too. The rewrite is a defensive no-op kept for shape parity with the above.
-await emit('src/lib/resetUiPrefs.ts', 'resetUiPrefs.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/uiStore', './uiStore.mjs'));
-await emit('src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
+await emitModule(tmpDir, 'src/lib/resetUiPrefs.ts', 'resetUiPrefs.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/uiStore', './uiStore.mjs'));
+await emitModule(tmpDir, 'src/lib/quickReply.ts', 'quickReply.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs'));
 
 const { loadUi, saveUi, persistUiState, DEFAULT_UI, STARTER_SNIPPETS, resetUiPrefDefaults, DEFAULT_TERMINAL_FONT_FAMILY, saveObs, loadObs, resetObsPrefDefaults, OBS_RESET_KEYS, OBS_PRESERVED_KEYS, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, launchedEmpty } =
   await import(join(tmpDir, 'storage.mjs'));

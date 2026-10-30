@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { emitUiStoreGraph } from './uiStoreTestHarness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const paneGridPath = resolve(__dirname, 'src/lib/paneGrid.ts');
@@ -44,29 +45,15 @@ const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistribu
 rmSync(tmpDir, { recursive: true, force: true });
 
 // --- Load the REAL uiStore.ts (WARDEN-1530: the store now owns the WARDEN-521 clear) --
-// The temp dir lives INSIDE web/ because uiStore.ts imports `zustand`, a real
-// package that Node resolves by walking up from the importing file (same
-// harness as uiStore.test.mjs). localStorage is polyfilled first since the
-// module seeds from loadUi() at load time.
-const lsMem = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (lsMem.has(k) ? lsMem.get(k) : null),
-  setItem: (k, v) => { lsMem.set(k, String(v)); },
-  removeItem: (k) => { lsMem.delete(k); },
-  clear: () => { lsMem.clear(); },
-};
+// uiStoreTestHarness.mjs polyfills localStorage BEFORE the emitted modules load
+// (the store seeds from loadUi() at load time) and emits uiStore's whole
+// `@/lib/*` VALUE-import graph into storeTmpDir — one home for the polyfill +
+// emit list + specifier rewrites this file used to hand-copy. storeTmpDir lives
+// INSIDE web/ because uiStore.ts imports `zustand`, a real package that Node
+// resolves by walking up from the importing file (contract detailed on
+// emitModule).
 const storeTmpDir = mkdtempSync(join(__dirname, '.panegrid-store-test-'));
-const emitStoreModule = async (relPath, outName, rewrite = (c) => c) => {
-  const absPath = resolve(__dirname, relPath);
-  const { code: out } = await transformWithOxc(readFileSync(absPath, 'utf8'), absPath, {});
-  writeFileSync(join(storeTmpDir, outName), rewrite(out));
-};
-await emitStoreModule('src/lib/themes.ts', 'themes.mjs');
-await emitStoreModule('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
-await emitStoreModule('src/lib/layout.ts', 'layout.mjs');
-await emitStoreModule('src/lib/paneAttach.ts', 'paneAttach.mjs');
-await emitStoreModule('src/lib/selection.ts', 'selection.mjs');
-await emitStoreModule('src/lib/uiStore.ts', 'uiStore.mjs', (c) => c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/selection', './selection.mjs').replaceAll('@/lib/themes', './themes.mjs'));
+await emitUiStoreGraph(storeTmpDir);
 const { createUiStore } = await import(join(storeTmpDir, 'uiStore.mjs'));
 rmSync(storeTmpDir, { recursive: true, force: true });
 
