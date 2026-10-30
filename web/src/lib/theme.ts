@@ -73,15 +73,6 @@ export function resolveThemeId(pref: ThemePref): ThemeId {
 }
 
 /**
- * The inherent light/dark MODE of a theme preference, OS-resolved when the pref
- * is 'system'. Used wherever the binary mode still matters (e.g. legacy
- * callers). Prefer the concrete id (`resolveThemeId`) when you need the palette.
- */
-export function getEffectiveMode(pref: ThemePref): 'light' | 'dark' {
-  return getThemeMode(resolveThemeId(pref));
-}
-
-/**
  * Apply a theme preference to the document.
  *
  * Sets the `data-theme` attribute on `<html>` to the resolved theme id — which

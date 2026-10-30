@@ -19,10 +19,6 @@
 //     it added. App.tsx returns that cleanup from an effect keyed [theme], so a
 //     broken cleanup leaks one OS-media listener per theme toggle.
 //
-// getEffectiveMode is intentionally NOT tested here: it is consumerless
-// (zero hits outside its own definition), flagged separately rather than
-// covered, so this diff protects only live code.
-//
 // No FE test runner in this repo, so (like storage.test.mjs / hostInput.test.mjs)
 // this loads the REAL theme.ts + themes.ts, transpiled TS -> ESM via Vite's OXC
 // transform, rewriting the `@/lib/themes` alias to a relative path Node resolves.
