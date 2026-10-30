@@ -38,7 +38,7 @@ const transpile = async (name, rewrite) => {
   return import(out);
 };
 const { findUrlCandidates, maskUrls, maskSpans } = await transpile('url-links.ts');
-const { findPathCandidates } = await transpile('path-links.ts', { from: /from ['"]\.\/url-links['"]/, to: 'from "./url-links.mjs"' });
+const { findPathCandidates } = await transpile('path-links.ts', { from: /from ['"]\.\/url-links['"]/g, to: 'from "./url-links.mjs"' });
 const { findIssueCandidates, issueEntriesForProject, issueTrackerUrl, normalizeIssueLinkEntries, shouldResolvePaneProject, paneIssueEntryFor } = await transpile('issue-links.ts');
 rmSync(tmpDir, { recursive: true, force: true });
 

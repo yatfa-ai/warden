@@ -35,7 +35,7 @@ writeFileSync(urlFile, urlCode);
 // relative specifier resolves from the temp dir (transformWithOxc keeps import
 // specifiers as-is).
 const src = readFileSync(join(libDir, 'path-links.ts'), 'utf8')
-  .replace(/from ['"]\.\/url-links['"]/, 'from "./url-links.mjs"');
+  .replace(/from ['"]\.\/url-links['"]/g, 'from "./url-links.mjs"');
 const { code } = await transformWithOxc(src, join(libDir, 'path-links.ts'), {});
 const tmpFile = join(tmpDir, 'path-links.mjs');
 writeFileSync(tmpFile, code);

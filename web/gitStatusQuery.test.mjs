@@ -30,7 +30,7 @@ const src = readFileSync(srcPath, 'utf8');
 const { code } = await transformWithOxc(src, srcPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-git-status-query-test-'));
 const tmpFile = join(tmpDir, 'gitStatusQuery.mjs');
-writeFileSync(tmpFile, code.replace(/from ['"]@\/lib\/gitStateSummary['"]/, "from './gitStateSummary.mjs'"));
+writeFileSync(tmpFile, code.replace(/from ['"]@\/lib\/gitStateSummary['"]/g, "from './gitStateSummary.mjs'"));
 // Also transform the dependency so the import resolves without a bundler.
 const depSrc = readFileSync(resolve(__dirname, 'src/lib/gitStateSummary.ts'), 'utf8');
 const dep = await transformWithOxc(depSrc, resolve(__dirname, 'src/lib/gitStateSummary.ts'), {});

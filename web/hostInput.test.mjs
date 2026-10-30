@@ -35,7 +35,7 @@ const { code: chatDisplayCode } = await transformWithOxc(
 writeFileSync(join(tmpDir, 'chatDisplay.mjs'), chatDisplayCode);
 
 const src = readFileSync(libPath, 'utf8')
-  .replace(/from ['"]\.\/chatDisplay['"]/, 'from "./chatDisplay.mjs"');
+  .replace(/from ['"]\.\/chatDisplay['"]/g, 'from "./chatDisplay.mjs"');
 const { code } = await transformWithOxc(src, libPath, {});
 const tmpFile = join(tmpDir, 'hostInput.mjs');
 writeFileSync(tmpFile, code);
