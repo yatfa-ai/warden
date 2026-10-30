@@ -779,4 +779,48 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
       fs.chmodSync(badDir, 0o755);
     }
   });
+
+  // WARDEN-2035: a stray regular FILE in the projects root (the classic macOS
+  // .DS_Store) makes stat('<root>/<stray>/<id>.jsonl') fail with ENOTDIR for every
+  // probe under that entry. Within the walk that is precisely "this entry cannot
+  // hold the id" — absence for that entry — but the resolver used to record it as
+  // lastErr and throw it after the walk, so an id that matched nothing anywhere
+  // answered the route's 500 {error} channel with a raw OS string instead of the
+  // documented 404 "session not found" (route-level repro: reviewer finding on
+  // WARDEN-2031's out-of-scope residue). Fixture: one stray file in the projects
+  // root + one healthy session — the pair the defect test and its
+  // sibling-isolation guard run against.
+  function seedStrayFileFixture() {
+    const stray = path.join(tempHome, '.claude', 'projects', '.DS_Store');
+    fs.writeFileSync(stray, ''); // a regular FILE, exactly what Finder drops there
+    writeSession(tempHome, 'projF', 'sess-f-good', [
+      { type: 'user', cwd: '/repo/f-good', message: { role: 'user', content: 'hi' } },
+    ], 7000);
+    return stray;
+  }
+
+  it('returns 404 "session not found" for an unknown id when a stray file sits in the projects root (WARDEN-2035)', async () => {
+    const stray = seedStrayFileFixture();
+    try {
+      const res = await fetch(`${baseUrl}/api/claude-session?id=sess-f-nowhere`);
+      assert.strictEqual(res.status, 404, 'an id matching no local file is absence — 404, not a 500 ENOTDIR');
+      const body = await res.json();
+      assert.strictEqual(body.error, 'session not found');
+      assert.strictEqual(body.messages, undefined);
+    } finally {
+      fs.rmSync(stray, { force: true });
+    }
+  });
+
+  it('still resolves a known id while a stray file sits in the projects root (WARDEN-2035)', async () => {
+    const stray = seedStrayFileFixture();
+    try {
+      const res = await fetch(`${baseUrl}/api/claude-session?id=sess-f-good`);
+      assert.strictEqual(res.status, 200, 'a real session still resolves past the stray entry');
+      const body = await res.json();
+      assert.ok(Array.isArray(body.messages) && body.messages.length > 0, 'messages served');
+    } finally {
+      fs.rmSync(stray, { force: true });
+    }
+  });
 });

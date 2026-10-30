@@ -301,13 +301,15 @@ export function alignOlderPageCursor(win, headBytes) {
 
 // Resolve a local session JSONL by id across every project dir (the session id IS
 // the basename; ids are unique per file). Returns the absolute path when found and
-// null ONLY for genuine absence (ENOENT): the projects root does not exist, or the
-// walk completed over every project dir and none holds the id. A resolution failure
-// that is not absence (e.g. EACCES on an unreadable project dir) is thrown, never laundered into null — null maps to
+// null ONLY for genuine absence (ENOENT, or ENOTDIR — a projects entry is not a
+// directory and cannot hold the id; the classic case is a stray macOS .DS_Store in
+// the projects root, WARDEN-2035): the projects root does not exist, or the walk
+// completed over every project dir and none holds the id. Any other resolution
+// failure (e.g. EACCES on an unreadable project dir) is thrown, never laundered into null — null maps to
 // the route's 404 "session not found", a lie for a session the catalog lists
 // (WARDEN-2031). Sibling isolation (WARDEN-2029) is preserved: a per-dir failure
-// only skips its own dir (the last non-ENOENT error is thrown after the full walk),
-// so an id found in a healthy dir resolves before any throw.
+// only skips its own entry (the last non-absence error is thrown after the full
+// walk), so an id found in a healthy dir resolves before any throw.
 async function findLocalSessionFile(id) {
   const dir = path.join(os.homedir(), '.claude', 'projects');
   let projects;
@@ -319,7 +321,10 @@ async function findLocalSessionFile(id) {
   for (const proj of projects) {
     const fp = path.join(dir, proj, `${id}.jsonl`);
     try { if ((await fsp.stat(fp)).isFile()) return fp; } catch (err) {
-      if (err && err.code !== 'ENOENT') lastErr = err; /* skip this dir, remember why */
+      /* ENOTDIR means this entry is not a directory — no id can live under it
+         (WARDEN-2035): absence for this entry, like ENOENT. Anything else is a
+         real resolution failure, remembered and thrown after the full walk. */
+      if (err && err.code !== 'ENOENT' && err.code !== 'ENOTDIR') lastErr = err;
     }
   }
   if (lastErr) throw lastErr;
