@@ -30,39 +30,23 @@
 // is wiring only review/tsc can see — see the PR note.)
 //
 // Run: node layout.test.mjs   (from web/)
-import { transformWithOxc } from 'vite';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { emitUiStoreGraph } from './uiStoreTestHarness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// uiStore.ts reads localStorage at creation (loadUi) — polyfill BEFORE loading it.
-const mem = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
-  setItem: (k, v) => { mem.set(k, String(v)); },
-  removeItem: (k) => { mem.delete(k); },
-  clear: () => { mem.clear(); },
-};
-
 // --- Load the REAL layout.ts + uiStore.ts (TS -> ESM via the OXC transform) --
-// The temp dir lives INSIDE web/ so uiStore's bare `zustand` import resolves
-// (same harness shape as uiStore.test.mjs).
+// uiStoreTestHarness.mjs polyfills localStorage BEFORE the emitted modules load
+// (uiStore.ts reads it at creation via loadUi) and emits uiStore's whole
+// `@/lib/*` VALUE-import graph into tmpDir — one home for the polyfill + emit
+// list + specifier rewrites this file used to hand-copy. tmpDir lives INSIDE
+// web/ so uiStore's bare `zustand` import resolves (contract detailed on
+// emitModule).
 const tmpDir = mkdtempSync(join(__dirname, '.layout-test-'));
-const emit = async (relPath, outName, rewrite = (c) => c) => {
-  const abs = resolve(__dirname, relPath);
-  const { code } = await transformWithOxc(readFileSync(abs, 'utf8'), abs, {});
-  writeFileSync(join(tmpDir, outName), rewrite(code));
-};
-await emit('src/lib/layout.ts', 'layout.mjs');
-await emit('src/lib/paneAttach.ts', 'paneAttach.mjs');
-await emit('src/lib/selection.ts', 'selection.mjs');
-await emit('src/lib/themes.ts', 'themes.mjs');
-await emit('src/lib/storage.ts', 'storage.mjs', (c) => c.replaceAll('@/lib/themes', './themes.mjs'));
-await emit('src/lib/uiStore.ts', 'uiStore.mjs', (c) =>
-  c.replaceAll('@/lib/storage', './storage.mjs').replaceAll('@/lib/layout', './layout.mjs').replaceAll('@/lib/paneAttach', './paneAttach.mjs').replaceAll('@/lib/selection', './selection.mjs').replaceAll('@/lib/themes', './themes.mjs'));
+await emitUiStoreGraph(tmpDir);
 const {
   clampLayoutWidths,
   clampSidebarWidth,
