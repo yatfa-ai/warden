@@ -38,7 +38,7 @@ writeFileSync(fanoutFile, fanoutCode);
 // relative specifier resolves from the temp dir (transformWithOxc keeps import
 // specifiers as-is).
 const killSrc = readFileSync(join(libDir, 'kill.ts'), 'utf8')
-  .replace(/from ['"]\.\/fanout['"]/, 'from "./fanout.mjs"');
+  .replace(/from ['"]\.\/fanout['"]/g, 'from "./fanout.mjs"');
 const { code: killCode } = await transformWithOxc(killSrc, join(libDir, 'kill.ts'), {});
 const killFile = join(tmpDir, 'kill.mjs');
 writeFileSync(killFile, killCode);

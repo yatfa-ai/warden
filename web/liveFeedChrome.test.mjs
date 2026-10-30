@@ -74,11 +74,11 @@ try {
   writeFileSync(join(tmpDir, 'timelinePacing.mjs'), await emit('src/lib/timelinePacing.ts'));
 
   const chromeCode = (await emit('src/components/LiveFeedChrome.tsx'))
-    .replace(/from ['"]@\/components\/ui\/button['"]/, `from './button.mjs'`)
-    .replace(/from ['"]@\/components\/ui\/select['"]/, `from './select.mjs'`)
-    .replace(/from ['"]@\/components\/ui\/context-menu['"]/, `from './context-menu.mjs'`)
-    .replace(/from ['"]@\/lib\/clipboardToast['"]/, `from './clipboardToast.mjs'`)
-    .replace(/from ['"]@\/lib\/timelinePacing['"]/, `from './timelinePacing.mjs'`);
+    .replace(/from ['"]@\/components\/ui\/button['"]/g, `from './button.mjs'`)
+    .replace(/from ['"]@\/components\/ui\/select['"]/g, `from './select.mjs'`)
+    .replace(/from ['"]@\/components\/ui\/context-menu['"]/g, `from './context-menu.mjs'`)
+    .replace(/from ['"]@\/lib\/clipboardToast['"]/g, `from './clipboardToast.mjs'`)
+    .replace(/from ['"]@\/lib\/timelinePacing['"]/g, `from './timelinePacing.mjs'`);
   // The rewrites are ASSERTED, not assumed: an unrewritten `@/` specifier would
   // fail to resolve loudly, but a PARTIAL rewrite could silently load a
   // different module, so pin that no alias survives.

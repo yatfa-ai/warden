@@ -37,7 +37,7 @@ const transpile = async (name) => {
   const src = readFileSync(join(libDir, name), 'utf8');
   const { code } = await transformWithOxc(src, join(libDir, name), {});
   const out = join(tmpDir, name.replace(/\.ts$/, '.mjs'));
-  writeFileSync(out, code.replace(/from ['"]\.\/issue-links['"]/, 'from "./issue-links.mjs"'));
+  writeFileSync(out, code.replace(/from ['"]\.\/issue-links['"]/g, 'from "./issue-links.mjs"'));
   return import(out);
 };
 const issueLinks = await transpile('issue-links.ts');

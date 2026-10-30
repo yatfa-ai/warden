@@ -72,8 +72,8 @@ writeFileSync(sonnerFile, sonnerMock);
 // the project's real react, so the wrapper is a real React element.
 const jsxRuntime = join(webDir, 'node_modules', 'react', 'jsx-runtime.js');
 const rewritten = code
-  .replace(/from\s+['"]sonner['"]/, `from ${JSON.stringify(sonnerFile)}`)
-  .replace(/from\s+['"]react\/jsx-runtime['"]/, `from ${JSON.stringify(jsxRuntime)}`);
+  .replace(/from\s+['"]sonner['"]/g, `from ${JSON.stringify(sonnerFile)}`)
+  .replace(/from\s+['"]react\/jsx-runtime['"]/g, `from ${JSON.stringify(jsxRuntime)}`);
 const seamFile = join(tmpDir, 'fanoutToast.mjs');
 writeFileSync(seamFile, rewritten);
 

@@ -38,7 +38,7 @@ writeFileSync(fanoutFile, fanoutCode);
 // relative specifier resolves from the temp dir (transformWithOxc keeps import
 // specifiers as-is).
 const keysendSrc = readFileSync(join(libDir, 'keysend.ts'), 'utf8')
-  .replace(/from ['"]\.\/fanout['"]/, 'from "./fanout.mjs"');
+  .replace(/from ['"]\.\/fanout['"]/g, 'from "./fanout.mjs"');
 const { code: keysendCode } = await transformWithOxc(keysendSrc, join(libDir, 'keysend.ts'), {});
 const keysendFile = join(tmpDir, 'keysend.mjs');
 writeFileSync(keysendFile, keysendCode);

@@ -41,7 +41,7 @@ try {
     'export function cn(...inputs) { return inputs.flat(Infinity).filter(Boolean).join(" "); }\n');
   const dotPath = resolve(__dirname, 'src/components/StatusDot.tsx');
   const dotCode = (await transformWithOxc(readFileSync(dotPath, 'utf8'), dotPath, {})).code
-    .replace(/from ['"]@\/lib\/utils['"]/, `from './cn-stub.mjs'`);
+    .replace(/from ['"]@\/lib\/utils['"]/g, `from './cn-stub.mjs'`);
   writeFileSync(join(tmpDir, 'StatusDot.mjs'), dotCode);
 
   const txtPath = resolve(__dirname, 'src/lib/companionStatusText.ts');
@@ -50,8 +50,8 @@ try {
 
   const indPath = resolve(__dirname, 'src/components/CompanionIndicator.tsx');
   const indCode = (await transformWithOxc(readFileSync(indPath, 'utf8'), indPath, {})).code
-    .replace(/from ['"]@\/components\/StatusDot['"]/, `from './StatusDot.mjs'`)
-    .replace(/from ['"]@\/lib\/companionStatusText['"]/, `from './companionStatusText.mjs'`);
+    .replace(/from ['"]@\/components\/StatusDot['"]/g, `from './StatusDot.mjs'`)
+    .replace(/from ['"]@\/lib\/companionStatusText['"]/g, `from './companionStatusText.mjs'`);
   writeFileSync(join(tmpDir, 'CompanionIndicator.mjs'), indCode);
 
   const { CompanionIndicator } = await import(

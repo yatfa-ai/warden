@@ -42,16 +42,16 @@ writeFileSync(
 await transpile('src/lib/healthUtils.ts', 'healthUtils.mjs');
 await transpile('src/lib/formatTokens.ts', 'formatTokens.mjs');
 await transpile('src/components/StatusDot.tsx', 'StatusDot.mjs', [
-  [/from ['"]@\/lib\/utils['"]/, `from './cn-stub.mjs'`],
+  [/from ['"]@\/lib\/utils['"]/g, `from './cn-stub.mjs'`],
 ]);
 await transpile('src/components/sidebar/DiffStatChip.tsx', 'DiffStatChip.mjs', [
-  [/from ['"]@\/lib\/utils['"]/, `from './cn-stub.mjs'`],
+  [/from ['"]@\/lib\/utils['"]/g, `from './cn-stub.mjs'`],
 ]);
 await transpile('src/components/fleet-health/StatusChips.tsx', 'StatusChips.mjs', [
-  [/from ['"]@\/components\/StatusDot['"]/, `from './StatusDot.mjs'`],
-  [/from ['"]\.\.\/sidebar\/DiffStatChip['"]/, `from './DiffStatChip.mjs'`],
-  [/from ['"]@\/lib\/formatTokens['"]/, `from './formatTokens.mjs'`],
-  [/from ['"]@\/lib\/healthUtils['"]/, `from './healthUtils.mjs'`],
+  [/from ['"]@\/components\/StatusDot['"]/g, `from './StatusDot.mjs'`],
+  [/from ['"]\.\.\/sidebar\/DiffStatChip['"]/g, `from './DiffStatChip.mjs'`],
+  [/from ['"]@\/lib\/formatTokens['"]/g, `from './formatTokens.mjs'`],
+  [/from ['"]@\/lib\/healthUtils['"]/g, `from './healthUtils.mjs'`],
 ]);
 
 const {
