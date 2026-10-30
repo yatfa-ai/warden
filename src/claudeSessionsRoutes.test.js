@@ -591,4 +591,33 @@ describe('GET /api/claude-sessions', () => {
       process.env.PATH = origPath;
     }
   });
+
+  // WARDEN-2029: a project dir whose readdir fails (EACCES after mangled
+  // permissions, or ENOENT from the stat→readdir race) must skip only itself —
+  // the walk must not blank the whole local catalog because a sibling dir is
+  // bad. Root bypasses mode bits, so the unreadable-dir case cannot be
+  // exercised there.
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const skipRoot = isRoot ? 'running as root: chmod 000 does not block reads' : false;
+
+  it('one unreadable project dir does not blank the whole local catalog (WARDEN-2029)', { skip: skipRoot }, async () => {
+    writeLocalSession('loc-ok', [userLine('healthy session')]);
+    const otherDir = path.join(projectsDir, '-w-other');
+    fs.mkdirSync(otherDir, { recursive: true });
+    fs.writeFileSync(path.join(otherDir, 'loc-hidden.jsonl'), userLine('hidden session') + '\n');
+    fs.chmodSync(otherDir, 0o000);
+    try {
+      const r = await get('/api/claude-sessions');
+      assert.equal(r.status, 200);
+      assert.equal(r.body.host, LOCAL);
+      assert.equal(r.body.claudeAvailable, true);
+      assert.deepEqual(
+        r.body.sessions.map((s) => s.id),
+        ['loc-ok'],
+        'the unaffected subdir\'s session survives a sibling dir that cannot be read',
+      );
+    } finally {
+      fs.chmodSync(otherDir, 0o755);
+    }
+  });
 });

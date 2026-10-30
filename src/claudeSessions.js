@@ -172,7 +172,14 @@ async function collectLocalSessionFiles() {
     for (const proj of await fsp.readdir(dir)) {
       const pdir = path.join(dir, proj);
       try { if (!(await fsp.stat(pdir)).isDirectory()) continue; } catch { continue; }
-      for (const f of await fsp.readdir(pdir)) {
+      // Per-dir granularity (WARDEN-2029): one project dir that cannot be read —
+      // EACCES after mangled permissions/ownership, or ENOENT from the window
+      // between the stat above and this readdir (claude creates/removes project
+      // dirs as sessions come and go) — skips only itself. A function-wide catch
+      // here blanked the ENTIRE catalog ([]) because a sibling dir was bad.
+      let entries;
+      try { entries = await fsp.readdir(pdir); } catch { continue; }
+      for (const f of entries) {
         if (!f.endsWith('.jsonl')) continue;
         const fp = path.join(pdir, f);
         try { files.push({ id: f.slice(0, -6), file: fp, mtime: (await fsp.stat(fp)).mtimeMs }); } catch { /* noop */ }
