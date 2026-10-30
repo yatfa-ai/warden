@@ -717,4 +717,66 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
   it('readLocalSessionTranscript still returns {notFound: true} for an unknown id (WARDEN-2026)', async () => {
     assert.deepStrictEqual(await readLocalSessionTranscript('sess-does-not-exist', {}), { notFound: true });
   });
+
+  // WARDEN-2031: an unreadable project DIRECTORY must fail the read the same way an
+  // unreadable FILE does (WARDEN-2026, above) — findLocalSessionFile used to launder
+  // its EACCES into null, which the route maps to 404 "session not found" for a
+  // session the catalog lists. Fixture: one session in a dir that is made unreadable
+  // and one in a healthy sibling dir — the pair the sibling-isolation guard (green
+  // before AND after the fix: it kills the naive per-dir rethrow) and the defect
+  // test run against. Root bypasses mode bits, so the unreadable-dir cases cannot
+  // be exercised there.
+  function seedXPair() {
+    const badDir = path.join(tempHome, '.claude', 'projects', 'projX-bad');
+    fs.mkdirSync(badDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(badDir, 'sess-x-bad.jsonl'),
+      jsonlLine({ type: 'user', cwd: '/repo/x-bad', message: { role: 'user', content: 'hi' } }) + '\n'
+    );
+    writeSession(tempHome, 'projX-good', 'sess-x-good', [
+      { type: 'user', cwd: '/repo/x-good', message: { role: 'user', content: 'hi' } },
+    ], 6000);
+    return badDir;
+  }
+
+  it('isolates an unreadable project dir: a session in a healthy sibling dir still reads (WARDEN-2031)', { skip: skipRoot }, async () => {
+    const badDir = seedXPair();
+    fs.chmodSync(badDir, 0o000);
+    try {
+      const res = await fetch(`${baseUrl}/api/claude-session?id=sess-x-good`);
+      assert.strictEqual(res.status, 200, 'healthy sibling dir resolves despite an unreadable sibling');
+      const body = await res.json();
+      assert.ok(Array.isArray(body.messages) && body.messages.length > 0, 'messages served');
+    } finally {
+      fs.chmodSync(badDir, 0o755);
+    }
+  });
+
+  it('returns 500 with a non-empty error when only an unreadable dir holds the id — not a 404 lie (WARDEN-2031)', { skip: skipRoot }, async () => {
+    const badDir = seedXPair();
+    fs.chmodSync(badDir, 0o000);
+    try {
+      const res = await fetch(`${baseUrl}/api/claude-session?id=sess-x-bad`);
+      assert.strictEqual(res.status, 500, 'dir-EACCES must reach the 500 {error} channel, not 404 "session not found"');
+      const body = await res.json();
+      assert.ok(typeof body.error === 'string' && body.error.length > 0, 'error message present');
+      assert.strictEqual(body.messages, undefined, 'no empty messages view is served');
+    } finally {
+      fs.chmodSync(badDir, 0o755);
+    }
+  });
+
+  it('readLocalSessionTranscript rejects with EACCES for an unreadable dir while the healthy sibling still resolves (WARDEN-2031)', { skip: skipRoot }, async () => {
+    const badDir = seedXPair();
+    // Unknown id, all-readable archive: still genuine absence → {notFound: true}.
+    assert.deepStrictEqual(await readLocalSessionTranscript('sess-x-unknown', {}), { notFound: true });
+    fs.chmodSync(badDir, 0o000);
+    try {
+      await assert.rejects(() => readLocalSessionTranscript('sess-x-bad', {}), { code: 'EACCES' });
+      const good = await readLocalSessionTranscript('sess-x-good', {});
+      assert.ok(!good.notFound && Array.isArray(good.messages) && good.messages.length > 0, 'healthy sibling still resolves in the same fixture');
+    } finally {
+      fs.chmodSync(badDir, 0o755);
+    }
+  });
 });
