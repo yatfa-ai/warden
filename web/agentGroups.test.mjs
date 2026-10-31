@@ -31,6 +31,7 @@ const REAL = {
   '@/lib/companionStatusText': 'src/lib/companionStatusText.ts',
   '@/lib/selection': 'src/lib/selection.ts',
   '@/lib/chatDisplay': 'src/lib/chatDisplay.ts',
+  '@/lib/paneAttach': 'src/lib/paneAttach.ts',
 };
 const STUBS = {
   '@/components/StatusDot': 'statusDot.mjs',
