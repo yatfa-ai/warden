@@ -429,6 +429,34 @@ export function ChatSidebar({
     <div className="wrap-anywhere px-2.5 pb-1 text-[10px] leading-snug text-muted-foreground">{children}</div>
   );
 
+  const renderSavedGroups = (
+    workingSorted: Chat[],
+    stoppedSorted: Chat[],
+    opts: { showHost?: boolean; query: string; workingNote?: React.ReactNode; stoppedNote?: React.ReactNode },
+  ) => (
+    <>
+      {workingSorted.length > 0 && (
+        <>
+          <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
+            working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
+          </div>
+          {opts.workingNote}
+          {renderRows(workingSorted, { showHost: opts.showHost, query: opts.query })}
+        </>
+      )}
+      {stoppedSorted.length > 0 && (
+        <>
+          <div className="mx-2 mt-2.5 border-t border-border/50" />
+          <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
+          </div>
+          {opts.stoppedNote}
+          {renderRows(stoppedSorted, { showHost: opts.showHost, query: opts.query })}
+        </>
+      )}
+    </>
+  );
+
   // ---- view bodies ----
 
   const renderHostView = (H: string) => {
@@ -506,25 +534,11 @@ export function ChatSidebar({
               </div>
             ) : (
               <>
-                {workingSorted.length > 0 && (
-                  <>
-                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
-                      working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
-                    </div>
-                    {renderSubnote('Click to reconnect to the running session.')}
-                    {renderRows(workingSorted, { query: q })}
-                  </>
-                )}
-                {stoppedSorted.length > 0 && (
-                  <>
-                    <div className="mx-2 mt-2.5 border-t border-border/50" />
-                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
-                    </div>
-                    {renderSubnote(<>Respawn starts a <strong className="font-semibold text-foreground">fresh</strong> process under the same name in the same directory — the stopped one cannot be resurrected.</>)}
-                    {renderRows(stoppedSorted, { query: q })}
-                  </>
-                )}
+                {renderSavedGroups(workingSorted, stoppedSorted, {
+                  query: q,
+                  workingNote: renderSubnote('Click to reconnect to the running session.'),
+                  stoppedNote: renderSubnote(<>Respawn starts a <strong className="font-semibold text-foreground">fresh</strong> process under the same name in the same directory — the stopped one cannot be resurrected.</>),
+                })}
                 {/* The unsaved shells are accounted for here — the ONE place the
                     "where are my shells?" question has an answer. */}
                 {tempCount > 0 && (
@@ -571,24 +585,8 @@ export function ChatSidebar({
               )
             ) : (
               <>
-                {workingSorted.length > 0 && (
-                  <>
-                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
-                      working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
-                    </div>
-                    {/* cross-host view: the host is the one extra piece of metadata */}
-                    {renderRows(workingSorted, { showHost: true, query: q })}
-                  </>
-                )}
-                {stoppedSorted.length > 0 && (
-                  <>
-                    <div className="mx-2 mt-2.5 border-t border-border/50" />
-                    <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
-                    </div>
-                    {renderRows(stoppedSorted, { showHost: true, query: q })}
-                  </>
-                )}
+                {/* cross-host view: the host is the one extra piece of metadata */}
+                {renderSavedGroups(workingSorted, stoppedSorted, { showHost: true, query: q })}
               </>
             )}
           </div>
@@ -615,23 +613,7 @@ export function ChatSidebar({
                 renderNoMatch(q, () => setSearchQuery(''))
               ) : (
                 <>
-                  {workingSorted.length > 0 && (
-                    <>
-                      <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-green-500">
-                        working<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{workingSorted.length}</span>
-                      </div>
-                      {renderRows(workingSorted, { showHost: true, query: q })}
-                    </>
-                  )}
-                  {stoppedSorted.length > 0 && (
-                    <>
-                      <div className="mx-2 mt-2.5 border-t border-border/50" />
-                      <div className="flex items-baseline gap-1.5 px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        stopped<span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">{stoppedSorted.length}</span>
-                      </div>
-                      {renderRows(stoppedSorted, { showHost: true, query: q })}
-                    </>
-                  )}
+                  {renderSavedGroups(workingSorted, stoppedSorted, { showHost: true, query: q })}
                 </>
               )}
             </div>
