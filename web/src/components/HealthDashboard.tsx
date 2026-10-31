@@ -41,6 +41,7 @@ import { useNotificationPrefsReader } from '@/lib/appConfigHooks';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor } from '@/lib/chatDisplay';
+import { paneIdOf } from '@/lib/paneAttach';
 import { useHealthSelectedIds, useToggleHealthSelected, useToggleHealthGroup, useSetHealthSelected, useClearHealthSelected, useHealthClosedExpanded, useSetHealthClosedExpanded, useHostLabels, useHealthGroupBy, useSetHealthGroupBy, useHealthCollapsedHosts, useSetHealthCollapsedHosts } from '@/lib/uiStore';
 
 // The fleet-health poll cadence. WARDEN-1144 named it (it was an inline `10000`)
@@ -58,14 +59,6 @@ interface Props {
   // The same gate every companion surface uses; the action is hidden unless the
   // transport is on. Lifted from App, which reads it from /api/config.
   companionTransportEnabled: boolean;
-}
-
-// Selection identity for a fleet agent — the same `key || id` the sidebar's
-// multi-select (WARDEN-328) and /api/kill use. Module-scope so it's stable
-// across renders (safe to reference inside memos without re-creating closures).
-// (WARDEN-371)
-function agentIdOf(a: Chat): string {
-  return a.key || a.id;
 }
 
 // The Fleet Health summary bar's git axes as ONE ordered set (WARDEN-1228).
@@ -375,7 +368,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   // iterates selectedIds, not this list) so a dead target is reported as a
   // per-agent failure rather than silently dropped.
   const selectedChats = useMemo(
-    () => (selectedIds.size === 0 ? [] : (healthData?.agents ?? []).filter((a) => selectedIds.has(agentIdOf(a)))),
+    () => (selectedIds.size === 0 ? [] : (healthData?.agents ?? []).filter((a) => selectedIds.has(paneIdOf(a)))),
     [healthData, selectedIds],
   );
 
@@ -398,22 +391,22 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
           ? (closedExpanded ? CLOSED_EXPANDED_LIMIT : CLOSED_COLLAPSED_LIMIT)
           : agents.length;
         const shown = isClosed ? [...agents].sort(byRecencyDesc).slice(0, limit) : agents;
-        for (const a of shown) ids.push(agentIdOf(a));
+        for (const a of shown) ids.push(paneIdOf(a));
       }
       return ids;
     }
     if (groupBy === 'project') {
       // Project mode has no per-section collapse/bounding — every group's agents
       // render, so "All" targets exactly the rendered project-section agents.
-      return projectGroups.flatMap((g) => g.agents.map(agentIdOf));
+      return projectGroups.flatMap((g) => g.agents.map(paneIdOf));
     }
     // Host mode: only non-collapsed hosts' agents are rendered.
-    return hostGroups.flatMap((g) => (collapsedHosts[g.host] ? [] : g.agents.map(agentIdOf)));
+    return hostGroups.flatMap((g) => (collapsedHosts[g.host] ? [] : g.agents.map(paneIdOf)));
   }, [healthData, groupBy, closedExpanded, collapsedHosts, hostGroups, projectGroups]);
 
   // Per-agent row layer lives in fleet-health/AgentRow.tsx (WARDEN-1942); the
   // nine bindings its bodies close over are threaded through this ctx.
-  const ctx = { selectedIds, toggleSelect, onOpenChat, fleetGit, hostLabels, timestampFormat, agentIdOf, agentActivity, bucketCount };
+  const ctx = { selectedIds, toggleSelect, onOpenChat, fleetGit, hostLabels, timestampFormat, agentIdOf: paneIdOf, agentActivity, bucketCount };
   const renderAgent = (agent: Chat, showHost: boolean) => renderAgentRow(agent, showHost, ctx);
 
   // Fan a KILL out to every selected agent via the shared runKillFanout
@@ -428,7 +421,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   const handleKillSelected = async () => {
     const ids = Array.from(selectedIds);
     const nameOf = (id: string) => {
-      const a = (healthData?.agents ?? []).find((c) => agentIdOf(c) === id);
+      const a = (healthData?.agents ?? []).find((c) => paneIdOf(c) === id);
       return a ? displayName(a) : id;
     };
     const summary = await runKillFanout(ids, nameOf, async () => {
@@ -465,7 +458,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   const handleInterruptSelected = async (key: string) => {
     const ids = Array.from(selectedIds);
     const nameOf = (id: string) => {
-      const a = (healthData?.agents ?? []).find((c) => agentIdOf(c) === id);
+      const a = (healthData?.agents ?? []).find((c) => paneIdOf(c) === id);
       return a ? displayName(a) : id;
     };
     const summary = await runKeySendFanout(ids, key, nameOf);

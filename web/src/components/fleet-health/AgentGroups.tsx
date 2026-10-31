@@ -35,15 +35,7 @@ import { hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
 import type { HostLabels } from '@/lib/chatDisplay';
 import type { useHostStatuses } from '@/lib/useHostStatuses';
 import { Trash2 } from 'lucide-react';
-
-// Selection identity for a fleet agent — MIRRORED from HealthDashboard.tsx's
-// module-scope `agentIdOf` (the same `key || id` the sidebar's multi-select and
-// /api/kill use) because the moved chain and the main component both need it;
-// kept as the identical one-liner rather than widening ctx past its fifteen
-// bindings. (WARDEN-371)
-function agentIdOf(a: Chat): string {
-  return a.key || a.id;
-}
+import { paneIdOf } from '@/lib/paneAttach';
 
 // Section render order. Derived from the canonical health-state vocabulary
 // (healthUtils.ts `HEALTH_STATES`, WARDEN-1104) rather than re-typed, so a new
@@ -140,7 +132,7 @@ export function renderAgentGroups(ctx: AgentGroupsCtx) {
                 // The ids actually rendered in this section — the select-all
                 // checkbox targets exactly these (the bounded `shown` subset for
                 // Closed, so it never selects agents hidden behind the cap).
-                const sectionIds = shown.map(agentIdOf);
+                const sectionIds = shown.map(paneIdOf);
 
                 return (
                   <div key={section} className="flex flex-col gap-1">
@@ -219,7 +211,7 @@ export function renderAgentGroups(ctx: AgentGroupsCtx) {
                   // Select-all targets every agent in this project — no collapse
                   // state in project mode, so all are rendered (matches the action
                   // bar's "All" via renderedIds).
-                  const projectIds = group.agents.map(agentIdOf);
+                  const projectIds = group.agents.map(paneIdOf);
                   return (
                     <div key={group.project} className="flex flex-col gap-1 min-w-0">
                       {/*
@@ -377,7 +369,7 @@ export function renderAgentGroups(ctx: AgentGroupsCtx) {
                   // matches the Closed-section bounding and the action bar's
                   // "All" (renderedIds), so every select-all targets exactly what
                   // is visible, never agents hidden behind a collapse/cap.
-                  const hostIds = collapsed ? [] : group.agents.map(agentIdOf);
+                  const hostIds = collapsed ? [] : group.agents.map(paneIdOf);
 
                   return (
                     <div key={group.host} className="flex flex-col gap-1 min-w-0">
