@@ -61,4 +61,20 @@ describe('readTranscriptPhase local branch — transcript selection', () => {
     put(path.join(tmp, '.claude', 'projects', 'stray.jsonl'), 'x', 9000);
     assert.strictEqual(await readTranscriptPhase(LOCAL_CHAT), 'awaiting-input');
   });
+
+  // WARDEN-2075: root bypasses mode bits, so chmod 000 cannot block reads there.
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  it('one unreadable project dir does not null the phase from a healthy dir (WARDEN-2075)',
+    { skip: isRoot ? 'running as root: chmod 000 does not block reads' : false }, async () => {
+      wipe();
+      put(path.join(proj('a'), 's.jsonl'), ended, 1000);
+      const bad = proj('b');
+      put(path.join(bad, 'hidden.jsonl'), mid, 2000);
+      fs.chmodSync(bad, 0o000);
+      try {
+        assert.strictEqual(await readTranscriptPhase(LOCAL_CHAT), 'awaiting-input');
+      } finally {
+        fs.chmodSync(bad, 0o755);
+      }
+    });
 });
