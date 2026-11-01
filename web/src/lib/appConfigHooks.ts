@@ -34,25 +34,29 @@ export const APP_CONFIG_QUERY_OPTIONS = {
   refetchOnReconnect: false,
 } as const;
 
-/** Whether the companion transport is enabled (defaults true until config loads). */
-export function useCompanionTransportEnabled(): boolean {
-  const { data } = useQuery({
+/**
+ * The one place the shared ['app-config'] query is spelled. Every per-fact hook
+ * below is a `select` over this same cache entry (key, fetcher and cadence
+ * options are identical), so only the selector varies.
+ */
+function useAppConfigQuery<T>({ select }: { select: (cfg: AppConfig) => T }) {
+  return useQuery({
     queryKey: appConfigQueryKey(),
     queryFn: appConfigQueryFn,
     ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectCompanionTransportEnabled,
+    select,
   });
+}
+
+/** Whether the companion transport is enabled (defaults true until config loads). */
+export function useCompanionTransportEnabled(): boolean {
+  const { data } = useAppConfigQuery({ select: selectCompanionTransportEnabled });
   return data ?? true;
 }
 
 /** WARDEN-332 — observer auto-start (defaults false until config loads). */
 export function useObserverAutoStart(): boolean {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectObserverAutoStart,
-  });
+  const { data } = useAppConfigQuery({ select: selectObserverAutoStart });
   return data ?? false;
 }
 
@@ -62,12 +66,7 @@ export function useObserverAutoStart(): boolean {
  * cached yet) falls back to the boot default 30.
  */
 export function useObserverSessionTimeout(): number | null {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectObserverSessionTimeout,
-  });
+  const { data } = useAppConfigQuery({ select: selectObserverSessionTimeout });
   return data === undefined ? 30 : data;
 }
 
@@ -78,34 +77,19 @@ export function useObserverSessionTimeout(): number | null {
  * loads (or on a failed first fetch) it is the 60s web default.
  */
 export function usePollIntervalMs(): number {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: (cfg) => resolvePollIntervalMs(cfg?.pollIntervalMs),
-  });
+  const { data } = useAppConfigQuery({ select: (cfg) => resolvePollIntervalMs(cfg?.pollIntervalMs) });
   return data ?? WEB_POLL_DEFAULT_MS;
 }
 
 /** WARDEN-37 — show the host tag in pane headers (defaults true until config loads). */
 export function useShowHostTags(): boolean {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectShowHostTags,
-  });
+  const { data } = useAppConfigQuery({ select: selectShowHostTags });
   return data ?? true;
 }
 
 /** WARDEN-1388 — issue-key link integration toggle (strict `=== true`; off until config loads). */
 export function useIssueLinksEnabled(): boolean {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectIssueLinksEnabled,
-  });
+  const { data } = useAppConfigQuery({ select: selectIssueLinksEnabled });
   return data ?? false;
 }
 
@@ -119,12 +103,7 @@ const NO_ISSUE_ENTRIES: IssueLinkEntry[] = [];
  * it do not refire every render. Empty until config loads.
  */
 export function useIssueLinkTrackers(): IssueLinkEntry[] {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectIssueLinkTrackersRaw,
-  });
+  const { data } = useAppConfigQuery({ select: selectIssueLinkTrackersRaw });
   return useMemo(() => {
     const out = normalizeIssueLinkEntries(data);
     return out.length === 0 ? NO_ISSUE_ENTRIES : out;
@@ -156,12 +135,7 @@ export function useMarkdownIssueEntries(): IssueLinkEntry[] {
  * Live-updates after Settings saves via App.refreshConfigPrefs.
  */
 export function useNotificationPrefs(): { prefs: NotificationPrefs } {
-  const { data } = useQuery({
-    queryKey: appConfigQueryKey(),
-    queryFn: appConfigQueryFn,
-    ...APP_CONFIG_QUERY_OPTIONS,
-    select: selectNotificationPrefs,
-  });
+  const { data } = useAppConfigQuery({ select: selectNotificationPrefs });
   return { prefs: data ?? NOTIFICATION_PREF_DEFAULTS };
 }
 
