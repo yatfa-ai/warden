@@ -1,10 +1,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import http from 'node:http';
 import { WebSocket } from 'ws';
+import { bootWsLayer } from './wsLayerTestHarness.mjs';
 
 /**
  * WARDEN-1693 — a FAILING createSession inside the async /api/observe connection handler
@@ -32,42 +30,19 @@ function observeFrames(port, waitMs = 500) {
 }
 
 describe('WARDEN-1693 — failing createSession never escapes the observe connection handler', () => {
-  let httpServer, port, saved, tempHome, sessionsDir;
+  let harness, port, sessionsDir;
   const rejections = [];
   const onRejection = (reason) => rejections.push(reason);
 
   before(async () => {
-    saved = { HOME: process.env.HOME, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN };
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-ws-sesscreate-'));
-    process.env.HOME = tempHome;
-    process.env.ANTHROPIC_AUTH_TOKEN = 'test-token';
-    sessionsDir = path.join(tempHome, '.yatfa-warden', 'sessions');
-    fs.mkdirSync(sessionsDir, { recursive: true });
-
     process.on('unhandledRejection', onRejection);
-
-    const { setupWsLayer } = await import('./wsLayer.js');
-    httpServer = http.createServer(() => {});
-    setupWsLayer({
-      server: httpServer,
-      cfg: { connectTimeout: 1, hosts: [] },
-      resolve: async () => ({ error: 'unused' }),
-      chatCatalog: { snapshot: () => [], has: () => true },
-    });
-    await new Promise((resolve, reject) => {
-      httpServer.once('error', reject);
-      httpServer.listen(0, '127.0.0.1', resolve);
-    });
-    port = httpServer.address().port;
+    harness = await bootWsLayer({ prefix: 'warden-ws-sesscreate-' });
+    ({ port, sessionsDir } = harness);
   });
 
   after(async () => {
     process.removeListener('unhandledRejection', onRejection);
-    await new Promise((r) => httpServer.close(r));
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+    await harness.close();
   });
 
   it('positive control: with a normal sessions/ dir, no-sid connect gets session_created', async () => {

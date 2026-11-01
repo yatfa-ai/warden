@@ -1,11 +1,8 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import http from 'node:http';
 import net from 'node:net';
 import { WebSocket } from 'ws';
+import { bootWsLayer } from './wsLayerTestHarness.mjs';
 
 /**
  * WARDEN-1804 — a protocol-violating frame (invalid UTF-8 text frame) makes the ws
@@ -55,36 +52,23 @@ function open(port, route) {
 }
 
 describe('WARDEN-1804 — ws socket protocol errors never escape as uncaught exceptions', () => {
-  let httpServer, port, saved, tempHome, snapshotCalls;
+  let harness, port, snapshotCalls;
   const uncaught = [];
   const onUncaught = (e) => uncaught.push(e);
   let origWarn;
 
   before(async () => {
-    saved = { HOME: process.env.HOME, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN };
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-ws-sockerr-'));
-    process.env.HOME = tempHome;
-    process.env.ANTHROPIC_AUTH_TOKEN = 'test-token';
-    fs.mkdirSync(path.join(tempHome, '.yatfa-warden', 'sessions'), { recursive: true });
     snapshotCalls = 0;
     origWarn = console.warn;
     console.warn = () => {};
 
     process.on('uncaughtException', onUncaught);
 
-    const { setupWsLayer } = await import('./wsLayer.js');
-    httpServer = http.createServer(() => {});
-    setupWsLayer({
-      server: httpServer,
-      cfg: { connectTimeout: 1, hosts: [] },
-      resolve: async () => ({ error: 'unused' }),
+    harness = await bootWsLayer({
+      prefix: 'warden-ws-sockerr-',
       chatCatalog: { snapshot: () => { snapshotCalls++; return []; }, has: () => true },
     });
-    await new Promise((resolve, reject) => {
-      httpServer.once('error', reject);
-      httpServer.listen(0, '127.0.0.1', resolve);
-    });
-    port = httpServer.address().port;
+    ({ port } = harness);
   });
 
   beforeEach(() => { uncaught.length = 0; });
@@ -92,11 +76,7 @@ describe('WARDEN-1804 — ws socket protocol errors never escape as uncaught exc
   after(async () => {
     process.removeListener('uncaughtException', onUncaught);
     console.warn = origWarn;
-    await new Promise((r) => { httpServer.closeAllConnections?.(); httpServer.close(r); });
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+    await harness.close();
   });
 
   it('positive control: a valid monitor frame on /api/stream is still handled', async () => {

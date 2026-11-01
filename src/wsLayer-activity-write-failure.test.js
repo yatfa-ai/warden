@@ -2,9 +2,9 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import http from 'node:http';
 import { WebSocket } from 'ws';
+import { bootWsLayer } from './wsLayerTestHarness.mjs';
 
 /**
  * WARDEN-1653 — a FAILING activity-log write inside an async ws handler must not
@@ -28,69 +28,50 @@ import { WebSocket } from 'ws';
 const settle = () => new Promise((r) => setTimeout(r, 150));
 
 describe('WARDEN-1653 — failing activity write never escapes wsLayer handlers', () => {
-  let httpServer, port, llmServer, saved, tempHome, appendEvent;
+  let harness, port, llmServer, appendEvent;
   const rejections = [];
   const onRejection = (reason) => rejections.push(reason);
 
   before(async () => {
-    saved = {
-      HOME: process.env.HOME,
-      ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
-      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
-    };
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-ws-writefail-'));
-    process.env.HOME = tempHome;
-    process.env.ANTHROPIC_AUTH_TOKEN = 'test-token';
-    const wdir = path.join(tempHome, '.yatfa-warden');
-    fs.mkdirSync(path.join(wdir, 'sessions'), { recursive: true });
-    fs.mkdirSync(path.join(wdir, 'activity.jsonl'), { recursive: true }); // THE INJECTION
-    // A manual catalog chat so the observer's send_directive can resolve "victim".
-    fs.writeFileSync(path.join(wdir, 'chats.json'), JSON.stringify([
-      { host: '(local)', session: 'victim', name: 'victim', cwd: '/tmp', cmd: 'bash' },
-    ]));
-
-    // Fake LLM: 1st call → tool_use send_directive; later calls → plain text.
-    let llmCalls = 0;
-    llmServer = http.createServer((req, res) => {
-      req.resume();
-      req.on('end', () => {
-        llmCalls++;
-        const body = llmCalls === 1
-          ? { content: [{ type: 'tool_use', id: 'tu1', name: 'send_directive', input: { id: 'victim', directive: 'do something' } }] }
-          : { content: [{ type: 'text', text: 'ok' }] };
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify(body));
-      });
-    });
-    await new Promise((r) => llmServer.listen(0, '127.0.0.1', r));
-    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${llmServer.address().port}`;
-
     process.on('unhandledRejection', onRejection);
 
-    ({ appendEvent } = await import('./activity.js'));
-    const { setupWsLayer } = await import('./wsLayer.js');
-    httpServer = http.createServer(() => {});
-    setupWsLayer({
-      server: httpServer,
-      cfg: { connectTimeout: 1, hosts: [] },
+    harness = await bootWsLayer({
+      prefix: 'warden-ws-writefail-',
+      extraEnv: ['ANTHROPIC_BASE_URL'],
       resolve: async () => ({ error: 'no chat matches "ghost"' }),
-      chatCatalog: { snapshot: () => [], has: () => true },
+      prepare: async ({ wdir }) => {
+        fs.mkdirSync(path.join(wdir, 'activity.jsonl'), { recursive: true }); // THE INJECTION
+        // A manual catalog chat so the observer's send_directive can resolve "victim".
+        fs.writeFileSync(path.join(wdir, 'chats.json'), JSON.stringify([
+          { host: '(local)', session: 'victim', name: 'victim', cwd: '/tmp', cmd: 'bash' },
+        ]));
+
+        // Fake LLM: 1st call → tool_use send_directive; later calls → plain text.
+        let llmCalls = 0;
+        llmServer = http.createServer((req, res) => {
+          req.resume();
+          req.on('end', () => {
+            llmCalls++;
+            const body = llmCalls === 1
+              ? { content: [{ type: 'tool_use', id: 'tu1', name: 'send_directive', input: { id: 'victim', directive: 'do something' } }] }
+              : { content: [{ type: 'text', text: 'ok' }] };
+            res.setHeader('content-type', 'application/json');
+            res.end(JSON.stringify(body));
+          });
+        });
+        await new Promise((r) => llmServer.listen(0, '127.0.0.1', r));
+        process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${llmServer.address().port}`;
+
+        ({ appendEvent } = await import('./activity.js'));
+      },
     });
-    await new Promise((resolve, reject) => {
-      httpServer.once('error', reject);
-      httpServer.listen(0, '127.0.0.1', resolve);
-    });
-    port = httpServer.address().port;
+    ({ port } = harness);
   });
 
   after(async () => {
     process.removeListener('unhandledRejection', onRejection);
-    await new Promise((r) => httpServer.close(r));
+    await harness.close();
     await new Promise((r) => llmServer.close(r));
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 
   it('positive control: appendEvent really rejects in this environment', async () => {

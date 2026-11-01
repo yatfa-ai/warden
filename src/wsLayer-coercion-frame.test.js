@@ -1,10 +1,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import http from 'node:http';
 import { WebSocket } from 'ws';
+import { bootWsLayer } from './wsLayerTestHarness.mjs';
 
 /**
  * WARDEN-1796 — a frame whose fields throw on coercion (`id: {"toString":null}`,
@@ -39,44 +36,25 @@ const FRAMES = {
 };
 
 describe('WARDEN-1796 — throwing-coercion frames never escape the /api/stream message handler', () => {
-  let httpServer, port, saved, tempHome, snapshotCalls;
+  let harness, port, snapshotCalls;
   const rejections = [];
   const onRejection = (reason) => rejections.push(reason);
 
   before(async () => {
-    saved = { HOME: process.env.HOME, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN };
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-ws-coercion-'));
-    process.env.HOME = tempHome;
-    process.env.ANTHROPIC_AUTH_TOKEN = 'test-token';
-    fs.mkdirSync(path.join(tempHome, '.yatfa-warden', 'sessions'), { recursive: true });
     snapshotCalls = 0;
-
     process.on('unhandledRejection', onRejection);
-
-    const { setupWsLayer } = await import('./wsLayer.js');
-    httpServer = http.createServer(() => {});
-    setupWsLayer({
-      server: httpServer,
-      cfg: { connectTimeout: 1, hosts: [] },
-      resolve: async () => ({ error: 'unused' }),
+    harness = await bootWsLayer({
+      prefix: 'warden-ws-coercion-',
       chatCatalog: { snapshot: () => { snapshotCalls++; return []; }, has: () => true },
     });
-    await new Promise((resolve, reject) => {
-      httpServer.once('error', reject);
-      httpServer.listen(0, '127.0.0.1', resolve);
-    });
-    port = httpServer.address().port;
+    ({ port } = harness);
   });
 
   beforeEach(() => { rejections.length = 0; });
 
   after(async () => {
     process.removeListener('unhandledRejection', onRejection);
-    await new Promise((r) => httpServer.close(r));
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+    await harness.close();
   });
 
   it('positive control: a valid monitor frame is handled, 0 rejections', async () => {

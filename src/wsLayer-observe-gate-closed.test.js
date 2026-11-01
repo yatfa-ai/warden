@@ -2,9 +2,9 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import http from 'node:http';
 import { WebSocket } from 'ws';
+import { bootWsLayer } from './wsLayerTestHarness.mjs';
 
 /**
  * WARDEN-1893 — the /api/observe `gate` (send_directive approval) must not park forever
@@ -27,61 +27,45 @@ const withTimeout = (p, ms, label) => Promise.race([
 ]);
 
 describe('WARDEN-1893 — observe gate on a closed socket does not wedge the per-sid chain', () => {
-  let httpServer, port, llmServer, saved, tempHome, deleteSession;
+  let harness, port, llmServer, deleteSession;
   let llmCalls = 0;
   let firstReplyIsDirective = true;
 
   before(async () => {
-    saved = { HOME: process.env.HOME, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL };
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-ws-gateclosed-'));
-    process.env.HOME = tempHome;
-    process.env.ANTHROPIC_AUTH_TOKEN = 'test-token';
-    const wdir = path.join(tempHome, '.yatfa-warden');
-    fs.mkdirSync(path.join(wdir, 'sessions'), { recursive: true });
-    fs.writeFileSync(path.join(wdir, 'chats.json'), JSON.stringify([
-      { host: '(local)', session: 'victim', name: 'victim', cwd: '/tmp', cmd: 'bash' },
-    ]));
+    harness = await bootWsLayer({
+      prefix: 'warden-ws-gateclosed-',
+      extraEnv: ['ANTHROPIC_BASE_URL'],
+      prepare: async ({ wdir }) => {
+        fs.writeFileSync(path.join(wdir, 'chats.json'), JSON.stringify([
+          { host: '(local)', session: 'victim', name: 'victim', cwd: '/tmp', cmd: 'bash' },
+        ]));
 
-    // Stub LLM: the 1st call of a scenario → tool_use send_directive; later calls → text.
-    llmServer = http.createServer((req, res) => {
-      req.resume();
-      req.on('end', () => {
-        const n = ++llmCalls;
-        setTimeout(() => {
-          const body = (n === 1 && firstReplyIsDirective)
-            ? { content: [{ type: 'tool_use', id: 'tu1', name: 'send_directive', input: { id: 'victim', directive: 'do something' } }] }
-            : { content: [{ type: 'text', text: 'ok' }] };
-          res.setHeader('content-type', 'application/json');
-          res.end(JSON.stringify(body));
-        }, LLM_DELAY_MS);
-      });
-    });
-    await new Promise((r) => llmServer.listen(0, '127.0.0.1', r));
-    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${llmServer.address().port}`;
+        // Stub LLM: the 1st call of a scenario → tool_use send_directive; later calls → text.
+        llmServer = http.createServer((req, res) => {
+          req.resume();
+          req.on('end', () => {
+            const n = ++llmCalls;
+            setTimeout(() => {
+              const body = (n === 1 && firstReplyIsDirective)
+                ? { content: [{ type: 'tool_use', id: 'tu1', name: 'send_directive', input: { id: 'victim', directive: 'do something' } }] }
+                : { content: [{ type: 'text', text: 'ok' }] };
+              res.setHeader('content-type', 'application/json');
+              res.end(JSON.stringify(body));
+            }, LLM_DELAY_MS);
+          });
+        });
+        await new Promise((r) => llmServer.listen(0, '127.0.0.1', r));
+        process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${llmServer.address().port}`;
 
-    ({ deleteSession } = await import('./sessions.js'));
-    const { setupWsLayer } = await import('./wsLayer.js');
-    httpServer = http.createServer(() => {});
-    setupWsLayer({
-      server: httpServer,
-      cfg: { connectTimeout: 1, hosts: [] },
-      resolve: async () => ({ error: 'unused' }),
-      chatCatalog: { snapshot: () => [], has: () => true },
+        ({ deleteSession } = await import('./sessions.js'));
+      },
     });
-    await new Promise((resolve, reject) => {
-      httpServer.once('error', reject);
-      httpServer.listen(0, '127.0.0.1', resolve);
-    });
-    port = httpServer.address().port;
+    ({ port } = harness);
   });
 
   after(async () => {
-    await new Promise((r) => httpServer.close(r));
+    await harness.close();
     await new Promise((r) => llmServer.close(r));
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 
   // Open socket A on a fresh session, send a user turn, and close it per `closeWhen`.
