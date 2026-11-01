@@ -124,7 +124,13 @@ async function readLocalTranscriptTail() {
   for (const proj of projects) {
     const pdir = path.join(dir, proj);
     try { if (!(await fsp.stat(pdir)).isDirectory()) continue; } catch { continue; }
-    for (const f of await fsp.readdir(pdir)) {
+    // Guarded like the stat above: one project dir that fails readdir (EACCES,
+    // or removed after the stat — TOCTOU) skips only itself, so it cannot null
+    // the phase of every pane via readTranscriptPhase's function-wide catch
+    // (WARDEN-2075; same fix as collectLocalSessionFiles, WARDEN-2029).
+    let entries;
+    try { entries = await fsp.readdir(pdir); } catch { continue; }
+    for (const f of entries) {
       if (!f.endsWith('.jsonl')) continue;
       const fp = path.join(pdir, f);
       try { files.push({ fp, mtime: (await fsp.stat(fp)).mtimeMs }); } catch { /* skip */ }
