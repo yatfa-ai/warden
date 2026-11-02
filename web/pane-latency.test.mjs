@@ -18,7 +18,8 @@
 //   • flush() closes AND resets (two windows never double-count).
 //
 // The browser-side singleton wiring is deliberately NOT exercised here (no DOM);
-// the pure core is the contract.
+// the pure core is the contract. The wiring itself is pinned in
+// paneLatencySingleton.test.mjs (WARDEN-2088).
 //
 // Run: node --test pane-latency.test.mjs   (from web/)
 
