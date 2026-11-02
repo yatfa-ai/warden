@@ -36,8 +36,9 @@
 // the read-only transcript-view family (SESSION_VIEW_MAX_BYTES /
 // SESSION_VIEW_MAX_MESSAGES, extractTranscriptMessage, buildTranscriptView,
 // transcriptWindow, alignOlderPageCursor) and the local ~/.claude archive access
-// (localClaudeSessions, readLocalSessionTranscript + the private
-// collectLocalSessionFiles / findLocalSessionFile) moved VERBATIM into
+// (localClaudeSessions, readLocalSessionTranscript + findLocalSessionFile;
+// collectLocalSessionFiles is there too, exported for transcriptPhase.js since
+// WARDEN-2096 and deliberately NOT re-exported here) moved VERBATIM into
 // src/claudeSessionsLocal.js, a leaf importing only node:path / node:fs /
 // node:os. This file keeps the remote-SSH script plumbing, the full-content
 // search and the cross-host merge/paginate + token rollup; it still calls the
