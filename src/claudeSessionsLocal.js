@@ -2,8 +2,11 @@
 // read-only transcript view: moved VERBATIM out of src/claudeSessions.js
 // (WARDEN-2033). claudeSessions.js re-exports every public name so all its
 // importers are unchanged; the dependency is strictly one-way (claudeSessions.js
-// -> this leaf, no cycle). tok / collectLocalSessionFiles / findLocalSessionFile
-// stay module-private (zero external callers across src/).
+// -> this leaf, no cycle). tok / findLocalSessionFile stay module-private (zero
+// external callers across src/). collectLocalSessionFiles is exported for
+// readLocalTranscriptTail in transcriptPhase.js (WARDEN-2096) — still NOT
+// re-exported through claudeSessions.js, so that module's public surface is
+// unchanged.
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -105,13 +108,14 @@ export function extractMessageText(line) {
 }
 
 // Enumerate ~/.claude/projects/*/*.jsonl, most-recent-first. Shared by the
-// top-40 list (localClaudeSessions) and full-content search so they walk the
-// same archive layout. Returns [] if the projects dir is absent.
+// top-40 list (localClaudeSessions), the full-content search, and the
+// transcript-phase tail pick (readLocalTranscriptTail, WARDEN-2096) so they all
+// walk the same archive layout. Returns [] if the projects dir is absent.
 //
 // Async (WARDEN-828): the directory walk uses fs.promises so the readdir/stat
 // syscalls yield the event loop instead of blocking it. This is the lighter
 // half of the work — the heavy I/O is the transcript reads in localClaudeSessions.
-async function collectLocalSessionFiles() {
+export async function collectLocalSessionFiles() {
   const dir = path.join(os.homedir(), '.claude', 'projects');
   const files = [];
   try {

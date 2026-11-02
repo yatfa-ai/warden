@@ -2,12 +2,13 @@
 // observer.js (WARDEN-1964). observer.js re-exports the public names, so every
 // existing importer of './observer.js' is unchanged.
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import { shellQuote } from './ssh.js';
 // companion.js is a leaf sibling (it imports ssh.js/chatMeta.js/loop-monitor.js,
 // never observer.js or this module) — no import cycle.
 import { deliverRemoteScript } from './companion.js';
+// claudeSessionsLocal.js is a leaf too (node builtins only) — no import cycle.
+// It owns the shared ~/.claude/projects walk this module reuses below.
+import { collectLocalSessionFiles } from './claudeSessionsLocal.js';
 
 const fsp = fs.promises;
 
@@ -107,38 +108,24 @@ export function parsePhaseFromTailOutput(stdout) {
 }
 
 // Read the local filesystem's most-recent transcript tail and return it in the
-// ___TAIL-marked shape parsePhaseFromTailOutput expects (or '' if none). Uses
-// os.homedir(), so a test redirects HOME to a throwaway dir to isolate it.
-// Async (WARDEN-1073): this walk stat'd every transcript in the archive with
-// synchronous fs on the WS request path — 400+ blocking syscalls per call, once
-// per pane, growing monotonically with transcript history. Converted to fsp so
-// the syscalls yield the event loop, matching collectLocalSessionFiles in
-// claudeSessions.js:134 (the same walk, already async) and the WARDEN-832
-// decision of record: no synchronous fs on a runtime/request path. Structure and
-// skip/'' semantics are otherwise unchanged.
+// ___TAIL-marked shape parsePhaseFromTailOutput expects (or '' if none). The
+// ~/.claude/projects walk is NOT re-implemented here: it delegates to
+// collectLocalSessionFiles (claudeSessionsLocal.js, WARDEN-2096) — the same
+// enumeration the session list and full-content search already use — so there
+// is one walk, one per-dir readdir guard (WARDEN-2029/2075, no longer a
+// hand-copy), one newest-mtime sort. Test isolation is unchanged:
+// collectLocalSessionFiles calls os.homedir() at call time, so a test still
+// redirects HOME to a throwaway dir. Skip/'' semantics are preserved: a
+// projects-dir read failure surfaces there as [] (→ '' here, as before), a
+// per-entry stat/readdir failure skips only that entry, and an empty archive
+// yields '' exactly as the old empty-files branch did. (History: this walk was
+// converted to fsp in WARDEN-1073 for the WARDEN-832 no-sync-fs-on-a-request-
+// path rule, and carried its own copy of the per-dir guard from WARDEN-2075;
+// both now live only in the shared function.)
 async function readLocalTranscriptTail() {
-  const dir = path.join(os.homedir(), '.claude', 'projects');
-  const files = [];
-  let projects;
-  try { projects = await fsp.readdir(dir); } catch { return ''; } // no ~/.claude/projects
-  for (const proj of projects) {
-    const pdir = path.join(dir, proj);
-    try { if (!(await fsp.stat(pdir)).isDirectory()) continue; } catch { continue; }
-    // Guarded like the stat above: one project dir that fails readdir (EACCES,
-    // or removed after the stat — TOCTOU) skips only itself, so it cannot null
-    // the phase of every pane via readTranscriptPhase's function-wide catch
-    // (WARDEN-2075; same fix as collectLocalSessionFiles, WARDEN-2029).
-    let entries;
-    try { entries = await fsp.readdir(pdir); } catch { continue; }
-    for (const f of entries) {
-      if (!f.endsWith('.jsonl')) continue;
-      const fp = path.join(pdir, f);
-      try { files.push({ fp, mtime: (await fsp.stat(fp)).mtimeMs }); } catch { /* skip */ }
-    }
-  }
+  const files = await collectLocalSessionFiles();
   if (!files.length) return '';
-  files.sort((a, b) => b.mtime - a.mtime);
-  const { fp } = files[0];
+  const fp = files[0].file;
   const size = (await fsp.stat(fp)).size;
   const len = Math.min(size, 8192);
   const buf = Buffer.alloc(len);
