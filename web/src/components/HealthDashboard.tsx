@@ -27,7 +27,7 @@ import { KeySendDialog } from './KeySendDialog';
 import { SelectionActionBar } from './sidebar/SidebarBits';
 import { healthRank } from './fleet-health/StatusChips';
 import { renderAgentRow } from './fleet-health/AgentRow';
-import { renderAgentGroups, HEALTH_SECTION_ORDER, CLOSED_COLLAPSED_LIMIT, CLOSED_EXPANDED_LIMIT, byRecencyDesc, type GroupMode } from './fleet-health/AgentGroups';
+import { renderAgentGroups, HEALTH_SECTION_ORDER, boundedSectionAgents, type GroupMode } from './fleet-health/AgentGroups';
 
 export type { GroupMode };
 import { formatKillToast, runKillFanout } from '@/lib/kill';
@@ -373,12 +373,11 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
   );
 
   // The ids of every agent currently RENDERED in the dashboard — the action
-  // bar's "All" selects exactly these. Health mode respects the Closed-section
-  // bounding (5 collapsed / 20 expanded); host mode respects per-host collapse —
-  // so "All" never silently targets an agent you can't see. KEEP THIS IN SYNC
-  // with the per-section `shown` computation in the JSX below (they apply the
-  // same bounding/collapse rules); a future refactor could lift both into one
-  // `useRenderedSections` hook.
+  // bar's "All" selects exactly these. Health mode applies the Closed-section
+  // bounding through the shared boundedSectionAgents helper (WARDEN-2106) —
+  // the same helper renderAgentGroups's `shown` uses, so the two can no longer
+  // drift — and host mode respects per-host collapse, so "All" never silently
+  // targets an agent you can't see.
   const renderedIds = useMemo(() => {
     if (!healthData) return [] as string[];
     if (groupBy === 'health') {
@@ -386,12 +385,7 @@ export function HealthDashboard({ onOpenChat, onClose, companionTransportEnabled
       for (const section of HEALTH_SECTION_ORDER) {
         const agents = healthData.groups[section];
         if (!agents || agents.length === 0) continue;
-        const isClosed = section === 'closed';
-        const limit = isClosed
-          ? (closedExpanded ? CLOSED_EXPANDED_LIMIT : CLOSED_COLLAPSED_LIMIT)
-          : agents.length;
-        const shown = isClosed ? [...agents].sort(byRecencyDesc).slice(0, limit) : agents;
-        for (const a of shown) ids.push(paneIdOf(a));
+        for (const a of boundedSectionAgents(section, agents, closedExpanded)) ids.push(paneIdOf(a));
       }
       return ids;
     }

@@ -83,6 +83,19 @@ export function byRecencyDesc(a: Chat, b: Chat): number {
   const bv = b.lastActivity ?? -Infinity;
   return bv - av;
 }
+
+// The ONE source of a health section's rendered subset: non-closed sections
+// return their agents unchanged (same reference); the Closed section is
+// recency-ordered and capped (5 collapsed / 20 expanded). Both render sites
+// call this — renderAgentGroups's `shown` below and HealthDashboard's
+// `renderedIds` (what the action bar's "All" targets) — so the bounding rule
+// can no longer drift between them (WARDEN-2106, superseding the old
+// KEEP-THIS-IN-SYNC comment in HealthDashboard's renderedIds).
+export function boundedSectionAgents(section: string, agents: Chat[], closedExpanded: boolean): Chat[] {
+  if (section !== 'closed') return agents;
+  const limit = closedExpanded ? CLOSED_EXPANDED_LIMIT : CLOSED_COLLAPSED_LIMIT;
+  return [...agents].sort(byRecencyDesc).slice(0, limit);
+}
 export type GroupMode = 'health' | 'host' | 'project';
 
 // The fifteen bindings the moved chain closes over in the main component.
@@ -116,17 +129,15 @@ export function renderAgentGroups(ctx: AgentGroupsCtx) {
                 const sectionInfo = SECTION_LABELS[section];
                 const count = agents.length;
 
-                // Closed section is bounded + recency-ordered (WARDEN-245): dead
-                // catalog sessions no longer flood the panel. Sort most-recent
-                // last-known activity first; cap 5 collapsed / 20 expanded. The
-                // total (count, in the header) is always shown so the cap is
-                // never silent, and a "...and M more" note surfaces the 20-cap.
+                // Closed section is bounded + recency-ordered via the shared
+                // boundedSectionAgents helper (WARDEN-245 caps; WARDEN-2106
+                // lifted the rule here) — the same helper HealthDashboard's
+                // renderedIds applies, so the action bar's "All" can never
+                // drift from what is rendered. The total (count, in the
+                // header) is always shown so the cap is never silent, and a
+                // "...and M more" note surfaces the 20-cap.
                 const isClosed = section === 'closed';
-                const ordered = isClosed ? [...agents].sort(byRecencyDesc) : agents;
-                const limit = isClosed
-                  ? (closedExpanded ? CLOSED_EXPANDED_LIMIT : CLOSED_COLLAPSED_LIMIT)
-                  : agents.length;
-                const shown = isClosed ? ordered.slice(0, limit) : ordered;
+                const shown = boundedSectionAgents(section, agents, closedExpanded);
                 const hiddenBeyondCap = isClosed ? count - shown.length : 0;
                 const showToggle = isClosed && count > CLOSED_COLLAPSED_LIMIT;
                 // The ids actually rendered in this section — the select-all

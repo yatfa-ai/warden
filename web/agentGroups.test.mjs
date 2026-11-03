@@ -77,7 +77,7 @@ writeFileSync(join(tmpDir, 'lucide.mjs'), `import { createElement as h } from 'r
 export function Trash2() { return h('i', { 'data-trash': '1' }); }\n`);
 
 const M = await import(join(tmpDir, 'AgentGroups.mjs'));
-const { renderAgentGroups, byRecencyDesc, CLOSED_COLLAPSED_LIMIT, CLOSED_EXPANDED_LIMIT, HEALTH_SECTION_ORDER } = M;
+const { renderAgentGroups, byRecencyDesc, boundedSectionAgents, CLOSED_COLLAPSED_LIMIT, CLOSED_EXPANDED_LIMIT, HEALTH_SECTION_ORDER } = M;
 const { copied } = await import(join(tmpDir, 'clipboardToast.mjs'));
 const { Button } = await import(join(tmpDir, 'button.mjs'));
 const { Checkbox } = await import(join(tmpDir, 'checkbox.mjs'));
@@ -155,6 +155,29 @@ test('byRecencyDesc orders newest lastActivity first, sinks missing, treats 0 as
   assert.ok(byRecencyDesc(ag('x', { lastActivity: 2 }), ag('y', { lastActivity: 1 })) < 0);
   assert.ok(byRecencyDesc(ag('x', { lastActivity: 1 }), ag('y', { lastActivity: 2 })) > 0);
   assert.equal(byRecencyDesc(ag('x', { lastActivity: 3 }), ag('y', { lastActivity: 3 })), 0);
+});
+
+// WARDEN-2106: the shared bounding helper. Non-closed sections must return the
+// SAME reference (no copy, no re-sort — the render sites rely on that), Closed
+// is recency-ordered and capped at the same 5/20 constants, and the input is
+// never mutated (the sort works on a copy).
+test('boundedSectionAgents: non-closed sections return the same reference; closed is recency-capped 5/20 without mutating the input', () => {
+  const plain = [ag('h2', { lastActivity: 2 }), ag('h1', { lastActivity: 1 })];
+  assert.equal(boundedSectionAgents('healthy', plain, false), plain);
+  assert.equal(boundedSectionAgents('idle', plain, true), plain);
+
+  const closed = closedAgents(8); // ids c0..c7, lastActivity rising with id
+  assert.deepEqual(boundedSectionAgents('closed', closed, false).map((a) => a.id), ['c7', 'c6', 'c5', 'c4', 'c3']);
+  assert.deepEqual(boundedSectionAgents('closed', closed, true).map((a) => a.id), ['c7', 'c6', 'c5', 'c4', 'c3', 'c2', 'c1', 'c0']);
+  // Under the expanded cap everything survives; over it exactly 20, newest first.
+  const big = closedAgents(22, 2000);
+  assert.deepEqual(boundedSectionAgents('closed', big, true).map((a) => a.id)[0], 'c21');
+  assert.equal(boundedSectionAgents('closed', big, true).length, 20);
+  // Missing lastActivity sinks below dated ones (byRecencyDesc semantics).
+  const mixed = [ag('none'), ag('c0', { lastActivity: 1 })];
+  assert.deepEqual(boundedSectionAgents('closed', mixed, false).map((a) => a.id), ['c0', 'none']);
+  // The input array is untouched.
+  assert.deepEqual(closed.map((a) => a.id), ['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7']);
 });
 
 test('health mode skips empty sections and renders the rest in canonical order with showHost=true', () => {
