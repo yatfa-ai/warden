@@ -10,9 +10,10 @@ import (
 // sentinel: any item with sid "") at the head of the interactive queue is not
 // a preemption trigger. The writer keeps its in-hand bulk remainder and
 // finishes it in place; the line is then the very next take(). No other test
-// holds a bulk remainder while a line heads the interactive queue (the two
-// direct preempt tests head with another pane's attachData echo), so this
-// clause is pinned here (WARDEN-2108).
+// arranges that state deterministically — the two direct preempt tests head
+// the queue with another pane's attachData echo, and the only serve-level
+// test that ever reaches a line at the head does so through runGatedServe's
+// drain-sentinel race — so the clause is pinned directly here (WARDEN-2108).
 func TestPreemptRefusesWhenALineHeadsTheInteractiveQueue(t *testing.T) {
 	q := newOutboundQueue(func(string) bool { return false }) // everything bulk
 	q.enqueueAttachData("P", []byte("AAAA"))
