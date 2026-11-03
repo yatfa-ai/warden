@@ -372,6 +372,35 @@ describe('GET /api/claude-sessions-search', () => {
       'no disclosure key: a command result is not an unreachable host (the -all scope discipline)');
   });
 
+  it('names LOCAL unreachable when the local grep cannot spawn, without blanking reachable remotes (WARDEN-2104)', async () => {
+    cfg.hosts = ['u@good'];
+    can('u@good', 'search', searchOut([{ id: 'g1', mt: 1000 }]));
+    writeLocalSession('loc-1', [userLine('local needle here')], 1700000000);
+    // A PATH holding the ssh shim and just what it needs, but NO grep → the local
+    // spawn fails with ENOENT.
+    const noGrep = path.join(tmpRoot, 'bin-nogrep');
+    fs.mkdirSync(noGrep, { recursive: true });
+    for (const t of ['bash', 'mktemp', 'cat', 'tr']) {
+      const real = ['/usr/bin', '/bin'].map((d) => path.join(d, t)).find((f) => fs.existsSync(f));
+      assert.ok(real, `need ${t} on the host`);
+      try { fs.symlinkSync(real, path.join(noGrep, t)); } catch { /* already linked */ }
+    }
+    try { fs.symlinkSync(path.join(shimDir, 'ssh'), path.join(noGrep, 'ssh')); } catch { /* already linked */ }
+    const savedPath = process.env.PATH;
+    process.env.PATH = noGrep;
+    let r;
+    try { r = await get('/api/claude-sessions-search?q=needle'); } finally { process.env.PATH = savedPath; }
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.results.map((x) => x.sessionId), ['g1'], 'the reachable remote still answers');
+    assert.deepEqual(r.body.unreachableHosts, [LOCAL]);
+  });
+
+  it('omits unreachableHosts for a genuine local zero-match search (WARDEN-2104)', async () => {
+    writeLocalSession('loc-1', [userLine('nothing relevant')], 1700000000);
+    const r = await get('/api/claude-sessions-search?q=absentneedle');
+    assert.deepEqual(r, { status: 200, body: { results: [] } });
+  });
+
   it('caps each host at 20 results and the merged list at 50', async () => {
     const hostNames = ['u@h1', 'u@h2', 'u@h3'];
     cfg.hosts = hostNames;

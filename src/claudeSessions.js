@@ -50,7 +50,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { isTransportFailure, shellQuote } from './ssh.js';
-import { parseSearchOutput, streamBoundedSearch } from './workspaceSearch.js';
+import { parseSearchOutput, streamBoundedSearchResult } from './workspaceSearch.js';
 // WARDEN-1284: the companion-transport routing guard for the session-listing
 // leg. companion.js imports ssh.js/chatMeta.js/loop-monitor.js and never this
 // module, so the dependency stays one-directional — no cycle.
@@ -481,15 +481,28 @@ const SESSION_SEARCH_LOCAL_SCAN = 500;
 // workspace-content search): a whole-file readFileSync approach would block the
 // event loop and balloon memory on large transcripts. The query is a literal argv
 // element (no shell), so it needs no shellQuote.
+//
+// WARDEN-2104: the failure-aware core is searchLocalClaudeSessionsDetail, which
+// resolves `{ sessions, unreachable }` so a grep that could not run (spawn error,
+// timeout with zero lines, exit other than 0/1 with zero lines — the
+// streamBoundedSearchResult `failed` verdict) is distinguishable from a genuine
+// zero-match search. A missing archive or empty query is legitimately "nothing to
+// search" and stays `unreachable: false`. searchLocalClaudeSessions is the bare-
+// array projection (the remoteSearchClaudeSessions / ...Detail split of WARDEN-1938).
 export async function searchLocalClaudeSessions(q) {
+  return (await searchLocalClaudeSessionsDetail(q)).sessions;
+}
+
+export async function searchLocalClaudeSessionsDetail(q) {
   const needle = q.toLowerCase();
-  if (!needle) return [];
+  if (!needle) return { sessions: [], unreachable: false };
   const archiveDir = path.join(os.homedir(), '.claude', 'projects');
-  try { if (!fs.statSync(archiveDir).isDirectory()) return []; } catch { return []; }
-  const raw = await streamBoundedSearch(
+  try { if (!fs.statSync(archiveDir).isDirectory()) return { sessions: [], unreachable: false }; } catch { return { sessions: [], unreachable: false }; }
+  const result = await streamBoundedSearchResult(
     'grep', ['-r', '-m', '1', '--include=*.jsonl', '-F', '-i', '-I', '-n', '--', q, archiveDir], undefined,
     { maxResults: SESSION_SEARCH_LOCAL_SCAN, transferLen: SESSION_SEARCH_SNIP_TRANSFER },
   );
+  const raw = result.raw;
   // grep -m1 emits one `file:line:text` row per matching file. Collect them, sort
   // by recency, then enrich the most-recent SESSION_SEARCH_PER_HOST with cwd/summary
   // (a small head read) + a cleaned snippet (from grep's matched-line text).
@@ -529,7 +542,7 @@ export async function searchLocalClaudeSessions(q) {
     const snippet = snippetFromLine(e.text, needle);
     out.push({ id: path.basename(e.file, '.jsonl'), cwd, summary, snippet, mtime: e.mtime });
   }
-  return out;
+  return { sessions: out, unreachable: result.failed };
 }
 
 // Remote (SSH) twin of searchLocalClaudeSessions. Builds a `bash -lc` script that
