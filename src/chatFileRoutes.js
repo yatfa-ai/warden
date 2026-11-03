@@ -96,7 +96,7 @@ export function createChatFileRouter({ resolve, fileExistsTelemetry, local }) {
   // POST /api/search-files — content-search a chat's working directory (grep).
   // Body: { id: string, query: string }
   // Response: { results: [{ file, line, text }], query, error?: string }
-  // Local chats run git/rg/grep via async runLocalGit/streamBoundedSearch; remote chats run buildSearchScript
+  // Local chats run git/rg/grep via async searchLocalRawResult; remote chats run buildSearchScript
   // over SSH. Mirrors /api/git-status's resolve → cwd guard → local/remote split.
   router.post('/api/search-files', async (req, res) => {
     const r = await resolve(String(req.body?.id || ''));

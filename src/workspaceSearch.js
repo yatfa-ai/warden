@@ -19,7 +19,7 @@ export const SEARCH_STREAM_TIMEOUT_MS = 60000;
 const SEARCH_MAX_LINE_LEN = 300; // display cap applied by parseSearchOutput
 // Per-line transfer cap — the local/remote single source of truth for "how much
 // of one matched line we move before stopping". The remote script's `cut -c1-…`
-// and the local streamBoundedSearch both read this; SEARCH_MAX_LINE_LEN (300) is
+// and the local streamBoundedSearchResult both read this; SEARCH_MAX_LINE_LEN (300) is
 // a stricter display-only truncation applied afterward by parseSearchOutput.
 const SEARCH_TRANSFER_LINE_LEN = 1000;
 
@@ -28,7 +28,7 @@ const SEARCH_TRANSFER_LINE_LEN = 1000;
 // match), so a text body containing its own ':123:' isn't misread as the line.
 //
 // The path is C-unescaped: `git grep` (both producers — buildSearchScript's
-// remote script and searchLocalRaw's local stream) quotes any path holding a
+// remote script and searchLocalRawResult's local stream) quotes any path holding a
 // non-ASCII byte, backslash or double-quote under the default core.quotePath=true,
 // exactly like `git ls-files`/`git show --name-status`. Without this the octal
 // form ("s\303\274b/caf\303\251.js") is what the dialog renders, copies, and
@@ -100,7 +100,7 @@ export function buildSearchScript(cwd, query) {
 // `rg --version`): bounded by a 10s timeout (SIGTERM) with stderr CAPTURED (not
 // inherited) so probe noise ("fatal: not a git repository") never hits the server
 // console. The workspace search itself is NOT run through here — it is streamed by
-// streamBoundedSearch below so its output is bounded AT THE SOURCE. Delegates to
+// streamBoundedSearchResult below so its output is bounded AT THE SOURCE. Delegates to
 // runLocalCapture (WARDEN-441): previously a spawnSync that froze the event loop
 // on every /api/search-files request while the probe ran.
 async function runLocalSearch(bin, args, cwd) {
@@ -142,11 +142,6 @@ async function hasBinary(bin) {
 // It never flags a result that already holds lines (rg/grep exit 2 with partial
 // hits keeps its real results), and never flags our own cap-triggered SIGTERM.
 // Exit 1 = genuine "no matches" for git grep/rg/grep → failed:false, raw ''.
-// streamBoundedSearch stays the string-returning wrapper (byte-identical).
-export async function streamBoundedSearch(bin, args, cwd, opts = {}) {
-  return (await streamBoundedSearchResult(bin, args, cwd, opts)).raw;
-}
-
 export function streamBoundedSearchResult(bin, args, cwd, opts = {}) {
   const maxResults = opts.maxResults ?? SEARCH_MAX_RESULTS;
   const transferLen = opts.transferLen ?? SEARCH_TRANSFER_LINE_LEN;
@@ -215,22 +210,16 @@ export function streamBoundedSearchResult(bin, args, cwd, opts = {}) {
   });
 }
 
-// Local raw search stdout for `query` under `cwd`: the streamed twin of the
+// Local raw search for `query` under `cwd`: the streamed twin of the
 // remote buildSearchScript. Prefers `git grep` (tracked files only, -F literal);
 // falls back to rg (PATH-gated via hasBinary, mirroring `command -v rg`) then
 // plain grep, only when cwd is not a git worktree. Output is bounded AT THE SOURCE
-// by streamBoundedSearch (line count + per-line transfer cap) — never by a
+// by streamBoundedSearchResult (line count + per-line transfer cap) — never by a
 // spawnSync maxBuffer — so a many-match search returns its real (≤30) results
-// instead of ENOBUFS→''. Returns the bounded raw string ('' for no matches AND for
-// spawn failure — use searchLocalRawResult to tell them apart) and never throws. Exported so the local path has test
-// coverage parity with the remote buildSearchScript.
-export async function searchLocalRaw(cwd, query) {
-  return (await searchLocalRawResult(cwd, query)).raw;
-}
-
-// Failure-aware twin of searchLocalRaw (WARDEN-1952): same git/rg/grep selection,
-// resolves `{ raw, failed, reason }` from streamBoundedSearchResult so the route
-// can answer error:'search failed' instead of a confident "No results found".
+// instead of ENOBUFS→''. Failure-aware (WARDEN-1952): resolves
+// `{ raw, failed, reason }` so the route can answer error:'search failed'
+// instead of a confident "No results found" ('' + failed:false = a genuine
+// no-match; '' + failed:true = the tool could not run / finish). Never throws.
 export async function searchLocalRawResult(cwd, query) {
   // Gate the rg/grep fallback to non-repos (mirrors remote `if git rev-parse…`).
   // rev-parse output is tiny ("true"), and runLocalSearch is async + bounded by a
