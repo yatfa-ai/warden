@@ -22,7 +22,7 @@
 // remoteSearchClaudeSessionsDetail, whose `{ sessions, unreachable }` shape is
 // what /api/claude-sessions-search reads to disclose a host it could not
 // search. They depend on the shared workspace-search
-// infrastructure (streamBoundedSearch / parseSearchOutput) in ./workspaceSearch.js;
+// infrastructure (streamBoundedSearchResult / parseSearchOutput) in ./workspaceSearch.js;
 // since WARDEN-1501 moved that infra out of server.js the dependency is
 // one-directional (no cycle). server.js re-exports these helpers so every
 // `server.X` consumer is unchanged; the Express routes stay in server.js.
@@ -476,8 +476,8 @@ const SESSION_SEARCH_LOCAL_SCAN = 500;
 // the top-40 list are found.
 //
 // Streams ONE `grep -r -m1` over the archive and bounds output AT THE SOURCE
-// (line count + per-line transfer cap via streamBoundedSearch) — it never reads
-// whole JSONL files into Node memory. This mirrors searchLocalRaw's pattern (the
+// (line count + per-line transfer cap via streamBoundedSearchResult) — it never reads
+// whole JSONL files into Node memory. This mirrors searchLocalRawResult's pattern (the
 // workspace-content search): a whole-file readFileSync approach would block the
 // event loop and balloon memory on large transcripts. The query is a literal argv
 // element (no shell), so it needs no shellQuote.

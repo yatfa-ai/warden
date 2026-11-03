@@ -5,13 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 // WARDEN-1752: the local `claude --version` probe (detectClaude) and
-// streamBoundedSearch armed no timeout, so a hung child left the awaited promise
+// streamBoundedSearchResult armed no timeout, so a hung child left the awaited promise
 // pending forever. Fake binary first on PATH: `exec sleep` so SIGTERM hits the
 // sleep itself, not an sh wrapper that would orphan it with the pipes open.
 
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-probe-home-'));
 const { detectClaude } = await import('./ssh.js');
-const { streamBoundedSearch } = await import('./workspaceSearch.js');
+const { streamBoundedSearchResult } = await import('./workspaceSearch.js');
 
 const BIN = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-probe-bin-'));
 const PIDFILE = path.join(BIN, 'pid');
@@ -67,26 +67,26 @@ describe('local probe timeouts (WARDEN-1752)', { skip }, () => {
     });
   });
 
-  describe('streamBoundedSearch', () => {
+  describe('streamBoundedSearchResult', () => {
     it('hung child => settles after timeout and kills the child', async () => {
       writeBin('hungsearch', `echo $$ > "${PIDFILE}"\nexec sleep 300`);
-      const r = await settledWithin(streamBoundedSearch('hungsearch', [], BIN, { timeout: 150 }), 3000);
-      assert.ok(r.settled, 'streamBoundedSearch must settle despite the hung child');
-      assert.strictEqual(r.v, '');
+      const r = await settledWithin(streamBoundedSearchResult('hungsearch', [], BIN, { timeout: 150 }), 3000);
+      assert.ok(r.settled, 'streamBoundedSearchResult must settle despite the hung child');
+      assert.strictEqual(r.v.raw, '');
       const pid = Number(fs.readFileSync(PIDFILE, 'utf8').trim());
       assert.ok(await waitDead(pid), 'hung child must be killed');
     });
 
     it('returns the partial lines collected before the timeout', async () => {
       writeBin('partialsearch', `echo $$ > "${PIDFILE}"\nprintf 'a:1:x\\nb:2:y\\n'\nexec sleep 300`);
-      const r = await settledWithin(streamBoundedSearch('partialsearch', [], BIN, { timeout: 400 }), 3000);
+      const r = await settledWithin(streamBoundedSearchResult('partialsearch', [], BIN, { timeout: 400 }), 3000);
       assert.ok(r.settled);
-      assert.strictEqual(r.v, 'a:1:x\nb:2:y');
+      assert.strictEqual(r.v.raw, 'a:1:x\nb:2:y');
     });
 
     it('fast child is unaffected by the timer', async () => {
       writeBin('fastsearch', "printf 'a:1:x\\n'");
-      const out = await streamBoundedSearch('fastsearch', [], BIN, { timeout: 5000 });
+      const out = (await streamBoundedSearchResult('fastsearch', [], BIN, { timeout: 5000 })).raw;
       assert.strictEqual(out, 'a:1:x');
     });
   });

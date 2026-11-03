@@ -19,7 +19,7 @@ import path from 'node:path';
 // the local body's own contract is never asserted directly. The risky wiring of
 // the local body — the grep argv (order-sensitive
 // `-r -m 1 --include=*.jsonl -F -i -I -n --`), the caps threading
-// (streamBoundedSearch maxResults=500 / per-line transfer 1500), the mtime
+// (streamBoundedSearchResult maxResults=500 / per-line transfer 1500), the mtime
 // ranking, the 8192-byte head read feeding parseJsonlHead's cwd gate, and the
 // deliberate unconditional-push rule — is pinned here directly.
 //
@@ -226,7 +226,7 @@ describe('searchLocalClaudeSessions (local grep/rank/enrich leg of /api/claude-s
   describe('unconditional push (remote-twin consistency)', () => {
     it('pushes a match whose needle sits past the 1500-byte transfer cap, with an honestly-empty snippet', async () => {
       // The needle lives ~3000 chars into the matched line — beyond the 1500-char
-      // row cap streamBoundedSearch applies — so snippetFromLine finds no
+      // row cap streamBoundedSearchResult applies — so snippetFromLine finds no
       // occurrence in the truncated text and returns ''. grep DID match the
       // file, so the session must surface (dropping it here is the false
       // negative the source comment explicitly forbids, and would diverge from

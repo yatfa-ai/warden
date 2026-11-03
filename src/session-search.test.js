@@ -106,7 +106,7 @@ before(async () => {
   // inside a large tool_result blob (>2000 chars of padding precede it), exactly
   // where real error strings / log lines hide. The first line carries cwd (so
   // the session is otherwise returnable) but NOT the needle. grep -m1 matches
-  // the long second line; streamBoundedSearch caps that row to 1500 chars BEFORE
+  // the long second line; streamBoundedSearchResult caps that row to 1500 chars BEFORE
   // the needle; snippetFromLine therefore returns ''. The endpoint must STILL
   // return this session (grep matched it) — pushing regardless of snippet is the
   // property under test. (WARDEN-161 reviewer finding: local search dropped it.)
