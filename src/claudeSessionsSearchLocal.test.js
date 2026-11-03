@@ -33,7 +33,7 @@ const originalHome = process.env.HOME;
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-claudeSessionsSearchLocal-'));
 process.env.HOME = tempHome;
 
-const { searchLocalClaudeSessions, SESSION_SEARCH_PER_HOST } = await import('./claudeSessions.js');
+const { searchLocalClaudeSessions, searchLocalClaudeSessionsDetail, SESSION_SEARCH_PER_HOST } = await import('./claudeSessions.js');
 
 const projectsDir = path.join(tempHome, '.claude', 'projects');
 
@@ -240,6 +240,49 @@ describe('searchLocalClaudeSessions (local grep/rank/enrich leg of /api/claude-s
       assert.ok(row, 'grep matched the file — the session must surface even without a clean snippet');
       assert.equal(row.cwd, '/repo/push');
       assert.equal(row.snippet, '', 'a needle past the transfer cap yields an empty snippet, not a dropped row');
+    });
+  });
+
+  describe('searchLocalClaudeSessionsDetail failure channel (WARDEN-2104)', () => {
+    it('reports unreachable:true when grep cannot be spawned, and the bare variant projects to []', async () => {
+      writeSession('fail', 'sess-fail', [
+        { type: 'user', cwd: '/repo/fail', message: { role: 'user', content: 'failneedle here' } },
+      ], 30000);
+      const savedPath = process.env.PATH;
+      const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-csl-nopath-'));
+      process.env.PATH = emptyDir;
+      try {
+        assert.deepEqual(await searchLocalClaudeSessionsDetail('failneedle'), { sessions: [], unreachable: true });
+        assert.deepEqual(await searchLocalClaudeSessions('failneedle'), []);
+      } finally {
+        process.env.PATH = savedPath;
+        fs.rmSync(emptyDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports unreachable:false for a genuine no-match search', async () => {
+      assert.deepEqual(await searchLocalClaudeSessionsDetail('zz-no-such-needle-zz'), { sessions: [], unreachable: false });
+    });
+
+    it('reports unreachable:false with the sessions on a healthy match', async () => {
+      writeSession('ok', 'sess-ok', [
+        { type: 'user', cwd: '/repo/ok', message: { role: 'user', content: 'okdetailneedle here' } },
+      ], 30100);
+      const d = await searchLocalClaudeSessionsDetail('okdetailneedle');
+      assert.equal(d.unreachable, false);
+      assert.deepEqual(d.sessions.map((r) => r.id), ['sess-ok']);
+    });
+
+    it('keeps unreachable:false for an empty query and a missing archive (nothing to search is not a failure)', async () => {
+      assert.deepEqual(await searchLocalClaudeSessionsDetail(''), { sessions: [], unreachable: false });
+      const noArchive = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-csl-noarchive2-'));
+      process.env.HOME = noArchive;
+      try {
+        assert.deepEqual(await searchLocalClaudeSessionsDetail('anything'), { sessions: [], unreachable: false });
+      } finally {
+        process.env.HOME = tempHome;
+        fs.rmSync(noArchive, { recursive: true, force: true });
+      }
     });
   });
 });

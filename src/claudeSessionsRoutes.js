@@ -14,7 +14,7 @@ import {
   localClaudeSessions, remoteClaudeSessionsDetail,
   mergeAndPaginateSessions,
   readLocalSessionTranscript, parseSessionReadOutput,
-  searchLocalClaudeSessions, remoteSearchClaudeSessionsDetail, remoteReadSessionTranscript,
+  searchLocalClaudeSessionsDetail, remoteSearchClaudeSessionsDetail, remoteReadSessionTranscript,
   SESSION_SEARCH_PER_HOST, SESSION_SEARCH_GLOBAL,
 } from './claudeSessions.js';
 
@@ -186,8 +186,10 @@ export function createClaudeSessionsRouter({ cfg, sessionCache, local }) {
   // unmodified), and the client reads the disclosure from the same success branch
   // that parses `results`.
   //
-  // Scope discipline, shared with the -all route above: LOCAL is a filesystem read
-  // and can never be unreachable; a remote host answering with a non-zero exit and
+  // Scope discipline, shared with the -all route above: LOCAL is a `grep -r` spawn
+  // that CAN fail (WARDEN-2104 — spawn error, timeout or exit other than 0/1 with
+  // zero lines is named unreachable via searchLocalClaudeSessionsDetail; an absent
+  // archive or a genuine zero-match search is not); a remote host answering with a non-zero exit and
   // real stdout is a COMMAND failure — `isTransportFailure` returns false on
   // non-empty stdout — so it still degrades to the empty list and is NOT named
   // unreachable. Deliberately NOT a top-level `error` key: a partial fleet is a
@@ -198,14 +200,17 @@ export function createClaudeSessionsRouter({ cfg, sessionCache, local }) {
     const hosts = [LOCAL, ...cfg.hosts];
     const settled = await Promise.allSettled(hosts.map(async (host) => {
       if (host === LOCAL) {
-        return { host, sessions: (await searchLocalClaudeSessions(q)).slice(0, SESSION_SEARCH_PER_HOST) };
+        // WARDEN-2104: the LOCAL grep can fail too (spawn error, timeout, exit 2
+        // with zero lines); the Detail variant surfaces that as `unreachable`.
+        const { sessions, unreachable } = await searchLocalClaudeSessionsDetail(q);
+        return { host, sessions: sessions.slice(0, SESSION_SEARCH_PER_HOST), unreachable };
       }
       // Belt-and-braces: in production the helper answers a dead transport with a
       // not-ok RESULT (never a throw), but if it ever did throw there would be no
       // result to classify — the same "we could not search it" a not-ok transport
       // failure names, so disclose it the same way rather than silently blanking
-      // the host. (LOCAL is deliberately outside this catch: it cannot throw its
-      // way into an "unreachable" claim.)
+      // the host. (LOCAL is deliberately outside this catch: its failure arrives as
+      // a result, never a throw.)
       try {
         const { sessions, unreachable } = await remoteSearchClaudeSessionsDetail(host, q);
         return { host, sessions: sessions.slice(0, SESSION_SEARCH_PER_HOST), unreachable };
