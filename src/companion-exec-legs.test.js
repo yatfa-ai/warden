@@ -110,10 +110,13 @@ const CHANNEL_DEAD = {
 // Drive ONE leg twice — flag ON (capturing what reaches the companion) and flag
 // OFF (capturing what reaches run()) — and return both captures plus the opts
 // each transport saw. `invoke(deps)` calls the real exported function.
+// WARDEN-2123: the transport toggle rides IN the deps (injected at the
+// deliverRemoteScript seam) — ON-leg injects `() => true`, OFF-leg `() => false`;
+// the process.env flips are retired.
 async function captureBothTransports(invoke, { stdout = '' } = {}) {
   const on = { script: null, opts: null, host: null, cfg: null, runCalls: 0 };
-  process.env.WARDEN_COMPANION_TRANSPORT = '1';
   await invoke({
+    isCompanionTransportEnabled: () => true,
     execInContext: async (host, script, opts, cfg) => {
       on.host = host; on.script = script; on.opts = opts; on.cfg = cfg;
       return okResult(stdout);
@@ -122,12 +125,11 @@ async function captureBothTransports(invoke, { stdout = '' } = {}) {
   });
 
   const off = { cmd: null, opts: null, host: null, companionCalls: 0 };
-  process.env.WARDEN_COMPANION_TRANSPORT = '0';
   await invoke({
+    isCompanionTransportEnabled: () => false,
     execInContext: async () => { off.companionCalls++; throw new Error('flag OFF must not touch the companion'); },
     run: async (host, cmd, opts) => { off.host = host; off.cmd = cmd; off.opts = opts; return okResult(stdout); },
   });
-  process.env.WARDEN_COMPANION_TRANSPORT = '1';
   return { on, off };
 }
 

@@ -62,10 +62,10 @@ function uniqueSession() {
   // 5s deadline, 50ms step) so a slow shell init does not yield a one-shot blank
   // capture. resolveAnyway: the LAST capture is returned either way; callers
   // still assert strictly.
-  async function captureUntilMarkers(chats, markerFor, { deadlineMs = 5000, stepMs = 50 } = {}) {
-    let out = await capturePanes(chats, {});
+  async function captureUntilMarkers(chats, markerFor, { deadlineMs = 5000, stepMs = 50 } = {}, deps = {}) {
+    let out = await capturePanes(chats, {}, deps);
     await pollUntil(async () => {
-      out = await capturePanes(chats, {});
+      out = await capturePanes(chats, {}, deps);
       return chats.every((c) => out[c.id] && out[c.id].includes(markerFor(c)));
     }, { what: 'every pane carrying its expected marker', timeout: deadlineMs, interval: stepMs, resolveAnyway: true });
     return out;
@@ -84,25 +84,24 @@ function uniqueSession() {
     };
   }
 
-  it('LOCAL fast path captures via runLocalTmux even under WARDEN_COMPANION_TRANSPORT=1', async () => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+  it('LOCAL fast path captures via runLocalTmux even with the companion transport enabled', async () => {
     const name = uniqueSession();
-    try {
-      await withSession(name, async () => {
-        const chat = makeLocalChat(name);
-        const out = await captureUntilMarkers([chat], () => 'WARDEN_LOCAL_MARKER_7');
-        // The capture succeeded via the LOCAL path — proving the companion (which
-        // refuses (local) hosts) was NOT consulted. Keyed by the HOST-QUALIFIED id
-        // (WARDEN-1223).
-        assert.ok(out[chat.id], `LOCAL pane was captured: ${JSON.stringify(Object.keys(out))}`);
-        assert.ok(out[chat.id].includes('WARDEN_LOCAL_MARKER_7'),
-          `captured the marker; got:\n${out[chat.id]}`);
-      })();
-    } finally {
-      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    }
+    await withSession(name, async () => {
+      const chat = makeLocalChat(name);
+      // WARDEN-2123: the transport toggle rides in deps (env dance retired).
+      // Injected ON, the REMOTE companion gate is open — yet the LOCAL branch of
+      // capturePanes returns before any toggle read, so the capture still went
+      // through runLocalTmux and the companion (which refuses (local) hosts)
+      // was never consulted.
+      const out = await captureUntilMarkers([chat], () => 'WARDEN_LOCAL_MARKER_7',
+        {}, { isCompanionTransportEnabled: () => true });
+      // The capture succeeded via the LOCAL path — proving the companion (which
+      // refuses (local) hosts) was NOT consulted. Keyed by the HOST-QUALIFIED id
+      // (WARDEN-1223).
+      assert.ok(out[chat.id], `LOCAL pane was captured: ${JSON.stringify(Object.keys(out))}`);
+      assert.ok(out[chat.id].includes('WARDEN_LOCAL_MARKER_7'),
+        `captured the marker; got:\n${out[chat.id]}`);
+    })();
   });
 
   it('default path (no env var) is unchanged: LOCAL captures identically', async () => {
@@ -159,17 +158,14 @@ function uniqueSession() {
 // monitor tick. Proving the cached content comes back is proof the RPC path was
 // never taken: the only other route (capturePanesViaCompanion) would bootstrap a
 // real SSH channel and fail/empty — never return the seeded content. No network.
+// WARDEN-2123: the toggle rides in deps (`isCompanionTransportEnabled: () => true`
+// at each capturePanes call) — no process.env mutation.
 
 describe('capturePanes renders companion hosts from the pushed delta cache (WARDEN-413)', () => {
-  let savedEnv;
   beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
     _resetPaneDeltaStateForTests();
   });
   afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
     _resetPaneDeltaStateForTests();
   });
 
@@ -178,7 +174,8 @@ describe('capturePanes renders companion hosts from the pushed delta cache (WARD
     applyPaneDelta('prod', { event: 'paneDelta', panes: { 'p-worker': 'IDLE PANE CONTENT' } });
     assert.ok(hasFreshPaneDelta('prod'), 'precondition: host has a fresh delta');
 
-    const out = await capturePanes([{ host: 'prod', id: 'prod:p-worker', key: 'p-worker', container: 'p-worker', session: 'agent' }], {});
+    const out = await capturePanes([{ host: 'prod', id: 'prod:p-worker', key: 'p-worker', container: 'p-worker', session: 'agent' }],
+      {}, { isCompanionTransportEnabled: () => true });
 
     // The cached content came back — proving capturePanes read the cache and never
     // called capturePanesViaCompanion (which would have hit a real channel). The
@@ -193,7 +190,7 @@ describe('capturePanes renders companion hosts from the pushed delta cache (WARD
     const out = await capturePanes([
       { host: 'prod', id: 'prod:a', key: 'a', container: 'a', session: 'agent' },
       { host: 'prod', id: 'prod:b', key: 'b', container: 'b', session: 'agent' },
-    ], {});
+    ], {}, { isCompanionTransportEnabled: () => true });
     assert.deepStrictEqual(out, { 'prod:a': 'AAA' }, 'b is missing (cache miss) -> caller capture_failed handling, unchanged');
   });
 
@@ -209,7 +206,7 @@ describe('capturePanes renders companion hosts from the pushed delta cache (WARD
       { host: 'hostA', id: 'hostA:same-name', key: 'same-name', container: 'same-name', session: 'agent' },
       { host: 'hostB', id: 'hostB:same-name', key: 'same-name', container: 'same-name', session: 'agent' },
     ];
-    const out = await capturePanes(chats, {});
+    const out = await capturePanes(chats, {}, { isCompanionTransportEnabled: () => true });
     assert.deepStrictEqual(out, {
       'hostA:same-name': 'HOST_A TERMINAL',
       'hostB:same-name': 'HOST_B TERMINAL',
@@ -217,7 +214,8 @@ describe('capturePanes renders companion hosts from the pushed delta cache (WARD
 
     // A capture failure on a host (no key in its host-local result) does not
     // borrow the sibling host's entry: the slot is simply missing → capture_failed.
-    const onlyGhost = await capturePanes([{ host: 'hostB', id: 'hostB:ghost', key: 'ghost', container: 'ghost', session: 'agent' }], {});
+    const onlyGhost = await capturePanes([{ host: 'hostB', id: 'hostB:ghost', key: 'ghost', container: 'ghost', session: 'agent' }],
+      {}, { isCompanionTransportEnabled: () => true });
     assert.deepStrictEqual(onlyGhost, {}, 'a host with no captured pane yields a MISSING slot, never the sibling host\'s content');
   });
 
