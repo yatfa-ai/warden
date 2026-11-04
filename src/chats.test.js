@@ -101,7 +101,7 @@ function uniqueSession() {
       assert.ok(out[chat.id], `LOCAL pane was captured: ${JSON.stringify(Object.keys(out))}`);
       assert.ok(out[chat.id].includes('WARDEN_LOCAL_MARKER_7'),
         `captured the marker; got:\n${out[chat.id]}`);
-    });
+    })();
   });
 
   it('default path (no env var) is unchanged: LOCAL captures identically', async () => {
