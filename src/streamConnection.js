@@ -20,6 +20,17 @@
 // dependency stays one-directional (wsLayer.js -> streamConnection.js) and the
 // observe side keeps its own byte-identical access to both.
 //
+// A second, defaulted `deps = {}` parameter is the module's test seam — the
+// standard `(deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()`
+// form the sibling modules take (tmux.js / chats.js / agentStatePoll.js,
+// WARDEN-2119/2121): `deps.isCompanionTransportEnabled` overrides the module-level
+// toggle at the two companion-eligibility gates (syncMonitorSubscription and the
+// close handler's release grouping), so the WARDEN-413/1860 gates are drivable by
+// injection alone. With no injection production reads the toggle exactly as
+// before, so wsLayer.js's call is unchanged. The per-host exclusion predicate
+// stays an inline module read at both sites — the gate census in
+// companion-totality.test.js pins its per-file line count.
+//
 // WARDEN-1385 — `PANE_OUT_FLUSH_MS` moves with its only consumer (the attach
 // handler's onData coalescing window).
 
@@ -40,7 +51,7 @@ const PANE_OUT_FLUSH_MS = 8;
 // Wire ONE /api/stream websocket connection: register the frame handlers and the
 // per-connection state machine, and tear every per-connection resource down on
 // close. Called from wsLayer.js's `streamWss.on('connection', (ws) => …)`.
-export function wireStreamConnection({ ws, cfg, resolve, chatCatalog, paneInputTelemetry, appendEventSafe, LOCAL }) {
+export function wireStreamConnection({ ws, cfg, resolve, chatCatalog, paneInputTelemetry, appendEventSafe, LOCAL }, deps = {}) {
   // WARDEN-1804: see the observe handler — a protocol-violating frame must not kill the process.
   ws.on('error', (e) => console.warn('[wsLayer] stream socket error:', e?.message || e));
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
@@ -140,7 +151,7 @@ export function wireStreamConnection({ ws, cfg, resolve, chatCatalog, paneInputT
     // subscribe/unsubscribe ARE channel RPCs, so the per-host exclusion is
     // part of this gate exactly as the LOCAL + flag-off arms are. Its panes
     // keep the plain poll path.
-    if (!chat || !isCompanionTransportEnabled() || chat.host === LOCAL || isCompanionExcludedHost(chat.host)) return;
+    if (!chat || !(deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() || chat.host === LOCAL || isCompanionExcludedHost(chat.host)) return;
     try {
       if (subscribe) await subscribePanes(chat.host, [chat], cfg);
       else await unsubscribePanes(chat.host, [chat.key], cfg);
@@ -399,7 +410,7 @@ export function wireStreamConnection({ ws, cfg, resolve, chatCatalog, paneInputT
     // subscription is released only when its LAST watcher closes (ref-counted in
     // companion.js). Best-effort + fire-and-forget: a transport hiccup here must
     // not block teardown, and capturePanes falls back to polling either way.
-    if (isCompanionTransportEnabled()) {
+    if ((deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
       const known = chatCatalog.snapshot();
       const byHost = {};
       for (const k of subscribedKeys) {
