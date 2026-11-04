@@ -298,8 +298,10 @@ async function resizeViaCompanion(chat, cfg, deps) {
 // in try/catch noop). Signature keeps (cols, rows) for call-site compatibility
 // even though set-option window-size latest takes no geometry — the ConPTY SIGWINCH
 // is what actually resizes; this just unlocks the window to follow it.
+// `deps.isCompanionTransportEnabled` / `deps.companionResize` / `deps.runTmux` are
+// optional test seams (production callers omit them; mirrors read / hasSession).
 export async function resize(chat, cfg, _cols, _rows, deps = {}) {
-  if (chat.host !== '(local)' && isCompanionTransportEnabled() && !isCompanionExcludedHost(chat.host)) {
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(chat.host)) {
     await resizeViaCompanion(chat, cfg, deps);
     return;
   }

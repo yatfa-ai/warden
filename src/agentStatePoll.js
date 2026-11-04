@@ -262,7 +262,9 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
 // `opts.excludeKeys` is the caller's open ∪ watched pane keys, so the sweep does NOT
 // re-classify what the 30s poll already covers (the sweep set = active chats − open ∪
 // watched). `deps` is the same test seam pollAgentStates takes, so the WARDEN-413
-// cost-gate test is drivable end-to-end. The sweep uses the SAME classifyPane +
+// cost-gate test is drivable end-to-end, and it also drives the companion-eligibility
+// gate (`deps.isCompanionTransportEnabled` overrides the module-level toggle — the
+// standard seam form). The sweep uses the SAME classifyPane +
 // stripAnsi path so classification semantics are identical to the open-pane poll — no
 // divergent heuristics. Exported (and deps-injected) for the cost-gate test. (WARDEN-571)
 export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
@@ -283,7 +285,7 @@ export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
     // host's panes must ride raw SSH, and the sweep is only ever allowed to
     // capture via the channel, so an excluded host lands in `skipped`
     // (surfaced as sweep_skipped, never probed over the channel).
-    if (isCompanionTransportEnabled() && c.host !== LOCAL && !isCompanionExcludedHost(c.host)) companionEligible.push(c);
+    if ((deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && c.host !== LOCAL && !isCompanionExcludedHost(c.host)) companionEligible.push(c);
     else skipped.push(c);
   }
   // Reconcile establishes the pane-push subscription → the companion pushes paneDelta
