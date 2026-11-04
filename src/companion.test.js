@@ -52,6 +52,12 @@ import {
   startPaneDeltaSweep, _stopPaneDeltaSweepForTests,
   streamFileToHost, UPLOAD_CLOSE_GRACE_MS,
 } from './companion.js';
+// WARDEN-2125: pollFleetStates is imported DIRECTLY (server.js:298 re-exports it
+// verbatim from here; agentStatePoll.js imports only leaf siblings — never server.js,
+// so no cycle and no module-scope side effects). The direct import keeps the
+// WARDEN-571 describe off server.js's boot, whose applyCompanionToggle would re-write
+// env '1' and let the converted tests pass AMBIENTLY instead of via injection.
+import { pollFleetStates } from './agentStatePoll.js';
 import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize, send as tmuxSend, sendKey as tmuxSendKey } from './tmux.js';
 import { pollUntil } from './testWait.js';
 import { deferred } from './testGate.js';
@@ -1193,25 +1199,14 @@ describe('pollAgentStates: idle companion host receives ZERO capturePanes RPCs (
 // production background TTL eviction between iterations so it cannot fool itself.
 
 describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
-  let server, savedEnv, savedHome, tempHome;
-  before(async () => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    savedHome = process.env.HOME;
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-fleet-'));
-    process.env.HOME = tempHome;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
-    // Dynamic import so this suite stays out of server.js's module-scope side effects
-    // unless this describe runs. HOME is an isolated temp dir so server.js's own load()
-    // reads no real config (pollFleetStates takes cfg/chats as params anyway).
-    server = await import('./server.js');
-  });
-  after(async () => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
-    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
-  });
+  // WARDEN-2125: the toggle gates this flow crosses — pollFleetStates' eligibility
+  // gate (agentStatePoll.js), reconcilePaneSubscriptions' entry gate, and
+  // capturePanes' per-host routing gate (chats.js) — are all seamed
+  // (`deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled`), so the
+  // WARDEN-2123 env-dance retirement pattern applies here too: the flag rides IN
+  // the deps (injected per test below), and the process-global env dance + the
+  // server.js dynamic import this describe used to run are gone (the import would
+  // let server.js's boot re-write env '1' and pass the flag-on tests AMBIENTLY).
   beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
   afterEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
 
@@ -1220,7 +1215,7 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
     const t = healthySubTransport({ panes: { 'hidden-a': 'POLLED A', 'hidden-b': 'POLLED B' } });
     const origWrite = t.write.bind(t);
     t.write = (line) => { try { if (JSON.parse(line).method === 'capturePanes') captureRpc++; } catch { /* non-JSON noise */ } origWrite(line); };
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     // Two HIDDEN panes on the SAME companion host (proves the per-sweep capture is
     // batched into ONE capturePanes RPC per host, not one per pane) + a LOCAL host.
     const chats = [
@@ -1233,7 +1228,7 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
     // batched RPC for the host (both panes) — the graceful bootstrap, exactly as
     // pollAgentStates does on the first poll after a host enters the watched set. The
     // LOCAL host is sweep_skipped and never probed. ---
-    let agents = await server.pollFleetStates(chats, {}, deps, {});
+    let agents = await pollFleetStates(chats, {}, deps, {});
     assert.strictEqual(captureRpc, 1, 'bootstrap sweep captured the companion host ONCE (batched, both panes)');
     const localRow = agents.find((a) => a.key === 'local1');
     assert.strictEqual(localRow.state, 'sweep_skipped', 'LOCAL host is sweep_skipped (cost gate)');
@@ -1270,7 +1265,7 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
     // HONEST steady state — ONE companion RPC per hidden host per sweep (NOT zero, and
     // NOT an SSH sweep: it is a single batched RPC over the persistent channel). The
     // LOCAL host stays sweep_skipped and is still never probed. ---
-    agents = await server.pollFleetStates(chats, {}, deps, {});
+    agents = await pollFleetStates(chats, {}, deps, {});
     assert.strictEqual(captureRpc, 2, 'steady-state sweep re-captured the hidden host ONCE (1 batched companion RPC per host per sweep after TTL eviction)');
     assert.strictEqual(agents.find((a) => a.key === 'local1').state, 'sweep_skipped', 'LOCAL host still sweep_skipped on steady-state');
     const t1 = Date.now();
@@ -1279,7 +1274,7 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
     // count increments by exactly 1 again — every sweep re-captures each hidden host once. ---
     await reconcilePaneSubscriptions([], {}, { now: t1 + 60_000 }, deps);
     applyPaneDelta('prod', { event: 'paneDelta', panes: { 'hidden-a': 'STALE A2', 'hidden-b': 'STALE B2' } }, t1 - 10_000);
-    agents = await server.pollFleetStates(chats, {}, deps, {});
+    agents = await pollFleetStates(chats, {}, deps, {});
     assert.strictEqual(captureRpc, 3, 'third sweep re-captured once more — 1 batched companion RPC per hidden host per sweep is the steady state');
     const prodRow = agents.find((a) => a.key === 'hidden-a');
     assert.ok(prodRow, 'companion hidden agent present');
@@ -1287,23 +1282,20 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
   });
 
   it('companion flag OFF -> every host is sweep_skipped and NONE are probed (no SSH sweep)', async () => {
-    const saved = process.env.WARDEN_COMPANION_TRANSPORT;
-    delete process.env.WARDEN_COMPANION_TRANSPORT;
     let captureRpc = 0;
     const t = healthySubTransport({ panes: { hidden: 'POLLED' } });
     const origWrite = t.write.bind(t);
     t.write = (line) => { try { if (JSON.parse(line).method === 'capturePanes') captureRpc++; } catch { /* non-JSON noise */ } origWrite(line); };
-    const { deps } = fakeDeps({ spawnChannel: () => t });
-    try {
-      const chats = [{ host: 'prod', key: 'hidden', container: 'hidden', session: 'agent', project: 'p', role: 'worker' }];
-      const agents = await server.pollFleetStates(chats, {}, deps, {});
-      assert.strictEqual(captureRpc, 0, 'no capturePanes RPC issued with the companion flag off');
-      assert.strictEqual(agents.length, 1);
-      assert.strictEqual(agents[0].state, 'sweep_skipped', 'flag-off host is sweep_skipped, never probed');
-      assert.strictEqual(agents[0].sweepSkipped, true);
-    } finally {
-      process.env.WARDEN_COMPANION_TRANSPORT = saved; // restore ('1') for the next test
-    }
+    // WARDEN-2125: the OFF leg is the injection discriminator — with the toggle riding
+    // in deps, the eligibility gate short-circuits before any channel bootstrap, so
+    // `t` (the fake channel) is never spawned and captureRpc stays 0.
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => false });
+    const chats = [{ host: 'prod', key: 'hidden', container: 'hidden', session: 'agent', project: 'p', role: 'worker' }];
+    const agents = await pollFleetStates(chats, {}, deps, {});
+    assert.strictEqual(captureRpc, 0, 'no capturePanes RPC issued with the companion flag off');
+    assert.strictEqual(agents.length, 1);
+    assert.strictEqual(agents[0].state, 'sweep_skipped', 'flag-off host is sweep_skipped, never probed');
+    assert.strictEqual(agents[0].sweepSkipped, true);
   });
 
   it('a hidden stuck-looping agent on a companion host is classified as stuck by the sweep', async () => {
@@ -1318,9 +1310,9 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
     const line = 'Retrying the upload step because the network is slow today';
     const loop = [line, line, line, line, line, line].join('\n');
     const t = healthySubTransport({ panes: { hidden: loop } });
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     const chats = [{ host: 'prod', key: 'hidden', container: 'hidden', session: 'agent', project: 'p', role: 'worker' }];
-    const agents = await server.pollFleetStates(chats, {}, deps, {});
+    const agents = await pollFleetStates(chats, {}, deps, {});
     const row = agents.find((a) => a.key === 'hidden');
     assert.ok(row, 'hidden agent classified by the sweep');
     assert.strictEqual(row.state, 'stuck', 'the hidden looping agent is stuck');
@@ -1330,13 +1322,13 @@ describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
 
   it('excludeKeys drops open ∪ watched panes (sweep set = fleet − open ∪ watched)', async () => {
     const t = healthySubTransport({ panes: { opened: 'A', hidden: 'B' } });
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     const chats = [
       { host: 'prod', key: 'opened', container: 'opened', session: 'agent' },
       { host: 'prod', key: 'hidden', container: 'hidden', session: 'agent' },
     ];
     // 'opened' is the caller's open pane -> excluded; only 'hidden' is swept.
-    const agents = await server.pollFleetStates(chats, {}, deps, { excludeKeys: ['opened'] });
+    const agents = await pollFleetStates(chats, {}, deps, { excludeKeys: ['opened'] });
     assert.deepStrictEqual(agents.map((a) => a.key).sort(), ['hidden'], 'the open pane is excluded; only the hidden pane is swept');
   });
 });
