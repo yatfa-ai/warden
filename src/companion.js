@@ -2288,7 +2288,7 @@ export function _getAgentStateWatchedForTests() {
 // error (CompanionTransportError carries the opt-out hint) but never breaks pane
 // rendering — capturePanes keeps polling until a real push arrives.
 export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, deps = {}) {
-  if (!isCompanionTransportEnabled()) return [];
+  if (!(deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) return [];
   const now = opts.now ?? Date.now();
   // Group REMOTE chats by host (LOCAL is excluded — the companion serves remote
   // hosts only, same guard as discover/capturePanes/hasSession). Dedupe by key per
