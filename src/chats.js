@@ -774,7 +774,9 @@ export function parseCaptureSentinels(stdout) {
 // chat id (c.id, `${host}:${name}`) -> pane content. (WARDEN-1223)
 // `deps` is a test seam (defaults to {} in production, where capturePanesViaCompanion
 // bootstraps the real SSH channel) forwarded to the companion transport so the
-// WARDEN-413 skip path is drivable end-to-end with a fake channel. (WARDEN-413)
+// WARDEN-413 skip path is drivable end-to-end with a fake channel, and it also drives
+// the per-host routing gate (`deps.isCompanionTransportEnabled` overrides the
+// module-level toggle — the standard seam form). (WARDEN-413)
 export async function capturePanes(chats, cfg = {}, deps = {}) {
   const byHost = {};
   for (const c of chats) (byHost[c.host] ||= []).push(c);
@@ -817,7 +819,7 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
     // unchanged and remains the default. companion-or-fail: on failure we DO
     // NOT fall back to raw SSH — the error is surfaced and the panes map is
     // simply empty for this host (opt out via the env var).
-    if (isCompanionTransportEnabled() && !isCompanionExcludedHost(host)) {
+    if ((deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)() && !isCompanionExcludedHost(host)) {
       // WARDEN-413: if a live subscription is pushing fresh deltas for this host,
       // render from the in-memory delta cache and SKIP the capturePanes RPC — the
       // success gate (idle companion host -> ZERO capturePanes RPCs per monitor
