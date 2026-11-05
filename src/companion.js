@@ -2365,7 +2365,7 @@ export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, dep
 // unconditional). `opts.interval` is for tests; production uses the TTL cadence.
 export function startPaneDeltaSweep(cfg = {}, opts = {}, deps = {}) {
   if (paneDeltaSweepTimer) return paneDeltaSweepTimer;
-  if (!isCompanionTransportEnabled()) return null;
+  if (!(deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) return null;
   const interval = opts.interval ?? AGENT_STATE_TTL_MS;
   // Traced for the server stall monitor (WARDEN-977): an always-on background
   // sweep that blocks the loop must be nameable in the stall record instead of
