@@ -4122,12 +4122,6 @@ describe('write-path routing over the companion (WARDEN-888 parity)', () => {
   const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
   const localChat = { host: '(local)', session: 'agent' };
 
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  afterEach(() => {
-    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
-  });
-
   it('send under the flag routes through the companion, NOT runTmux', async () => {
     let runTmuxCalls = 0;
     let rpcCalls = 0;
@@ -4328,18 +4322,13 @@ describe('control-plane routing over the companion (WARDEN-409 parity)', () => {
   const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
   const localChat = { host: '(local)', session: 'agent' };
 
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  afterEach(() => {
-    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
-  });
-
   it('resize under the flag routes through the companion, NOT runTmux', async () => {
     let runTmuxCalls = 0;
     let rpcCalls = 0;
     await tmuxResize(remoteChat, {}, 100, 30, {
       runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
       companionResize: async () => { rpcCalls++; return { host: 'prod-1', ok: true, code: 0, stdout: '', stderr: '' }; },
+      isCompanionTransportEnabled: () => true,
     });
     assert.strictEqual(rpcCalls, 1, 'remote resize under the flag routes through the companion');
     assert.strictEqual(runTmuxCalls, 0, 'remote resize under the flag does NOT call runTmux');
@@ -4351,6 +4340,7 @@ describe('control-plane routing over the companion (WARDEN-409 parity)', () => {
     await tmuxResize(localChat, {}, 100, 30, {
       runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
       companionResize: async () => { companionCalls++; return { host: '(local)', ok: true, code: 0, stdout: '', stderr: '' }; },
+      isCompanionTransportEnabled: () => true,
     });
     assert.strictEqual(runTmuxCalls, 1, 'local control-plane op uses runTmux');
     assert.strictEqual(companionCalls, 0, 'local control-plane op does NOT call the companion');
@@ -4398,12 +4388,6 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
   const localManual = { host: '(local)', container: null };
   const localContainer = { host: '(local)', container: 'p-worker' };
 
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  afterEach(() => {
-    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
-  });
-
   // THE LOAD-BEARING PARITY TEST (runGit): drive the SAME call twice — flag ON
   // (capturing the script handed to the companion) and flag OFF (capturing the
   // cmd handed to run()) — and assert the two strings are byte-identical. This
@@ -4414,15 +4398,15 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
       let companionScript = null;
       let runCmd = null;
       await runGit(chat, args, cwd, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (host, script) => { companionScript = script; return { host, ok: true, code: 0, stdout: '', stderr: '' }; },
         run: async () => { throw new Error('flag ON must not touch run()'); },
       });
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       await runGit(chat, args, cwd, {
+        isCompanionTransportEnabled: () => false,
         execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
         run: async (host, cmd) => { runCmd = cmd; return { ok: true, code: 0, stdout: '', stderr: '' }; },
       });
-      process.env.WARDEN_COMPANION_TRANSPORT = '1';
       assert.strictEqual(companionScript, runCmd,
         `the delivered script must be byte-identical on both paths:\ncompanion: ${companionScript}\nrun():     ${runCmd}`);
       // And the expected shape, pinned explicitly so a quoting drift in EITHER
@@ -4443,18 +4427,18 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
     let companionPayload = null;
     let runCmd = null;
     await runInContext(remoteContainer, script, { timeout: 6000 }, {
+      isCompanionTransportEnabled: () => true,
       execInContext: async (host, s, opts) => { companionPayload = { script: s, opts }; return { host, ok: true, code: 0, stdout: '', stderr: '' }; },
       run: async () => { throw new Error('flag ON must not touch run()'); },
     });
     assert.strictEqual(companionPayload.script, script, 'the INNER script rides verbatim (never rebuilt JS-side)');
     assert.strictEqual(companionPayload.opts.container, 'p-worker', 'the container selects the docker-exec delivery host-side');
     assert.strictEqual(companionPayload.opts.timeout, 6000, 'the timeout rides through (the host-side kill deadline)');
-    process.env.WARDEN_COMPANION_TRANSPORT = '0';
     await runInContext(remoteContainer, script, { timeout: 6000 }, {
+      isCompanionTransportEnabled: () => false,
       execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
       run: async (host, cmd) => { runCmd = cmd; return { ok: true, code: 0, stdout: '', stderr: '' }; },
     });
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
     // The host side (companion buildExecScript) assembles EXACTLY this from the
     // payload above — Go's shellQuote is ssh.js's byte-identical twin — so the
     // delivered command is byte-for-byte the default path's:
@@ -4468,15 +4452,15 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
     let companionScript = null;
     let runCmd = null;
     await runInContext(remoteManual, script, {}, {
+      isCompanionTransportEnabled: () => true,
       execInContext: async (host, s, opts) => { companionScript = s; assert.strictEqual(opts.container, '', 'manual chat -> no container (bare bash -lc delivery)'); return { host, ok: true, code: 0, stdout: '', stderr: '' }; },
       run: async () => { throw new Error('flag ON must not touch run()'); },
     });
-    process.env.WARDEN_COMPANION_TRANSPORT = '0';
     await runInContext(remoteManual, script, {}, {
+      isCompanionTransportEnabled: () => false,
       execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
       run: async (host, cmd) => { runCmd = cmd; return { ok: true, code: 0, stdout: '', stderr: '' }; },
     });
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
     assert.strictEqual(companionScript, runCmd);
     assert.strictEqual(companionScript, script, 'the containment script rides verbatim');
   });
@@ -4485,6 +4469,7 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
     let companionCalls = 0;
     let runCalls = 0;
     const r = await runGit(remoteManual, ['status', '--porcelain'], '/work', {
+      isCompanionTransportEnabled: () => true,
       execInContext: async (host, script, opts) => {
         companionCalls++;
         assert.strictEqual(host, 'prod-1');
@@ -4503,6 +4488,7 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
   it('runGit under the flag is companion-or-fail: a companion failure propagates, run() is NEVER consulted', async () => {
     let runCalls = 0;
     const r = await runGit(remoteManual, ['status', '--porcelain'], '/work', {
+      isCompanionTransportEnabled: () => true,
       execInContext: async (host) => ({ host, ok: false, code: -1, stdout: '', stderr: 'companion transport error for prod-1: channel died. Set WARDEN_COMPANION_TRANSPORT=0 to use the default SSH path.' }),
       run: async () => { runCalls++; return { ok: true, code: 0, stdout: 'should not appear', stderr: '' }; },
     });
@@ -4514,6 +4500,7 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
   it('LOCAL chats never route through the companion, even under the flag (container + manual)', async () => {
     let companionCalls = 0;
     const deps = {
+      isCompanionTransportEnabled: () => true,
       execInContext: async () => { companionCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
     };
     // container+LOCAL: runLocalCapture('docker', argv) — a local docker-exec, no
@@ -4554,21 +4541,20 @@ describe('git-domain routing over the companion (WARDEN-1261 parity)', () => {
 // asserts the reason contract classifyProbe produces — the ticket's tri-state:
 // exists -> alive, !exists -> session_dead, transport -> host_unreachable.
 
-// Capture/restore WARDEN_COMPANION_TRANSPORT so the routing tests can flip the
-// gate without leaking the change to the rest of the suite.
+// The ambient WARDEN_COMPANION_TRANSPORT value at load. The default-path
+// (flag-off) describes' pins write the env in-body and restore it via
+// afterEach(ORIG_COMPANION_ENV), so their writes never leak past their own
+// describe. The four routing describes' gating is injected per call and never
+// touches this variable; the git-domain flag-off pin's remaining in-body '0'
+// write is inert (unset ≡ '0': both mean the transport is off).
 const ORIG_COMPANION_ENV = process.env.WARDEN_COMPANION_TRANSPORT;
 
 describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
   const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
 
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  afterEach(() => {
-    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
-  });
-
   it('exists:true -> probeSession ok -> classifyProbe null (alive)', async () => {
     const probe = await probeSession(remoteChat, {}, {}, {
+      isCompanionTransportEnabled: () => true,
       companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: true }),
     });
     assert.strictEqual(probe.ok, true);
@@ -4578,6 +4564,7 @@ describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
 
   it('exists:false -> classifyProbe session_dead', async () => {
     const probe = await probeSession(remoteChat, {}, {}, {
+      isCompanionTransportEnabled: () => true,
       companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: false }),
     });
     assert.strictEqual(probe.ok, false);
@@ -4589,6 +4576,7 @@ describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
 
   it('transport failure -> classifyProbe host_unreachable', async () => {
     const probe = await probeSession(remoteChat, {}, {}, {
+      isCompanionTransportEnabled: () => true,
       companionHasSession: async () => ({
         host: 'prod-1', ok: false, transport: true,
         error: 'companion transport error for prod-1: bootstrap probe failed',
@@ -4602,14 +4590,17 @@ describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
 
   it('hasSession() boolean: true iff the companion says exists:true', async () => {
     const yes = await tmuxHasSession(remoteChat, {}, {
+      isCompanionTransportEnabled: () => true,
       companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: true }),
     });
     assert.strictEqual(yes, true, 'exists:true -> hasSession true');
     const no = await tmuxHasSession(remoteChat, {}, {
+      isCompanionTransportEnabled: () => true,
       companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: false }),
     });
     assert.strictEqual(no, false, 'exists:false -> hasSession false');
     const dead = await tmuxHasSession(remoteChat, {}, {
+      isCompanionTransportEnabled: () => true,
       companionHasSession: async () => ({ host: 'prod-1', ok: false, transport: true, error: 'x', exists: false }),
     });
     assert.strictEqual(dead, false, 'transport failure -> hasSession false');
@@ -4618,6 +4609,7 @@ describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
   it('runTmux is NOT invoked for a remote probe under the flag', async () => {
     let runTmuxCalls = 0;
     await probeSession(remoteChat, {}, {}, {
+      isCompanionTransportEnabled: () => true,
       runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
       companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: true }),
     });
@@ -4629,6 +4621,7 @@ describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
     let companionCalls = 0;
     const localChat = { host: '(local)', session: 'agent' };
     await probeSession(localChat, {}, {}, {
+      isCompanionTransportEnabled: () => true,
       runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
       companionHasSession: async () => { companionCalls++; return { host: '(local)', ok: true, exists: true }; },
     });
