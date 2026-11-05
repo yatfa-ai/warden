@@ -267,8 +267,8 @@ function setCompanionStatus(host, status) {
 // branch keeps its reason-less shape (byte-identical contract with the
 // pre-exclusion status map and its deepStrictEqual pins); only the excluded
 // branch adds the reason.
-export function getCompanionStatus(host) {
-  if (!isCompanionTransportEnabled()) return { state: 'inactive' };
+export function getCompanionStatus(host, deps = {}) {
+  if (!(deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) return { state: 'inactive' };
   if (host === LOCAL) return { state: 'inactive' };
   if (isCompanionExcludedHost(host)) return { state: 'inactive', reason: 'excluded-by-setting' };
   return joinCompanionOps(host, companionStatus.get(host) ?? { state: 'inactive' });
@@ -282,8 +282,8 @@ export function getCompanionStatus(host) {
 // being excluded and the entry has not been released yet) reads as inactive
 // with the excluded-by-setting reason, mirroring getCompanionStatus — the
 // aggregated shape must never contradict the per-host read for the same host.
-export function getAllCompanionStatuses() {
-  if (!isCompanionTransportEnabled()) return {};
+export function getAllCompanionStatuses(deps = {}) {
+  if (!(deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) return {};
   const out = {};
   for (const [host, status] of companionStatus) {
     out[host] = isCompanionExcludedHost(host)

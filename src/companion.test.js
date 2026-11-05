@@ -2295,16 +2295,18 @@ setTimeout(() => { console.log('RESULT ' + JSON.stringify(res)); process.exit(0)
 // reading the cache. The status map captures state at the failure site instead,
 // so a failed host shows its error rather than silently reading "no companion."
 describe('companion transport status (WARDEN-878)', () => {
-  let savedEnv;
-  beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
-    _resetChannelCacheForTests();
-  });
-  afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-  });
+  // WARDEN-2131: the toggle gates this flow crosses — getCompanionStatus's and
+  // getAllCompanionStatuses's entry gates (`deps.isCompanionTransportEnabled ??
+  // isCompanionTransportEnabled`, seamed here in the WARDEN-2124 production-side
+  // pattern) — are the flow's ONLY toggle reads (getChannel has NO toggle gate
+  // at entry; its seam is the bootstrap legs, and joinCompanionOps reads no
+  // toggle), so the WARDEN-2123/2125/2127/2129 env-dance retirement pattern
+  // applies: the flag rides IN the deps (injected at the status-call sites
+  // below) and the process-global env dance is gone. The two flag-off pins
+  // below stay env-driven by design: no injection -> module read -> the env
+  // value the body writes — the self-gate the /hosts/status route
+  // (hostsRoutes.js) leans on. The cache reset is orthogonal to the toggle.
+  beforeEach(() => { _resetChannelCacheForTests(); });
 
   it('getCompanionStatus reads inactive while the transport is disabled', () => {
     process.env.WARDEN_COMPANION_TRANSPORT = '0';
@@ -2312,17 +2314,17 @@ describe('companion transport status (WARDEN-878)', () => {
   });
 
   it('getCompanionStatus reads inactive for LOCAL (the companion is remote-only)', () => {
-    assert.deepStrictEqual(getCompanionStatus('(local)'), { state: 'inactive' });
+    assert.deepStrictEqual(getCompanionStatus('(local)', { isCompanionTransportEnabled: () => true }), { state: 'inactive' });
   });
 
   it('getCompanionStatus reads inactive for a host no companion op has engaged yet', () => {
-    assert.deepStrictEqual(getCompanionStatus('never-touched'), { state: 'inactive' });
+    assert.deepStrictEqual(getCompanionStatus('never-touched', { isCompanionTransportEnabled: () => true }), { state: 'inactive' });
   });
 
   it('a successful bootstrap -> active with the ping-verified version', async () => {
     const { deps } = fakeDeps();
     await getChannel('prod-active', {}, deps);
-    assert.deepStrictEqual(getCompanionStatus('prod-active'), { state: 'active', version: TEST_VER });
+    assert.deepStrictEqual(getCompanionStatus('prod-active', { isCompanionTransportEnabled: () => true }), { state: 'active', version: TEST_VER });
   });
 
   it('THE TRAP: a FAILED bootstrap leaves no cache entry but status persists as error', async () => {
@@ -2338,7 +2340,7 @@ describe('companion transport status (WARDEN-878)', () => {
       assert.ok(e instanceof CompanionTransportError);
       return true;
     });
-    const status = getCompanionStatus('prod-errored');
+    const status = getCompanionStatus('prod-errored', { isCompanionTransportEnabled: () => true });
     assert.strictEqual(status.state, 'error');
     assert.ok(typeof status.lastErrorAt === 'number', 'lastErrorAt is a numeric epoch-ms timestamp');
     assert.ok(status.lastErrorAt > 0, 'lastErrorAt is positive');
@@ -2354,7 +2356,7 @@ describe('companion transport status (WARDEN-878)', () => {
       spawnChannel: () => fakeTransport(() => null), // companion never answers ping
     });
     await assert.rejects(() => getChannel('prod-pingfail', {}, deps));
-    const status = getCompanionStatus('prod-pingfail');
+    const status = getCompanionStatus('prod-pingfail', { isCompanionTransportEnabled: () => true });
     assert.strictEqual(status.state, 'error');
     assert.ok(/did not respond to ping/.test(status.lastError), status.lastError);
   });
@@ -2376,18 +2378,18 @@ describe('companion transport status (WARDEN-878)', () => {
     // getChannel sets bootstrapping synchronously before returning the promise,
     // but flush a microtask to be robust against any refactor.
     await new Promise((r) => setImmediate(r));
-    assert.strictEqual(getCompanionStatus('prod-booting').state, 'bootstrapping');
+    assert.strictEqual(getCompanionStatus('prod-booting', { isCompanionTransportEnabled: () => true }).state, 'bootstrapping');
     // Release the probe so the bootstrap finishes (and the channel teardown stays clean).
     probe.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
-    assert.deepStrictEqual(getCompanionStatus('prod-booting'), { state: 'active', version: TEST_VER });
+    assert.deepStrictEqual(getCompanionStatus('prod-booting', { isCompanionTransportEnabled: () => true }), { state: 'active', version: TEST_VER });
   });
 
   it('getAllCompanionStatuses returns the per-host map, empty while disabled', async () => {
     const { deps } = fakeDeps();
     await getChannel('prod-all-1', {}, deps);
     await getChannel('prod-all-2', {}, deps);
-    const all = getAllCompanionStatuses();
+    const all = getAllCompanionStatuses({ isCompanionTransportEnabled: () => true });
     assert.strictEqual(all['prod-all-1'].state, 'active');
     assert.strictEqual(all['prod-all-2'].state, 'active');
     process.env.WARDEN_COMPANION_TRANSPORT = '0';
@@ -2401,7 +2403,7 @@ describe('companion transport status (WARDEN-878)', () => {
     // stuck on a stale "active" once a fresh bootstrap is underway.
     const { deps } = fakeDeps();
     const first = await getChannel('prod-redead', {}, deps);
-    assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
+    assert.strictEqual(getCompanionStatus('prod-redead', { isCompanionTransportEnabled: () => true }).state, 'active');
     first.kill(); // simulate the ssh process exiting
     // Only the PROBE (first runFn call of the re-bootstrap) is deferred; the reap
     // (WARDEN-904) is a later best-effort runFn call and resolves immediately.
@@ -2412,10 +2414,10 @@ describe('companion transport status (WARDEN-878)', () => {
       : Promise.resolve({ ok: true, stdout: '', stderr: '' });
     const pending = getChannel('prod-redead', {}, deps);
     await new Promise((r) => setImmediate(r));
-    assert.strictEqual(getCompanionStatus('prod-redead').state, 'bootstrapping');
+    assert.strictEqual(getCompanionStatus('prod-redead', { isCompanionTransportEnabled: () => true }).state, 'bootstrapping');
     probe.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending;
-    assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
+    assert.strictEqual(getCompanionStatus('prod-redead', { isCompanionTransportEnabled: () => true }).state, 'active');
   });
 });
 
