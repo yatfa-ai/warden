@@ -845,23 +845,20 @@ describe('subscribePanes / unsubscribePanes (WARDEN-413)', () => {
 // refs compose with the WS monitor path's refs (one ref per watched key).
 
 describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', () => {
-  let savedEnv;
-  beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
-    _resetChannelCacheForTests();
-    _resetPaneDeltaStateForTests();
-  });
-  afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    _resetChannelCacheForTests();
-    _resetPaneDeltaStateForTests();
-  });
+  // WARDEN-2127: the toggle gate this flow crosses — reconcilePaneSubscriptions'
+  // entry gate (`deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled`,
+  // seamed WARDEN-2125) — is the flow's ONLY toggle read (syncSubscriptionOnce,
+  // subscribePanes, unsubscribePanes gate on nothing), so the WARDEN-2123/2125
+  // env-dance retirement pattern applies: the flag rides IN the deps (injected
+  // per test below) and the process-global env dance is gone. The flag-off pin
+  // below stays env-driven by design: no injection -> module read -> the env
+  // default.
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
 
   it('subscribes a REMOTE host panes when they enter the polled set', async () => {
     const t = healthySubTransport();
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     const chats = [
       { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
       { host: 'prod', key: 'w2', container: 'w2', session: 'agent' },
@@ -875,7 +872,7 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
 
   it('dedupes duplicate keys per host (no ref over-count / leak)', async () => {
     const t = healthySubTransport();
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     // Same key twice for one host (e.g. a caller that didn't dedupe) must count
     // as ONE ref, not two — else TTL eviction would under-decrement and leak.
     await reconcilePaneSubscriptions([
@@ -890,7 +887,7 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
     const t = healthySubTransport();
     const origWrite = t.write.bind(t);
     t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     const chats = [{ host: 'prod', key: 'w1', container: 'w1', session: 'agent' }];
     await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
     const firstCount = sent.filter((s) => s.method === 'subscribePanes').length;
@@ -904,7 +901,7 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
 
   it('a pane that LEAVES the polled set is released once its TTL elapses', async () => {
     const t = healthySubTransport();
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     // Poll 1 (t=1000): w1 + w2 watched.
     await reconcilePaneSubscriptions([
       { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
@@ -925,7 +922,7 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
 
   it('LOCAL hosts are never subscribed (companion serves remote hosts only)', async () => {
     const t = healthySubTransport();
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     await reconcilePaneSubscriptions([
       { host: '(local)', key: 'l1', session: 'l1' },
       { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
@@ -946,7 +943,7 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
 
   it('two concurrent pollers keep a shared pane subscribed until BOTH stop (multi-tab)', async () => {
     const t = healthySubTransport();
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     // Poller A watches a; poller B watches b - same host. Interleaved polls.
     await reconcilePaneSubscriptions([{ host: 'prod', key: 'a', container: 'a', session: 'agent' }], {}, { now: 1000 }, deps);
     await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 2_000 }, deps);
@@ -964,7 +961,7 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
     const t = healthySubTransport();
     const origWrite = t.write.bind(t);
     t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
-    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const { deps } = fakeDeps({ spawnChannel: () => t, isCompanionTransportEnabled: () => true });
     // A pane is polled (t=1000): subscribed.
     await reconcilePaneSubscriptions([{ host: 'prod', key: 'w1', container: 'w1', session: 'agent' }], {}, { now: 1000 }, deps);
     assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 });
@@ -992,17 +989,11 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
 // any burst of syncs collapsing into at most one follow-up run whose final state
 // is the true union.
 describe('subscription sync coalescing (WARDEN-1491)', () => {
-  let savedEnv;
-  beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1'; // reconcilePaneSubscriptions self-gates on the flag
-    _resetChannelCacheForTests(); _resetPaneDeltaStateForTests();
-  });
-  afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    _resetChannelCacheForTests(); _resetPaneDeltaStateForTests();
-  });
+  // WARDEN-2127: same env-dance retirement as the describe above — the flag
+  // rides IN the deps (injected per test below); the entry gate is the only
+  // toggle read the injection must cover.
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
 
   // A transport whose subscribe ACK is DELAYED, so syncs pile up behind it.
   const slowAckTransport = (log, ackMs = 40) => {
@@ -1028,7 +1019,7 @@ describe('subscription sync coalescing (WARDEN-1491)', () => {
 
   it('a burst of N subscribes behind a slow ACK costs at most 2 RPCs, and the last carries the full union', async () => {
     const log = [];
-    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log) });
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log), isCompanionTransportEnabled: () => true });
     const calls = [];
     for (let i = 0; i < 12; i++) {
       calls.push(subscribePanes('prod', [{ key: `k${i}`, container: `k${i}`, session: 'agent' }], {}, {}, deps));
@@ -1043,7 +1034,7 @@ describe('subscription sync coalescing (WARDEN-1491)', () => {
 
   it('every coalesced caller observes a result produced AFTER its own registration (no stale ack)', async () => {
     const log = [];
-    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 30) });
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 30), isCompanionTransportEnabled: () => true });
     const first = subscribePanes('prod', [{ key: 'a', container: 'a', session: 'agent' }], {}, {}, deps);
     // Arrives while the first RPC is in flight: must be covered by a LATER run.
     const second = subscribePanes('prod', [{ key: 'b', container: 'b', session: 'agent' }], {}, {}, deps);
@@ -1055,7 +1046,7 @@ describe('subscription sync coalescing (WARDEN-1491)', () => {
 
   it('the TTL sweep releases a whole aged-out set with ONE sync, not one per key', async () => {
     const log = [];
-    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 5) });
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 5), isCompanionTransportEnabled: () => true });
     const chats = Array.from({ length: 20 }, (_, i) => ({ host: 'prod', key: `w${i}`, container: `w${i}`, session: 'agent' }));
     await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
     log.length = 0;
@@ -1069,7 +1060,7 @@ describe('subscription sync coalescing (WARDEN-1491)', () => {
 
   it('a partial release sends ONE subscribePanes carrying exactly the surviving panes', async () => {
     const log = [];
-    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 5) });
+    const { deps } = fakeDeps({ spawnChannel: () => slowAckTransport(log, 5), isCompanionTransportEnabled: () => true });
     const all = Array.from({ length: 6 }, (_, i) => ({ host: 'prod', key: `w${i}`, container: `w${i}`, session: 'agent' }));
     await reconcilePaneSubscriptions(all, {}, { now: 1000 }, deps);
     log.length = 0;
