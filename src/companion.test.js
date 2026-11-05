@@ -1081,31 +1081,28 @@ describe('subscription sync coalescing (WARDEN-1491)', () => {
 // right conditions (the production wiring in startServer calls this unconditionally).
 
 describe('startPaneDeltaSweep: background TTL sweep (WARDEN-413 cleanup-leak fix)', () => {
-  let savedEnv;
-  beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
-    _resetChannelCacheForTests();
-    _resetPaneDeltaStateForTests();
-  });
-  afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    _stopPaneDeltaSweepForTests();
-    _resetChannelCacheForTests();
-    _resetPaneDeltaStateForTests();
-  });
+  // WARDEN-2129: the toggle gate this flow crosses — startPaneDeltaSweep's entry
+  // gate (`deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled`,
+  // seamed here in the WARDEN-2124 production-side pattern) — is the flow's ONLY
+  // toggle read (the idempotency guard reads no toggle), so the WARDEN-2123/2125/
+  // 2127 env-dance retirement pattern applies: the flag rides IN the deps
+  // (injected as the third arg below) and the process-global env dance is gone.
+  // The flag-off pin below stays env-driven by design: no injection -> module
+  // read -> the env default — the self-gate the startServer call site relies on.
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _stopPaneDeltaSweepForTests(); _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
 
   it('arms one idempotent timer when the flag is on; null when off', () => {
-    const t1 = startPaneDeltaSweep({});
+    const t1 = startPaneDeltaSweep({}, {}, { isCompanionTransportEnabled: () => true });
     assert.ok(t1, 'flag on -> arms a timer');
-    assert.strictEqual(startPaneDeltaSweep({}), t1, 'idempotent: second start returns the SAME timer');
+    assert.strictEqual(startPaneDeltaSweep({}, {}, { isCompanionTransportEnabled: () => true }), t1, 'idempotent: second start returns the SAME timer');
     // Stopping clears the idempotency guard, so a subsequent start arms a NEW one.
     _stopPaneDeltaSweepForTests();
-    const t2 = startPaneDeltaSweep({});
+    const t2 = startPaneDeltaSweep({}, {}, { isCompanionTransportEnabled: () => true });
     assert.notStrictEqual(t1, t2, 'after stop, a new start arms a fresh timer');
     _stopPaneDeltaSweepForTests();
     // Flag off -> no timer (the startServer call site relies on this self-gate).
+    // Preserved-default pin: NO deps passed -> module read -> env absent -> null.
     delete process.env.WARDEN_COMPANION_TRANSPORT;
     assert.strictEqual(startPaneDeltaSweep({}), null, 'flag off -> no timer');
   });
