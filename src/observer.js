@@ -650,11 +650,13 @@ export class Observer {
   serializeForUi() {
     const items = [];
     for (const m of this.messages) {
+      if (!m || typeof m !== 'object') continue;
       if (m.role === 'user') {
         if (typeof m.content === 'string') items.push({ role: 'user', text: m.content });
         // tool_result blocks (array content) are skipped in the UI history
       } else if (m.role === 'assistant' && Array.isArray(m.content)) {
         for (const b of m.content) {
+          if (!b || typeof b !== 'object') continue;
           if (b.type === 'text' && b.text) items.push({ role: 'assistant', text: b.text });
           else if (b.type === 'tool_use') items.push({ role: 'tool', name: b.name, id: (b.input && b.input.id) || '' });
         }
