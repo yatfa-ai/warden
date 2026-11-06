@@ -178,4 +178,20 @@ describe('Observer#serializeForUi — ws history-frame item mapping (redirected 
       { role: 'assistant', text: 'still rendered among the junk' },
     ]);
   });
+  // WARDEN-2153 — `messages` itself is disk-owned too: a {sid}.json with valid
+  // JSON but a non-array `messages` passes the defensive reader (only unparseable
+  // files are backed up), so the constructor must not keep it verbatim.
+  for (const [label, bad] of [['{}', {}], ['5', 5]]) {
+    it(`constructor yields [] from a persisted non-array messages (${label}) and serializeForUi does not throw`, () => {
+      const sid = `bad-messages-${label === '{}' ? 'obj' : 'num'}`;
+      const dir = path.join(tempHome, '.yatfa-warden', 'sessions');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${sid}.json`), JSON.stringify({ id: sid, name: 'x', messages: bad }));
+      const obs = new Observer({}, { sid });
+      assert.deepStrictEqual(obs.messages, []);
+      let items;
+      assert.doesNotThrow(() => { items = obs.serializeForUi(); });
+      assert.deepStrictEqual(items, []);
+    });
+  }
 });
