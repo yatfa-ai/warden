@@ -81,19 +81,20 @@ function countingDeps() {
 
 const okRun = async () => ({ ok: true, code: 0, stdout: '', stderr: '' });
 
-let savedToggleEnv;
+// Transport toggle injected through the getCompanionStatus deps seam rather
+// than through the process environment.
+const TRANSPORT_ON = { isCompanionTransportEnabled: () => true };
+
 let savedExclusionEnv;
 
 before(() => {
-  savedToggleEnv = process.env.WARDEN_COMPANION_TRANSPORT;
   savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
 });
 
 beforeEach(() => {
-  // The transport MUST be ON: getCompanionStatus short-circuits to a bare
-  // `inactive` while it is off, which would make every status assertion here
-  // tautological, and the routing gates only consult the exclusion when on.
-  process.env.WARDEN_COMPANION_TRANSPORT = '1';
+  // Every getCompanionStatus call below passes TRANSPORT_ON: the status read
+  // short-circuits to a bare `inactive` while the toggle is off, which would
+  // make every status assertion here tautological.
   process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
   applyCompanionExclusions([]);
   _resetChannelCacheForTests();
@@ -101,8 +102,6 @@ beforeEach(() => {
 
 after(() => {
   applyCompanionExclusions([]);
-  if (savedToggleEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-  else process.env.WARDEN_COMPANION_TRANSPORT = savedToggleEnv;
   if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
   else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
   _resetChannelCacheForTests();
@@ -123,7 +122,7 @@ describe('WARDEN-1475: a removal survives the next ordinary op (the measured def
     await getChannel(HOST, cfg, deps);
     assert.strictEqual(calls.upload, 1, 'precondition: the binary was uploaded once');
     assert.strictEqual(calls.spawnChannel, 1, 'precondition: one channel was spawned');
-    assert.deepStrictEqual(getCompanionStatus(HOST), { state: 'active', version: TEST_VER },
+    assert.deepStrictEqual(getCompanionStatus(HOST, TRANSPORT_ON), { state: 'active', version: TEST_VER },
       'precondition: the host reads active');
 
     const res = await uninstallCompanion(HOST, cfg, { manifest: TEST_MANIFEST, run: okRun });
@@ -140,7 +139,7 @@ describe('WARDEN-1475: a removal survives the next ordinary op (the measured def
     assert.strictEqual(calls.spawnChannel, spawnsAfterRemoval,
       `THE DEFECT: the channel was respawned after a removal (${spawnsAfterRemoval} → ${calls.spawnChannel})`);
     assert.strictEqual(_channelCacheHasForTests(HOST), false, 'no channel was cached for the removed host');
-    assert.notStrictEqual(getCompanionStatus(HOST).state, 'active',
+    assert.notStrictEqual(getCompanionStatus(HOST, TRANSPORT_ON).state, 'active',
       'the host must not return to active on its own');
     assert.strictEqual(r.ok, false, 'companion-or-fail: the op reports the refusal rather than silently re-installing');
     assert.match(r.error, /excluded/i, `the refusal names the reason: ${r.error}`);
@@ -166,7 +165,7 @@ describe('WARDEN-1475: a removal survives the next ordinary op (the measured def
     assert.strictEqual(calls.upload, 2, 'the instrument SEES a re-upload when nothing suppresses it');
     assert.strictEqual(calls.spawnChannel, 2, 'the instrument SEES a respawn when nothing suppresses it');
     // state/version only — a ridden op adds its WARDEN-1312 tally to the status.
-    const status = getCompanionStatus(HOST);
+    const status = getCompanionStatus(HOST, TRANSPORT_ON);
     assert.strictEqual(status.state, 'active',
       'and the host returns to active — exactly what a removed host must NOT do');
     assert.strictEqual(status.version, TEST_VER, 'with the version the bootstrap ping verified');
@@ -275,16 +274,16 @@ describe('WARDEN-1475: the status surface stays honest across subsequent ticks',
     const cfg = { companionExcludedHosts: [] };
     const { deps } = countingDeps();
     await getChannel(HOST, cfg, deps);
-    assert.strictEqual(getCompanionStatus(HOST).state, 'active', 'precondition: active');
+    assert.strictEqual(getCompanionStatus(HOST, TRANSPORT_ON).state, 'active', 'precondition: active');
 
     await uninstallCompanion(HOST, cfg, { manifest: TEST_MANIFEST, run: okRun });
-    assert.deepStrictEqual(getCompanionStatus(HOST), { state: 'inactive', reason: 'excluded-by-setting' },
+    assert.deepStrictEqual(getCompanionStatus(HOST, TRANSPORT_ON), { state: 'inactive', reason: 'excluded-by-setting' },
       'the removed host says WHY the channel is dark instead of looking broken');
 
     // Three more "ticks". A status that flickered into `bootstrapping` or
     // `error` would be the indicator lying about a host nobody is installing to.
     for (let i = 0; i < 3; i++) await discover(HOST, cfg, {}, deps);
-    assert.deepStrictEqual(getCompanionStatus(HOST), { state: 'inactive', reason: 'excluded-by-setting' },
+    assert.deepStrictEqual(getCompanionStatus(HOST, TRANSPORT_ON), { state: 'inactive', reason: 'excluded-by-setting' },
       'and it holds across subsequent ticks — no bootstrapping flicker, no error dot');
   });
 });
@@ -365,7 +364,7 @@ describe('WARDEN-1475: re-install is one gesture, and it is reversible both ways
     assert.strictEqual(calls.upload, suppressed.upload + 1, 'the binary was re-installed');
     assert.strictEqual(calls.spawnChannel, suppressed.spawnChannel + 1, 'and the channel respawned');
     // state/version only — the discover just ridden adds its WARDEN-1312 tally.
-    const status = getCompanionStatus(HOST);
+    const status = getCompanionStatus(HOST, TRANSPORT_ON);
     assert.strictEqual(status.state, 'active', 'and the host reads active again');
     assert.strictEqual(status.version, TEST_VER, 'with the verified version');
   });
