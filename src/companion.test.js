@@ -1733,15 +1733,17 @@ describe('getChannel bootstrap-failure cooldown (WARDEN-1399)', () => {
 
   // The defect is framed with the transport ON (the lifecycle tick routes gated
   // ops through getChannel only when the toggle is on), and the red-steady-dot
-  // assertions read getCompanionStatus — which short-circuits to 'inactive'
-  // while the env toggle is off. Save/restore so nothing leaks across suites.
-  let savedToggleEnv;
-  before(() => { savedToggleEnv = process.env.WARDEN_COMPANION_TRANSPORT; });
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  after(() => {
-    if (savedToggleEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedToggleEnv;
-  });
+  // assertions read getCompanionStatus — whose entry gate
+  // (`deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled`, seamed
+  // in the WARDEN-2124/2131 production-side pattern) is the flow's ONLY toggle
+  // read (getChannel has NO toggle gate at entry; its seam is the bootstrap
+  // legs), so the env-dance retirement pattern applies: the flag rides IN the
+  // deps (transportOn, injected at the status-call sites below) and the
+  // process-global env dance is gone. The per-test exclusion-env dances below
+  // are the exclusion gate's own plumbing (applyCompanionExclusions owns the
+  // env var), orthogonal to this toggle, and stay; the recovery-hint string
+  // assertions quoting WARDEN_COMPANION_TRANSPORT are error CONTENT, not env
+  // plumbing. The cache reset is orthogonal to the toggle.
 
   // A probe that always refuses — the connection-refused shape a downed host
   // returns in milliseconds, the storm driver. Deliberately NOT
@@ -1760,13 +1762,16 @@ describe('getChannel bootstrap-failure cooldown (WARDEN-1399)', () => {
     return { deps, calls };
   };
 
+  // Toggle-on deps injected at every getCompanionStatus call below.
+  const transportOn = { isCompanionTransportEnabled: () => true };
+
   it('suppresses a retry WITHIN the cooldown: same error object, zero probe/spawn/upload legs, no status churn', async () => {
     const { deps, calls } = failingDeps();
     let firstErr;
     await assert.rejects(() => getChannel('storm-1', {}, deps), (e) => { firstErr = e; return true; });
     assert.strictEqual(calls.run, 1, 'exactly one probe attempt');
-    assert.strictEqual(getCompanionStatus('storm-1').state, 'error', 'precondition: the failure surfaced');
-    const statusAfterFirst = getCompanionStatus('storm-1');
+    assert.strictEqual(getCompanionStatus('storm-1', transportOn).state, 'error', 'precondition: the failure surfaced');
+    const statusAfterFirst = getCompanionStatus('storm-1', transportOn);
 
     let secondErr;
     await assert.rejects(() => getChannel('storm-1', {}, deps), (e) => { secondErr = e; return true; });
@@ -1777,7 +1782,7 @@ describe('getChannel bootstrap-failure cooldown (WARDEN-1399)', () => {
     assert.strictEqual(calls.run, 1, 'NO second probe within the cooldown (the retry storm is bounded)');
     assert.strictEqual(calls.spawnChannel, 0, 'no spawn attempt while suppressed');
     assert.strictEqual(calls.upload, 0, 'no upload attempt while suppressed');
-    assert.deepStrictEqual(getCompanionStatus('storm-1'), statusAfterFirst,
+    assert.deepStrictEqual(getCompanionStatus('storm-1', transportOn), statusAfterFirst,
       'NO status write during suppression — the dot stays red-steady, lastErrorAt unchanged');
     assert.strictEqual(_channelCacheHasForTests('storm-1'), false,
       'suppression leaves no cache entry (nothing to leak, nothing to coalesce onto)');
@@ -1830,7 +1835,7 @@ describe('getChannel bootstrap-failure cooldown (WARDEN-1399)', () => {
     assert.ok(ch instanceof CompanionChannel, 'the recovery probe bootstrapped a live channel');
     assert.ok(healed.calls.run >= 1, 'a genuine probe ran (the retry happened)');
     assert.strictEqual(_bootstrapFailureForTests('storm-expiry'), undefined, 'success cleared the record');
-    assert.strictEqual(getCompanionStatus('storm-expiry').state, 'active', 'status reflects the recovery');
+    assert.strictEqual(getCompanionStatus('storm-expiry', transportOn).state, 'active', 'status reflects the recovery');
   });
 
   it('a retry that fails AGAIN re-stamps the record (fresh at, new error) and suppression resumes', async () => {
@@ -2431,19 +2436,26 @@ describe('companion transport status (WARDEN-878)', () => {
 // exclusion release), superseded bootstraps must not register, and the
 // death write must keep the exact-shape status contract.
 describe('companion status reconciles on channel death (WARDEN-1430)', () => {
-  let savedEnv;
+  // The defect is framed with the transport ON, and every assertion here reads
+  // getCompanionStatus — whose entry gate (`deps.isCompanionTransportEnabled ??
+  // isCompanionTransportEnabled`, seamed in the WARDEN-2124/2131 production-side
+  // pattern) is the flow's ONLY toggle read (getChannel has NO toggle gate at
+  // entry; its seam is the bootstrap legs, and the death writes it registers
+  // read no toggle), so the env-dance retirement pattern applies: the flag
+  // rides IN the deps (transportOn, injected at the status-call sites below)
+  // and the process-global env dance is gone. The exclusion-env legs below are
+  // the exclusion gate's own plumbing (applyCompanionExclusions owns the env
+  // var), orthogonal to the toggle, and keep their save/restore. The cache
+  // reset is orthogonal to the toggle.
+  const transportOn = { isCompanionTransportEnabled: () => true };
   let savedExclusionEnv;
   beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
     savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
     process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
     applyCompanionExclusions([]);
     _resetChannelCacheForTests();
   });
   afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
     if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
     else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
     applyCompanionExclusions([]);
@@ -2461,10 +2473,10 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
   it('a channel dying via transport exit reconciles the stale active to error', async () => {
     const { deps, transport } = deathTransportDeps();
     await getChannel('prod-death', {}, deps);
-    assert.deepStrictEqual(getCompanionStatus('prod-death'), { state: 'active', version: TEST_VER },
+    assert.deepStrictEqual(getCompanionStatus('prod-death', transportOn), { state: 'active', version: TEST_VER },
       'precondition: the bootstrap stamped active');
     transport()._die(new Error('ssh exited')); // the ssh process exits on its own
-    const status = getCompanionStatus('prod-death');
+    const status = getCompanionStatus('prod-death', transportOn);
     assert.strictEqual(status.state, 'error',
       'the surface stops asserting a transport that is gone — no stale-active window');
     assert.ok(status.lastError.includes('prod-death'), 'names the host');
@@ -2478,9 +2490,9 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
   it('a channel dying via kill() reconciles too (both death paths funnel through _die)', async () => {
     const { deps } = deathTransportDeps();
     const ch = await getChannel('prod-kill', {}, deps);
-    assert.strictEqual(getCompanionStatus('prod-kill').state, 'active', 'precondition: active');
+    assert.strictEqual(getCompanionStatus('prod-kill', transportOn).state, 'active', 'precondition: active');
     ch.kill();
-    const status = getCompanionStatus('prod-kill');
+    const status = getCompanionStatus('prod-kill', transportOn);
     assert.strictEqual(status.state, 'error', 'kill() is a death the status map learns about');
     assert.ok(/died/.test(status.lastError), status.lastError);
   });
@@ -2523,14 +2535,14 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
     await getChannel('prod-late', {}, deps);
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.strictEqual(getCompanionStatus('prod-late').state, 'error',
+    assert.strictEqual(getCompanionStatus('prod-late', transportOn).state, 'error',
       'the death reconciles even when it lands immediately after the active write');
   });
 
   it('uninstall does not resurrect: kill-then-delete leaves the host dark (WARDEN-882 ordering vs this death write)', async () => {
     const { deps } = deathTransportDeps();
     const ch = await getChannel('prod-uninst', {}, deps);
-    assert.strictEqual(getCompanionStatus('prod-uninst').state, 'active', 'precondition: active');
+    assert.strictEqual(getCompanionStatus('prod-uninst', transportOn).state, 'active', 'precondition: active');
     const res = await uninstallCompanion('prod-uninst', { companionExcludedHosts: [] }, {
       manifest: TEST_MANIFEST,
       run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
@@ -2545,22 +2557,22 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
     // silently re-install the binary), and the host-row indicator reads that
     // reason so the dark channel says WHY instead of looking broken. Asserted
     // as the EXACT shape, not loosened, so a future change to it is visible.
-    assert.deepStrictEqual(getCompanionStatus('prod-uninst'), { state: 'inactive', reason: 'excluded-by-setting' },
+    assert.deepStrictEqual(getCompanionStatus('prod-uninst', transportOn), { state: 'inactive', reason: 'excluded-by-setting' },
       'the death write must not survive — let alone resurrect — a deliberately removed host');
   });
 
   it('exclusion release does not resurrect: delete-before-kill writes nothing the map keeps', async () => {
     const { deps } = deathTransportDeps();
     const ch = await getChannel('prod-excl', {}, deps);
-    assert.strictEqual(getCompanionStatus('prod-excl').state, 'active', 'precondition: active');
+    assert.strictEqual(getCompanionStatus('prod-excl', transportOn).state, 'active', 'precondition: active');
 
     applyCompanionExclusions(['prod-excl']); // releaseExcludedHostState: cache delete → kill → status delete
     assert.strictEqual(ch.dead, true, 'the released channel was killed');
-    assert.deepStrictEqual(getCompanionStatus('prod-excl'), { state: 'inactive', reason: 'excluded-by-setting' },
+    assert.deepStrictEqual(getCompanionStatus('prod-excl', transportOn), { state: 'inactive', reason: 'excluded-by-setting' },
       'the exclusion reads through while it holds');
 
     applyCompanionExclusions([]); // lift the exclusion — expose the RAW map underneath
-    assert.deepStrictEqual(getCompanionStatus('prod-excl'), { state: 'inactive' },
+    assert.deepStrictEqual(getCompanionStatus('prod-excl', transportOn), { state: 'inactive' },
       'no death error was resurrected for the host the user excluded');
   });
 
@@ -2574,14 +2586,14 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
     });
     const pending = getChannel('prod-twin', {}, deps); // bootstrap in flight
     await new Promise((r) => setImmediate(r));
-    assert.strictEqual(getCompanionStatus('prod-twin').state, 'bootstrapping', 'precondition: in flight');
+    assert.strictEqual(getCompanionStatus('prod-twin', transportOn).state, 'bootstrapping', 'precondition: in flight');
 
     applyCompanionExclusions(['prod-twin']); // the release drops the in-flight promise
     probe.resolve({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
     await pending; // the twin settles: identity check fails → killed WITHOUT registering
     applyCompanionExclusions([]); // lift the exclusion so the raw map is readable
     assert.strictEqual(_channelCacheHasForTests('prod-twin'), false, 'no cache entry');
-    assert.deepStrictEqual(getCompanionStatus('prod-twin'), { state: 'inactive' },
+    assert.deepStrictEqual(getCompanionStatus('prod-twin', transportOn), { state: 'inactive' },
       'the killed twin stamped NOTHING — no resurrected active (the WARDEN-1390 bug) '
       + 'and no death error (this ticket)');
   });
