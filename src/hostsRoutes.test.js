@@ -31,6 +31,7 @@ describe('createHostsRouter (bare express app)', () => {
   let originalHome, originalTransport, tempHome;
   let server, baseUrl, emptyServer, emptyUrl;
   const CFG_HOSTS = ['cfg-host-a', 'cfg-host-b'];
+  let transportOn = true;
 
   const listen = (app) =>
     new Promise((resolve) => {
@@ -64,12 +65,12 @@ describe('createHostsRouter (bare express app)', () => {
 
     const { createHostsRouter } = await import('./hostsRoutes.js');
     const app = express();
-    app.use(createHostsRouter({ cfg: { hosts: CFG_HOSTS }, local: LOCAL }));
+    app.use(createHostsRouter({ cfg: { hosts: CFG_HOSTS }, local: LOCAL, deps: { isCompanionTransportEnabled: () => transportOn } }));
     server = await listen(app);
     baseUrl = `http://127.0.0.1:${server.address().port}`;
 
     const emptyApp = express();
-    emptyApp.use(createHostsRouter({ cfg: { hosts: [] }, local: LOCAL }));
+    emptyApp.use(createHostsRouter({ cfg: { hosts: [] }, local: LOCAL, deps: { isCompanionTransportEnabled: () => transportOn } }));
     emptyServer = await listen(emptyApp);
     emptyUrl = `http://127.0.0.1:${emptyServer.address().port}`;
   });
@@ -128,7 +129,7 @@ describe('createHostsRouter (bare express app)', () => {
 
   describe('GET /api/hosts/status', () => {
     it('serves [local, ...cfg.hosts] in that order, local online, and omits `companion` while the toggle is off', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
+      transportOn = false;
       const { status, body } = await get(baseUrl, '/api/hosts/status');
       assert.strictEqual(status, 200);
       assert.deepStrictEqual(body.hosts.map((h) => h.host), [LOCAL, ...CFG_HOSTS]);
@@ -137,19 +138,19 @@ describe('createHostsRouter (bare express app)', () => {
     });
 
     it('toggle on attaches {state:"inactive"} to every host; flipped back off the field is gone again (no stale field on the cached objects)', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '1';
+      transportOn = true;
       const on = await get(baseUrl, '/api/hosts/status');
       assert.deepStrictEqual(on.body.hosts.map((h) => h.host), [LOCAL, ...CFG_HOSTS]);
       for (const h of on.body.hosts) assert.deepStrictEqual(h.companion, { state: 'inactive' }, `${h.host} companion`);
 
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
+      transportOn = false;
       const off = await get(baseUrl, '/api/hosts/status');
       assert.deepStrictEqual(off.body.hosts.map((h) => h.host), [LOCAL, ...CFG_HOSTS]);
       for (const h of off.body.hosts) assert.ok(!('companion' in h), `${h.host} kept a stale companion field`);
     });
 
     it('a router over cfg.hosts=[] serves only the local host', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
+      transportOn = false;
       const { body } = await get(emptyUrl, '/api/hosts/status');
       assert.strictEqual(body.hosts.length, 1);
       assert.strictEqual(body.hosts[0].host, LOCAL);

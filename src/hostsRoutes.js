@@ -8,7 +8,7 @@ import { validateHost } from './ssh.js';
 // plus the probeHostReachability wrapper and the per-host status cache they share,
 // extracted verbatim from server.js. Injected: the shared `cfg` and the `local`
 // host id constant.
-export function createHostsRouter({ cfg, local }) {
+export function createHostsRouter({ cfg, local, deps = {} }) {
   const router = express.Router();
 
   // Per-host connectivity cache behind GET /api/hosts/status (WARDEN-915), so that
@@ -74,7 +74,7 @@ export function createHostsRouter({ cfg, local }) {
     // The toggle is read at REQUEST time (isCompanionTransportEnabled) so a flip
     // takes effect on the next poll without a restart; when off, the field is
     // omitted entirely (the transport is opt-in, so there is nothing to surface).
-    const companionOn = isCompanionTransportEnabled();
+    const companionOn = (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)();
     // WARDEN-1324: the probe handed to the cache is the companion-riding wrapper,
     // NOT validateHost directly — a live channel answers the poll's reachability
     // question with zero ssh spawns; every other case (no channel / toggle off)
@@ -86,7 +86,7 @@ export function createHostsRouter({ cfg, local }) {
     // transport is toggled back off (the field must vanish, not linger).
     res.json({
       hosts: companionOn
-        ? results.map((r) => ({ ...r, companion: getCompanionStatus(r.host) }))
+        ? results.map((r) => ({ ...r, companion: getCompanionStatus(r.host, deps) }))
         : results,
     });
   });
