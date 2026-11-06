@@ -154,6 +154,8 @@ describe('Observer#serializeForUi — ws history-frame item mapping (redirected 
 
   it('never throws on unrecognized persisted shapes', () => {
     const obs = obsWith([
+      null,
+      { role: 'assistant', content: [null, { type: 'text', text: 'text after a null block' }] },
       { role: 'assistant', content: 'legacy plain-string assistant turn' },
       { role: 'assistant', content: null },
       { role: 'assistant', content: { type: 'text', text: 'content is an object, not an array' } },
@@ -171,6 +173,9 @@ describe('Observer#serializeForUi — ws history-frame item mapping (redirected 
     assert.ok(Array.isArray(items));
     // Tolerance is per-message, not a blanket empty result: the one
     // recognizable turn among the junk still reaches the operator.
-    assert.deepEqual(items, [{ role: 'assistant', text: 'still rendered among the junk' }]);
+    assert.deepEqual(items, [
+      { role: 'assistant', text: 'text after a null block' },
+      { role: 'assistant', text: 'still rendered among the junk' },
+    ]);
   });
 });
