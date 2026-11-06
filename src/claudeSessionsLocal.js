@@ -25,6 +25,7 @@ export function parseJsonlHead(text) {
     if (!line.trim()) continue;
     let j;
     try { j = JSON.parse(line); } catch { continue; }
+    if (!j || typeof j !== 'object') continue;
     if (!cwd && j.cwd) cwd = j.cwd;
     if (!summary && j.type === 'user' && j.message) {
       const c = j.message.content;

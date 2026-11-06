@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { localClaudeSessions } from './claudeSessionsLocal.js';
+import { localClaudeSessions, parseJsonlHead } from './claudeSessionsLocal.js';
 
 // WARDEN-2043 — pins localClaudeSessions' OWN catalog contract (the leaf module
 // WARDEN-2033 split out of claudeSessions.js). The symbol is exercised widely at
@@ -136,5 +136,41 @@ describe('localClaudeSessions catalog contract', () => {
 
     const out = await localClaudeSessions();
     assert.deepEqual(out.map((s) => s.id), ['real']);
+  });
+});
+
+// WARDEN-2151 — parseJsonlHead's lenient "never throws" contract: a line that is
+// valid JSON but not an object (`null`) used to reach `j.cwd` bare and throw a
+// TypeError. Every caller (local list, both remote parsers, the transcript head)
+// goes through this one function.
+describe('parseJsonlHead — a non-object JSON line is skipped, never thrown on (WARDEN-2151)', () => {
+  it('skips a literal null line and still reads the cwd after it', () => {
+    assert.deepEqual(parseJsonlHead('null\n{"cwd":"/a"}'), { cwd: '/a', summary: '' });
+  });
+
+  it('still extracts the summary from a user message that follows a leading null line', () => {
+    const user = JSON.stringify({ type: 'user', cwd: '/a', message: { content: 'hello there' } });
+    assert.deepEqual(parseJsonlHead(`null\n${user}`), { cwd: '/a', summary: 'hello there' });
+  });
+
+  it('skips scalar JSON lines too and parses non-null lines identically', () => {
+    assert.deepEqual(parseJsonlHead('42\n"str"\ntrue\n{"cwd":"/a"}'), { cwd: '/a', summary: '' });
+    assert.deepEqual(parseJsonlHead('{"cwd":"/a"}'), { cwd: '/a', summary: '' });
+  });
+
+  it('localClaudeSessions keeps a session whose file has a null line before the cwd', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'w2151-'));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const dir = path.join(home, '.claude', 'projects', '-p');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 's1.jsonl'), 'null\n{"cwd":"/home/u/proj"}\n');
+      const out = await localClaudeSessions();
+      assert.deepEqual(out.map((s) => s.id), ['s1']);
+    } finally {
+      process.env.HOME = prev;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
