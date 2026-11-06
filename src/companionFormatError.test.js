@@ -43,16 +43,11 @@ function throwingDeps(err = new Error('boom')) {
   };
 }
 
-let savedTransport;
 beforeEach(() => {
-  savedTransport = process.env.WARDEN_COMPANION_TRANSPORT;
-  process.env.WARDEN_COMPANION_TRANSPORT = '1';
   _resetChannelCacheForTests();
   _resetPaneDeltaStateForTests();
 });
 afterEach(() => {
-  if (savedTransport === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-  else process.env.WARDEN_COMPANION_TRANSPORT = savedTransport;
   _resetChannelCacheForTests();
   _resetPaneDeltaStateForTests();
 });
@@ -106,7 +101,7 @@ describe('formatCompanionError generic fallback — thrown value shapes', () => 
 describe('formatCompanionError via the per-host status surface', () => {
   it('getChannel failure stamps lastError with the default-op text', async () => {
     await assert.rejects(() => getChannel(HOST, {}, throwingDeps()), /boom/);
-    assert.strictEqual(getCompanionStatus(HOST).lastError, 'companion op failed on prod: boom');
+    assert.strictEqual(getCompanionStatus(HOST, { isCompanionTransportEnabled: () => true }).lastError, 'companion op failed on prod: boom');
   });
 });
 
