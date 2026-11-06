@@ -588,7 +588,7 @@ export class Observer {
     // resume an existing persisted conversation (if any)
     const existing = sid ? getSession(sid) : null;
     this.name = existing?.name || null;
-    this.messages = existing?.messages || [];
+    this.messages = Array.isArray(existing?.messages) ? existing.messages : [];
     // Chat context: which agent chat this observer session is bound to. On
     // resume, the context persisted with the session is the source of truth
     // (so a reconnect restores the bound agent); otherwise use the context
@@ -803,7 +803,7 @@ export class Observer {
       // this reads null and leaves the array untouched; the tail existence guard in
       // _runTurn then skips the write-back (WARDEN-1841, no ghost-resurrect).
       const fresh = await getSessionAsync(this.sid);
-      if (fresh) this.messages = fresh.messages || [];
+      if (fresh) this.messages = Array.isArray(fresh.messages) ? fresh.messages : [];
       return this._runTurn(userText);
     });
   }
