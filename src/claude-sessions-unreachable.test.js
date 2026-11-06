@@ -198,6 +198,15 @@ describe('parseRemoteSessionOutput — the extracted pure parser (WARDEN-1196)',
     assert.deepStrictEqual(parseRemoteSessionOutput(noCwd), []);
   });
 
+  it('a literal null line inside one session buffer does not drop it or its neighbours (WARDEN-2151)', () => {
+    const bad = `___S\tbad\t700\nnull\n${JSON.stringify({ cwd: '/p/bad' })}\n___E\tbad\n`;
+
+    const out = parseRemoteSessionOutput(emit('a', 100) + bad + emit('b', 900));
+
+    assert.deepStrictEqual(out.map((s) => s.id), ['b', 'bad', 'a']);
+    assert.strictEqual(out.find((s) => s.id === 'bad').cwd, '/p/bad');
+  });
+
   it('is total over junk input (empty / undefined / unframed)', () => {
     assert.deepStrictEqual(parseRemoteSessionOutput(''), []);
     assert.deepStrictEqual(parseRemoteSessionOutput(undefined), []);

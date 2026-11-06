@@ -89,6 +89,15 @@ describe('remote search leg of /api/claude-sessions-search (WARDEN-1938)', () =>
       }]);
     });
 
+    it('a literal null line inside one session buffer does not drop it or its neighbours (WARDEN-2151)', () => {
+      const body = userLine('hello', '/w/proj');
+      const nullBody = `null\n${body}`;
+      const stdout = record('a', 100, body, body) + record('bad', 500, nullBody, body) + record('b', 900, body, body);
+      const out = parseSessionSearchOutput(stdout, 'hello');
+      assert.deepEqual(out.map((r) => r.id), ['b', 'bad', 'a']);
+      assert.equal(out[1].cwd, '/w/proj');
+    });
+
     it('sorts newest-first and caps at SESSION_SEARCH_PER_HOST', () => {
       const body = userLine('hello', '/w/proj');
       const stdout = record('old', 100, body, body) + record('new', 900, body, body)
