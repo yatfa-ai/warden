@@ -45,7 +45,7 @@
 // LOCAL chats and the toggle-off default are byte-for-byte unchanged, and no
 // file under companion/ is touched by this slice. Run: node --test src.
 
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -54,7 +54,6 @@ import { read } from './tmux.js';
 import { runTmux, buildRunCommand } from './ssh.js';
 import { execInContext, spawnPersistentChannel, _resetChannelCacheForTests } from './companion.js';
 
-const ORIG_ENV = process.env.WARDEN_COMPANION_TRANSPORT;
 const REMOTE = 'prod-1';
 const LOCAL = '(local)';
 
@@ -77,8 +76,8 @@ const captureArgv = (session, lines) => ['capture-pane', '-t', session, '-p', '-
 // transport returned.
 async function captureBothTransports(chat, cfg, lines, { stdout = 'PANE\n' } = {}) {
   const on = { host: null, script: null, opts: null, cfg: null, runTmuxCalls: 0 };
-  process.env.WARDEN_COMPANION_TRANSPORT = '1';
   const paneOn = await read(chat, cfg, lines, {
+    isCompanionTransportEnabled: () => true,
     companionExec: async (host, script, opts, c) => {
       on.host = host; on.script = script; on.opts = opts; on.cfg = c;
       return okResult(stdout);
@@ -87,8 +86,8 @@ async function captureBothTransports(chat, cfg, lines, { stdout = 'PANE\n' } = {
   });
 
   const off = { host: null, cmd: null, opts: null, execCalls: 0, argv: null };
-  process.env.WARDEN_COMPANION_TRANSPORT = '0';
   const paneOff = await read(chat, cfg, lines, {
+    isCompanionTransportEnabled: () => false,
     companionExec: async () => { off.execCalls++; throw new Error('flag OFF must not touch the companion'); },
     runTmux: (c, args) => {
       off.argv = args;
@@ -101,7 +100,6 @@ async function captureBothTransports(chat, cfg, lines, { stdout = 'PANE\n' } = {
       });
     },
   });
-  process.env.WARDEN_COMPANION_TRANSPORT = '1';
   return { on, off, paneOn, paneOff };
 }
 
@@ -186,12 +184,6 @@ function fakeCompanionChild() {
 }
 
 describe('WARDEN-1329 — tmux.js read() routes onto the companion `exec` RPC', () => {
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  afterEach(() => {
-    if (ORIG_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_ENV;
-  });
-
   describe('PARITY — the delivered command is byte-identical on both transports', () => {
     it('bare remote (no container): `tmux <quoted argv>`', async () => {
       const chat = { host: REMOTE, session: 'agent' };
@@ -238,6 +230,7 @@ describe('WARDEN-1329 — tmux.js read() routes onto the companion `exec` RPC', 
       let runTmuxCalls = 0;
       await assert.rejects(
         () => read(chat, {}, 200, {
+          isCompanionTransportEnabled: () => true,
           companionExec: async () => CHANNEL_DEAD,
           runTmux: async () => { runTmuxCalls++; return okResult('should not be reached'); },
         }),
@@ -254,6 +247,7 @@ describe('WARDEN-1329 — tmux.js read() routes onto the companion `exec` RPC', 
       };
       await assert.rejects(
         () => read(chat, {}, 200, {
+          isCompanionTransportEnabled: () => true,
           companionExec: async () => TOO_OLD,
           runTmux: async () => { runTmuxCalls++; return okResult('fallback'); },
         }),
@@ -276,10 +270,10 @@ describe('WARDEN-1329 — tmux.js read() routes onto the companion `exec` RPC', 
     });
 
     it('flag OFF: the companion is never consulted and the default runTmux path serves the read', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       let companionCalls = 0;
       let seenArgs = null;
       const pane = await read({ host: REMOTE, session: 'agent' }, {}, 200, {
+        isCompanionTransportEnabled: () => false,
         companionExec: async () => { companionCalls++; return okResult('companion'); },
         runTmux: async (c, args) => { seenArgs = args; return okResult('default'); },
       });
@@ -318,6 +312,7 @@ describe('WARDEN-1329 — tmux.js read() routes onto the companion `exec` RPC', 
       // Drive the REAL read() → REAL execInContext with only the bootstrap
       // faked — the full JS decode path under test is production code.
       const pane = await read({ host: REMOTE, session: 'agent' }, {}, 5000, {
+        isCompanionTransportEnabled: () => true,
         companionExec: (h, s, o, c) => execInContext(h, s, o, c, fakeBootstrapDeps(() => t)),
       });
 
@@ -339,6 +334,7 @@ describe('WARDEN-1329 — tmux.js read() routes onto the companion `exec` RPC', 
       );
 
       const pending = read({ host: REMOTE, session: 'agent' }, {}, 5000, {
+        isCompanionTransportEnabled: () => true,
         companionExec: (h, s, o, c) => execInContext(h, s, o, c, deps),
       });
 
