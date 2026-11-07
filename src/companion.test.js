@@ -2599,22 +2599,17 @@ describe('companion status reconciles on channel death (WARDEN-1430)', () => {
   });
 });
 describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => {
-  let savedEnv;
   // WARDEN-1475: a successful uninstall now live-applies a durable exclusion
   // (applyCompanionExclusions writes the process env gate), so this suite must
   // save/restore that env too or its writes leak into every later suite.
   let savedExclusionEnv;
   beforeEach(() => {
-    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
     savedExclusionEnv = process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
     process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = '';
     applyCompanionExclusions([]);
     _resetChannelCacheForTests();
   });
   afterEach(() => {
-    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
     applyCompanionExclusions([]);
     if (savedExclusionEnv === undefined) delete process.env.WARDEN_COMPANION_EXCLUDED_HOSTS;
     else process.env.WARDEN_COMPANION_EXCLUDED_HOSTS = savedExclusionEnv;
@@ -2648,7 +2643,7 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
     const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
     const ch = await getChannel('ops-join', {}, deps);
     await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
-    const status = getCompanionStatus('ops-join');
+    const status = getCompanionStatus('ops-join', { isCompanionTransportEnabled: () => true });
     assert.strictEqual(status.state, 'active');
     const tally = _getCompanionOpsForTests().get('ops-join');
     assert.deepStrictEqual(status.ops, { send: { n: 1, failures: 0, lastAt: tally.send.lastAt } });
@@ -2663,14 +2658,14 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
     assert.strictEqual(ops.get('ops-host-a').send.n, 1);
     assert.strictEqual(ops.get('ops-host-b')?.send, undefined,
       'host B issued nothing -> no tally');
-    assert.strictEqual(getCompanionStatus('ops-host-b').ops, undefined,
+    assert.strictEqual(getCompanionStatus('ops-host-b', { isCompanionTransportEnabled: () => true }).ops, undefined,
       'host B status stays byte-identical (no empty ops object)');
   });
 
   it('a host that bootstrapped but issued no ops keeps its byte-identical status shape', async () => {
     const { deps } = fakeDeps();
     await getChannel('ops-clean', {}, deps);
-    assert.deepStrictEqual(getCompanionStatus('ops-clean'), { state: 'active', version: TEST_VER },
+    assert.deepStrictEqual(getCompanionStatus('ops-clean', { isCompanionTransportEnabled: () => true }), { state: 'active', version: TEST_VER },
       'no ops object on a bootstrapped-but-idle host (the exact-shape contract)');
   });
 
@@ -2722,17 +2717,16 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
     const { deps } = fakeDeps({ spawnChannel: () => ackingTransport() });
     const ch = await getChannel('ops-toggled', {}, deps);
     await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
-    process.env.WARDEN_COMPANION_TRANSPORT = '0';
-    assert.deepStrictEqual(getCompanionStatus('ops-toggled'), { state: 'inactive' },
+    assert.deepStrictEqual(getCompanionStatus('ops-toggled', { isCompanionTransportEnabled: () => false }), { state: 'inactive' },
       'the existing short-circuit hides everything — no ops leak while off');
-    assert.deepStrictEqual(getAllCompanionStatuses(), {}, 'all-hosts map is empty while off');
+    assert.deepStrictEqual(getAllCompanionStatuses({ isCompanionTransportEnabled: () => false }), {}, 'all-hosts map is empty while off');
   });
 
   it('LOCAL never surfaces ops (the companion is remote-only)', async () => {
     // A raw channel on "(local)" records a tally, but the getter short-circuits.
     const ch = new CompanionChannel('(local)', ackingTransport());
     await ch.call('send', { session: 's', keys: 'x' }, { timeout: 500 });
-    assert.deepStrictEqual(getCompanionStatus('(local)'), { state: 'inactive' });
+    assert.deepStrictEqual(getCompanionStatus('(local)', { isCompanionTransportEnabled: () => true }), { state: 'inactive' });
   });
 
   it('uninstall clears the tallies beside the status (no stale counts survive a removal)', async () => {
@@ -2749,7 +2743,7 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
       'the tally is cleared with the status');
     // WARDEN-1475: `inactive` is unchanged; the ADDITIVE `reason` is the durable
     // removal now recorded as a no-bootstrap fact (see the uninstall suite).
-    assert.deepStrictEqual(getCompanionStatus('ops-uninstalled'), { state: 'inactive', reason: 'excluded-by-setting' });
+    assert.deepStrictEqual(getCompanionStatus('ops-uninstalled', { isCompanionTransportEnabled: () => true }), { state: 'inactive', reason: 'excluded-by-setting' });
   });
 
   it('channel death does NOT clear the tally (a process-lifetime signal, by design)', async () => {
@@ -2759,7 +2753,7 @@ describe('companion op tallies (WARDEN-1312 — ops riding the channel)', () => 
     ch.kill();
     assert.strictEqual(_getCompanionOpsForTests().get('ops-died').send.n, 1,
       'the tally survives channel death');
-    assert.deepStrictEqual(getCompanionStatus('ops-died').ops,
+    assert.deepStrictEqual(getCompanionStatus('ops-died', { isCompanionTransportEnabled: () => true }).ops,
       { send: { n: 1, failures: 0, lastAt: _getCompanionOpsForTests().get('ops-died').send.lastAt } });
   });
 
@@ -2904,67 +2898,53 @@ describe('uninstallCompanion() (WARDEN-882 Removability — companion-or-fail)',
   // CompanionIndicator would keep reading "active" after a successful removal.
   // That is success criterion 3 ("the host-status surface reflects the companion
   // as absent") failing on the very surface that confirms the action worked.
-  // The transport flag MUST be on here: getCompanionStatus short-circuits to
+  // The injected gate MUST be ON here: getCompanionStatus short-circuits to
   // 'inactive' while it is off, which would make this assertion tautological.
   it('clears the host companionStatus so the status surface reads absent after removal (WARDEN-878 integration)', async () => {
-    const savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
-    try {
-      // Drive the host to a real 'active' status through the bootstrap path (the
-      // only writer of companionStatus), and assert that precondition — so a
-      // green result cannot come from the status never having been 'active'.
-      const { deps: bootDeps } = fakeDeps();
-      await getChannel('prod-status-clear', {}, bootDeps);
-      assert.deepStrictEqual(getCompanionStatus('prod-status-clear'),
-        { state: 'active', version: TEST_VER },
-        'precondition: the host reads active with a version before removal');
+    // Drive the host to a real 'active' status through the bootstrap path (the
+    // only writer of companionStatus), and assert that precondition — so a
+    // green result cannot come from the status never having been 'active'.
+    const { deps: bootDeps } = fakeDeps();
+    await getChannel('prod-status-clear', {}, bootDeps);
+    assert.deepStrictEqual(getCompanionStatus('prod-status-clear', { isCompanionTransportEnabled: () => true }),
+      { state: 'active', version: TEST_VER },
+      'precondition: the host reads active with a version before removal');
 
-      const res = await uninstallCompanion('prod-status-clear', { companionExcludedHosts: [] }, {
-        manifest: TEST_MANIFEST,
-        run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
-      });
-      assert.strictEqual(res.ok, true, 'removal succeeded');
+    const res = await uninstallCompanion('prod-status-clear', { companionExcludedHosts: [] }, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+    });
+    assert.strictEqual(res.ok, true, 'removal succeeded');
 
-      // WARDEN-1475: `inactive` is unchanged — the companion IS absent. The
-      // ADDITIVE `reason` is the durable no-bootstrap fact the removal now
-      // records, which is what stops the next lifecycle tick re-installing the
-      // binary; the host row renders it as "excluded" so the dark channel says
-      // WHY rather than looking broken.
-      assert.deepStrictEqual(getCompanionStatus('prod-status-clear'), { state: 'inactive', reason: 'excluded-by-setting' },
-        'the host-status surface reads inactive (companion absent) after removal');
-      assert.ok(!('prod-status-clear' in getAllCompanionStatuses()),
-        'the removed host is gone from the all-hosts status map too (no stale version leaks)');
-    } finally {
-      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    }
+    // WARDEN-1475: `inactive` is unchanged — the companion IS absent. The
+    // ADDITIVE `reason` is the durable no-bootstrap fact the removal now
+    // records, which is what stops the next lifecycle tick re-installing the
+    // binary; the host row renders it as "excluded" so the dark channel says
+    // WHY rather than looking broken.
+    assert.deepStrictEqual(getCompanionStatus('prod-status-clear', { isCompanionTransportEnabled: () => true }), { state: 'inactive', reason: 'excluded-by-setting' },
+      'the host-status surface reads inactive (companion absent) after removal');
+    assert.ok(!('prod-status-clear' in getAllCompanionStatuses({ isCompanionTransportEnabled: () => true })),
+      'the removed host is gone from the all-hosts status map too (no stale version leaks)');
   });
 
   it('leaves OTHER hosts\' companionStatus intact (removal is per-host, not a global wipe)', async () => {
-    const savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
-    process.env.WARDEN_COMPANION_TRANSPORT = '1';
-    try {
-      const { deps: bootDeps } = fakeDeps();
-      await getChannel('host-removed', {}, bootDeps);
-      await getChannel('host-kept', {}, bootDeps);
+    const { deps: bootDeps } = fakeDeps();
+    await getChannel('host-removed', {}, bootDeps);
+    await getChannel('host-kept', {}, bootDeps);
 
-      await uninstallCompanion('host-removed', { companionExcludedHosts: [] }, {
-        manifest: TEST_MANIFEST,
-        run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
-      });
+    await uninstallCompanion('host-removed', { companionExcludedHosts: [] }, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+    });
 
-      // WARDEN-1475: the removed host's `reason` is ADDITIVE (the durable
-      // no-bootstrap fact); the per-host scoping this test exists to pin is
-      // unchanged and now covers the new fact too — the untouched host is
-      // neither darkened nor excluded.
-      assert.deepStrictEqual(getCompanionStatus('host-removed'), { state: 'inactive', reason: 'excluded-by-setting' },
-        'the targeted host reads absent');
-      assert.deepStrictEqual(getCompanionStatus('host-kept'), { state: 'active', version: TEST_VER },
-        'an untouched host keeps its active status — uninstall is not a global clear');
-    } finally {
-      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
-    }
+    // WARDEN-1475: the removed host's `reason` is ADDITIVE (the durable
+    // no-bootstrap fact); the per-host scoping this test exists to pin is
+    // unchanged and now covers the new fact too — the untouched host is
+    // neither darkened nor excluded.
+    assert.deepStrictEqual(getCompanionStatus('host-removed', { isCompanionTransportEnabled: () => true }), { state: 'inactive', reason: 'excluded-by-setting' },
+      'the targeted host reads absent');
+    assert.deepStrictEqual(getCompanionStatus('host-kept', { isCompanionTransportEnabled: () => true }), { state: 'active', version: TEST_VER },
+      'an untouched host keeps its active status — uninstall is not a global clear');
   });
 });
 
