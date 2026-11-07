@@ -65,6 +65,8 @@ import {
   SESSION_VIEW_MAX_BYTES, buildTranscriptView, transcriptWindow, alignOlderPageCursor,
 } from './claudeSessionsLocal.js';
 
+const fsp = fs.promises;
+
 // ---- full-content session-search helpers (WARDEN-161) ----
 // parseJsonlHead only extracts cwd + the first user message (the 100-char
 // "summary"). These helpers search the WHOLE conversation body so a session is
@@ -465,8 +467,9 @@ const SESSION_SEARCH_HEAD_BYTES = 6000;    // matches remoteClaudeSessions' `hea
 const SESSION_SEARCH_SNIP_TRANSFER = 1500; // bounded matched-line transfer over SSH
 // Cap on matching files gathered locally before the recency sort (grep -m1 emits
 // one row per file). High enough to honor recency ranking across a real archive,
-// bounded so a wildly common term can't stream unbounded output. statSync'ing a
-// few hundred files is cheap; only the top PER_HOST get a head read.
+// bounded so a wildly common term can't stream unbounded output. The stats are
+// async (fs.promises, awaited sequentially so open handles stay bounded) and
+// cheap for a few hundred files; only the top PER_HOST get a head read.
 const SESSION_SEARCH_LOCAL_SCAN = 500;
 
 // Search the local JSONL archive for sessions whose body contains `q` (literal,
@@ -497,7 +500,7 @@ export async function searchLocalClaudeSessionsDetail(q) {
   const needle = q.toLowerCase();
   if (!needle) return { sessions: [], unreachable: false };
   const archiveDir = path.join(os.homedir(), '.claude', 'projects');
-  try { if (!fs.statSync(archiveDir).isDirectory()) return { sessions: [], unreachable: false }; } catch { return { sessions: [], unreachable: false }; }
+  try { if (!(await fsp.stat(archiveDir)).isDirectory()) return { sessions: [], unreachable: false }; } catch { return { sessions: [], unreachable: false }; }
   const result = await streamBoundedSearchResult(
     'grep', ['-r', '-m', '1', '--include=*.jsonl', '-F', '-i', '-I', '-n', '--', q, archiveDir], undefined,
     { maxResults: SESSION_SEARCH_LOCAL_SCAN, transferLen: SESSION_SEARCH_SNIP_TRANSFER },
@@ -512,7 +515,7 @@ export async function searchLocalClaudeSessionsDetail(q) {
   const ranked = [];
   for (const row of parseSearchOutput(raw, SESSION_SEARCH_LOCAL_SCAN, SESSION_SEARCH_SNIP_TRANSFER)) {
     let mtime;
-    try { mtime = fs.statSync(row.file).mtimeMs; } catch { continue; }
+    try { mtime = (await fsp.stat(row.file)).mtimeMs; } catch { continue; }
     ranked.push({ file: row.file, text: row.text, mtime });
   }
   ranked.sort((a, b) => b.mtime - a.mtime);
@@ -521,10 +524,9 @@ export async function searchLocalClaudeSessionsDetail(q) {
     if (out.length >= SESSION_SEARCH_PER_HOST) break;
     let head = '';
     try {
-      const fd = fs.openSync(e.file, 'r');
+      const fh = await fsp.open(e.file, 'r');
       const buf = Buffer.alloc(8192);
-      fs.readSync(fd, buf, 0, 8192, 0);
-      fs.closeSync(fd);
+      try { await fh.read(buf, 0, 8192, 0); } finally { await fh.close(); }
       head = buf.toString('utf8');
     } catch { continue; }
     const { cwd, summary } = parseJsonlHead(head);
