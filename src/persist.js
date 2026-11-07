@@ -164,6 +164,19 @@ export async function removeFile(file) {
 }
 
 /**
+ * Read a UTF-8 text file, returning `null` when it does not exist (ENOENT).
+ * Every other error (EISDIR, EACCES, EIO, …) propagates.
+ */
+export async function readTextIfExists(file) {
+  try {
+    return await fsp.readFile(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
  * Defensive JSON read (async, for request paths). A missing file returns
  * `fallback`. An unparseable file is backed up to `<file>.corrupt-<digest><ext>.bak`
  * (best-effort), logged with the backup path, and returns `fallback` — never

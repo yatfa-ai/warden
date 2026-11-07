@@ -3,7 +3,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
-import { atomicWrite, atomicAppend } from './persist.js';
+import { atomicWrite, atomicAppend, readTextIfExists } from './persist.js';
 
 // fs.promises alias — every I/O here is async (WARDEN-828 made the reads async;
 // WARDEN-831 makes the writes async too) so serving /api/activity* OR appending an
@@ -79,14 +79,8 @@ export async function readEvents({ after, before, limit } = {}) {
 // crash mid-rotation leaves the previous complete file (WARDEN-831).
 export async function rotateEvents() {
   await ensureDir();
-  let content;
-  try {
-    content = await fsp.readFile(FILE, 'utf8');
-  } catch (err) {
-    if (err.code === 'ENOENT') return 0;
-    throw err;
-  }
-  if (!content.trim()) return 0;
+  const content = await readTextIfExists(FILE);
+  if (content === null || !content.trim()) return 0;
 
   const lines = content.trim().split('\n');
   const kept = [];

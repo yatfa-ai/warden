@@ -24,7 +24,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
-import { atomicWrite, atomicAppend } from './persist.js';
+import { atomicWrite, atomicAppend, readTextIfExists } from './persist.js';
 
 const fsp = fs.promises;
 
@@ -103,14 +103,8 @@ export async function readStalls({ limit } = {}) {
  */
 export async function pruneStallLog(maxAgeMs = SEVEN_DAYS_MS) {
   const file = stallLogFile();
-  let content;
-  try {
-    content = await fsp.readFile(file, 'utf8');
-  } catch (err) {
-    if (err.code === 'ENOENT') return 0;
-    throw err;
-  }
-  if (!content.trim()) return 0;
+  const content = await readTextIfExists(file);
+  if (content === null || !content.trim()) return 0;
   const lines = content.trim().split('\n').filter((l) => l.trim());
   const cutoff = Date.now() - maxAgeMs;
   let kept = [];

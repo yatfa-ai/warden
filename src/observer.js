@@ -23,7 +23,7 @@ import { classifyPane, stripAnsi } from './agentState.js';
 // sends, which previously had no activity record at all). Imported here because
 // logDirective (below) is the single point every confirmed send flows through.
 import { appendEvent } from './activity.js';
-import { atomicAppend, atomicWrite } from './persist.js';
+import { atomicAppend, atomicWrite, readTextIfExists } from './persist.js';
 
 // fs.promises alias — readDirectives is async (WARDEN-828) so serving GET
 // /api/directives does not block the single-threaded event loop on a synchronous
@@ -149,14 +149,8 @@ const DIRECTIVES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // the file away from the writer's format.
 const DIRECTIVE_HEADER = /^## (\S+) → .+@[^ ]+ \([^)]*\)$/;
 export async function rotateDirectives() {
-  let content;
-  try {
-    content = await fsp.readFile(DIRECTIVES_LOG, 'utf8');
-  } catch (err) {
-    if (err.code === 'ENOENT') return 0;
-    throw err;
-  }
-  if (!content.trim()) return 0;
+  const content = await readTextIfExists(DIRECTIVES_LOG);
+  if (content === null || !content.trim()) return 0;
 
   const lines = content.split('\n');
   // Preserve any leading content before the first directive header (the title or
@@ -202,14 +196,9 @@ export async function rotateDirectives() {
 // matching the prior existsSync guard; anything else rethrows) instead of blocking
 // /api/config behind a synchronous readFileSync of the append-only log.
 export async function readDirectives({ agent, host, limit } = {}) {
-  let content;
-  try {
-    content = await fsp.readFile(DIRECTIVES_LOG, 'utf8');
-  } catch (e) {
-    if (e.code === 'ENOENT') return []; // missing file → empty (matches existsSync guard)
-    throw e;
-  }
-  if (!content.trim()) return [];
+  // missing file → empty (matches the prior existsSync guard); other errors rethrow
+  const content = await readTextIfExists(DIRECTIVES_LOG);
+  if (content === null || !content.trim()) return [];
 
   // Header authored by logDirective: `## <ISO ts> → <container>@<host> (<role>)`.
   // `<ts>` is `\S+` (ISO timestamps carry no spaces); `host` is `[^ ]+` (hosts
