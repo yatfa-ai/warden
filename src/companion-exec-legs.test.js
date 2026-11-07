@@ -43,7 +43,7 @@
 // the companion's host side rebuild it as `docker exec <c> bash -lc <script>`,
 // silently changing the in-container interpreter. Both halves are pinned below.
 
-import { describe, it, beforeEach, afterEach, after } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -91,7 +91,6 @@ after(() => {
   try { fs.rmSync(TEMP_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
-const ORIG_ENV = process.env.WARDEN_COMPANION_TRANSPORT;
 const REMOTE = 'prod-1';
 const LOCAL = '(local)';
 
@@ -150,11 +149,6 @@ function assertParity({ on, off }, { expectedScript, timeout }) {
 }
 
 describe('WARDEN-1284 — the nine script-delivery legs route onto the companion `exec` RPC', () => {
-  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
-  afterEach(() => {
-    if (ORIG_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_ENV;
-  });
 
   // ------------------------------------------------------------------ leg 1
   describe('leg 1 — file viewer read (readChatFile, REMOTE branch)', () => {
@@ -173,6 +167,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
 
     it('the companion result flows through the SAME consumers: content is returned unchanged', async () => {
       const r = await readChatFile(chat, 'src/app.js', {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => okResult('hello world\n'),
         run: async () => { throw new Error('no run()'); },
       });
@@ -182,6 +177,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it("COMPANION-OR-FAIL: a dead channel maps through mapReadScriptError, run() is NEVER consulted", async () => {
       let runCalls = 0;
       const r = await readChatFile(chat, 'src/app.js', {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => CHANNEL_DEAD,
         run: async () => { runCalls++; return okResult('should not appear'); },
       });
@@ -195,6 +191,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
       const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-1284-local-'));
       fs.writeFileSync(path.join(cwd, 'a.txt'), 'local body\n');
       const r = await readChatFile({ host: LOCAL, cwd }, 'a.txt', {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => { companionCalls++; return okResult(); },
       });
       assert.strictEqual(companionCalls, 0, 'LOCAL reads the filesystem, never the channel');
@@ -217,15 +214,16 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     });
 
     it('the EXISTS marker check reads the companion result unchanged (true / false)', async () => {
-      const hit = await remoteFileExists(REMOTE, '/work', 'a.js', { execInContext: async () => okResult('EXISTS\n') });
+      const hit = await remoteFileExists(REMOTE, '/work', 'a.js', { isCompanionTransportEnabled: () => true, execInContext: async () => okResult('EXISTS\n') });
       assert.strictEqual(hit, true);
-      const miss = await remoteFileExists(REMOTE, '/work', 'a.js', { execInContext: async () => okResult('') });
+      const miss = await remoteFileExists(REMOTE, '/work', 'a.js', { isCompanionTransportEnabled: () => true, execInContext: async () => okResult('') });
       assert.strictEqual(miss, false, 'no marker -> not a file');
     });
 
     it('COMPANION-OR-FAIL: a dead channel collapses to exists:false, run() is NEVER consulted', async () => {
       let runCalls = 0;
       const r = await remoteFileExists(REMOTE, '/work', 'a.js', {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => CHANNEL_DEAD,
         run: async () => { runCalls++; return okResult('EXISTS'); },
       });
@@ -249,6 +247,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it("the user's query still rides SHELL-QUOTED through the companion (no injection surface)", async () => {
       let sent = null;
       await remoteSearchClaudeSessions(REMOTE, "it's; rm -rf /", {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (host, script) => { sent = script; return okResult(''); },
       });
       assert.ok(sent.includes(shellQuote("it's; rm -rf /")),
@@ -258,6 +257,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it('COMPANION-OR-FAIL: a dead channel degrades to the empty list, run() is NEVER consulted', async () => {
       let runCalls = 0;
       const rows = await remoteSearchClaudeSessions(REMOTE, 'q', {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => CHANNEL_DEAD,
         run: async () => { runCalls++; return okResult(''); },
       });
@@ -281,6 +281,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it('the `before` cursor still reaches the script builder through the companion path', async () => {
       let sent = null;
       await remoteReadSessionTranscript(REMOTE, 'abc-123', { before: 4096 }, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (host, script) => { sent = script; return okResult(''); },
       });
       assert.strictEqual(sent, buildSessionReadScript('abc-123', { before: 4096 }),
@@ -292,6 +293,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it('COMPANION-OR-FAIL: a dead channel surfaces {ok:false} for the route to report unreachable', async () => {
       let runCalls = 0;
       const r = await remoteReadSessionTranscript(REMOTE, 'abc-123', {}, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => CHANNEL_DEAD,
         run: async () => { runCalls++; return okResult(''); },
       });
@@ -314,9 +316,9 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     });
 
     it('the pre-existing `deps.run` seam still drives the DEFAULT path (flag off) unchanged', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       let seen = null;
       const r = await remoteClaudeSessionsDetail('deadhost', 40, {
+        isCompanionTransportEnabled: () => false,
         run: async (host, cmd, opts) => {
           seen = { host, cmd, opts };
           return { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host deadhost port 22: Connection refused' };
@@ -330,6 +332,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it('COMPANION-OR-FAIL: a dead channel is reported as unreachable, run() is NEVER consulted', async () => {
       let runCalls = 0;
       const r = await remoteClaudeSessionsDetail(REMOTE, 40, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => CHANNEL_DEAD,
         run: async () => { runCalls++; return okResult(''); },
       });
@@ -379,6 +382,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
 
     it('the phase parser reads the companion result unchanged', async () => {
       const phase = await readTranscriptPhase(bareChat, {}, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => okResult(TAIL_OK),
       });
       assert.strictEqual(phase, 'awaiting-input', 'parsePhaseFromTailOutput reads the same {ok, stdout}');
@@ -388,6 +392,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
       let runCalls = 0;
       for (const chat of [bareChat, containerChat]) {
         const phase = await readTranscriptPhase(chat, {}, {
+          isCompanionTransportEnabled: () => true,
           execInContext: async () => CHANNEL_DEAD,
           run: async () => { runCalls++; return okResult(TAIL_OK); },
         });
@@ -400,6 +405,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
       let seenCfg = null;
       const cfg = { tmuxSession: 'agent', hosts: ['prod-1'] };
       await readTranscriptPhase(bareChat, cfg, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (host, script, opts, c) => { seenCfg = c; return okResult(TAIL_OK); },
       });
       assert.strictEqual(seenCfg, cfg, 'cfg is threaded through, not dropped by the routing');
@@ -408,6 +414,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it('a LOCAL bare chat never reaches the companion, even under the flag', async () => {
       let companionCalls = 0;
       await readTranscriptPhase({ host: LOCAL }, {}, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => { companionCalls++; return okResult(TAIL_OK); },
       });
       assert.strictEqual(companionCalls, 0, 'the local branch reads the filesystem');
@@ -427,15 +434,16 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     });
 
     it('the OK/MISSING verdict is read from the companion result unchanged', async () => {
-      const pass = await preflightTmux(REMOTE, { execInContext: async () => okResult('OK\n') });
+      const pass = await preflightTmux(REMOTE, { isCompanionTransportEnabled: () => true, execInContext: async () => okResult('OK\n') });
       assert.strictEqual(pass, null, 'OK -> no error string, the spawn/resume proceeds');
-      const fail = await preflightTmux(REMOTE, { execInContext: async () => okResult('MISSING\n') });
+      const fail = await preflightTmux(REMOTE, { isCompanionTransportEnabled: () => true, execInContext: async () => okResult('MISSING\n') });
       assert.ok(fail && fail.includes('tmux is required'), `MISSING -> the install hint: ${fail}`);
     });
 
     it('COMPANION-OR-FAIL: a dead channel blocks the spawn with the install hint, run() is NEVER consulted', async () => {
       let runCalls = 0;
       const err = await preflightTmux(REMOTE, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async () => CHANNEL_DEAD,
         run: async () => { runCalls++; return okResult('OK\n'); },
       });
@@ -445,7 +453,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
 
     it('the LOCAL branch never reaches the companion, even under the flag', async () => {
       let companionCalls = 0;
-      await preflightTmux(LOCAL, { execInContext: async () => { companionCalls++; return okResult('OK\n'); } });
+      await preflightTmux(LOCAL, { isCompanionTransportEnabled: () => true, execInContext: async () => { companionCalls++; return okResult('OK\n'); } });
       assert.strictEqual(companionCalls, 0, 'local uses runLocalTmux([-V])');
     });
   });
@@ -475,9 +483,9 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     });
 
     it('FLAG OFF: the probes still go through runWithPool (pooling + retry), with the exact pre-1284 opts', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       const calls = [];
       const hit = await detectClaude(REMOTE, {
+        isCompanionTransportEnabled: () => false,
         runWithPool: async (host, cmd, opts, cfg) => {
           calls.push({ host, cmd, opts, cfg });
           return okResult(cmd.startsWith('bash') ? '/usr/local/bin/claude\n' : '');
@@ -495,10 +503,10 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     // Pinned in BOTH directions because getting it backwards is silently green
     // everywhere else while routing the binary upload through the pool.
     it('FLAG OFF: a `deps.run` (bootstrap) seam does NOT hijack this leg`s default transport', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       let poolCalls = 0;
       let bootstrapRunCalls = 0;
       await detectClaude(REMOTE, {
+        isCompanionTransportEnabled: () => false,
         runWithPool: async () => { poolCalls++; return okResult(''); },
         run: async () => { bootstrapRunCalls++; return okResult(''); },
       });
@@ -566,11 +574,12 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
       let runCmd = null;
       const script = "cd '/w' && cat 'a b.txt'";
       await deliverRemoteScript(REMOTE, script, { timeout: 1234 }, {}, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (h, s) => { companionScript = s; return okResult(); },
         run: async () => { throw new Error('flag ON must not touch run()'); },
       });
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       await deliverRemoteScript(REMOTE, script, { timeout: 1234 }, {}, {
+        isCompanionTransportEnabled: () => false,
         execInContext: async () => { throw new Error('flag OFF must not touch the companion'); },
         run: async (h, cmd) => { runCmd = cmd; return okResult(); },
       });
@@ -579,10 +588,10 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     });
 
     it('`opts.run` (a caller`s own default transport) takes precedence over `deps.run` (the bootstrap seam)', async () => {
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       let ownCalls = 0;
       let bootstrapCalls = 0;
       await deliverRemoteScript(REMOTE, 'true', { run: async () => { ownCalls++; return okResult(); } }, {}, {
+        isCompanionTransportEnabled: () => false,
         run: async () => { bootstrapCalls++; return okResult(); },
       });
       assert.strictEqual(ownCalls, 1);
@@ -592,6 +601,7 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
     it('the innerScript+container shape (the git container branch) still reaches the companion intact', async () => {
       let payload = null;
       await deliverRemoteScript(REMOTE, 'docker exec c bash -lc inner', { innerScript: 'inner', container: 'c', timeout: 6000 }, {}, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (h, s, opts) => { payload = { s, opts }; return okResult(); },
       });
       assert.strictEqual(payload.s, 'inner', 'the INNER script rides when a container is named');
@@ -603,10 +613,11 @@ describe('WARDEN-1284 — the nine script-delivery legs route onto the companion
       let onTimeout = null;
       let offOpts = null;
       await deliverRemoteScript(REMOTE, 'true', {}, {}, {
+        isCompanionTransportEnabled: () => true,
         execInContext: async (h, s, opts) => { onTimeout = opts.timeout; return okResult(); },
       });
-      process.env.WARDEN_COMPANION_TRANSPORT = '0';
       await deliverRemoteScript(REMOTE, 'true', {}, {}, {
+        isCompanionTransportEnabled: () => false,
         run: async (h, c, opts) => { offOpts = opts; return okResult(); },
       });
       assert.strictEqual(onTimeout, 8000);
