@@ -164,18 +164,12 @@ describe('WARDEN-1200 over-correction guard — what must NOT be called unreacha
   // WARDEN-1379: the schema default flipped to ON, so the sibling describe's server
   // boot (applyCompanionToggle at import) leaves WARDEN_COMPANION_TRANSPORT='1' in this
   // shared process env — which would route these calls over the companion channel and
-  // silently bypass the raw-path `run` seam they exist to drive. Pin the gate OFF
-  // around the suite (the companion-exec-legs.test.js pattern) and restore it after:
-  // these assertions are about RAW-SSH result classification, so the raw path must be
-  // the one selected, regardless of ambient env or sibling describes.
-  const ORIG_GATE = process.env.WARDEN_COMPANION_TRANSPORT;
+  // silently bypass the raw-path `run` seam they exist to drive. These assertions are
+  // about RAW-SSH result classification, so the raw path must be the one selected: each
+  // call injects `isCompanionTransportEnabled: () => false` through deps (forwarded to
+  // `deliverRemoteScript`), so ambient env and sibling describes no longer matter and
+  // no process-global env is touched.
   const result = (over = {}) => ({ ok: false, code: 1, stdout: '', stderr: '', ...over });
-
-  before(() => { process.env.WARDEN_COMPANION_TRANSPORT = '0'; });
-  after(() => {
-    if (ORIG_GATE === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
-    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_GATE;
-  });
 
   it('a non-zero exit WITH real stdout classifies as unreachable:false — a COMMAND failure', async () => {
     // The case that makes "report every failure as unreachable" wrong. The machine
@@ -184,7 +178,7 @@ describe('WARDEN-1200 over-correction guard — what must NOT be called unreacha
     // (src/ssh.js) returns false whenever stdout is non-empty, by design.
     const run = async () => result({ code: 2, stdout: 'some output the command produced\n', stderr: 'grep: bad thing' });
 
-    const detail = await remoteClaudeSessionsDetail('livehost', 40, { run });
+    const detail = await remoteClaudeSessionsDetail('livehost', 40, { run, isCompanionTransportEnabled: () => false });
 
     assert.strictEqual(detail.unreachable, false,
       'a host that produced stdout provably ran the command — the route must not name it');
@@ -194,7 +188,7 @@ describe('WARDEN-1200 over-correction guard — what must NOT be called unreacha
   it('an auth failure classifies as unreachable:false — not transport, deliberately excluded', async () => {
     const run = async () => result({ code: 255, stderr: 'Permission denied (publickey).\n' });
 
-    const detail = await remoteClaudeSessionsDetail('authfail', 40, { run });
+    const detail = await remoteClaudeSessionsDetail('authfail', 40, { run, isCompanionTransportEnabled: () => false });
 
     assert.strictEqual(detail.unreachable, false, 'the route lists transport failures only');
   });
@@ -205,7 +199,7 @@ describe('WARDEN-1200 over-correction guard — what must NOT be called unreacha
     // for every user whose hosts simply have no sessions.
     const run = async () => result({ ok: true, code: 0, stdout: '' });
 
-    const detail = await remoteClaudeSessionsDetail('emptyhost', 40, { run });
+    const detail = await remoteClaudeSessionsDetail('emptyhost', 40, { run, isCompanionTransportEnabled: () => false });
 
     assert.deepStrictEqual(detail, { sessions: [], unreachable: false },
       'empty is a fact about the host CONTENTS; unreachable is a fact about the READ');
