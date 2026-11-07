@@ -219,7 +219,7 @@ const GIT_LOG_GREP_MAX = 200;
 // is `code === 0`): reading `r.ok` here would classify EVERY real diff as an error.
 // Exported so the exit-0-identical / exit-1-differ discipline has a direct test.
 export async function diffNoIndex(contentA, contentB, filePath) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-cross-agent-'));
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'warden-cross-agent-'));
   try {
     // A safe basename so the diff header names the file meaningfully; the A-/B-
     // prefix labels the two sides in the `--- a/.../A-<name>` / `+++ b/.../B-<name>`
@@ -229,8 +229,8 @@ export async function diffNoIndex(contentA, contentB, filePath) {
     const base = (path.basename(filePath || 'file').replace(/[^A-Za-z0-9._-]/g, '_') || 'file').slice(0, 64);
     const fileA = path.join(tmpDir, `A-${base}`);
     const fileB = path.join(tmpDir, `B-${base}`);
-    fs.writeFileSync(fileA, contentA ?? '');
-    fs.writeFileSync(fileB, contentB ?? '');
+    await fsp.writeFile(fileA, contentA ?? '');
+    await fsp.writeFile(fileB, contentB ?? '');
     const r = await runLocalCapture('git', ['diff', '--no-index', fileA, fileB]);
     if (r.code !== 0 && r.code !== 1) {
       // >1 (or spawn failure → -1): a real git error, not "files differ". Surface
@@ -242,7 +242,7 @@ export async function diffNoIndex(contentA, contentB, filePath) {
     // success; an empty stdout on the identical case is the genuine, useful signal.
     return { diff: capDiff(r.stdout || '') };
   } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { await fsp.rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 }
 
