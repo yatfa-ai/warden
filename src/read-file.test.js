@@ -195,40 +195,40 @@ describe('resolveLocalFile (local resolution twin)', () => {
     fs.mkdirSync(path.join(tmp, 'sub'));
   });
 
-  it('resolves an existing file under cwd', () => {
-    const r = resolveLocalFile(tmp, 'hello.txt');
+  it('resolves an existing file under cwd', async () => {
+    const r = await resolveLocalFile(tmp, 'hello.txt');
     assert.equal(r.ok, true);
     assert.ok(r.resolvedPath && r.resolvedPath.endsWith('hello.txt'));
   });
 
-  it('returns 404 "file not found" for a missing file', () => {
-    const r = resolveLocalFile(tmp, 'nope.txt');
+  it('returns 404 "file not found" for a missing file', async () => {
+    const r = await resolveLocalFile(tmp, 'nope.txt');
     assert.equal(r.ok, false);
     assert.equal(r.status, 404);
     assert.equal(r.error, 'file not found');
   });
 
-  it('returns 400 "path is a directory" for a directory', () => {
-    const r = resolveLocalFile(tmp, 'sub');
+  it('returns 400 "path is a directory" for a directory', async () => {
+    const r = await resolveLocalFile(tmp, 'sub');
     assert.equal(r.ok, false);
     assert.equal(r.status, 400);
     assert.equal(r.error, 'path is a directory');
   });
 
-  it('returns 403 "path must be within working directory" for traversal', () => {
-    const r = resolveLocalFile(tmp, '../../etc/passwd');
+  it('returns 403 "path must be within working directory" for traversal', async () => {
+    const r = await resolveLocalFile(tmp, '../../etc/passwd');
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
     assert.equal(r.error, 'path must be within working directory');
   });
 
-  it('blocks prefix-sibling traversal (separator-bearing containment guard)', () => {
+  it('blocks prefix-sibling traversal (separator-bearing containment guard)', async () => {
     // Same hole as the remote script test above: a sibling whose name merely
     // extends the cwd must be rejected. cwd = .../<base>; request ../<base>-secret.txt.
     const base = path.basename(tmp);
     const sibling = `${tmp}-secret.txt`;
     fs.writeFileSync(sibling, 'TOPSECRET\n');
-    const r = resolveLocalFile(tmp, `../${base}-secret.txt`);
+    const r = await resolveLocalFile(tmp, `../${base}-secret.txt`);
     assert.equal(r.ok, false, 'sibling extending the cwd name must be rejected');
     assert.equal(r.status, 403);
     assert.equal(r.error, 'path must be within working directory');

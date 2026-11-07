@@ -69,7 +69,7 @@ export function createChatFileRouter({ resolve, fileExistsTelemetry, local }) {
       fileExistsTelemetry.recordProbe(kind, Date.now() - probeStart, ok);
 
     if (!chat.container && chat.host === local) {
-      const exists = resolveLocalFile(cwd, filePath).ok;
+      const exists = (await resolveLocalFile(cwd, filePath)).ok;
       finishProbe('local', exists);
       return res.json({ exists });
     }
