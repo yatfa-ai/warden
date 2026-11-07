@@ -3,7 +3,7 @@
 // working-tree reads. Moved verbatim out of server.js; the route handlers stay
 // there and import these helpers.
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import { shellQuote } from './ssh.js';
 import { isWithinResolvedCwd, CWD_CONTAINMENT_CASE } from './pathContainment.js';
@@ -135,14 +135,19 @@ export function expandChatFilePath(cwd, filePath, homeDir) {
 // lightweight /api/file-exists probe, so the resolution behavior — and the cwd
 // containment guard — stay identical between the two endpoints. Returns
 // { ok: true, resolvedPath } or { ok: false, status, error }.
-export function resolveLocalFile(cwd, filePath) {
+//
+// WARDEN-832/2161: async (fs.promises) so a slow or hung cwd mount cannot stall
+// the single event loop. expandChatFilePath reads os.homedir() ($HOME) at call
+// time, so the target path is computed BEFORE the first await.
+export async function resolveLocalFile(cwd, filePath) {
   let resolvedCwd, resolvedPath;
   try {
-    resolvedCwd = fs.realpathSync.native(cwd);
+    const target = expandChatFilePath(cwd, filePath);
+    resolvedCwd = await fsp.realpath(cwd);
     // WARDEN-1258 — absolute paths are used as-is and `~` expands to the local
     // home directory BEFORE resolution (expandChatFilePath); the containment
     // guard below still runs on the fully-resolved path, unchanged.
-    resolvedPath = fs.realpathSync.native(expandChatFilePath(cwd, filePath));
+    resolvedPath = await fsp.realpath(target);
   } catch (e) {
     if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
     return { ok: false, status: 400, error: 'invalid path' };
@@ -154,7 +159,7 @@ export function resolveLocalFile(cwd, filePath) {
     return { ok: false, status: 403, error: 'path must be within working directory' };
   }
   try {
-    const stats = fs.statSync(resolvedPath);
+    const stats = await fsp.stat(resolvedPath);
     if (stats.isDirectory()) return { ok: false, status: 400, error: 'path is a directory' };
     if (!stats.isFile()) return { ok: false, status: 400, error: 'not a file' };
   } catch (e) {
@@ -190,8 +195,8 @@ function mapReadScriptError(out) {
 // instead of drifted across two hand-maintained copies (WARDEN-674). Returns a
 // canonical discriminated result: { ok: true, content } | { ok: false, status, error }.
 //
-// LOCAL chats (chat.host === LOCAL): resolveLocalFile → 1MB statSync cap →
-// isBinaryFile (by extension) → readFileSync → isBinaryBlob (NUL in content).
+// LOCAL chats (chat.host === LOCAL): resolveLocalFile → 1MB stat cap →
+// isBinaryFile (by extension) → readFile → isBinaryBlob (NUL in content).
 // REMOTE/yatfa chats: buildReadFileScript + run(host, script) — the script
 // carries the same realpath + cwd-containment + size + binary-extension guards
 // inside the bash, emitting "ERROR ..." diagnostics — then an isBinaryBlob pass
@@ -224,13 +229,13 @@ export async function readChatFile(chat, filePath, deps = {}) {
     return { ok: true, content: result.stdout };
   }
   if (chat.host === LOCAL) {
-    const resolved = resolveLocalFile(cwd, filePath);
+    const resolved = await resolveLocalFile(cwd, filePath);
     if (!resolved.ok) return { ok: false, status: resolved.status, error: resolved.error };
     try {
-      const stats = fs.statSync(resolved.resolvedPath);
+      const stats = await fsp.stat(resolved.resolvedPath);
       if (stats.size > 1024 * 1024) return { ok: false, status: 413, error: 'file too large (max 1MB)' };
       if (isBinaryFile(resolved.resolvedPath)) return { ok: false, status: 400, error: 'cannot read binary files' };
-      const content = fs.readFileSync(resolved.resolvedPath, 'utf8');
+      const content = await fsp.readFile(resolved.resolvedPath, 'utf8');
       if (isBinaryBlob(content)) return { ok: false, status: 400, error: 'cannot read binary files' };
       return { ok: true, content };
     } catch (e) {

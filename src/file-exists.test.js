@@ -230,50 +230,50 @@ describe('resolveLocalFile (shared local resolution)', () => {
     fs.mkdirSync(path.join(tmp, 'adir'));
   });
 
-  it('resolves an existing file under cwd (ok + resolvedPath)', () => {
-    const r = resolveLocalFile(tmp, 'real.txt');
+  it('resolves an existing file under cwd (ok + resolvedPath)', async () => {
+    const r = await resolveLocalFile(tmp, 'real.txt');
     assert.equal(r.ok, true);
     assert.equal(typeof r.resolvedPath, 'string');
     assert.equal(fs.realpathSync.native(path.join(tmp, 'real.txt')), r.resolvedPath);
   });
 
-  it('returns 404 for a missing file', () => {
-    const r = resolveLocalFile(tmp, 'missing.txt');
+  it('returns 404 for a missing file', async () => {
+    const r = await resolveLocalFile(tmp, 'missing.txt');
     assert.equal(r.ok, false);
     assert.equal(r.status, 404);
   });
 
-  it('returns 403 for a path outside cwd (containment guard)', () => {
-    const r = resolveLocalFile(tmp, '../../etc/hostname');
+  it('returns 403 for a path outside cwd (containment guard)', async () => {
+    const r = await resolveLocalFile(tmp, '../../etc/hostname');
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
 
-  it('blocks prefix-sibling traversal (the local twin of the remote guard)', () => {
+  it('blocks prefix-sibling traversal (the local twin of the remote guard)', async () => {
     const base = path.basename(tmp);
     const sibling = `${tmp}-secret.txt`;
     fs.writeFileSync(sibling, 'TOPSECRET\n');
-    const r = resolveLocalFile(tmp, `../${base}-secret.txt`);
+    const r = await resolveLocalFile(tmp, `../${base}-secret.txt`);
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
 
-  it('rejects a directory (only regular files resolve)', () => {
-    const r = resolveLocalFile(tmp, 'adir');
+  it('rejects a directory (only regular files resolve)', async () => {
+    const r = await resolveLocalFile(tmp, 'adir');
     assert.equal(r.ok, false);
     assert.equal(r.status, 400);
     assert.match(r.error, /directory/);
   });
 
   // WARDEN-1573: the local twin of the remote `[ -f ]` → 'not a file' guard.
-  // Without it a FIFO resolves ok and readChatFile's readFileSync blocks the
+  // Without it a FIFO resolves ok and readChatFile's file read blocks the
   // whole server process forever.
   const posix = process.platform === 'win32' ? { skip: 'mkfifo is POSIX-only' } : {};
 
-  it('rejects a FIFO with 400 "not a file" (WARDEN-1573)', posix, () => {
+  it('rejects a FIFO with 400 "not a file" (WARDEN-1573)', posix, async () => {
     const mk = spawnSync('mkfifo', [path.join(tmp, 'pipe')]);
     assert.equal(mk.status, 0, 'mkfifo must succeed');
-    const r = resolveLocalFile(tmp, 'pipe');
+    const r = await resolveLocalFile(tmp, 'pipe');
     assert.deepEqual(r, { ok: false, status: 400, error: 'not a file' });
   });
 
@@ -283,7 +283,7 @@ describe('resolveLocalFile (shared local resolution)', () => {
     const srv = net.createServer();
     await new Promise((res, rej) => { srv.once('error', rej); srv.listen(path.join(sockDir, 's'), res); });
     try {
-      const r = resolveLocalFile(sockDir, 's');
+      const r = await resolveLocalFile(sockDir, 's');
       assert.deepEqual(r, { ok: false, status: 400, error: 'not a file' });
     } finally {
       await new Promise((res) => srv.close(res));
@@ -291,10 +291,10 @@ describe('resolveLocalFile (shared local resolution)', () => {
     }
   });
 
-  it('still resolves a regular file and a symlink to one (positive controls)', () => {
+  it('still resolves a regular file and a symlink to one (positive controls)', async () => {
     fs.symlinkSync(path.join(tmp, 'real.txt'), path.join(tmp, 'link.txt'));
-    assert.equal(resolveLocalFile(tmp, 'real.txt').ok, true);
-    const r = resolveLocalFile(tmp, 'link.txt');
+    assert.equal((await resolveLocalFile(tmp, 'real.txt')).ok, true);
+    const r = await resolveLocalFile(tmp, 'link.txt');
     assert.equal(r.ok, true);
     assert.equal(r.resolvedPath, fs.realpathSync.native(path.join(tmp, 'real.txt')));
   });
@@ -318,13 +318,13 @@ describe('resolveLocalFile (shared local resolution)', () => {
       { ok: false, status: 400, error: 'not a file' });
   });
 
-  it('follows symlinks and rejects one that escapes cwd', () => {
+  it('follows symlinks and rejects one that escapes cwd', async () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-fe-outside-'));
     fs.writeFileSync(path.join(outside, 'secret.txt'), 'nope\n');
     // Symlink inside cwd pointing outside cwd → containment guard must reject it
     // after realpath resolves the target (mirrors /api/read-file's symlink defense).
     fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(tmp, 'escape.txt'));
-    const r = resolveLocalFile(tmp, 'escape.txt');
+    const r = await resolveLocalFile(tmp, 'escape.txt');
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
@@ -351,56 +351,56 @@ describe('resolveLocalFile — absolute and ~ paths (WARDEN-1258)', () => {
   // time on POSIX — point it at the fake home for the duration of each call.
   // (The outer suite's HOME is already a temp dir, so restore-then-return is
   // enough; nothing real is ever touched.)
-  const withFakeHome = (fn) => {
+  const withFakeHome = async (fn) => {
     const prev = process.env.HOME;
     process.env.HOME = home;
-    try { return fn(); } finally { process.env.HOME = prev; }
+    try { return await fn(); } finally { process.env.HOME = prev; }
   };
 
-  it('expands ~/… via os.homedir() and resolves when it lands inside cwd', () => {
-    const r = withFakeHome(() => resolveLocalFile(ops, '~/ops/infra/configmap.yaml'));
+  it('expands ~/… via os.homedir() and resolves when it lands inside cwd', async () => {
+    const r = await withFakeHome(() => resolveLocalFile(ops, '~/ops/infra/configmap.yaml'));
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.resolvedPath, path.join(ops, 'infra', 'configmap.yaml'));
   });
 
-  it('resolves an absolute path inside cwd (never joined onto cwd)', () => {
-    const r = resolveLocalFile(ops, path.join(ops, 'infra', 'configmap.yaml'));
+  it('resolves an absolute path inside cwd (never joined onto cwd)', async () => {
+    const r = await resolveLocalFile(ops, path.join(ops, 'infra', 'configmap.yaml'));
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.resolvedPath, path.join(ops, 'infra', 'configmap.yaml'));
   });
 
-  it('rejects a ~ path leading OUTSIDE cwd with 403 (containment after expansion)', () => {
-    const r = withFakeHome(() => resolveLocalFile(ops, '~/secret-key.pem'));
+  it('rejects a ~ path leading OUTSIDE cwd with 403 (containment after expansion)', async () => {
+    const r = await withFakeHome(() => resolveLocalFile(ops, '~/secret-key.pem'));
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
 
-  it('rejects an absolute path outside cwd with 403 even though the file exists', () => {
+  it('rejects an absolute path outside cwd with 403 even though the file exists', async () => {
     // The file is REAL and outside cwd — before WARDEN-1258 the join onto cwd
     // relocated it to a nonexistent <cwd>/… and 404'd; now it resolves to its
     // true location and the unchanged containment clause rejects it.
-    const r = resolveLocalFile(ops, path.join(home, 'secret-key.pem'));
+    const r = await resolveLocalFile(ops, path.join(home, 'secret-key.pem'));
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
 
-  it('blocks a prefix-sibling reached via ~ (separator-bearing guard)', () => {
-    const r = withFakeHome(() => resolveLocalFile(ops, '~/ops-secret.txt'));
+  it('blocks a prefix-sibling reached via ~ (separator-bearing guard)', async () => {
+    const r = await withFakeHome(() => resolveLocalFile(ops, '~/ops-secret.txt'));
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
 
-  it('rejects a symlink inside cwd that escapes via ~ resolution', () => {
+  it('rejects a symlink inside cwd that escapes via ~ resolution', async () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-fe-out1258l-'));
     fs.writeFileSync(path.join(outside, 'secret.txt'), 'nope\n');
     fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(ops, 'escape.txt'));
-    const r = withFakeHome(() => resolveLocalFile(ops, '~/ops/escape.txt'));
+    const r = await withFakeHome(() => resolveLocalFile(ops, '~/ops/escape.txt'));
     assert.equal(r.ok, false);
     assert.equal(r.status, 403);
   });
 
-  it('does NOT resolve a ~user prefix (stays literal → 404)', () => {
-    const r = resolveLocalFile(ops, '~alice/ops/infra/configmap.yaml');
+  it('does NOT resolve a ~user prefix (stays literal → 404)', async () => {
+    const r = await resolveLocalFile(ops, '~alice/ops/infra/configmap.yaml');
     assert.equal(r.ok, false);
     assert.equal(r.status, 404);
   });
