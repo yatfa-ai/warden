@@ -10,6 +10,7 @@ import {
   atomicWriteJson,
   atomicAppend,
   removeFile,
+  readTextIfExists,
   readJsonDefensive,
   readJsonDefensiveSync,
   corruptBackupPath,
@@ -160,6 +161,24 @@ describe('removeFile', () => {
 
   it('tolerates a missing file (no throw)', async () => {
     await assert.doesNotReject(() => removeFile(file('never-existed.json')));
+  });
+});
+
+describe('readTextIfExists', () => {
+  it('returns null when the file is missing (ENOENT)', async () => {
+    assert.strictEqual(await readTextIfExists(file('nope.txt')), null);
+  });
+
+  it('returns the UTF-8 text of an existing file', async () => {
+    const p = file('here.txt');
+    await atomicWrite(p, 'héllo\n');
+    assert.strictEqual(await readTextIfExists(p), 'héllo\n');
+  });
+
+  it('rethrows non-ENOENT errors (a directory path → EISDIR)', async () => {
+    const d = file('a-dir');
+    fs.mkdirSync(d);
+    await assert.rejects(() => readTextIfExists(d), { code: 'EISDIR' });
   });
 });
 
