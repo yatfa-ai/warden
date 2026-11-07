@@ -36,11 +36,24 @@ import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNam
 // file is absent or unreadable) so a partial marker state never throws — only
 // used by detectInProgress's manual-LOCAL host-fs path, which (unlike the script
 // path) reaches the marker files on this machine's fs directly.
-function readMarker(gd, name) {
+const fsp = fs.promises;
+
+async function readMarker(gd, name) {
   try {
-    return fs.readFileSync(path.join(gd, name), 'utf8').trim();
+    return (await fsp.readFile(path.join(gd, name), 'utf8')).trim();
   } catch {
     return '';
+  }
+}
+
+// Async existence probe (WARDEN-832: no sync fs on a request path). Any error
+// (ENOENT, EACCES, ...) reads as "not present", matching the old sync existence check.
+async function markerExists(p) {
+  try {
+    await fsp.access(p);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -131,19 +144,23 @@ async function detectInProgress(chat, cwd) {
     const gitDir = gitDirResult.stdout.trim() || '';
     if (!gitDir) return { operation: null, detail: null };
     const gd = path.resolve(cwd, gitDir);
-    if (fs.existsSync(path.join(gd, 'MERGE_HEAD')))
-      return parseInProgressDetail(`merge|${readMarker(gd, 'MERGE_HEAD')}`);
-    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD')))
-      return parseInProgressDetail(`cherry-pick|${readMarker(gd, 'CHERRY_PICK_HEAD')}`);
-    if (fs.existsSync(path.join(gd, 'REVERT_HEAD')))
-      return parseInProgressDetail(`revert|${readMarker(gd, 'REVERT_HEAD')}`);
-    if (fs.existsSync(path.join(gd, 'rebase-merge')))
-      return parseInProgressDetail(`rebase|${readMarker(gd, 'rebase-merge/msgnum')}|${readMarker(gd, 'rebase-merge/end')}|${readMarker(gd, 'rebase-merge/onto')}|${readMarker(gd, 'rebase-merge/stopped-sha')}`);
+    if (await markerExists(path.join(gd, 'MERGE_HEAD')))
+      return parseInProgressDetail(`merge|${await readMarker(gd, 'MERGE_HEAD')}`);
+    if (await markerExists(path.join(gd, 'CHERRY_PICK_HEAD')))
+      return parseInProgressDetail(`cherry-pick|${await readMarker(gd, 'CHERRY_PICK_HEAD')}`);
+    if (await markerExists(path.join(gd, 'REVERT_HEAD')))
+      return parseInProgressDetail(`revert|${await readMarker(gd, 'REVERT_HEAD')}`);
+    if (await markerExists(path.join(gd, 'rebase-merge'))) {
+      const [msgnum, end, onto, stopped] = await Promise.all(
+        ['msgnum', 'end', 'onto', 'stopped-sha'].map((f) => readMarker(gd, `rebase-merge/${f}`)),
+      );
+      return parseInProgressDetail(`rebase|${msgnum}|${end}|${onto}|${stopped}`);
+    }
     // rebase-apply (the older git rebase / git pull --rebase backend) has NO
     // step files — surface the operation with a null detail rather than a
     // misleading "step 0/0".
-    if (fs.existsSync(path.join(gd, 'rebase-apply'))) return { operation: 'rebase', detail: null };
-    if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) return { operation: 'bisect', detail: null };
+    if (await markerExists(path.join(gd, 'rebase-apply'))) return { operation: 'rebase', detail: null };
+    if (await markerExists(path.join(gd, 'BISECT_LOG'))) return { operation: 'bisect', detail: null };
     return { operation: null, detail: null };
   }
   const r = await runInContext(chat, buildInProgressScript(cwd));
