@@ -819,6 +819,11 @@ export function whereWindows(bin, deps = {}) {
     } catch {
       return resolve(null);
     }
+    // setEncoding('utf8') BEFORE the 'data' listener (WARDEN-1045): `out += d` on a
+    // Buffer decodes each chunk IN ISOLATION, so a multibyte character (e.g. a
+    // non-ASCII Windows path) straddling a read boundary becomes U+FFFD. Same
+    // idiom as ensureControlMaster above — it must not diverge between siblings.
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { out += d; });
     child.on('error', () => resolve(null));
     // 'close' (not 'exit') so stdout has fully drained before we read it.

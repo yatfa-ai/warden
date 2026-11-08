@@ -1,5 +1,7 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { isTransportFailure, runWithPool, detectClaude, whereWindows, buildSshArgv, SSH_BASE_OPTS } from './ssh.js';
 
 /**
@@ -355,17 +357,21 @@ describe('detectClaude (remote) — concurrent, priority-preserving (WARDEN-440)
  */
 describe('whereWindows (Windows PATH resolution — WARDEN-922)', () => {
   // Minimal child_process.spawn stand-in: emits `stdout`, then closes with `code`.
+  // Like a real child's pipe it delivers Buffers (not strings) and exposes
+  // `setEncoding`; here that is a no-op, so this fake only suits tests whose
+  // output is single-chunk. Decoder behaviour is gated with a real stream in the
+  // WARDEN-1045 test below.
   function fakeSpawn({ stdout = '', code = 0, error = null, throws = false } = {}) {
     return mock.fn((_file, _args) => {
       if (throws) throw new Error('spawn threw');
       const outCbs = [];
       const child = {
-        stdout: { on: (_e, cb) => outCbs.push(cb) },
+        stdout: { setEncoding: () => {}, on: (_e, cb) => outCbs.push(cb) },
         on(event, cb) {
           if (event === 'error' && error) setImmediate(() => cb(error));
           if (event === 'close' && !error) {
             setImmediate(() => {
-              for (const c of outCbs) c(stdout);
+              for (const c of outCbs) c(Buffer.from(stdout, 'utf8'));
               cb(code);
             });
           }
@@ -419,6 +425,30 @@ describe('whereWindows (Windows PATH resolution — WARDEN-922)', () => {
   it('ignores blank lines rather than returning an empty string as a path', async () => {
     const r = await whereWindows('claude', { spawn: fakeSpawn({ stdout: '\r\n\r\nC:\\tools\\claude.exe\r\n' }) });
     assert.strictEqual(r, 'C:\\tools\\claude.exe');
+  });
+
+  it('carries utf8 decoder state across chunks: a multibyte char split mid-sequence survives (WARDEN-1045)', async () => {
+    // A non-ASCII Windows path whose multibyte character straddles a read
+    // boundary. Real Readable (PassThrough) so setEncoding is node's own
+    // StringDecoder; without the setEncoding call the listener receives raw
+    // Buffers and `out += d` destroys the split character (both halves -> U+FFFD).
+    const expected = 'C:\\Users\\José\\AppData\\Roaming\\npm\\claude.cmd';
+    const buf = Buffer.from(`${expected}\r\n`, 'utf8');
+    // Cut between the two bytes of 'é' (0xC3 0xA9).
+    const cut = buf.indexOf(0xc3) + 1;
+    const [head, tail] = [buf.subarray(0, cut), buf.subarray(cut)];
+    assert.ok(head.toString('utf8').includes('\ufffd'), 'the split must land inside a multibyte sequence');
+
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough() });
+    const p = whereWindows('claude', { spawn: () => child });
+    const tick = () => new Promise((r) => setImmediate(r));
+    child.stdout.write(head);
+    await tick();
+    child.stdout.write(tail);
+    await tick();
+    child.emit('close', 0);
+
+    assert.strictEqual(await p, expected);
   });
 });
 
