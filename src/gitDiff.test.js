@@ -204,10 +204,10 @@ describe('getLocalGitDiff', () => {
 });
 
 // --- range=outgoing (WARDEN-601) ---------------------------------------------
-// A SEPARATE fixture with an UPSTREAM + an unpushed commit, so @{u}..HEAD resolves
+// A SEPARATE fixture with an UPSTREAM + an unpushed commit, so @{u}...HEAD resolves
 // to a real range. The main fixture above has no upstream (its commits are local-
 // only), which is exactly why the range path needs its own repo: the impending-
-// collision committer's panel sources its diff from `git diff @{u}..HEAD -- <path>`,
+// collision committer's panel sources its diff from `git diff @{u}...HEAD -- <path>`,
 // which is empty/errored without an @{u}. This mirrors how the live tests above
 // exercise the working-tree diff and the staged tests exercise --cached.
 let outRepo;
@@ -232,7 +232,7 @@ describe('getLocalGitDiff range=outgoing (WARDEN-601)', () => {
     assert.equal(git(['add', '-A'], outRepo).status, 0);
     assert.equal(git(['commit', '-q', '-m', 'v0'], outRepo).status, 0);
     assert.equal(git(['push', '-q', '-u', 'origin', 'main'], outRepo).status, 0);
-    // ...then committed as v1 and LEFT UNPUSHED. Now ahead 1 and @{u}..HEAD = v0->v1.
+    // ...then committed as v1 and LEFT UNPUSHED. Now ahead 1 and @{u}...HEAD = v0->v1.
     fs.writeFileSync(path.join(outRepo, 'outgoing.txt'), 'v1\n');
     assert.equal(git(['add', '-A'], outRepo).status, 0);
     assert.equal(git(['commit', '-q', '-m', 'v1'], outRepo).status, 0);
@@ -243,13 +243,54 @@ describe('getLocalGitDiff range=outgoing (WARDEN-601)', () => {
     // -- the exact impending-collision committer state whose default diff is empty.
   });
 
-  it('range=@{u}..HEAD returns the UNPUSHED commit change (v0 to v1), non-empty', async () => {
-    const r = await getLocalGitDiff(outRepo, 'outgoing.txt', false, '@{u}..HEAD');
+  it('range=@{u}...HEAD returns the UNPUSHED commit change (v0 to v1), non-empty', async () => {
+    const r = await getLocalGitDiff(outRepo, 'outgoing.txt', false, '@{u}...HEAD');
     assert.equal(r.error, undefined, JSON.stringify(r));
     assert.equal(r.untracked, false);
     assert.ok(r.diff.length > 0, 'outgoing diff should be non-empty');
     assert.match(r.diff, /\+v1/);
     assert.match(r.diff, /-v0/);
+  });
+
+  it('DIVERGED branch (ahead 1 / behind 1, same file): three-dot shows ONLY local lines, not upstream-only (WARDEN-2189)', async () => {
+    const dRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gd-div-'));
+    const dUp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gd-divup-'));
+    const dOther = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gd-divother-'));
+    repoCleanup.push(dRepo, dUp, dOther);
+    const setup = (d) => {
+      assert.equal(git(['config', 'user.email', 't@t'], d).status, 0);
+      assert.equal(git(['config', 'user.name', 't'], d).status, 0);
+      assert.equal(git(['config', 'commit.gpgsign', 'false'], d).status, 0);
+    };
+    assert.equal(git(['init', '--bare', '-q', '-b', 'main', dUp]).status, 0);
+    assert.equal(git(['init', '-q', '-b', 'main'], dRepo).status, 0);
+    setup(dRepo);
+    assert.equal(git(['remote', 'add', 'origin', dUp], dRepo).status, 0);
+    fs.writeFileSync(path.join(dRepo, 'f.txt'), 'base1\nbase2\nbase3\nbase4\nbase5\nbase6\nbase7\n');
+    assert.equal(git(['add', '-A'], dRepo).status, 0);
+    assert.equal(git(['commit', '-q', '-m', 'base'], dRepo).status, 0);
+    assert.equal(git(['push', '-q', '-u', 'origin', 'main'], dRepo).status, 0);
+    // A second clone pushes an UPSTREAM-only edit to f.txt (top of the file).
+    assert.equal(spawnSync('git', ['clone', '-q', dUp, dOther], { encoding: 'utf8' }).status, 0);
+    setup(dOther);
+    fs.writeFileSync(path.join(dOther, 'f.txt'), 'UPSTREAM-ONLY\nbase2\nbase3\nbase4\nbase5\nbase6\nbase7\n');
+    assert.equal(git(['commit', '-q', '-am', 'upstream edit'], dOther).status, 0);
+    assert.equal(git(['push', '-q', 'origin', 'main'], dOther).status, 0);
+    // The local clone makes its own commit to the same file (bottom), then fetches.
+    fs.writeFileSync(path.join(dRepo, 'f.txt'), 'base1\nbase2\nbase3\nbase4\nbase5\nbase6\nLOCAL-ONLY\n');
+    assert.equal(git(['commit', '-q', '-am', 'local edit'], dRepo).status, 0);
+    assert.equal(git(['fetch', '-q'], dRepo).status, 0);
+    const ab = git(['rev-list', '--left-right', '--count', '@{u}...HEAD'], dRepo).stdout.trim();
+    assert.equal(ab, '1\t1', `fixture must be diverged (got ${ab})`);
+
+    const r = await getLocalGitDiff(dRepo, 'f.txt', false, '@{u}...HEAD');
+    assert.equal(r.error, undefined, JSON.stringify(r));
+    assert.match(r.diff, /\+LOCAL-ONLY/);
+    assert.doesNotMatch(r.diff, /UPSTREAM-ONLY/, 'upstream-only line must not leak into the outgoing diff');
+
+    // Contrast: two-dot (the pre-WARDEN-2189 literal) DOES leak the upstream line.
+    const twoDot = await getLocalGitDiff(dRepo, 'f.txt', false, '@{u}..HEAD');
+    assert.match(twoDot.diff, /UPSTREAM-ONLY/);
   });
 
   it('the DEFAULT working-tree diff for the same (clean) file is empty -- the range is what surfaces it', async () => {
@@ -264,7 +305,7 @@ describe('getLocalGitDiff range=outgoing (WARDEN-601)', () => {
   it('range takes precedence over staged (a range is never combined with --cached)', async () => {
     // Both staged=true AND a rangeRev: the range wins (the outgoing diff), so the
     // committed v0->v1 change is shown rather than the (empty) staged diff.
-    const r = await getLocalGitDiff(outRepo, 'outgoing.txt', true, '@{u}..HEAD');
+    const r = await getLocalGitDiff(outRepo, 'outgoing.txt', true, '@{u}...HEAD');
     assert.equal(r.error, undefined);
     assert.match(r.diff, /\+v1/);
   });
@@ -272,7 +313,7 @@ describe('getLocalGitDiff range=outgoing (WARDEN-601)', () => {
   it('containment STILL applies with a range -- a "../" escape is rejected (403)', async () => {
     // The pathspec `-- <path>` + isPathWithinCwd run unchanged when a range is set;
     // supplying a range must NOT relax path containment.
-    const r = await getLocalGitDiff(outRepo, '../escape.txt', false, '@{u}..HEAD');
+    const r = await getLocalGitDiff(outRepo, '../escape.txt', false, '@{u}...HEAD');
     assert.equal(r.status, 403);
     assert.equal(r.error, 'path must be within working directory');
   });
@@ -487,24 +528,24 @@ describe('buildGitDiffScript (remote SSH script)', () => {
 
   // ---- WARDEN-601: rangeRev swaps `git diff HEAD`/`--cached` for `git diff <range>` ----
   it('rangeRev splices a shellQuoted range into the diff command', () => {
-    // The fixed literal '@{u}..HEAD' is shellQuote'd (single-quoted) so its braces
+    // The fixed literal '@{u}...HEAD' is shellQuote'd (single-quoted) so its braces
     // never reach the shell unquoted, then spliced before the `-- "$FILE"` pathspec.
-    const script = buildGitDiffScript('/a/b', 'c.txt', false, '@{u}..HEAD');
-    assert.match(script, /git diff '@{u}\.\.HEAD' -- "\$FILE"/);
+    const script = buildGitDiffScript('/a/b', 'c.txt', false, '@{u}...HEAD');
+    assert.match(script, /git diff '@\{u\}\.\.\.HEAD' -- "\$FILE"/);
     assert.doesNotMatch(script, /git diff HEAD/);
     assert.doesNotMatch(script, /git diff --cached/);
   });
 
   it('rangeRev takes precedence over staged (a range is never combined with --cached)', () => {
-    const script = buildGitDiffScript('/a/b', 'c.txt', true, '@{u}..HEAD');
-    assert.match(script, /git diff '@{u}\.\.HEAD'/);
+    const script = buildGitDiffScript('/a/b', 'c.txt', true, '@{u}...HEAD');
+    assert.match(script, /git diff '@\{u\}\.\.\.HEAD'/);
     assert.doesNotMatch(script, /--cached/);
   });
 
   it('rangeRev keeps the realpath containment ceremony intact (blocks a ../ escape)', () => {
     // The containment `case` runs BEFORE the cd + diff command regardless of the
     // range, so a path escape is still rejected even when a range is supplied.
-    const r = runScript(outRepo, '../escape.txt', false, '@{u}..HEAD');
+    const r = runScript(outRepo, '../escape.txt', false, '@{u}...HEAD');
     assert.equal(r.ok, false);
     assert.match(r.stdout, /ERROR path must be within working directory/);
   });
@@ -512,7 +553,7 @@ describe('buildGitDiffScript (remote SSH script)', () => {
   it('rangeRev over the remote script path yields the outgoing diff (v0 to v1)', () => {
     // Same outgoing fixture as the local-path range tests: the delivered (remote)
     // script with rangeRev must show the committed v0->v1 change for outgoing.txt.
-    const r = runScript(outRepo, 'outgoing.txt', false, '@{u}..HEAD');
+    const r = runScript(outRepo, 'outgoing.txt', false, '@{u}...HEAD');
     assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
     assert.match(r.stdout, /\+v1/);
     assert.match(r.stdout, /-v0/);
@@ -584,7 +625,7 @@ describe('buildGitDiffScript cds into the repo (WARDEN-1051)', () => {
   const escapes = [
     ['a "../" escape', '../escape.txt', false, null],
     ['an absolute path outside cwd', '/etc/hosts', false, null],
-    ['a "../" escape combined with a range', '../escape.txt', false, '@{u}..HEAD'],
+    ['a "../" escape combined with a range', '../escape.txt', false, '@{u}...HEAD'],
   ];
   for (const [label, file, staged, range] of escapes) {
     it(`rejects ${label} from every landing dir (plain, decoy, and the repo itself)`, () => {

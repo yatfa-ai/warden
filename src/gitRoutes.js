@@ -256,12 +256,12 @@ export async function diffNoIndex(contentA, contentB, filePath) {
 // `staged` (WARDEN-369) runs `git diff --cached` (index-vs-HEAD, exactly what will
 // be committed) instead of `git diff HEAD` (combined staged+unstaged). Read-only.
 //
-// `rangeRev` (WARDEN-601) — a fixed server-validated literal range ('@{u}..HEAD') —
+// `rangeRev` (WARDEN-601) — a fixed server-validated literal range ('@{u}...HEAD') —
 // runs `git diff <rangeRev> -- <path>` (the file's change across the range) instead of
 // the working-tree diff, so the impending-conflict committer's panel can show its
 // OUTGOING change to the path (its working tree is clean, so the default `git diff
 // HEAD` would be empty and misclassify as 'already resolved'). rangeRev is passed as a
-// single argv element (no shell on the LOCAL transport) so @{u}..HEAD stays brace-
+// single argv element (no shell on the LOCAL transport) so @{u}...HEAD stays brace-
 // expansion-safe. Read-only. Containment (isPathWithinCwd) is unchanged — the pathspec
 // `-- <path>` still applies identically regardless of the rev.
 export async function getLocalGitDiff(cwd, filePath, staged, rangeRev) {
@@ -782,15 +782,18 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
     const filePath = String(req.query.path || '').trim();
     if (!filePath) return res.status(400).json({ diff: null, untracked: false, path: '', error: 'path is required' });
     const staged = String(req.query.staged || '') === '1';
-    // range=outgoing (WARDEN-601): diff the file across the unpushed (@{u}..HEAD) range
+    // range=outgoing (WARDEN-601): diff the file across the unpushed (@{u}...HEAD) range
     // instead of the working tree, so the impending-conflict committer's per-agent panel
     // shows its OUTGOING change (its clean working tree would otherwise yield an empty
-    // diff and misclassify as 'already resolved'). Validated to the fixed literal rev
-    // '@{u}..HEAD' — anything else (including an unknown/garbage range) falls back to the
+    // diff and misclassify as 'already resolved'). THREE-DOT on purpose (WARDEN-2189):
+    // @{u}...HEAD is merge-base…HEAD, i.e. only the agent's OWN unpushed commits, matching
+    // /api/git-status's outgoingFiles probe (WARDEN-2184); two-dot would leak upstream-only
+    // lines on a diverged branch (ahead>0 AND behind>0). Validated to the fixed literal rev
+    // '@{u}...HEAD' — anything else (including an unknown/garbage range) falls back to the
     // default working-tree diff (rangeRev null), so a stray param can never inject a rev
     // (mirroring /api/git-range-diff's rangeRev map discipline, WARDEN-398).
     const rangeParam = String(req.query.range || '').trim();
-    const rangeRev = rangeParam === 'outgoing' ? '@{u}..HEAD' : null;
+    const rangeRev = rangeParam === 'outgoing' ? '@{u}...HEAD' : null;
     await withGitRepo(req, res, {
       defaults: { diff: null, untracked: false, path: filePath },
       // The unknown-id 404 carries this route's path-bearing contract (not the bare
