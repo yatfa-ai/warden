@@ -8,15 +8,14 @@ import { spawnSync } from 'node:child_process';
 /**
  * Route-level tests for `outgoingFiles` in /api/git-status (WARDEN-601).
  *
- * The route runs `git diff --name-only @{u}..HEAD` only when
+ * The route runs `git diff --name-only @{u}...HEAD` only when
  * `branch && typeof ahead === 'number' && ahead > 0` and serves null otherwise.
  * src/gitStatus.test.js pins the pure parser; nothing else drove the route's
  * probe or its gate. These tests pin the OBSERVABLE contract (list vs null)
  * with real tmp git repos (bare remote + `push -u`) behind the real Express app.
  *
- * The diverged-branch case (unpushed + incoming commits) is deliberately NOT
- * pinned: the two-dot tree diff over-reports incoming files there, and a test
- * must not enshrine that.
+ * The diverged-branch case (unpushed + incoming commits) is pinned too: the
+ * three-dot form lists only the local commits' files, never upstream-only ones.
  *
  * Same HOME-freeze-before-single-import harness as src/git-status.test.js:
  * server.js freezes the home dir on first import, so HOME is set first.
@@ -72,6 +71,7 @@ let aheadRepo;
 let dirtyRepo;
 let syncedRepo;
 let noUpstreamRepo;
+let divergedRepo;
 
 before(async () => {
   originalHome = process.env.HOME;
@@ -108,6 +108,14 @@ before(async () => {
   commit(noUpstreamRepo, 'a.txt', 'a\n', 'init');
   commit(noUpstreamRepo, 'b.txt', 'b\n', 'second');
 
+  // Diverged: one upstream-only commit (pushed, then dropped locally) plus one
+  // unpushed local commit → ahead 1, behind 1.
+  divergedRepo = trackingRepo('warden-outgoing-diverged-');
+  commit(divergedRepo, 'theirs.txt', 't\n', 'theirs');
+  git(['push', '-q', 'origin', 'feature'], divergedRepo);
+  git(['reset', '-q', '--hard', 'HEAD~1'], divergedRepo);
+  commit(divergedRepo, 'ours.txt', 'o\n', 'ours');
+
   fs.writeFileSync(
     path.join(wardenDir, 'chats.json'),
     JSON.stringify([
@@ -115,6 +123,7 @@ before(async () => {
       { host: '(local)', session: 'warden-dirty', cwd: dirtyRepo, cmd: 'bash', name: 'warden-dirty' },
       { host: '(local)', session: 'warden-synced', cwd: syncedRepo, cmd: 'bash', name: 'warden-synced' },
       { host: '(local)', session: 'warden-noup', cwd: noUpstreamRepo, cmd: 'bash', name: 'warden-noup' },
+      { host: '(local)', session: 'warden-diverged', cwd: divergedRepo, cmd: 'bash', name: 'warden-diverged' },
     ]),
   );
 
@@ -170,5 +179,12 @@ describe('/api/git-status outgoingFiles (real Express app)', () => {
     assert.strictEqual(body.upstream, null);
     assert.strictEqual(body.ahead, null);
     assert.strictEqual(body.outgoingFiles, null);
+  });
+
+  it('on a diverged branch lists only the local commits\' files, not upstream-only ones', async () => {
+    const body = await status('warden-diverged');
+    assert.strictEqual(body.ahead, 1);
+    assert.strictEqual(body.behind, 1);
+    assert.deepStrictEqual(body.outgoingFiles, ['ours.txt']);
   });
 });

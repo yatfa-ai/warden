@@ -492,8 +492,10 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         const diffstat = parseDiffStat(diffstatR.ok ? diffstatR.stdout : '');
 
         // Outgoing (unpushed-commit) changed-file set (WARDEN-601): `git diff --name-only
-        // @{u}..HEAD` lists the files touched by the agent's local commits that @{u}
-        // (upstream) doesn't have yet — the join key for the IMPENDING cross-agent file-
+        // @{u}...HEAD` lists the files touched by the agent's local commits that @{u}
+        // (upstream) doesn't have yet. Three-dot (merge-base..HEAD) is load-bearing: for
+        // `git diff` two-dot is a tip-to-tip TREE diff, so on a diverged branch (ahead>0
+        // and behind>0) it would also list files changed only upstream — the join key for the IMPENDING cross-agent file-
         // conflict detector. Where `files` (porcelain) surfaces working-tree WIP and
         // ahead/behind surface the COUNT of unpushed/incoming commits, this surfaces
         // WHICH paths are in the unpushed set, so the detector can flag the case the
@@ -508,7 +510,7 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // returns [] for empty; the `branch && ahead > 0` gate below nulls it otherwise.
         let outgoingFiles = null;
         if (branch && typeof ahead === 'number' && ahead > 0) {
-          const outR = await runGit(chat, ['diff', '--name-only', '@{u}..HEAD'], cwd);
+          const outR = await runGit(chat, ['diff', '--name-only', '@{u}...HEAD'], cwd);
           outgoingFiles = parseOutgoingFiles(outR.ok ? outR.stdout : '');
         }
 
