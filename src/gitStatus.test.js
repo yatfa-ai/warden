@@ -647,7 +647,7 @@ describe('parseAheadBehind', () => {
 });
 
 describe('parseOutgoingFiles', () => {
-  // `git diff --name-only @{u}..HEAD` prints one cwd-relative path per line for the
+  // `git diff --name-only @{u}...HEAD` prints one cwd-relative path per line for the
   // files changed in an agent's UNPUSHED commits — the join key for the impending
   // cross-agent file-conflict detector (WARDEN-601). Unlike porcelain there are no
   // status codes, so this is the simple split/trim/drop-empties shape. Empty input

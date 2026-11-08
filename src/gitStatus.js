@@ -488,7 +488,7 @@ export function parseAheadBehind(output) {
 }
 
 /**
- * Parse `git diff --name-only @{u}..HEAD` output into a list of the file paths an
+ * Parse `git diff --name-only @{u}...HEAD` output into a list of the file paths an
  * agent has changed in its UNPUSHED commits (the outgoing set) — the join key for
  * the impending cross-agent file-conflict detector (WARDEN-601).
  *
@@ -500,7 +500,7 @@ export function parseAheadBehind(output) {
  * additionally nulls it unless `branch && ahead > 0`. CRLF (over SSH) is tolerated
  * per line, the same as every other line-splitting parser here.
  *
- * @param {string|Buffer|undefined} output - Raw stdout from `git diff --name-only @{u}..HEAD`.
+ * @param {string|Buffer|undefined} output - Raw stdout from `git diff --name-only @{u}...HEAD`.
  * @returns {string[]} the outgoing changed-file paths (empty for empty input, never null).
  */
 export function parseOutgoingFiles(output) {
