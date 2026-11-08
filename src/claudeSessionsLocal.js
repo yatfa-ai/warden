@@ -145,20 +145,34 @@ export async function collectLocalSessionFiles() {
 // `/api/claude-sessions` (the single-host resume list) unchanged; the unified
 // "All Sessions" endpoint passes a larger window for pagination (WARDEN-176).
 //
-// Async (WARDEN-828): transcripts are read SEQUENTIALLY with fs.promises.readFile
-// rather than readFileSync. A synchronous full-file read of up to `limit`
-// transcripts (the budget sweep passes a large window) blocks the single-threaded
-// server's event loop for the whole duration — queueing /api/config and every
-// other HTTP response behind it, which surfaced as the Settings forever-spinner.
-// Each `await readFile` yields the event loop, so other requests are answered in
-// the I/O gaps. Reads stay sequential (not Promise.all) deliberately: peak memory
-// remains bounded by the LARGEST single transcript — one body in memory at a time
-// — matching the prior profile, rather than spiking to N concurrent bodies for the
-// 1000-file pagination/budget window.
+// Async (WARDEN-828): transcripts are read with fs.promises.readFile rather than
+// readFileSync. A synchronous full-file read of up to `limit` transcripts (the
+// budget sweep passes a large window) blocks the single-threaded server's event
+// loop for the whole duration — queueing /api/config and every other HTTP
+// response behind it, which surfaced as the Settings forever-spinner. Each
+// `await readFile` yields the event loop, so other requests are answered in the
+// I/O gaps. Reads run through a bounded pool of depth LOCAL_READ_POOL_DEPTH
+// (WARDEN-2199) instead of sequentially: at most 4 bodies are in memory at a
+// time (depth-4 pool), so peak memory is ≤ 4 × the largest single transcript —
+// a constant, not N concurrent bodies for the 1000-file pagination/budget
+// window — while cutting wall-clock ~3–4× on wide windows. Pool results are
+// written back at their original index before the final filter, so row order
+// stays the mtime-descending catalog order collectLocalSessionFiles produces
+// (WARDEN-2198 audit contract).
+
+// Read-pool concurrency for localClaudeSessions: how many transcript bodies may
+// be in memory / mid-read at once. Depth 4 keeps peak memory at 4 × the largest
+// single transcript (bounded, like the prior sequential profile) while letting
+// the reads overlap. (WARDEN-2199.)
+const LOCAL_READ_POOL_DEPTH = 4;
+
 export async function localClaudeSessions(limit = 40) {
   const files = (await collectLocalSessionFiles()).slice(0, limit);
-  const out = [];
-  for (const f of files) {
+  // Build ONE row wholly from its own file. Failure isolation is per-file: a
+  // read that fails leaves the row's cwd empty and the final filter drops it,
+  // exactly as the sequential loop did — one unreadable file never fails the
+  // batch.
+  const readOne = async (f) => {
     let cwd = '';
     let summary = '';
     let tokenUsage = null;
@@ -171,8 +185,26 @@ export async function localClaudeSessions(limit = 40) {
       ({ cwd, summary } = parseJsonlHead(body));
       tokenUsage = parseJsonlTokenUsage(body);
     } catch { /* noop */ }
-    out.push({ id: f.id, cwd, summary, mtime: f.mtime, tokenUsage });
-  }
+    return { id: f.id, cwd, summary, mtime: f.mtime, tokenUsage };
+  };
+  // Depth-4 worker pool (WARDEN-2199): each worker claims the next file index
+  // and writes its row back AT THAT INDEX, so the finished array is in
+  // collectLocalSessionFiles' mtime-descending order regardless of which
+  // worker finished first — the only delta vs the sequential loop is
+  // wall-clock.
+  const out = new Array(files.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(LOCAL_READ_POOL_DEPTH, files.length) },
+    async () => {
+      while (true) {
+        const i = next++;
+        if (i >= files.length) return;
+        out[i] = await readOne(files[i]);
+      }
+    }
+  );
+  await Promise.all(workers);
   return out.filter((s) => s.cwd);
 }
 
