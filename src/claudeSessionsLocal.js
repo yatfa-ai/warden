@@ -66,20 +66,21 @@ export function parseJsonlHead(text) {
 //      note on the remote script below. It cannot interact with (1): no JSONL
 //      line carries both keys (measured 0 of 7617 locally).
 export function parseJsonlTokenUsage(text) {
-  let input = 0, output = 0, cacheCreation = 0, cacheRead = 0;
+  const sum = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     let j;
     try { j = JSON.parse(line); } catch { continue; }
     const u = j?.message?.usage;
     if (!u || typeof u !== 'object') continue;
-    input += tok(u.input_tokens);
-    output += tok(u.output_tokens);
-    cacheCreation += tok(u.cache_creation_input_tokens);
-    cacheRead += tok(u.cache_read_input_tokens);
+    const c = usageCounts(u);
+    sum.input += c.input;
+    sum.output += c.output;
+    sum.cacheCreation += c.cacheCreation;
+    sum.cacheRead += c.cacheRead;
   }
-  const total = input + output + cacheCreation + cacheRead;
-  return total > 0 ? { input, output, cacheCreation, cacheRead, total } : null;
+  const total = sum.input + sum.output + sum.cacheCreation + sum.cacheRead;
+  return total > 0 ? { ...sum, total } : null;
 }
 
 // Coerce one usage field to a non-negative integer, defending against a stray
@@ -90,6 +91,18 @@ function tok(v) {
   if (v == null) return 0;
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+}
+
+// The single source of the message.usage → {input, output, cacheCreation,
+// cacheRead, total} mapping, shared by parseJsonlTokenUsage (session total) and
+// extractTranscriptMessage (per-turn chip) so the two can never disagree about
+// which token dimensions count (WARDEN-367). A new dimension is added here only.
+function usageCounts(u) {
+  const input = tok(u.input_tokens);
+  const output = tok(u.output_tokens);
+  const cacheCreation = tok(u.cache_creation_input_tokens);
+  const cacheRead = tok(u.cache_read_input_tokens);
+  return { input, output, cacheCreation, cacheRead, total: input + output + cacheCreation + cacheRead };
 }
 
 // Pull the human-meaningful text out of one JSONL message line: the joined text
@@ -251,12 +264,8 @@ export function extractTranscriptMessage(line) {
   const msg = { role, text, ts: (j && j.timestamp) || '' };
   const u = j && j.message && j.message.usage;
   if (u && typeof u === 'object') {
-    const input = tok(u.input_tokens);
-    const output = tok(u.output_tokens);
-    const cacheCreation = tok(u.cache_creation_input_tokens);
-    const cacheRead = tok(u.cache_read_input_tokens);
-    const total = input + output + cacheCreation + cacheRead;
-    if (total > 0) msg.usage = { input, output, cacheCreation, cacheRead, total };
+    const counts = usageCounts(u);
+    if (counts.total > 0) msg.usage = counts;
   }
   return msg;
 }
